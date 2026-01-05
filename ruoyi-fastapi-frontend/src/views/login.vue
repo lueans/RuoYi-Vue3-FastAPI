@@ -52,9 +52,20 @@
           <span v-if="!loading">登 录</span>
           <span v-else>登 录 中...</span>
         </el-button>
+       
         <div style="float: right;" v-if="register">
           <router-link class="link-type" :to="'/register'">立即注册</router-link>
         </div>
+      </el-form-item>
+      <el-form-item style="width:100%;">
+         <el-button
+          size="large"
+          type="default"
+          style="width:100%; margin-top: 10px;"
+          @click.prevent="handleFeishuLogin"
+        >
+          使用飞书登录
+        </el-button>
       </el-form-item>
     </el-form>
     <!--  底部  -->
@@ -70,6 +81,7 @@ import Cookies from "js-cookie";
 import { encrypt, decrypt } from "@/utils/jsencrypt";
 import useUserStore from '@/store/modules/user'
 import defaultSettings from '@/settings'
+import { feishuAuthorize } from "@/api/login";
 
 const title = import.meta.env.VITE_APP_TITLE;
 const footerContent = defaultSettings.footerContent
@@ -160,6 +172,15 @@ function getCookie() {
     password: password === undefined ? loginForm.value.password : decrypt(password),
     rememberMe: rememberMe === undefined ? false : Boolean(rememberMe)
   };
+}
+
+function handleFeishuLogin() {
+  feishuAuthorize().then(res => {
+    const url = res.url;
+    if (url) {
+      window.location.href = url;
+    }
+  })
 }
 
 getCode();

@@ -4,6 +4,7 @@ from typing import Any, Union
 
 from sqlalchemy import ColumnElement, and_, delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from common.vo import PageModel
 from module_admin.entity.do.dept_do import SysDept
@@ -78,6 +79,26 @@ class UserDao:
             .first()
         )
 
+        return query_user_info
+
+    @classmethod
+    async def get_user_by_openid_and_tenant(
+        cls, db: AsyncSession, user_source: int, user_openid: str, user_tenant_id: str
+    ) -> Union[SysUser, None]:
+        query_user_info = (
+            (
+                await db.execute(
+                    select(SysUser).where(
+                        SysUser.del_flag == '0',
+                        SysUser.user_source == user_source,
+                        SysUser.user_openid == user_openid,
+                        SysUser.user_tenant_id == user_tenant_id,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
         return query_user_info
 
     @classmethod

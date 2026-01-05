@@ -59,3 +59,24 @@ export function getCodeImg() {
     timeout: 20000
   })
 }
+
+export function feishuAuthorize() {
+  return request({
+    url: '/feishu/authorize',
+    headers: {
+      isToken: false
+    },
+    method: 'get'
+  })
+}
+
+export function feishuLogin(code) {
+  return request({
+    url: '/feishu/login',
+    headers: {
+      isToken: false
+    },
+    method: 'post',
+    data: { code }
+  })
+}

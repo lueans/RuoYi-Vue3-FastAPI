@@ -14,7 +14,7 @@ from common.constant import CommonConstant, MenuConstant
 from common.context import RequestContext
 from common.enums import RedisInitKeyConfig
 from common.vo import CrudResponseModel
-from config.env import AppConfig, JwtConfig
+from config.env import AppConfig, JwtConfig, FeishuConfig
 from config.get_db import get_db
 from exceptions.exception import AuthException, LoginException, ServiceException
 from module_admin.dao.login_dao import login_by_account
@@ -23,7 +23,14 @@ from module_admin.entity.do.dept_do import SysDept
 from module_admin.entity.do.menu_do import SysMenu
 from module_admin.entity.do.user_do import SysUser
 from module_admin.entity.vo.login_vo import MenuTreeModel, MetaModel, RouterModel, SmsCode, UserLogin, UserRegister
-from module_admin.entity.vo.user_vo import AddUserModel, CurrentUserModel, ResetUserModel, TokenData, UserInfoModel
+from module_admin.entity.vo.user_vo import (
+    AddUserModel,
+    CurrentUserModel,
+    ResetUserModel,
+    TokenData,
+    UserInfoModel,
+    UserModel,
+)
 from module_admin.service.user_service import UserService
 from utils.common_util import CamelCaseUtil
 from utils.log_util import logger
@@ -105,6 +112,9 @@ class LoginService:
         if not user:
             logger.warning('用户不存在')
             raise LoginException(data='', message='用户不存在')
+        if getattr(user[0], 'user_source', 0) == 1:
+            logger.warning('该账号为飞书登录账号，请使用飞书登录')
+            raise LoginException(data='', message='该账号为飞书登录账号，请使用飞书登录')
         if not PwdUtil.verify_password(login_user.password, user[0].password):
             cache_password_error_count = await request.app.state.redis.get(
                 f'{RedisInitKeyConfig.PASSWORD_ERROR_COUNT.key}:{login_user.user_name}'
@@ -136,6 +146,63 @@ class LoginService:
             raise LoginException(data='', message='用户已停用')
         await request.app.state.redis.delete(f'{RedisInitKeyConfig.PASSWORD_ERROR_COUNT.key}:{login_user.user_name}')
         return user
+
+    @classmethod
+    async def authenticate_feishu(
+        cls, request: Request, query_db: AsyncSession, code: str, login_info: Optional[dict[str, str]] = None
+    ) -> SysUser:
+        await cls.__check_login_ip(request)
+        import asyncio
+        import requests
+
+        url = 'https://open.feishu.cn/open-apis/authen/v1/access_token'
+
+        def _call():
+            return requests.post(
+                url,
+                json={
+                    'grant_type': 'authorization_code',
+                    'app_id': FeishuConfig.feishu_app_id,
+                    'app_secret': FeishuConfig.feishu_app_secret,
+                    'code': code,
+                },
+                timeout=10,
+            )
+
+        resp = await asyncio.get_running_loop().run_in_executor(None, _call)
+        if resp.status_code != 200:
+            raise LoginException(data='', message='飞书接口调用失败')
+        data = resp.json()
+        if data.get('code') != 0:
+            raise LoginException(data='', message=data.get('msg') or '飞书登录失败')
+        feishu = data.get('data') or {}
+        open_id = feishu.get('open_id') or ''
+        tenant_key = feishu.get('tenant_key') or ''
+        name = feishu.get('name') or 'feishu'
+        if not open_id or not tenant_key:
+            raise LoginException(data='', message='飞书返回数据缺失')
+        exist_user = await UserDao.get_user_by_openid_and_tenant(query_db, 1, open_id, tenant_key)
+        if exist_user:
+            return exist_user
+        user_name = f'fs_{open_id}'[:30]
+        add_user = AddUserModel(
+            userName=user_name,
+            nickName=name,
+            password=str(uuid.uuid4()),
+            status='0',
+            delFlag='0',
+            userSource=1,
+            userOpenid=open_id,
+            userTenantId=tenant_key,
+            pwdUpdateDate=datetime.now(),
+            createBy='system',
+            createTime=datetime.now(),
+            updateBy='system',
+            updateTime=datetime.now(),
+        )
+        add_result = await UserService.add_user_services(query_db, add_user)
+        new_user = await UserDao.get_user_by_info(query_db, UserModel(userName=user_name))
+        return new_user
 
     @classmethod
     async def __check_login_ip(cls, request: Request) -> bool:

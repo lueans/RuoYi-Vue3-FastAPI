@@ -73,6 +73,12 @@ class RedisSettings(BaseSettings):
     redis_database: int = 2
 
 
+class FeishuSettings(BaseSettings):
+    feishu_app_id: str = 'cli_a9d17fc51cf8dcc9'
+    feishu_app_secret: str = '29XiHrFqt9C71trvq7UiZgSypXedQvab'
+    feishu_redirect_uri: str = 'http://localhost/feishu-login'
+
+
 class GenSettings:
     """
     代码生成配置
@@ -182,6 +188,9 @@ class GetConfig:
         # 实例化Redis配置模型
         return RedisSettings()
 
+    def get_feishu_config(self) -> FeishuSettings:
+        return FeishuSettings()
+
     def get_gen_config(self) -> GenSettings:
         """
         获取代码生成配置
@@ -241,6 +250,8 @@ JwtConfig = get_config.get_jwt_config()
 DataBaseConfig = get_config.get_database_config()
 # Redis配置
 RedisConfig = get_config.get_redis_config()
+# 飞书配置
+FeishuConfig = get_config.get_feishu_config()
 # 代码生成配置
 GenConfig = get_config.get_gen_config()
 # 上传配置

@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import CHAR, BigInteger, Column, DateTime, String
+from sqlalchemy import Integer
 
 from config.database import Base
 from config.env import DataBaseConfig
@@ -34,6 +35,11 @@ class SysUser(Base):
     del_flag = Column(CHAR(1), nullable=True, server_default='0', comment='删除标志（0代表存在 2代表删除）')
     login_ip = Column(String(128), nullable=True, server_default="''", comment='最后登录IP')
     login_date = Column(DateTime, nullable=True, comment='最后登录时间')
+    user_source = Column(
+        Integer, nullable=True, server_default='0', comment='用户来源（0默认，1飞书，2钉钉，3企业微信登录）'
+    )
+    user_openid = Column(String(64), nullable=True, server_default="''", comment='用户openid')
+    user_tenant_id = Column(String(64), nullable=True, server_default="''", comment='用户租户id')
     pwd_update_date = Column(DateTime, nullable=True, comment='密码最后更新时间')
     create_by = Column(String(64), nullable=True, server_default="''", comment='创建者')
     create_time = Column(DateTime, nullable=True, comment='创建时间', default=datetime.now())

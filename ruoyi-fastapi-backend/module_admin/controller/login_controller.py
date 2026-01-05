@@ -12,13 +12,14 @@ from common.aspect.pre_auth import CurrentUserDependency
 from common.enums import BusinessType, RedisInitKeyConfig
 from common.router import APIRouterPro
 from common.vo import CrudResponseModel, DataResponseModel, DynamicResponseModel, ResponseBaseModel
-from config.env import AppConfig, JwtConfig
-from module_admin.entity.vo.login_vo import RouterModel, Token, UserLogin, UserRegister
+from config.env import AppConfig, JwtConfig, FeishuConfig
+from module_admin.entity.vo.login_vo import RouterModel, Token, UserLogin, UserRegister, FeishuLoginCode
 from module_admin.entity.vo.user_vo import CurrentUserModel, EditUserModel
 from module_admin.service.login_service import CustomOAuth2PasswordRequestForm, LoginService, oauth2_scheme
 from module_admin.service.user_service import UserService
 from utils.log_util import logger
 from utils.response_util import ResponseUtil
+from urllib.parse import quote
 
 login_controller = APIRouterPro(order_num=1, tags=['登录模块'])
 
@@ -83,6 +84,65 @@ async def login(
         return {'access_token': access_token, 'token_type': 'Bearer'}
     return ResponseUtil.success(msg='登录成功', dict_content={'token': access_token})
 
+@login_controller.get(
+    '/feishu/authorize',
+    summary='飞书登录授权地址',
+    description='生成飞书授权地址',
+    response_model=DynamicResponseModel[Token],
+)
+async def feishu_authorize(request: Request) -> Response:
+    url = (
+        'https://open.feishu.cn/open-apis/authen/v1/authorize'
+        f'?app_id={FeishuConfig.feishu_app_id}&redirect_uri={quote(FeishuConfig.feishu_redirect_uri)}&state=STATE'
+    )
+    return ResponseUtil.success(dict_content={'url': url})
+
+@login_controller.post(
+    '/feishu/login',
+    summary='飞书登录',
+    description='飞书回调code登录',
+    response_model=DynamicResponseModel[Token],
+)
+async def feishu_login(
+    request: Request,
+    body: FeishuLoginCode,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    user = await LoginService.authenticate_feishu(request, query_db, body.code)
+    access_token_expires = timedelta(minutes=JwtConfig.jwt_expire_minutes)
+    session_id = str(uuid.uuid4())
+    login_info = {
+        'ipaddr': '',
+        'loginLocation': '',
+        'browser': '',
+        'os': '',
+        'loginTime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    access_token = await LoginService.create_access_token(
+        data={
+            'user_id': str(user.user_id),
+            'user_name': user.user_name,
+            'dept_name': None,
+            'session_id': session_id,
+            'login_info': login_info,
+        },
+        expires_delta=access_token_expires,
+    )
+    if AppConfig.app_same_time_login:
+        await request.app.state.redis.set(
+            f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{session_id}',
+            access_token,
+            ex=timedelta(minutes=JwtConfig.jwt_redis_expire_minutes),
+        )
+    else:
+        await request.app.state.redis.set(
+            f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{user.user_id}',
+            access_token,
+            ex=timedelta(minutes=JwtConfig.jwt_redis_expire_minutes),
+        )
+    await UserService.edit_user_services(query_db, EditUserModel(userId=user.user_id, loginDate=datetime.now(), type='status'))
+    logger.info('飞书登录成功')
+    return ResponseUtil.success(msg='登录成功', dict_content={'token': access_token})
 
 @login_controller.get(
     '/getInfo',

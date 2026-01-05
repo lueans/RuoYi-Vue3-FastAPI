@@ -40,6 +40,10 @@ class Token(BaseModel):
     access_token: str = Field(description='token信息')
     token_type: str = Field(description='token类型')
 
+class FeishuLoginCode(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel)
+    code: str = Field(description='飞书回调code')
+    state: Optional[str] = Field(default=None, description='回调state')
 
 class CaptchaCode(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel)

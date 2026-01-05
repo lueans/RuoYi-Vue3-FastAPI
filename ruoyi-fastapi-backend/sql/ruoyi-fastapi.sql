@@ -717,3 +717,26 @@ create table gen_table_column (
   update_time       datetime                                   comment '更新时间',
   primary key (column_id)
 ) engine=innodb auto_increment=1 comment = '代码生成业务表字段';
+
+
+CREATE TABLE `sys_file` (
+    `file_id`       BIGINT         NOT NULL AUTO_INCREMENT COMMENT '文件主键ID',
+    `file_uuid`     VARCHAR(128)   DEFAULT NULL COMMENT '文件业务ID/UUID',
+    `file_name`     VARCHAR(255)   DEFAULT NULL COMMENT '文件名',
+    `file_path`     VARCHAR(1024)  DEFAULT NULL COMMENT '文件存储路径/URL',
+    `file_size`     BIGINT         DEFAULT NULL COMMENT '文件大小（字节）',
+    `file_suffix`   VARCHAR(32)    DEFAULT NULL COMMENT '文件后缀',
+    `oss_type`      INT            DEFAULT NULL COMMENT '存储类型（0=local, 1=aliyun, 2=minio, 3=qiniu）',
+    `create_by`     BIGINT         DEFAULT NULL COMMENT '创建者ID',
+    `create_time`   DATETIME       DEFAULT NULL COMMENT '创建时间',
+    `update_by`     VARCHAR(64)    DEFAULT NULL COMMENT '更新者',
+    `update_time`   DATETIME       DEFAULT NULL COMMENT '更新时间',
+    `remark`        VARCHAR(500)   DEFAULT NULL COMMENT '备注',
+    `del_flag`      CHAR(1)        DEFAULT NULL COMMENT '删除标志（0代表存在，2代表删除）',
+    PRIMARY KEY (`file_id`),
+    UNIQUE KEY `file_uuid` (`file_uuid`)
+) ENGINE=InnoDB
+  AUTO_INCREMENT=4
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='文件管理表';

@@ -1,6 +1,14 @@
 import request from '@/utils/request'
 import { parseStrEmpty } from "@/utils/ruoyi";
 
+// 查询用户下拉选项列表
+export function listUserOption() {
+  return request({
+    url: '/system/user/optionSelect',
+    method: 'get'
+  })
+}
+
 // 查询用户列表
 export function listUser(query) {
   return request({

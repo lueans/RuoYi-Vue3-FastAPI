@@ -354,6 +354,28 @@ class UserDao:
         return user_list
 
     @classmethod
+    async def get_user_option_list(cls, db: AsyncSession) -> Sequence[SysUser]:
+        """
+        获取所有在用用户的基本信息（用于下拉选择）
+
+        :param db: orm对象
+        :return: 在用用户列表
+        """
+        result = (
+            (
+                await db.execute(
+                    select(SysUser)
+                    .where(SysUser.del_flag == '0', SysUser.status == '0')
+                    .order_by(SysUser.user_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        return result
+
+    @classmethod
     async def add_user_dao(cls, db: AsyncSession, user: UserModel) -> SysUser:
         """
         新增用户数据库操作

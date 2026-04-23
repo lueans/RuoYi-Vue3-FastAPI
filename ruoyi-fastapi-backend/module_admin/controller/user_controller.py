@@ -72,6 +72,21 @@ async def get_system_dept_tree(
 
 
 @user_controller.get(
+    '/optionSelect',
+    summary='获取用户下拉选项列表接口',
+    response_model=DataResponseModel[list[UserModel]],
+)
+async def get_system_user_option_select(
+    request: Request,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    user_option_result = await UserService.get_user_option_services(query_db)
+    logger.info('获取成功')
+
+    return ResponseUtil.success(data=user_option_result)
+
+
+@user_controller.get(
     '/list',
     summary='获取用户分页列表接口',
     description='用于获取用户分页列表',

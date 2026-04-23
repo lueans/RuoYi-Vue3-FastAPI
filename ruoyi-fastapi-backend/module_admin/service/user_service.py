@@ -79,6 +79,17 @@ class UserService:
         return user_list_result
 
     @classmethod
+    async def get_user_option_services(cls, query_db: AsyncSession) -> list[dict]:
+        """
+        获取用户下拉选项列表service
+
+        :param query_db: orm对象
+        :return: 用户选项列表
+        """
+        user_list = await UserDao.get_user_option_list(query_db)
+        return CamelCaseUtil.transform_result(user_list)
+
+    @classmethod
     async def check_user_allowed_services(cls, check_user: UserModel) -> CrudResponseModel:
         """
         校验用户是否允许操作service

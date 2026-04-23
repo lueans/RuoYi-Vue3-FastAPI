@@ -112,6 +112,8 @@ class UploadSettings:
         'jpg',
         'jpeg',
         'png',
+        'svg',
+        'webp',
         # word excel powerpoint
         'doc',
         'docx',
@@ -134,6 +136,7 @@ class UploadSettings:
         # pdf
         'pdf',
     ]
+    MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB
     DOWNLOAD_PATH = 'vf_admin/download_path'
 
     def __init__(self) -> None:

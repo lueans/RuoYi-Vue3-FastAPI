@@ -75,6 +75,8 @@
               style="width: 50px; height: 50px"
               :src="scope.row.filePath"
               :preview-src-list="[scope.row.filePath]"
+              :hide-on-click-modal="true"
+              :preview-teleported="true"
               fit="contain"
             />
             <span v-else>无法预览</span>
@@ -130,9 +132,20 @@
         <el-icon class="el-icon--upload"><upload-filled /></el-icon>
         <div class="el-upload__text">将文件拖到此处，或<em>点击上传</em></div>
       </el-upload>
+      <div v-if="upload.isUploading" style="margin-top: 16px;">
+        <div style="margin-bottom: 6px; font-size: 13px; color: #606266;">
+          {{ uploadFileName }}
+        </div>
+        <el-progress
+          :percentage="uploadPercent"
+          :status="uploadPercent === 100 ? 'success' : ''"
+          :stroke-width="20"
+          :text-inside="true"
+        />
+      </div>
       <template #footer>
         <div class="dialog-footer">
-          <el-button @click="open = false">取 消</el-button>
+          <el-button @click="open = false" :disabled="upload.isUploading">取 消</el-button>
         </div>
       </template>
     </el-dialog>
@@ -144,7 +157,7 @@ import { listFile, delFile, uploadFile } from "@/api/system/file";
 import { getToken } from "@/utils/auth";
 
 const { proxy } = getCurrentInstance();
-
+const uploadRef = ref(null);
 const fileList = ref([]);
 const open = ref(false);
 const loading = ref(true);
@@ -155,6 +168,8 @@ const multiple = ref(true);
 const total = ref(0);
 const title = ref("");
 const dateRange = ref([]);
+const uploadPercent = ref(0);
+const uploadFileName = ref("");
 
 const data = reactive({
   form: {},
@@ -215,15 +230,25 @@ function handleAdd() {
 /** 自定义上传 */
 function customUpload(options) {
     upload.value.isUploading = true;
+    uploadPercent.value = 0;
+    uploadFileName.value = options.file.name;
     const formData = new FormData();
     formData.append("file", options.file);
-    uploadFile(formData).then(response => {
+    uploadFile(formData, (progressEvent) => {
+        uploadPercent.value = Math.round((progressEvent.loaded / progressEvent.total) * 100);
+    }).then(response => {
         upload.value.isUploading = false;
+        uploadPercent.value = 0;
+        uploadFileName.value = "";
+        uploadRef.value.clearFiles();
         proxy.$modal.msgSuccess("上传成功");
         open.value = false;
         getList();
     }).catch(() => {
         upload.value.isUploading = false;
+        uploadPercent.value = 0;
+        uploadFileName.value = "";
+        uploadRef.value.clearFiles();
         proxy.$modal.msgError("上传失败");
     });
 }
@@ -256,7 +281,7 @@ function formatFileSize(size) {
 /** 是否图片 */
 function isImage(suffix) {
     if (!suffix) return false;
-    return ['png', 'jpg', 'jpeg', 'gif', 'bmp'].includes(suffix.toLowerCase());
+    return ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp'].includes(suffix.toLowerCase());
 }
 
 getList();

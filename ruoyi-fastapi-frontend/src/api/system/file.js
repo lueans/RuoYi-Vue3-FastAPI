@@ -18,11 +18,13 @@ export function delFile(fileId) {
 }
 
 // 上传文件
-export function uploadFile(data) {
+export function uploadFile(data, onUploadProgress) {
   return request({
     url: '/system/file/upload',
     method: 'post',
     data: data,
-    headers: { 'Content-Type': 'multipart/form-data' }
+    headers: { 'Content-Type': 'multipart/form-data', repeatSubmit: false },
+    timeout: 0,
+    onUploadProgress
   })
 }

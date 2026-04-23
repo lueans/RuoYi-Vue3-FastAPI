@@ -27,6 +27,9 @@ class CommonService:
         """
         if not UploadUtil.check_file_extension(file):
             raise ServiceException(message='文件类型不合法')
+        if file.size and file.size > UploadConfig.MAX_UPLOAD_SIZE:
+            max_mb = UploadConfig.MAX_UPLOAD_SIZE // (1024 * 1024)
+            raise ServiceException(message=f'文件大小超出限制，最大允许{max_mb}MB')
         relative_path = (
             f'upload/{datetime.now().strftime("%Y")}/{datetime.now().strftime("%m")}/{datetime.now().strftime("%d")}'
         )

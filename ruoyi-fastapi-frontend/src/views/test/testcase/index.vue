@@ -76,14 +76,15 @@
     <!-- 新增/编辑目录对话框 -->
     <el-dialog :title="dialogTitle" v-model="dialogOpen" width="500px" append-to-body>
       <el-form ref="dirFormRef" :model="form" :rules="rules" label-width="80px">
-        <el-form-item label="上级目录" prop="parentId" v-if="form.parentId !== 0">
+        <el-form-item label="上级目录" prop="parentId">
           <el-tree-select
             v-model="form.parentId"
             :data="dirOptions"
             :props="{ value: 'dirId', label: 'dirName', children: 'children' }"
             value-key="dirId"
-            placeholder="选择上级目录"
+            placeholder="无（创建为根目录）"
             check-strictly
+            clearable
             style="width: 100%;"
           />
         </el-form-item>
@@ -124,7 +125,7 @@ const dirOptions = ref([]);
 
 const form = ref({});
 const rules = {
-  parentId: [{ required: true, message: "上级目录不能为空", trigger: "blur" }],
+  parentId: [],
   dirName: [{ required: true, message: "目录名称不能为空", trigger: "blur" }],
   orderNum: [{ required: true, message: "显示排序不能为空", trigger: "blur" }],
 };
@@ -164,7 +165,6 @@ function handleAddRoot() {
   listCaseDir().then(res => {
     dirOptions.value = proxy.handleTree(res.data, "dirId");
   });
-  form.value.parentId = 100;
   dialogOpen.value = true;
   dialogTitle.value = "新增目录";
 }
@@ -194,14 +194,18 @@ function handleUpdate(data) {
 function submitForm() {
   proxy.$refs["dirFormRef"].validate(valid => {
     if (valid) {
-      if (form.value.dirId != undefined) {
-        updateCaseDir(form.value).then(() => {
+      const submitData = { ...form.value };
+      if (submitData.parentId == null) {
+        submitData.parentId = 0;
+      }
+      if (submitData.dirId != undefined) {
+        updateCaseDir(submitData).then(() => {
           proxy.$modal.msgSuccess("修改成功");
           dialogOpen.value = false;
           getList();
         });
       } else {
-        addCaseDir(form.value).then(() => {
+        addCaseDir(submitData).then(() => {
           proxy.$modal.msgSuccess("新增成功");
           dialogOpen.value = false;
           getList();

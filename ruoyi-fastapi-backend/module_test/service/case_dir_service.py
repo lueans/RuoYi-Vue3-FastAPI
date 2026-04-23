@@ -53,10 +53,14 @@ class CaseDirService:
     async def add_case_dir_services(cls, query_db: AsyncSession, page_object: CaseDirModel) -> CrudResponseModel:
         if not await cls.check_dir_name_unique_services(query_db, page_object):
             raise ServiceException(message=f'新增目录{page_object.dir_name}失败，目录名称已存在')
-        parent_info = await CaseDirDao.get_case_dir_by_id(query_db, page_object.parent_id)
-        if parent_info.status != CommonConstant.DEPT_NORMAL:
-            raise ServiceException(message=f'目录{parent_info.dir_name}停用，不允许新增')
-        page_object.ancestors = f'{parent_info.ancestors},{page_object.parent_id}'
+        if page_object.parent_id and page_object.parent_id != 0:
+            parent_info = await CaseDirDao.get_case_dir_by_id(query_db, page_object.parent_id)
+            if parent_info.status != CommonConstant.DEPT_NORMAL:
+                raise ServiceException(message=f'目录{parent_info.dir_name}停用，不允许新增')
+            page_object.ancestors = f'{parent_info.ancestors},{page_object.parent_id}'
+        else:
+            page_object.parent_id = 0
+            page_object.ancestors = '0'
         try:
             await CaseDirDao.add_case_dir_dao(query_db, page_object)
             await query_db.commit()
@@ -69,13 +73,18 @@ class CaseDirService:
     async def edit_case_dir_services(cls, query_db: AsyncSession, page_object: CaseDirModel) -> CrudResponseModel:
         if not await cls.check_dir_name_unique_services(query_db, page_object):
             raise ServiceException(message=f'修改目录{page_object.dir_name}失败，目录名称已存在')
-        if page_object.dir_id == page_object.parent_id:
+        if page_object.parent_id and page_object.dir_id == page_object.parent_id:
             raise ServiceException(message=f'修改目录{page_object.dir_name}失败，上级目录不能是自己')
-        new_parent = await CaseDirDao.get_case_dir_by_id(query_db, page_object.parent_id)
+        if not page_object.parent_id:
+            page_object.parent_id = 0
         old_dir = await CaseDirDao.get_case_dir_by_id(query_db, page_object.dir_id)
+        new_parent = await CaseDirDao.get_case_dir_by_id(query_db, page_object.parent_id) if page_object.parent_id != 0 else None
         try:
-            if new_parent and old_dir:
-                new_ancestors = f'{new_parent.ancestors},{new_parent.dir_id}'
+            if old_dir:
+                if new_parent:
+                    new_ancestors = f'{new_parent.ancestors},{new_parent.dir_id}'
+                else:
+                    new_ancestors = '0'
                 old_ancestors = old_dir.ancestors
                 page_object.ancestors = new_ancestors
                 children = await CaseDirDao.get_children_case_dir_dao(query_db, page_object.dir_id)

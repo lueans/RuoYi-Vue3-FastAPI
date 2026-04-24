@@ -33,15 +33,43 @@ class Event extends EventEmitter {
     this.onBodyClick = this.onBodyClick.bind(this)
     this.onDrawClick = this.onDrawClick.bind(this)
     this.onMousedown = this.onMousedown.bind(this)
-    this.onMousemove = this.onMousemove.bind(this)
+    this._onMousemoveRaw = this.onMousemove.bind(this)
+    this.onMousemove = this._throttleRAF(this._onMousemoveRaw)
     this.onMouseup = this.onMouseup.bind(this)
     this.onNodeMouseup = this.onNodeMouseup.bind(this)
-    this.onMousewheel = this.onMousewheel.bind(this)
+    this._onMousewheelRaw = this.onMousewheel.bind(this)
+    this.onMousewheel = this._throttleWheelRAF(this._onMousewheelRaw)
     this.onContextmenu = this.onContextmenu.bind(this)
     this.onSvgMousedown = this.onSvgMousedown.bind(this)
     this.onKeyup = this.onKeyup.bind(this)
     this.onMouseenter = this.onMouseenter.bind(this)
     this.onMouseleave = this.onMouseleave.bind(this)
+  }
+
+  _throttleRAF(fn) {
+    let ticking = false
+    return function (...args) {
+      if (ticking) return
+      ticking = true
+      requestAnimationFrame(() => {
+        fn.apply(this, args)
+        ticking = false
+      })
+    }
+  }
+
+  _throttleWheelRAF(fn) {
+    let ticking = false
+    return function (e) {
+      e.stopPropagation()
+      e.preventDefault()
+      if (ticking) return
+      ticking = true
+      requestAnimationFrame(() => {
+        fn.call(this, e)
+        ticking = false
+      })
+    }
   }
 
   //  绑定事件
@@ -54,7 +82,7 @@ class Event extends EventEmitter {
     window.addEventListener('mousemove', this.onMousemove)
     window.addEventListener('mouseup', this.onMouseup)
     this.on('node_mouseup', this.onNodeMouseup)
-    this.mindMap.el.addEventListener('wheel', this.onMousewheel)
+    this.mindMap.el.addEventListener('wheel', this.onMousewheel, { passive: false })
     this.mindMap.svg.on('contextmenu', this.onContextmenu)
     this.mindMap.svg.on('mouseenter', this.onMouseenter)
     this.mindMap.svg.on('mouseleave', this.onMouseleave)
@@ -67,10 +95,11 @@ class Event extends EventEmitter {
     document.body.removeEventListener('click', this.onBodyClick)
     this.mindMap.svg.off('click', this.onDrawClick)
     this.mindMap.el.removeEventListener('mousedown', this.onMousedown)
+    this.mindMap.svg.off('mousedown', this.onSvgMousedown)
     window.removeEventListener('mousemove', this.onMousemove)
     window.removeEventListener('mouseup', this.onMouseup)
     this.off('node_mouseup', this.onNodeMouseup)
-    this.mindMap.el.removeEventListener('wheel', this.onMousewheel)
+    this.mindMap.el.removeEventListener('wheel', this.onMousewheel, { passive: false })
     this.mindMap.svg.off('contextmenu', this.onContextmenu)
     this.mindMap.svg.off('mouseenter', this.onMouseenter)
     this.mindMap.svg.off('mouseleave', this.onMouseleave)
@@ -146,8 +175,6 @@ class Event extends EventEmitter {
 
   //  鼠标滚动/触控板滑动
   onMousewheel(e) {
-    e.stopPropagation()
-    e.preventDefault()
     const dirs = []
     if (e.deltaY < 0) dirs.push(CONSTANTS.DIR.UP)
     if (e.deltaY > 0) dirs.push(CONSTANTS.DIR.DOWN)

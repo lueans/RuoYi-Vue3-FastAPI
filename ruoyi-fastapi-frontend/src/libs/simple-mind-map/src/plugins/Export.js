@@ -251,7 +251,10 @@ class Export {
               imgHeight * scaleY
             )
           }
-          resolve(canvas.toDataURL(format))
+          const dataUrl = canvas.toDataURL(format)
+          canvas.width = 0
+          canvas.height = 0
+          resolve(dataUrl)
         } catch (error) {
           reject(error)
         }

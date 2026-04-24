@@ -67,7 +67,7 @@ const emit = defineEmits([
 
 const containerRef = ref(null)
 const mindMapInstance = shallowRef(null)
-let isInternalChange = false
+let dataVersion = 0
 
 const wrapperStyle = computed(() => ({
   width: props.width,
@@ -92,10 +92,9 @@ onMounted(() => {
   mindMapInstance.value = instance
 
   instance.on('data_change', (data) => {
-    isInternalChange = true
+    dataVersion++
     emit('update:modelValue', data)
     emit('data-change', data)
-    nextTick(() => { isInternalChange = false })
   })
 
   instance.on('node_click', (node, e) => {
@@ -128,12 +127,16 @@ onBeforeUnmount(() => {
   }
 })
 
+let lastAppliedVersion = 0
 watch(() => props.modelValue, (val) => {
-  if (isInternalChange) return
+  if (dataVersion !== lastAppliedVersion) {
+    lastAppliedVersion = dataVersion
+    return
+  }
   if (val && mindMapInstance.value) {
     mindMapInstance.value.setData(val)
   }
-}, { deep: true })
+})
 
 watch(() => props.layout, (val) => {
   if (mindMapInstance.value) {
@@ -151,7 +154,7 @@ watch(() => props.themeConfig, (val) => {
   if (mindMapInstance.value) {
     mindMapInstance.value.setThemeConfig(val)
   }
-}, { deep: true })
+})
 
 watch(() => props.readonly, (val) => {
   if (mindMapInstance.value) {

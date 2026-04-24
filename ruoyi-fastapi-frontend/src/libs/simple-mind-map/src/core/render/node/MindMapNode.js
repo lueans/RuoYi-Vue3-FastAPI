@@ -533,8 +533,14 @@ class MindMapNode {
     if (this.updateUserListNode) this.updateUserListNode()
     // 更新节点位置
     const t = this.group.transform()
-    // 保存一份当前节点数据快照
-    this.nodeDataSnapshot = readonly ? '' : JSON.stringify(this.getData())
+    // 保存一份当前节点数据快照 - 延迟序列化避免每次渲染都执行
+    if (!readonly && !this._snapshotPending) {
+      this._snapshotPending = true
+      Promise.resolve().then(() => {
+        this._snapshotPending = false
+        this.nodeDataSnapshot = JSON.stringify(this.getData())
+      })
+    }
     // 节点位置变化才更新，因为即使值没有变化属性设置操作也是耗时的
     if (this.left !== t.translateX || this.top !== t.translateY) {
       this.group.translate(this.left - t.translateX, this.top - t.translateY)

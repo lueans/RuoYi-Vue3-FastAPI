@@ -533,8 +533,9 @@ function layout() {
     }
   })
   this.group.add(textContentNested)
-  // 文字内容整体
-  const { width: bboxWidth, height: bboxHeight } = textContentNested.bbox()
+  // 文字内容整体 - 优先使用已计算的尺寸避免强制 reflow
+  const bboxWidth = textContentWidth || textContentNested.bbox().width
+  const bboxHeight = textContentHeightWithTag || textContentNested.bbox().height
   let translateX = 0
   let translateY = 0
   switch (imgPlacement) {

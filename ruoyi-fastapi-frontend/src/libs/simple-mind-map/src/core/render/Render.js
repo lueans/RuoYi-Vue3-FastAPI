@@ -552,10 +552,13 @@ class Render {
   // 渲染
   render(callback, source) {
     this.addRenderParams(callback, source)
-    clearTimeout(this.renderTimer)
-    this.renderTimer = setTimeout(() => {
+    if (this.renderTimer) {
+      cancelAnimationFrame(this.renderTimer)
+    }
+    this.renderTimer = requestAnimationFrame(() => {
+      this.renderTimer = null
       this._render()
-    }, 0)
+    })
   }
 
   // 真正的渲染
@@ -1942,13 +1945,13 @@ class Render {
           customLeft: undefined,
           customTop: undefined
         })
-        this.mindMap.render()
       },
       null,
       true,
       0,
       0
     )
+    this.mindMap.render()
   }
 
   //  设置节点形状

@@ -1,0 +1,493 @@
+<template>
+  <div
+    class="editContainer"
+    ref="editContainerRef"
+    @dragenter.stop.prevent="onDragenter"
+    @dragleave.stop.prevent
+    @dragover.stop.prevent
+    @drop.stop.prevent
+  >
+    <div
+      class="mindMapContainer"
+      id="mindMapContainer"
+      ref="mindMapContainerRef"
+    ></div>
+    <Navigator v-if="mindMap" :mindMap="mindMap" />
+    <OutlineSidebar :mindMap="mindMap" />
+    <MmStyle v-if="mindMap && !isZenMode" :mindMap="mindMap" />
+    <BaseStyle :mindMap="mindMap" />
+    <AssociativeLineStyle v-if="mindMap" :mindMap="mindMap" />
+    <Theme v-if="mindMap" :mindMap="mindMap" />
+    <Structure :mindMap="mindMap" />
+    <ShortcutKey />
+    <Contextmenu v-if="mindMap" :mindMap="mindMap" />
+    <NodeIconSidebar v-if="mindMap" :mindMap="mindMap" />
+    <Search v-if="mindMap" :mindMap="mindMap" />
+    <SidebarTrigger v-if="!isZenMode" />
+    <Setting :mindMap="mindMap" />
+    <RichTextToolbar v-if="mindMap" :mindMap="mindMap" />
+    <NodeTagStyle v-if="mindMap" :mindMap="mindMap" />
+    <NodeImgPlacementToolbar v-if="mindMap" :mindMap="mindMap" />
+    <NodeOuterFrame v-if="mindMap" :mindMap="mindMap" />
+    <NodeNoteContentShow v-if="mindMap" :mindMap="mindMap" />
+    <NodeNoteSidebar v-if="mindMap" :mindMap="mindMap" />
+    <NodeImgPreview v-if="mindMap" :mindMap="mindMap" />
+    <FormulaSidebar v-if="mindMap" :mindMap="mindMap" />
+    <OutlineEdit v-if="mindMap" :mindMap="mindMap" />
+    <div
+      class="dragMask"
+      v-if="showDragMask"
+      @dragleave.stop.prevent="onDragleave"
+      @dragover.stop.prevent
+      @drop.stop.prevent="onDrop"
+    >
+      <div class="dragTip">在此释放以导入该文件</div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import MindMap from '@mind-map'
+import { registerPlugins, RichText, ScrollbarPlugin } from './usePlugins'
+import Themes from 'simple-mind-map-plugin-themes'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
+import bus from './useEventBus'
+import { store, actions } from './useStore'
+import { defaultData } from './config'
+import './assets/icon-font/iconfont.css'
+
+import Contextmenu from './Contextmenu.vue'
+import Navigator from './Navigator.vue'
+import Search from './Search.vue'
+import SidebarTrigger from './SidebarTrigger.vue'
+import MmStyle from './Style.vue'
+import BaseStyle from './BaseStyle.vue'
+import Theme from './Theme.vue'
+import Structure from './Structure.vue'
+import ShortcutKey from './ShortcutKey.vue'
+import OutlineSidebar from './OutlineSidebar.vue'
+import NodeIconSidebar from './NodeIconSidebar.vue'
+import AssociativeLineStyle from './AssociativeLineStyle.vue'
+import Setting from './Setting.vue'
+import RichTextToolbar from './RichTextToolbar.vue'
+import NodeTagStyle from './NodeTagStyle.vue'
+import NodeImgPlacementToolbar from './NodeImgPlacementToolbar.vue'
+import NodeOuterFrame from './NodeOuterFrame.vue'
+import NodeNoteContentShow from './NodeNoteContentShow.vue'
+import NodeNoteSidebar from './NodeNoteSidebar.vue'
+import NodeImgPreview from './NodeImgPreview.vue'
+import FormulaSidebar from './FormulaSidebar.vue'
+import OutlineEdit from './OutlineEdit.vue'
+
+// Register all plugins and themes
+registerPlugins('full')
+Themes.init(MindMap)
+
+const editContainerRef = ref(null)
+const mindMapContainerRef = ref(null)
+const mindMap = shallowRef(null)
+const showDragMask = ref(false)
+let storeConfigTimer = null
+let enableShowLoading = true
+
+const isZenMode = computed(() => store.localConfig.isZenMode)
+const openNodeRichText = computed(() => store.localConfig.openNodeRichText)
+const isShowScrollbar = computed(() => store.localConfig.isShowScrollbar)
+const useLeftKeySelectionRightKeyDrag = computed(() => store.localConfig.useLeftKeySelectionRightKeyDrag)
+
+// All events to forward from mindMap instance to bus
+const forwardEvents = [
+  'node_active',
+  'data_change',
+  'view_data_change',
+  'back_forward',
+  'node_contextmenu',
+  'node_click',
+  'draw_click',
+  'expand_btn_click',
+  'svg_mousedown',
+  'mouseup',
+  'mode_change',
+  'node_tree_render_end',
+  'rich_text_selection_change',
+  'transforming-dom-to-images',
+  'generalization_node_contextmenu',
+  'painter_start',
+  'painter_end',
+  'scrollbar_change',
+  'scale',
+  'translate',
+  'node_attachmentClick',
+  'node_attachmentContextmenu',
+  'demonstrate_jump',
+  'exit_demonstrate',
+  'node_note_dblclick',
+  'node_mousedown',
+]
+
+// Watch openNodeRichText to dynamically add/remove RichText plugin.
+// A full reRender is required after the swap: the plugin's internal transform
+// only issues a partial render() that reuses cached MindMapNode instances, so
+// stale plain <text> / rich <foreignObject> SVG groups otherwise remain and
+// node text displays abnormally.
+watch(openNodeRichText, (val) => {
+  if (!mindMap.value) return
+  mindMap.value.renderer?.textEdit?.hideEditTextBox?.()
+  if (val) {
+    mindMap.value.addPlugin(RichText)
+  } else {
+    mindMap.value.removePlugin(RichText)
+  }
+  nextTick(() => {
+    mindMap.value?.reRender()
+  })
+})
+
+// Watch isShowScrollbar to dynamically add/remove Scrollbar plugin
+watch(isShowScrollbar, (val) => {
+  if (!mindMap.value) return
+  if (val) {
+    mindMap.value.addPlugin(ScrollbarPlugin)
+  } else {
+    mindMap.value.removePlugin(ScrollbarPlugin)
+  }
+})
+
+onMounted(() => {
+  actions.initLocalConfig()
+  initMindMap()
+  bindBusEvents()
+  window.addEventListener('resize', handleResize)
+})
+
+onBeforeUnmount(() => {
+  unbindBusEvents()
+  window.removeEventListener('resize', handleResize)
+  if (mindMap.value) {
+    mindMap.value.destroy()
+    mindMap.value = null
+  }
+  clearTimeout(storeConfigTimer)
+  actions.resetState()
+})
+
+function initMindMap() {
+  if (!mindMapContainerRef.value) return
+
+  const savedData = actions.getData()
+  const savedConfig = actions.getConfig() || {}
+
+  let root = savedData?.root || defaultData
+  let layout = savedData?.layout || 'logicalStructure'
+  let themeTemplate = savedData?.theme?.template || 'default'
+  let themeConfig = savedData?.theme?.config || {}
+  let viewData = savedData?.view || null
+
+  const mm = new MindMap({
+    el: mindMapContainerRef.value,
+    data: root,
+    fit: false,
+    layout: layout,
+    theme: themeTemplate,
+    themeConfig: themeConfig,
+    viewData: viewData,
+    nodeTextEditZIndex: 1000,
+    nodeNoteTooltipZIndex: 1000,
+    customNoteContentShow: {
+      show: (content, left, top, node) => {
+        bus.emit('showNoteContent', content, left, top, node)
+      },
+      hide: () => {}
+    },
+    openRealtimeRenderOnNodeTextEdit: true,
+    enableAutoEnterTextEditWhenKeydown: true,
+    demonstrateConfig: {
+      openBlankMode: false
+    },
+    isLimitMindMapInCanvas: true,
+    ...savedConfig,
+    useLeftKeySelectionRightKeyDrag: useLeftKeySelectionRightKeyDrag.value,
+    customInnerElsAppendTo: null,
+    initRootNodePosition: ['center', 'center'],
+    customHandleMousewheel: (e) => {
+      if (!mm) return
+      const {
+        mouseScaleCenterUseMousePosition,
+        disableMouseWheelZoom,
+        translateRatio = 1,
+        minZoomRatio = 20,
+        maxZoomRatio = 400
+      } = mm.opt || {}
+      if (e.ctrlKey || e.metaKey) {
+        if (disableMouseWheelZoom) return
+        const { x: cx, y: cy } = mm.toPos(e.clientX, e.clientY)
+        const centerX = mouseScaleCenterUseMousePosition ? cx : undefined
+        const centerY = mouseScaleCenterUseMousePosition ? cy : undefined
+        const factor = 1 - e.deltaY * 0.01
+        const minScale = minZoomRatio / 100
+        const maxScale = maxZoomRatio === -1 ? Infinity : maxZoomRatio / 100
+        const newScale = Math.min(Math.max(mm.view.scale * factor, minScale), maxScale)
+        mm.view.setScale(newScale, centerX, centerY)
+        mm.emit('scale', mm.view.scale)
+        return
+      }
+      mm.view.translateXY(
+        -e.deltaX * translateRatio,
+        -e.deltaY * translateRatio
+      )
+    },
+    handleIsSplitByWrapOnPasteCreateNewNode: () => {
+      return ElMessageBox.confirm(
+        '是否按换行自动分割节点？',
+        '提示',
+        {
+          confirmButtonText: '是',
+          cancelButtonText: '否',
+          type: 'warning'
+        }
+      )
+    },
+    errorHandler: (code, err) => {
+      console.error('[MindMap Error]', code, err)
+      if (code === 'export_error') {
+        ElMessage.error('导出失败')
+      }
+    },
+    expandBtnNumHandler: (num) => {
+      return num >= 100 ? '...' : num
+    },
+    beforeDeleteNodeImg: (node) => {
+      return new Promise((resolve) => {
+        ElMessageBox.confirm(
+          '是否确认删除该节点图片？',
+          '提示',
+          {
+            confirmButtonText: '是',
+            cancelButtonText: '否',
+            type: 'warning'
+          }
+        ).then(() => {
+          resolve(false)
+        }).catch(() => {
+          resolve(true)
+        })
+      })
+    }
+  })
+
+  mindMap.value = mm
+  actions.setMindMap(mm)
+
+  // Load dynamic plugins based on config
+  if (openNodeRichText.value) {
+    mm.addPlugin(RichText)
+  }
+  if (isShowScrollbar.value) {
+    mm.addPlugin(ScrollbarPlugin)
+  }
+
+  // Forward all events from mindMap to bus
+  forwardEvents.forEach(eventName => {
+    mm.on(eventName, (...args) => {
+      bus.emit(eventName, ...args)
+    })
+  })
+
+  // Bind save events (use named functions for proper cleanup)
+  bus.on('data_change', onBusDataChange)
+  bus.on('view_data_change', onBusViewDataChange)
+
+  // Ctrl+S manual save
+  mm.keyCommand.addShortcut('Control+s', () => {
+    manualSave()
+  })
+}
+
+function manualSave() {
+  if (!mindMap.value) return
+  const fullData = mindMap.value.getData(true)
+  actions.storeData(fullData)
+  ElMessage.success('已保存')
+}
+
+// --- Bus command handlers ---
+
+function onBusDataChange(data) {
+  actions.storeData({ root: data })
+}
+
+function onBusViewDataChange(data) {
+  clearTimeout(storeConfigTimer)
+  storeConfigTimer = setTimeout(() => {
+    actions.storeData({ view: data })
+  }, 300)
+}
+
+function onExecCommand(...args) {
+  mindMap.value?.execCommand(...args)
+}
+
+async function onExport(...args) {
+  if (!mindMap.value) return
+  try {
+    await mindMap.value.export(...args)
+  } catch (error) {
+    console.error('导出失败:', error)
+  }
+}
+
+async function onExportXmind(name = '思维导图') {
+  if (!mindMap.value?.doExportXMind) return
+  try {
+    const data = mindMap.value.getData(true)
+    const result = await mindMap.value.doExportXMind.xmind(data, name)
+    if (result) {
+      const url = URL.createObjectURL(result)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name + '.xmind'
+      a.click()
+      URL.revokeObjectURL(url)
+    }
+  } catch (error) {
+    console.error('XMind导出失败:', error)
+    ElMessage.error('XMind 导出失败')
+  }
+}
+
+function onSetData(data) {
+  if (!mindMap.value) return
+  let rootNodeData = null
+  if (data.root) {
+    mindMap.value.setFullData(data)
+    rootNodeData = data.root
+  } else {
+    mindMap.value.setData(data)
+    rootNodeData = data
+  }
+  mindMap.value.view.reset()
+  manualSave()
+  // If imported content is rich text, auto-enable rich text mode
+  if (rootNodeData?.data?.richText && !openNodeRichText.value) {
+    bus.emit('toggleOpenNodeRichText', true)
+    ElNotification.info({
+      title: '提示',
+      message: '检测到导入了富文本内容，已自动开启富文本模式'
+    })
+  }
+}
+
+function onPaddingChange(data) {
+  mindMap.value?.updateConfig(data)
+}
+
+function onStartTextEdit() {
+  mindMap.value?.renderer?.startTextEdit?.()
+}
+
+function onEndTextEdit() {
+  mindMap.value?.renderer?.endTextEdit?.()
+}
+
+function onCreateAssociativeLine() {
+  mindMap.value?.associativeLine?.createLineFromActiveNode()
+}
+
+function onStartPainter() {
+  mindMap.value?.painter?.startPainter()
+}
+
+function handleResize() {
+  mindMap.value?.resize()
+}
+
+// --- Drag and drop import ---
+
+function onDragenter() {
+  showDragMask.value = true
+}
+
+function onDragleave() {
+  showDragMask.value = false
+}
+
+function onDrop(e) {
+  showDragMask.value = false
+  const dt = e.dataTransfer
+  const file = dt?.files?.[0]
+  if (!file) return
+  bus.emit('importFile', file)
+}
+
+// --- Bus event binding ---
+
+function onToggleOpenNodeRichText(val) {
+  actions.setLocalConfig({ openNodeRichText: !!val })
+}
+
+function bindBusEvents() {
+  bus.on('execCommand', onExecCommand)
+  bus.on('paddingChange', onPaddingChange)
+  bus.on('export', onExport)
+  bus.on('exportXmind', onExportXmind)
+  bus.on('setData', onSetData)
+  bus.on('startTextEdit', onStartTextEdit)
+  bus.on('endTextEdit', onEndTextEdit)
+  bus.on('createAssociativeLine', onCreateAssociativeLine)
+  bus.on('startPainter', onStartPainter)
+  bus.on('toggleOpenNodeRichText', onToggleOpenNodeRichText)
+}
+
+function unbindBusEvents() {
+  bus.off('execCommand', onExecCommand)
+  bus.off('paddingChange', onPaddingChange)
+  bus.off('export', onExport)
+  bus.off('exportXmind', onExportXmind)
+  bus.off('setData', onSetData)
+  bus.off('startTextEdit', onStartTextEdit)
+  bus.off('endTextEdit', onEndTextEdit)
+  bus.off('createAssociativeLine', onCreateAssociativeLine)
+  bus.off('startPainter', onStartPainter)
+  bus.off('data_change', onBusDataChange)
+  bus.off('view_data_change', onBusViewDataChange)
+  bus.off('toggleOpenNodeRichText', onToggleOpenNodeRichText)
+}
+
+defineExpose({
+  mindMap,
+  getMindMap: () => mindMap.value
+})
+</script>
+
+<style lang="scss" scoped>
+.editContainer {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+
+  .mindMapContainer {
+    width: 100%;
+    height: 100%;
+  }
+
+  .dragMask {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(255, 255, 255, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 3999;
+
+    .dragTip {
+      pointer-events: none;
+      font-weight: bold;
+      font-size: 16px;
+      color: #333;
+    }
+  }
+}
+</style>

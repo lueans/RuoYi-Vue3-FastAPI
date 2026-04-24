@@ -18,7 +18,9 @@ export default defineConfig(({ mode, command }) => {
         // 设置路径
         '~': path.resolve(__dirname, './'),
         // 设置别名
-        '@': path.resolve(__dirname, './src')
+        '@': path.resolve(__dirname, './src'),
+        // 思维导图库
+        '@mind-map': path.resolve(__dirname, './src/libs/simple-mind-map')
       },
       // https://cn.vitejs.dev/config/#resolve-extensions
       extensions: ['.mjs', '.js', '.ts', '.jsx', '.tsx', '.json', '.vue']

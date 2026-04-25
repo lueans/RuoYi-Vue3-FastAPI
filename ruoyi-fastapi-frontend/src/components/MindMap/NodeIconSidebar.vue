@@ -79,7 +79,7 @@ watch(() => store.activeSidebar, (val) => {
 })
 </script>
 
-<style lang="less">
+<style lang="less" scoped>
 .node-icon-sidebar {
   padding-top: 6px;
 

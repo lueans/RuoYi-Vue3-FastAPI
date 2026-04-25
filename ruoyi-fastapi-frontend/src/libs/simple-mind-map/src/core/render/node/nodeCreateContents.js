@@ -368,6 +368,7 @@ function createTagNode() {
   tagData.slice(0, maxTag).forEach((item, index) => {
     let str = ''
     let placement = null
+    let align = null
     let style = {
       ...defaultTagStyle
     }
@@ -379,6 +380,7 @@ function createTagNode() {
       str = item.text
       style = { ...defaultTagStyle, ...item.style }
       placement = item.placement || null
+      align = item.align || null
     }
     // 是否手动设置了标签宽度
     const hasCustomWidth = typeof style.width !== 'undefined'
@@ -423,7 +425,8 @@ function createTagNode() {
       node: tag,
       width: maxWidth,
       height: maxHeight,
-      placement
+      placement,
+      align
     })
   })
   return nodes

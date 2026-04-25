@@ -44,6 +44,13 @@ function groupTagsByPlacement(defaultPlacement) {
   return groups
 }
 
+// 计算内联标签(left/right)的垂直对齐 y 坐标
+function _getInlineAlignY(align, inlineYOffset, textContentHeight, itemHeight) {
+  if (align === 'top') return inlineYOffset
+  if (align === 'bottom') return inlineYOffset + textContentHeight - itemHeight
+  return inlineYOffset + (textContentHeight - itemHeight) / 2
+}
+
 //  计算节点尺寸信息
 function getNodeRect() {
   // 自定义节点内容
@@ -396,9 +403,10 @@ function layout() {
     let tagNested = new G()
     let tagLeft = 0
     tagGroups.left.forEach(item => {
+      const alignY = _getInlineAlignY(item.align, inlineYOffset, textContentHeight, item.height)
       item.node
         .x(textContentOffsetX + tagLeft)
-        .y(inlineYOffset + (textContentHeight - item.height) / 2)
+        .y(alignY)
       tagNested.add(item.node)
       tagLeft += item.width + textContentMargin
     })
@@ -452,9 +460,10 @@ function layout() {
       let tagNested = new G()
       let tagLeft = 0
       tagGroups.right.forEach(item => {
+        const alignY = _getInlineAlignY(item.align, inlineYOffset, textContentHeight, item.height)
         item.node
           .x(textContentOffsetX + tagLeft)
-          .y(inlineYOffset + (textContentHeight - item.height) / 2)
+          .y(alignY)
         tagNested.add(item.node)
         tagLeft += item.width + textContentMargin
       })
@@ -466,14 +475,14 @@ function layout() {
       let tagNested = new G()
       let tagLeft = 0
       const topSize = this.getTagContentSize(textContentMargin, tagGroups.top)
+      const topAlign = tagGroups.top[0].align || 'center'
       tagGroups.top.forEach(item => {
         item.node.x(tagLeft).y((topSize.height - item.height) / 2)
         tagNested.add(item.node)
         tagLeft += item.width + textContentMargin
       })
-      tagNested
-        .x((textContentWidth - topSize.width) / 2)
-        .y(0)
+      const topAlignX = topAlign === 'left' ? 0 : topAlign === 'right' ? textContentWidth - topSize.width : (textContentWidth - topSize.width) / 2
+      tagNested.x(topAlignX).y(0)
       textContentNested.add(tagNested)
     }
     // bottom 组：文字下方
@@ -481,14 +490,14 @@ function layout() {
       let tagNested = new G()
       let tagLeft = 0
       const bottomSize = this.getTagContentSize(textContentMargin, tagGroups.bottom)
+      const bottomAlign = tagGroups.bottom[0].align || 'center'
       tagGroups.bottom.forEach(item => {
         item.node.x(tagLeft).y((bottomSize.height - item.height) / 2)
         tagNested.add(item.node)
         tagLeft += item.width + textContentMargin
       })
-      tagNested
-        .x((textContentWidth - bottomSize.width) / 2)
-        .y(textContentHeightWithTag - bottomSize.height)
+      const bottomAlignX = bottomAlign === 'left' ? 0 : bottomAlign === 'right' ? textContentWidth - bottomSize.width : (textContentWidth - bottomSize.width) / 2
+      tagNested.x(bottomAlignX).y(textContentHeightWithTag - bottomSize.height)
       textContentNested.add(tagNested)
     }
   }

@@ -27,6 +27,7 @@
     <Setting :mindMap="mindMap" />
     <RichTextToolbar v-if="mindMap" :mindMap="mindMap" />
     <NodeTagStyle v-if="mindMap" :mindMap="mindMap" />
+    <NodeIconToolbar v-if="mindMap" :mindMap="mindMap" />
     <NodeImgPlacementToolbar v-if="mindMap" :mindMap="mindMap" />
     <NodeOuterFrame v-if="mindMap" :mindMap="mindMap" />
     <NodeNoteContentShow v-if="mindMap" :mindMap="mindMap" />
@@ -71,6 +72,7 @@ import AssociativeLineStyle from './AssociativeLineStyle.vue'
 import Setting from './Setting.vue'
 import RichTextToolbar from './RichTextToolbar.vue'
 import NodeTagStyle from './NodeTagStyle.vue'
+import NodeIconToolbar from './NodeIconToolbar.vue'
 import NodeImgPlacementToolbar from './NodeImgPlacementToolbar.vue'
 import NodeOuterFrame from './NodeOuterFrame.vue'
 import NodeNoteContentShow from './NodeNoteContentShow.vue'

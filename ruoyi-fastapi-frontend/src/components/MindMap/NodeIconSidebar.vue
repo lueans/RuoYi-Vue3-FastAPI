@@ -1,13 +1,15 @@
 <template>
   <Sidebar ref="sidebarRef" title="图标">
-    <div v-for="group in iconList" :key="group.type" class="icon-group">
-      <div class="group-title">{{ group.name }}</div>
-      <div class="icon-grid">
-        <div v-for="item in group.list" :key="item.name"
-          class="icon-item" :class="{ selected: isSelected(group.type, item.name) }"
-          @click="setIcon(group.type, item.name)"
-          v-html="item.icon"
-          :title="item.name">
+    <div class="node-icon-sidebar">
+      <div v-for="group in iconList" :key="group.type" class="icon-group">
+        <div class="group-title">{{ group.name }}</div>
+        <div class="icon-grid">
+          <div v-for="item in group.list" :key="item.name"
+            class="icon-item" :class="{ selected: isSelected(group.type, item.name) }"
+            @click="setIcon(group.type, item.name)"
+            v-html="item.icon"
+            :title="item.name">
+          </div>
         </div>
       </div>
     </div>
@@ -77,32 +79,57 @@ watch(() => store.activeSidebar, (val) => {
 })
 </script>
 
-<style scoped lang="scss">
-.icon-group { margin-bottom: 16px; }
-.group-title {
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid #f0f0f0;
-}
-.icon-grid {
-  display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  gap: 4px;
-}
-.icon-item {
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  cursor: pointer;
-  border: 2px solid transparent;
-  transition: all 0.15s;
-  :deep(svg) { width: 20px; height: 20px; }
-  &:hover { background: #f5f7fa; }
-  &.selected { border-color: #409eff; background: #ecf5ff; }
+<style lang="less">
+.node-icon-sidebar {
+  padding-top: 6px;
+
+  .icon-group {
+    margin-bottom: 20px;
+    padding: 0 20px;
+  }
+  .group-title {
+    font-size: 16px;
+    font-weight: 500;
+    color: #333;
+    margin-bottom: 10px;
+  }
+  .icon-grid {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .icon-item {
+    width: 24px;
+    height: 24px;
+    margin-right: 10px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    position: relative;
+
+    img {
+      width: 100%;
+      height: 100%;
+    }
+
+    svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    &:hover { opacity: 0.7; }
+
+    &.selected {
+      &::after {
+        content: '';
+        position: absolute;
+        left: -4px;
+        top: -4px;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        border: 2px solid #409eff;
+        box-sizing: content-box;
+      }
+    }
+  }
 }
 </style>

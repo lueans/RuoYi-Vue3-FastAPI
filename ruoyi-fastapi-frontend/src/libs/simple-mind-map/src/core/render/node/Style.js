@@ -222,7 +222,7 @@ class Style {
   tagText(node, style) {
     node
       .fill({
-        color: '#fff'
+        color: style.color || '#fff'
       })
       .css({
         'font-size': style.fontSize + 'px'

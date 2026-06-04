@@ -1,7 +1,7 @@
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 import jwt
 from fastapi import Depends, Form, Request

@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from datetime import datetime, time
-from typing import Any
+from typing import Any, Union
 
 from sqlalchemy import ColumnElement, and_, delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -166,6 +166,7 @@ insert into sys_menu values('1',  '系统管理', '0', '1',  'system',          
 insert into sys_menu values('2',  '系统监控', '0', '2',  'monitor',          null, '', '', 1, 0, 'M', '0', '0', '', 'monitor',  'admin', sysdate(), '', null, '系统监控目录');
 insert into sys_menu values('3',  '系统工具', '0', '3',  'tool',             null, '', '', 1, 0, 'M', '0', '0', '', 'tool',     'admin', sysdate(), '', null, '系统工具目录');
 insert into sys_menu values('4',  'AI 管理', '0', '4',  'ai',               null, '', '', 1, 0, 'M', '0', '0', '', 'ai-manage', 'admin', sysdate(), '', null, 'AI 管理目录');
+insert into sys_menu values('5',  '测试管理', '0', '5',  'test',             null, '', '', 1, 0, 'M', '0', '0', '', 'bug',       'admin', sysdate(), '', null, '测试管理目录');
 insert into sys_menu values('99', '若依官网', '0', '99', 'http://ruoyi.vip', null, '', '', 0, 0, 'M', '0', '0', '', 'guide',    'admin', sysdate(), '', null, '若依官网地址');
 -- 二级菜单
 insert into sys_menu values('100',  '用户管理', '1',   '1', 'user',                'system/user/index',                 '', '', 1, 0, 'C', '0', '0', 'system:user:list',                 'user',          'admin', sysdate(), '', null, '用户管理菜单');
@@ -189,6 +190,9 @@ insert into sys_menu values('116',  '代码生成', '3',   '2', 'gen',          
 insert into sys_menu values('117',  '系统接口', '3',   '3', 'swagger',             'tool/swagger/index',                '', '', 1, 0, 'C', '0', '0', 'tool:swagger:list',                'swagger',       'admin', sysdate(), '', null, '系统接口菜单');
 insert into sys_menu values('118',  '模型管理', '4',   '1', 'model',               'ai/model/index',                    '', '', 1, 0, 'C', '0', '0', 'ai:model:list',                    'ai-model',      'admin', sysdate(), '', null, '模型管理菜单');
 insert into sys_menu values('119',  'AI 对话', '4',   '2', 'chat',                'ai/chat/index',                     '', '', 1, 0, 'C', '0', '0', 'ai:chat:list',                     'ai-chat',       'admin', sysdate(), '', null, 'AI 对话菜单');
+insert into sys_menu values('121',  '思维导图', '5',   '1', 'mindmap',             'test/mindmap',                      '', '', 1, 0, 'C', '0', '0', 'tool:mindmap:list',                'tree',          'admin', sysdate(), '', null, '思维导图菜单');
+insert into sys_menu values('122',  '业务线管理', '5', '2', 'businessLine',        'test/businessLine/index',           '', '', 1, 0, 'C', '0', '0', 'test:businessLine:list',           'tree-table',    'admin', sysdate(), '', null, '业务线管理菜单');
+insert into sys_menu values('123',  '用例管理', '5',   '3', 'testcase',            'test/testcase/index',               '', '', 1, 0, 'C', '0', '0', 'test:caseDir:list',                'list',          'admin', sysdate(), '', null, '用例管理菜单');
 -- 三级菜单
 insert into sys_menu values('500',  '操作日志', '108', '1', 'operlog',    'monitor/operlog/index',    '', '', 1, 0, 'C', '0', '0', 'monitor:operlog:list',    'form',          'admin', sysdate(), '', null, '操作日志菜单');
 insert into sys_menu values('501',  '登录日志', '108', '2', 'logininfor', 'monitor/logininfor/index', '', '', 1, 0, 'C', '0', '0', 'monitor:logininfor:list', 'logininfor',    'admin', sysdate(), '', null, '登录日志菜单');
@@ -271,6 +275,16 @@ insert into sys_menu values('1061', '模型查询', '118', '1', '#', '', '', '',
 insert into sys_menu values('1062', '模型新增', '118', '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'ai:model:add',               '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1063', '模型修改', '118', '3', '#', '', '', '', 1, 0, 'F', '0', '0', 'ai:model:edit',              '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1064', '模型删除', '118', '4', '#', '', '', '', 1, 0, 'F', '0', '0', 'ai:model:remove',            '#', 'admin', sysdate(), '', null, '');
+-- 业务线管理按钮
+insert into sys_menu values('1070', '业务线查询', '122', '1', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:businessLine:query',    '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1071', '业务线新增', '122', '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:businessLine:add',      '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1072', '业务线修改', '122', '3', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:businessLine:edit',     '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1073', '业务线删除', '122', '4', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:businessLine:remove',   '#', 'admin', sysdate(), '', null, '');
+-- 用例管理按钮
+insert into sys_menu values('1075', '用例目录查询', '123', '1', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:caseDir:query',       '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1076', '用例目录新增', '123', '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:caseDir:add',         '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1077', '用例目录修改', '123', '3', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:caseDir:edit',        '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1078', '用例目录删除', '123', '4', '#', '', '', '', 1, 0, 'F', '0', '0', 'test:caseDir:remove',      '#', 'admin', sysdate(), '', null, '');
 
 
 -- ----------------------------
@@ -326,6 +340,11 @@ insert into sys_role_menu values ('2', '120');
 insert into sys_role_menu values ('2', '115');
 insert into sys_role_menu values ('2', '116');
 insert into sys_role_menu values ('2', '117');
+insert into sys_role_menu values ('2', '118');
+insert into sys_role_menu values ('2', '119');
+insert into sys_role_menu values ('2', '121');
+insert into sys_role_menu values ('2', '122');
+insert into sys_role_menu values ('2', '123');
 insert into sys_role_menu values ('2', '500');
 insert into sys_role_menu values ('2', '501');
 insert into sys_role_menu values ('2', '1000');
@@ -389,6 +408,18 @@ insert into sys_role_menu values ('2', '1057');
 insert into sys_role_menu values ('2', '1058');
 insert into sys_role_menu values ('2', '1059');
 insert into sys_role_menu values ('2', '1060');
+insert into sys_role_menu values ('2', '1061');
+insert into sys_role_menu values ('2', '1062');
+insert into sys_role_menu values ('2', '1063');
+insert into sys_role_menu values ('2', '1064');
+insert into sys_role_menu values ('2', '1070');
+insert into sys_role_menu values ('2', '1071');
+insert into sys_role_menu values ('2', '1072');
+insert into sys_role_menu values ('2', '1073');
+insert into sys_role_menu values ('2', '1075');
+insert into sys_role_menu values ('2', '1076');
+insert into sys_role_menu values ('2', '1077');
+insert into sys_role_menu values ('2', '1078');
 
 -- ----------------------------
 -- 8、角色和部门关联表  角色1-N部门

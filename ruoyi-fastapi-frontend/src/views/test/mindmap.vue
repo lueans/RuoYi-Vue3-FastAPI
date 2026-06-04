@@ -21,13 +21,12 @@ const mindMapInstance = computed(() => editRef.value?.mindMap || null)
 
 <style scoped lang="scss">
 .mind-map-page {
-  display: flex;
-  flex-direction: column;
+  position: relative;
   height: calc(100vh - 84px);
   background: #f5f5f5;
 }
 .mind-map-body {
-  flex: 1;
+  height: 100%;
   display: flex;
   overflow: hidden;
   position: relative;

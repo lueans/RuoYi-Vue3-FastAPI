@@ -42,7 +42,7 @@ class Token(BaseModel):
 class FeishuLoginCode(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel)
     code: str = Field(description='飞书回调code')
-    state: Optional[str] = Field(default=None, description='回调state')
+    state: str | None = Field(default=None, description='回调state')
 
 class LoginToken(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel)

@@ -474,12 +474,22 @@ onBeforeUnmount(() => {
 
 <style lang="scss" scoped>
 .toolbarContainer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  pointer-events: none;
+
   &.isDark {
     .toolbar {
       color: hsla(0, 0%, 100%, 0.9);
 
       .toolbarBlock {
-        background-color: #262a2e;
+        background-color: hsla(210, 10%, 14%, 0.85);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-color: rgba(255, 255, 255, 0.08);
       }
 
       .toolbarBtn {
@@ -506,20 +516,18 @@ onBeforeUnmount(() => {
   .toolbar {
     display: flex;
     justify-content: center;
-    width: 100%;
     font-size: 12px;
     font-family: PingFangSC-Regular, PingFang SC;
     font-weight: 400;
     color: rgba(26, 26, 26, 0.8);
-    z-index: 2;
     padding: 10px 0;
-    background: #fff;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-    flex-shrink: 0;
+    pointer-events: auto;
 
     .toolbarBlock {
       display: flex;
-      background-color: #fff;
+      background-color: hsla(0, 0%, 100%, 0.85);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
       padding: 10px 20px;
       border-radius: 6px;
       box-shadow: 0 2px 16px 0 rgba(0, 0, 0, 0.06);

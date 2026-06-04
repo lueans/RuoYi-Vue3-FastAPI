@@ -1,6 +1,6 @@
 <template>
   <el-dialog v-model="dialogVisible" title="备注" width="600px" :close-on-click-modal="false"
-    @open="onOpen" @close="onClose">
+    @open="onOpen" @close="onClose" append-to-body>
     <el-input
       v-model="note"
       type="textarea"

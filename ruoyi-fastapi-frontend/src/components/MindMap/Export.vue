@@ -5,6 +5,7 @@
     v-model="dialogVisible"
     :width="'800px'"
     :show-close="false"
+    append-to-body
   >
     <div class="exportContainer" :class="{ isDark: isDark }">
       <div class="downloadTypeSelectBox">
@@ -218,6 +219,12 @@ onBeforeUnmount(() => {
   bus.off('showExport', handleShowExport)
 })
 </script>
+
+<style lang="less">
+.el-overlay.nodeExportDialog {
+  pointer-events: auto;
+}
+</style>
 
 <style lang="less" scoped>
 .nodeExportDialog {

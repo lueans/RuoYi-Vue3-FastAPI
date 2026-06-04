@@ -5,6 +5,7 @@
       title="导入"
       v-model="dialogVisible"
       width="350px"
+      append-to-body
     >
       <el-upload
         ref="uploadRef"
@@ -40,6 +41,7 @@
       v-model="xmindCanvasSelectDialogVisible"
       width="300px"
       :show-close="false"
+      append-to-body
     >
       <el-radio-group v-model="selectCanvas" class="canvasList">
         <el-radio
@@ -242,6 +244,12 @@ onBeforeUnmount(() => {
   bus.off('importFile', handleImportFile)
 })
 </script>
+
+<style lang="less">
+.el-overlay.nodeImportDialog {
+  pointer-events: auto;
+}
+</style>
 
 <style lang="less" scoped>
 .nodeImportDialog {

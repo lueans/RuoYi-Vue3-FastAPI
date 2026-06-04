@@ -1,6 +1,6 @@
 <template>
   <el-dialog v-model="dialogVisible" title="标签" width="460px" :close-on-click-modal="false"
-    @open="onOpen" @close="onClose">
+    @open="onOpen" @close="onClose" append-to-body>
     <div class="tag-input-row">
       <el-input v-model="tagInput" placeholder="输入标签后按 Enter 添加" size="small"
         @keydown.enter="addTag" ref="inputRef" />

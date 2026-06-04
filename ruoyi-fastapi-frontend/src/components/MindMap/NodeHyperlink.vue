@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="dialogVisible" title="超链接" width="500px" :close-on-click-modal="false">
+  <el-dialog v-model="dialogVisible" title="超链接" width="500px" :close-on-click-modal="false" append-to-body>
     <el-form label-width="70px">
       <el-form-item label="链接地址">
         <el-input v-model="link" placeholder="请输入链接地址">

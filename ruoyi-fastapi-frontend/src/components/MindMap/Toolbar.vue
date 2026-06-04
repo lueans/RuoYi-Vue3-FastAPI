@@ -486,9 +486,10 @@ onBeforeUnmount(() => {
       color: hsla(0, 0%, 100%, 0.9);
 
       .toolbarBlock {
-        background-color: hsla(210, 10%, 14%, 0.85);
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
+        background-color: hsla(210, 10%, 14%, 0.95);
+        /* 临时禁用 backdrop-filter 验证性能问题 */
+        /* backdrop-filter: blur(10px); */
+        /* -webkit-backdrop-filter: blur(10px); */
         border-color: rgba(255, 255, 255, 0.08);
       }
 
@@ -525,9 +526,10 @@ onBeforeUnmount(() => {
 
     .toolbarBlock {
       display: flex;
-      background-color: hsla(0, 0%, 100%, 0.85);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
+      background-color: hsla(0, 0%, 100%, 0.95);
+      /* 临时禁用 backdrop-filter 验证性能问题 */
+      /* backdrop-filter: blur(10px); */
+      /* -webkit-backdrop-filter: blur(10px); */
       padding: 10px 20px;
       border-radius: 6px;
       box-shadow: 0 2px 16px 0 rgba(0, 0, 0, 0.06);

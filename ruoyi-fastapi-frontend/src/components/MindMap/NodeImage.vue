@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="dialogVisible" title="图片" width="500px" :close-on-click-modal="false">
+  <el-dialog v-model="dialogVisible" title="图片" width="500px" :close-on-click-modal="false" append-to-body>
     <el-tabs v-model="activeTab">
       <el-tab-pane label="URL 地址" name="url">
         <el-input v-model="imgUrl" placeholder="请输入图片 URL 地址" />

@@ -459,75 +459,79 @@ class View {
   limitMindMapInCanvas() {
     if (!this.checkNeedMindMapInCanvas()) return
 
-    // 节流控制：避免过于频繁的 DOM 查询
-    const now = performance.now()
-    if (now - this._lastLimitCheck < this._limitThrottleMs) {
-      return
-    }
-    this._lastLimitCheck = now
-
     const draw = this.mindMap.draw
-    const drawRect = draw.rbox()
     const elRect = this.mindMap.elRect
+    if (!elRect) return
 
-    // 安全检查：初始化阶段绘制区域或容器信息可能尚未就绪
-    if (!drawRect || !drawRect.width || !elRect) return
+    // ---- 节流控制 draw.rbox() DOM 查询 ----
+    // 仅节流昂贵的 DOM 查询，边界钳制数学计算每次都执行（避免抖动）
+    const now = performance.now()
+    if (now - this._lastLimitCheck >= this._limitThrottleMs) {
+      this._lastLimitCheck = now
+      const drawRect = draw.rbox()
 
-    // ---- 第一步：将 rbox 转为容器相对坐标 ----
-    // rbox() 返回文档绝对坐标，减去容器偏移量得到容器相对坐标
-    // 这与 fit()、Scrollbar、MiniMap 中的处理方式一致
-    const prevX = this._appliedX ?? this.x
-    const prevY = this._appliedY ?? this.y
-    const prevScale = this._appliedScale ?? this.scale
+      // 安全检查：初始化阶段绘制区域可能尚未就绪
+      if (drawRect && drawRect.width) {
+        const prevX = this._appliedX ?? this.x
+        const prevY = this._appliedY ?? this.y
+        const prevScale = this._appliedScale ?? this.scale
 
-    // 除零保护：如果 prevScale 无效，跳过边界限制
-    if (prevScale === 0 || !Number.isFinite(prevScale)) {
-      if (process.env.NODE_ENV === 'development') {
-        console.warn('[MindMap] limitMindMapInCanvas: invalid prevScale', prevScale)
+        // 除零保护
+        if (prevScale === 0 || !Number.isFinite(prevScale)) {
+          if (process.env.NODE_ENV === 'development') {
+            console.warn('[MindMap] limitMindMapInCanvas: invalid prevScale', prevScale)
+          }
+          return
+        }
+
+        // rbox() 转为容器相对坐标，与 fit()、Scrollbar、MiniMap 一致
+        const screenLeft = drawRect.x - elRect.left
+        const screenTop = drawRect.y - elRect.top
+
+        // 反推脑图在内部坐标系下的固有位置（与缩放/平移无关的原始尺寸）
+        // 缓存结果，节流期间复用
+        this._cachedBounds = {
+          intLeft: (screenLeft - prevX) / prevScale,
+          intTop: (screenTop - prevY) / prevScale,
+          intW: drawRect.width / prevScale,
+          intH: drawRect.height / prevScale
+        }
       }
-      return
     }
 
-    // draw.rbox() 是上一帧变换的结果，需要用上一帧的 this.x/y/scale 来反推
-    const screenLeft = drawRect.x - elRect.left
-    const screenTop = drawRect.y - elRect.top
+    // 没有缓存数据（首次调用 rbox 失败），跳过本次钳制
+    if (!this._cachedBounds) return
 
-    // ---- 第二步：反推脑图在内部坐标系下的固有位置 ----
-    // 上一帧：screenLeft = intLeft × prevScale + prevX
-    // 反推：  intLeft = (screenLeft - prevX) / prevScale
-    const intLeft = (screenLeft - prevX) / prevScale
-    const intTop = (screenTop - prevY) / prevScale
-    const intW = drawRect.width / prevScale
-    const intH = drawRect.height / prevScale
+    const { intLeft, intTop, intW, intH } = this._cachedBounds
 
-    // ---- 第三步：用新的 this.x/y/scale 正推屏幕坐标 ----
+    // ---- 以下纯数学计算，每帧都执行（避免节流导致抖动） ----
+
+    // 用新的 this.x/y/scale 正推屏幕坐标
     // newScreenLeft = intLeft × this.scale + this.x
-    const newLeft = intLeft * this.scale + this.x
-    const newTop = intTop * this.scale + this.y
-    const newRight = newLeft + intW * this.scale
-    const newBottom = newTop + intH * this.scale
+    const newRight = (intLeft + intW) * this.scale + this.x
+    const newBottom = (intTop + intH) * this.scale + this.y
 
-    // ---- 第四步：约束 —— 脑图不能完全离开画布 ----
+    // ---- 约束：脑图不能完全离开画布 ----
     // 至少保证 minVisible 像素的脑图内容可见于画布中
     const canvasW = this.mindMap.width
     const canvasH = this.mindMap.height
     const minVisible = this.mindMap.opt.minVisibleInCanvas ?? 80
 
     // 向右拖：脑图左边不能超过 (画布右边 - minVisible)
-    //   newLeft < canvasW - minVisible
+    //   intLeft × scale + x < canvasW - minVisible
     //   x < canvasW - minVisible - intLeft × scale
     const maxX = canvasW - minVisible - intLeft * this.scale
 
     // 向左拖：脑图右边不能低于 (画布左边 + minVisible)
-    //   newRight > minVisible
-    //   x > minVisible - (intLeft + intW) × scale
+    //   (intLeft + intW) × scale + x > minVisible
+    //   x > minVisible - newRight（不含 x）
     const minX = minVisible - (intLeft + intW) * this.scale
 
     // 同理 Y 轴
     const maxY = canvasH - minVisible - intTop * this.scale
     const minY = minVisible - (intTop + intH) * this.scale
 
-    // ---- 第五步：钳制 ----
+    // ---- 钳制 ----
     if (minX <= maxX) {
       if (this.x > maxX) this.x = maxX
       if (this.x < minX) this.x = minX

@@ -6,10 +6,13 @@ from fastapi.responses import StreamingResponse
 from pydantic_validation_decorator import ValidateFields
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.annotation.cache_annotation import ApiCache, ApiCacheEvict
 from common.annotation.log_annotation import Log
+from common.annotation.rate_limit_annotation import ApiRateLimit, ApiRateLimitPreset
 from common.aspect.db_seesion import DBSessionDependency
 from common.aspect.interface_auth import UserInterfaceAuthDependency
 from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
+from common.constant import ApiGroup, ApiNamespace
 from common.enums import BusinessType
 from common.router import APIRouterPro
 from common.vo import DataResponseModel, PageResponseModel, ResponseBaseModel
@@ -32,6 +35,7 @@ post_controller = APIRouterPro(
     response_model=PageResponseModel[PostModel],
     dependencies=[UserInterfaceAuthDependency('system:post:list')],
 )
+@ApiCache(namespace=ApiNamespace.SYSTEM_POST_LIST)
 async def get_system_post_list(
     request: Request,
     post_page_query: Annotated[PostPageQueryModel, Query()],
@@ -52,6 +56,7 @@ async def get_system_post_list(
     dependencies=[UserInterfaceAuthDependency('system:post:add')],
 )
 @ValidateFields(validate_model='add_post')
+@ApiCacheEvict(namespaces=ApiGroup.POST_MUTATION)
 @Log(title='岗位管理', business_type=BusinessType.INSERT)
 async def add_system_post(
     request: Request,
@@ -77,6 +82,7 @@ async def add_system_post(
     dependencies=[UserInterfaceAuthDependency('system:post:edit')],
 )
 @ValidateFields(validate_model='edit_post')
+@ApiCacheEvict(namespaces=ApiGroup.POST_MUTATION)
 @Log(title='岗位管理', business_type=BusinessType.UPDATE)
 async def edit_system_post(
     request: Request,
@@ -99,6 +105,7 @@ async def edit_system_post(
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('system:post:remove')],
 )
+@ApiCacheEvict(namespaces=ApiGroup.POST_MUTATION)
 @Log(title='岗位管理', business_type=BusinessType.DELETE)
 async def delete_system_post(
     request: Request,
@@ -119,6 +126,7 @@ async def delete_system_post(
     response_model=DataResponseModel[PostModel],
     dependencies=[UserInterfaceAuthDependency('system:post:query')],
 )
+@ApiCache(namespace=ApiNamespace.SYSTEM_POST_DETAIL)
 async def query_detail_system_post(
     request: Request,
     post_id: Annotated[int, Path(description='岗位ID')],
@@ -145,6 +153,7 @@ async def query_detail_system_post(
     },
     dependencies=[UserInterfaceAuthDependency('system:post:export')],
 )
+@ApiRateLimit(namespace=ApiNamespace.SYSTEM_POST_EXPORT, preset=ApiRateLimitPreset.USER_RESOURCE_EXPORT)
 @Log(title='岗位管理', business_type=BusinessType.EXPORT)
 async def export_system_post_list(
     request: Request,

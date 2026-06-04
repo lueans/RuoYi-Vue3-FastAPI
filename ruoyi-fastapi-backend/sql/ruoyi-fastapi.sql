@@ -162,29 +162,33 @@ create table sys_menu (
 -- 初始化-菜单信息表数据
 -- ----------------------------
 -- 一级菜单
-insert into sys_menu values('1', '系统管理', '0', '1', 'system',           null, '', '', 1, 0, 'M', '0', '0', '', 'system',   'admin', sysdate(), '', null, '系统管理目录');
-insert into sys_menu values('2', '系统监控', '0', '2', 'monitor',          null, '', '', 1, 0, 'M', '0', '0', '', 'monitor',  'admin', sysdate(), '', null, '系统监控目录');
-insert into sys_menu values('3', '系统工具', '0', '3', 'tool',             null, '', '', 1, 0, 'M', '0', '0', '', 'tool',     'admin', sysdate(), '', null, '系统工具目录');
-insert into sys_menu values('4', '若依官网', '0', '4', 'http://ruoyi.vip', null, '', '', 0, 0, 'M', '0', '0', '', 'guide',    'admin', sysdate(), '', null, '若依官网地址');
+insert into sys_menu values('1',  '系统管理', '0', '1',  'system',           null, '', '', 1, 0, 'M', '0', '0', '', 'system',   'admin', sysdate(), '', null, '系统管理目录');
+insert into sys_menu values('2',  '系统监控', '0', '2',  'monitor',          null, '', '', 1, 0, 'M', '0', '0', '', 'monitor',  'admin', sysdate(), '', null, '系统监控目录');
+insert into sys_menu values('3',  '系统工具', '0', '3',  'tool',             null, '', '', 1, 0, 'M', '0', '0', '', 'tool',     'admin', sysdate(), '', null, '系统工具目录');
+insert into sys_menu values('4',  'AI 管理', '0', '4',  'ai',               null, '', '', 1, 0, 'M', '0', '0', '', 'ai-manage', 'admin', sysdate(), '', null, 'AI 管理目录');
+insert into sys_menu values('99', '若依官网', '0', '99', 'http://ruoyi.vip', null, '', '', 0, 0, 'M', '0', '0', '', 'guide',    'admin', sysdate(), '', null, '若依官网地址');
 -- 二级菜单
-insert into sys_menu values('100',  '用户管理', '1',   '1', 'user',       'system/user/index',        '', '', 1, 0, 'C', '0', '0', 'system:user:list',        'user',          'admin', sysdate(), '', null, '用户管理菜单');
-insert into sys_menu values('101',  '角色管理', '1',   '2', 'role',       'system/role/index',        '', '', 1, 0, 'C', '0', '0', 'system:role:list',        'peoples',       'admin', sysdate(), '', null, '角色管理菜单');
-insert into sys_menu values('102',  '菜单管理', '1',   '3', 'menu',       'system/menu/index',        '', '', 1, 0, 'C', '0', '0', 'system:menu:list',        'tree-table',    'admin', sysdate(), '', null, '菜单管理菜单');
-insert into sys_menu values('103',  '部门管理', '1',   '4', 'dept',       'system/dept/index',        '', '', 1, 0, 'C', '0', '0', 'system:dept:list',        'tree',          'admin', sysdate(), '', null, '部门管理菜单');
-insert into sys_menu values('104',  '岗位管理', '1',   '5', 'post',       'system/post/index',        '', '', 1, 0, 'C', '0', '0', 'system:post:list',        'post',          'admin', sysdate(), '', null, '岗位管理菜单');
-insert into sys_menu values('105',  '字典管理', '1',   '6', 'dict',       'system/dict/index',        '', '', 1, 0, 'C', '0', '0', 'system:dict:list',        'dict',          'admin', sysdate(), '', null, '字典管理菜单');
-insert into sys_menu values('106',  '参数设置', '1',   '7', 'config',     'system/config/index',      '', '', 1, 0, 'C', '0', '0', 'system:config:list',      'edit',          'admin', sysdate(), '', null, '参数设置菜单');
-insert into sys_menu values('107',  '通知公告', '1',   '8', 'notice',     'system/notice/index',      '', '', 1, 0, 'C', '0', '0', 'system:notice:list',      'message',       'admin', sysdate(), '', null, '通知公告菜单');
-insert into sys_menu values('108',  '日志管理', '1',   '9', 'log',        '',                         '', '', 1, 0, 'M', '0', '0', '',                        'log',           'admin', sysdate(), '', null, '日志管理菜单');
-insert into sys_menu values('109',  '在线用户', '2',   '1', 'online',     'monitor/online/index',     '', '', 1, 0, 'C', '0', '0', 'monitor:online:list',     'online',        'admin', sysdate(), '', null, '在线用户菜单');
-insert into sys_menu values('110',  '定时任务', '2',   '2', 'job',        'monitor/job/index',        '', '', 1, 0, 'C', '0', '0', 'monitor:job:list',        'job',           'admin', sysdate(), '', null, '定时任务菜单');
-insert into sys_menu values('111',  '数据监控', '2',   '3', 'druid',      'monitor/druid/index',      '', '', 1, 0, 'C', '0', '0', 'monitor:druid:list',      'druid',         'admin', sysdate(), '', null, '数据监控菜单');
-insert into sys_menu values('112',  '服务监控', '2',   '4', 'server',     'monitor/server/index',     '', '', 1, 0, 'C', '0', '0', 'monitor:server:list',     'server',        'admin', sysdate(), '', null, '服务监控菜单');
-insert into sys_menu values('113',  '缓存监控', '2',   '5', 'cache',      'monitor/cache/index',      '', '', 1, 0, 'C', '0', '0', 'monitor:cache:list',      'redis',         'admin', sysdate(), '', null, '缓存监控菜单');
-insert into sys_menu values('114',  '缓存列表', '2',   '6', 'cacheList',  'monitor/cache/list',       '', '', 1, 0, 'C', '0', '0', 'monitor:cache:list',      'redis-list',    'admin', sysdate(), '', null, '缓存列表菜单');
-insert into sys_menu values('115',  '表单构建', '3',   '1', 'build',      'tool/build/index',         '', '', 1, 0, 'C', '0', '0', 'tool:build:list',         'build',         'admin', sysdate(), '', null, '表单构建菜单');
-insert into sys_menu values('116',  '代码生成', '3',   '2', 'gen',        'tool/gen/index',           '', '', 1, 0, 'C', '0', '0', 'tool:gen:list',           'code',          'admin', sysdate(), '', null, '代码生成菜单');
-insert into sys_menu values('117',  '系统接口', '3',   '3', 'swagger',    'tool/swagger/index',       '', '', 1, 0, 'C', '0', '0', 'tool:swagger:list',       'swagger',       'admin', sysdate(), '', null, '系统接口菜单');
+insert into sys_menu values('100',  '用户管理', '1',   '1', 'user',                'system/user/index',                 '', '', 1, 0, 'C', '0', '0', 'system:user:list',                 'user',          'admin', sysdate(), '', null, '用户管理菜单');
+insert into sys_menu values('101',  '角色管理', '1',   '2', 'role',                'system/role/index',                 '', '', 1, 0, 'C', '0', '0', 'system:role:list',                 'peoples',       'admin', sysdate(), '', null, '角色管理菜单');
+insert into sys_menu values('102',  '菜单管理', '1',   '3', 'menu',                'system/menu/index',                 '', '', 1, 0, 'C', '0', '0', 'system:menu:list',                 'tree-table',    'admin', sysdate(), '', null, '菜单管理菜单');
+insert into sys_menu values('103',  '部门管理', '1',   '4', 'dept',                'system/dept/index',                 '', '', 1, 0, 'C', '0', '0', 'system:dept:list',                 'tree',          'admin', sysdate(), '', null, '部门管理菜单');
+insert into sys_menu values('104',  '岗位管理', '1',   '5', 'post',                'system/post/index',                 '', '', 1, 0, 'C', '0', '0', 'system:post:list',                 'post',          'admin', sysdate(), '', null, '岗位管理菜单');
+insert into sys_menu values('105',  '字典管理', '1',   '6', 'dict',                'system/dict/index',                 '', '', 1, 0, 'C', '0', '0', 'system:dict:list',                 'dict',          'admin', sysdate(), '', null, '字典管理菜单');
+insert into sys_menu values('106',  '参数设置', '1',   '7', 'config',              'system/config/index',               '', '', 1, 0, 'C', '0', '0', 'system:config:list',               'edit',          'admin', sysdate(), '', null, '参数设置菜单');
+insert into sys_menu values('107',  '通知公告', '1',   '8', 'notice',              'system/notice/index',               '', '', 1, 0, 'C', '0', '0', 'system:notice:list',               'message',       'admin', sysdate(), '', null, '通知公告菜单');
+insert into sys_menu values('108',  '日志管理', '1',   '9', 'log',                 '',                                  '', '', 1, 0, 'M', '0', '0', '',                                 'log',           'admin', sysdate(), '', null, '日志管理菜单');
+insert into sys_menu values('109',  '在线用户', '2',   '1', 'online',              'monitor/online/index',              '', '', 1, 0, 'C', '0', '0', 'monitor:online:list',              'online',        'admin', sysdate(), '', null, '在线用户菜单');
+insert into sys_menu values('110',  '定时任务', '2',   '2', 'job',                 'monitor/job/index',                 '', '', 1, 0, 'C', '0', '0', 'monitor:job:list',                 'job',           'admin', sysdate(), '', null, '定时任务菜单');
+insert into sys_menu values('111',  '数据监控', '2',   '3', 'druid',               'monitor/druid/index',               '', '', 1, 0, 'C', '0', '0', 'monitor:druid:list',               'druid',         'admin', sysdate(), '', null, '数据监控菜单');
+insert into sys_menu values('112',  '服务监控', '2',   '4', 'server',              'monitor/server/index',              '', '', 1, 0, 'C', '0', '0', 'monitor:server:list',              'server',        'admin', sysdate(), '', null, '服务监控菜单');
+insert into sys_menu values('113',  '缓存监控', '2',   '5', 'cache',               'monitor/cache/index',               '', '', 1, 0, 'C', '0', '0', 'monitor:cache:list',               'redis',         'admin', sysdate(), '', null, '缓存监控菜单');
+insert into sys_menu values('114',  '缓存列表', '2',   '6', 'cacheList',           'monitor/cache/list',                '', '', 1, 0, 'C', '0', '0', 'monitor:cache:list',               'redis-list',    'admin', sysdate(), '', null, '缓存列表菜单');
+insert into sys_menu values('120',  '传输加密', '2',   '7', 'transportCrypto',     'monitor/transportCrypto/index',     '', '', 1, 0, 'C', '0', '0', 'monitor:transportCrypto:list',     'chart',         'admin', sysdate(), '', null, '传输加密监控菜单');
+insert into sys_menu values('115',  '表单构建', '3',   '1', 'build',               'tool/build/index',                  '', '', 1, 0, 'C', '0', '0', 'tool:build:list',                  'build',         'admin', sysdate(), '', null, '表单构建菜单');
+insert into sys_menu values('116',  '代码生成', '3',   '2', 'gen',                 'tool/gen/index',                    '', '', 1, 0, 'C', '0', '0', 'tool:gen:list',                    'code',          'admin', sysdate(), '', null, '代码生成菜单');
+insert into sys_menu values('117',  '系统接口', '3',   '3', 'swagger',             'tool/swagger/index',                '', '', 1, 0, 'C', '0', '0', 'tool:swagger:list',                'swagger',       'admin', sysdate(), '', null, '系统接口菜单');
+insert into sys_menu values('118',  '模型管理', '4',   '1', 'model',               'ai/model/index',                    '', '', 1, 0, 'C', '0', '0', 'ai:model:list',                    'ai-model',      'admin', sysdate(), '', null, '模型管理菜单');
+insert into sys_menu values('119',  'AI 对话', '4',   '2', 'chat',                'ai/chat/index',                     '', '', 1, 0, 'C', '0', '0', 'ai:chat:list',                     'ai-chat',       'admin', sysdate(), '', null, 'AI 对话菜单');
 -- 三级菜单
 insert into sys_menu values('500',  '操作日志', '108', '1', 'operlog',    'monitor/operlog/index',    '', '', 1, 0, 'C', '0', '0', 'monitor:operlog:list',    'form',          'admin', sysdate(), '', null, '操作日志菜单');
 insert into sys_menu values('501',  '登录日志', '108', '2', 'logininfor', 'monitor/logininfor/index', '', '', 1, 0, 'C', '0', '0', 'monitor:logininfor:list', 'logininfor',    'admin', sysdate(), '', null, '登录日志菜单');
@@ -262,6 +266,11 @@ insert into sys_menu values('1057', '生成删除', '116', '3', '#', '', '', '',
 insert into sys_menu values('1058', '导入代码', '116', '4', '#', '', '', '', 1, 0, 'F', '0', '0', 'tool:gen:import',            '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1059', '预览代码', '116', '5', '#', '', '', '', 1, 0, 'F', '0', '0', 'tool:gen:preview',           '#', 'admin', sysdate(), '', null, '');
 insert into sys_menu values('1060', '生成代码', '116', '6', '#', '', '', '', 1, 0, 'F', '0', '0', 'tool:gen:code',              '#', 'admin', sysdate(), '', null, '');
+-- 模型管理按钮
+insert into sys_menu values('1061', '模型查询', '118', '1', '#', '', '', '', 1, 0, 'F', '0', '0', 'ai:model:query',             '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1062', '模型新增', '118', '2', '#', '', '', '', 1, 0, 'F', '0', '0', 'ai:model:add',               '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1063', '模型修改', '118', '3', '#', '', '', '', 1, 0, 'F', '0', '0', 'ai:model:edit',              '#', 'admin', sysdate(), '', null, '');
+insert into sys_menu values('1064', '模型删除', '118', '4', '#', '', '', '', 1, 0, 'F', '0', '0', 'ai:model:remove',            '#', 'admin', sysdate(), '', null, '');
 
 
 -- ----------------------------
@@ -313,6 +322,7 @@ insert into sys_role_menu values ('2', '111');
 insert into sys_role_menu values ('2', '112');
 insert into sys_role_menu values ('2', '113');
 insert into sys_role_menu values ('2', '114');
+insert into sys_role_menu values ('2', '120');
 insert into sys_role_menu values ('2', '115');
 insert into sys_role_menu values ('2', '116');
 insert into sys_role_menu values ('2', '117');
@@ -464,17 +474,18 @@ create table sys_dict_type
   unique (dict_type)
 ) engine=innodb auto_increment=100 comment = '字典类型表';
 
-insert into sys_dict_type values(1,  '用户性别',   'sys_user_sex',        '0', 'admin', sysdate(), '', null, '用户性别列表');
-insert into sys_dict_type values(2,  '菜单状态',   'sys_show_hide',       '0', 'admin', sysdate(), '', null, '菜单状态列表');
-insert into sys_dict_type values(3,  '系统开关',   'sys_normal_disable',  '0', 'admin', sysdate(), '', null, '系统开关列表');
-insert into sys_dict_type values(4,  '任务状态',   'sys_job_status',      '0', 'admin', sysdate(), '', null, '任务状态列表');
-insert into sys_dict_type values(5,  '任务分组',   'sys_job_group',       '0', 'admin', sysdate(), '', null, '任务分组列表');
-insert into sys_dict_type values(6,  '任务执行器', 'sys_job_executor',    '0', 'admin', sysdate(), '', null, '任务执行器列表');
-insert into sys_dict_type values(7,  '系统是否',   'sys_yes_no',          '0', 'admin', sysdate(), '', null, '系统是否列表');
-insert into sys_dict_type values(8,  '通知类型',   'sys_notice_type',     '0', 'admin', sysdate(), '', null, '通知类型列表');
-insert into sys_dict_type values(9,  '通知状态', 	 'sys_notice_status',   '0', 'admin', sysdate(), '', null, '通知状态列表');
-insert into sys_dict_type values(10,  '操作类型', 	 'sys_oper_type',     '0', 'admin', sysdate(), '', null, '操作类型列表');
-insert into sys_dict_type values(11, '系统状态',   'sys_common_status',   '0', 'admin', sysdate(), '', null, '登录状态列表');
+insert into sys_dict_type values(1,  '用户性别',     'sys_user_sex',        '0', 'admin', sysdate(), '', null, '用户性别列表');
+insert into sys_dict_type values(2,  '菜单状态',     'sys_show_hide',       '0', 'admin', sysdate(), '', null, '菜单状态列表');
+insert into sys_dict_type values(3,  '系统开关',     'sys_normal_disable',  '0', 'admin', sysdate(), '', null, '系统开关列表');
+insert into sys_dict_type values(4,  '任务状态',     'sys_job_status',      '0', 'admin', sysdate(), '', null, '任务状态列表');
+insert into sys_dict_type values(5,  '任务分组',     'sys_job_group',       '0', 'admin', sysdate(), '', null, '任务分组列表');
+insert into sys_dict_type values(6,  '任务执行器',   'sys_job_executor',    '0', 'admin', sysdate(), '', null, '任务执行器列表');
+insert into sys_dict_type values(7,  '系统是否',     'sys_yes_no',          '0', 'admin', sysdate(), '', null, '系统是否列表');
+insert into sys_dict_type values(8,  '通知类型',     'sys_notice_type',     '0', 'admin', sysdate(), '', null, '通知类型列表');
+insert into sys_dict_type values(9,  '通知状态', 	   'sys_notice_status',   '0', 'admin', sysdate(), '', null, '通知状态列表');
+insert into sys_dict_type values(10, '操作类型', 	   'sys_oper_type',       '0', 'admin', sysdate(), '', null, '操作类型列表');
+insert into sys_dict_type values(11, '系统状态',     'sys_common_status',   '0', 'admin', sysdate(), '', null, '登录状态列表');
+insert into sys_dict_type values(12, 'AI模型提供商', 'ai_provider_type',    '0', 'admin', sysdate(), '', null, 'AI模型提供商列表');
 
 
 -- ----------------------------
@@ -500,38 +511,75 @@ create table sys_dict_data
   primary key (dict_code)
 ) engine=innodb auto_increment=100 comment = '字典数据表';
 
-insert into sys_dict_data values(1,  1,  '男',       '0',           'sys_user_sex',        '',   '',        'Y', '0', 'admin', sysdate(), '', null, '性别男');
-insert into sys_dict_data values(2,  2,  '女',       '1',           'sys_user_sex',        '',   '',        'N', '0', 'admin', sysdate(), '', null, '性别女');
-insert into sys_dict_data values(3,  3,  '未知',     '2',           'sys_user_sex',        '',   '',        'N', '0', 'admin', sysdate(), '', null, '性别未知');
-insert into sys_dict_data values(4,  1,  '显示',     '0',           'sys_show_hide',       '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '显示菜单');
-insert into sys_dict_data values(5,  2,  '隐藏',     '1',           'sys_show_hide',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '隐藏菜单');
-insert into sys_dict_data values(6,  1,  '正常',     '0',           'sys_normal_disable',  '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '正常状态');
-insert into sys_dict_data values(7,  2,  '停用',     '1',           'sys_normal_disable',  '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '停用状态');
-insert into sys_dict_data values(8,  1,  '正常',     '0',           'sys_job_status',      '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '正常状态');
-insert into sys_dict_data values(9,  2,  '暂停',     '1',           'sys_job_status',      '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '停用状态');
-insert into sys_dict_data values(10, 1,  '默认',     'default',     'sys_job_group',       '',   '',        'Y', '0', 'admin', sysdate(), '', null, '默认分组');
-insert into sys_dict_data values(11, 2,  '数据库',   'sqlalchemy',  'sys_job_group',       '',   '',        'N', '0', 'admin', sysdate(), '', null, '数据库分组');
-insert into sys_dict_data values(12, 3,  'redis',    'redis',  			'sys_job_group',       '',   '',        'N', '0', 'admin', sysdate(), '', null, 'reids分组');
-insert into sys_dict_data values(13, 1,  '默认',     'default',  		'sys_job_executor',    '',   '',        'N', '0', 'admin', sysdate(), '', null, '线程池');
-insert into sys_dict_data values(14, 2,  '进程池',   'processpool', 'sys_job_executor',    '',   '',        'N', '0', 'admin', sysdate(), '', null, '进程池');
-insert into sys_dict_data values(15, 1,  '是',       'Y',       		'sys_yes_no',          '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '系统默认是');
-insert into sys_dict_data values(16, 2,  '否',       'N',       		'sys_yes_no',          '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '系统默认否');
-insert into sys_dict_data values(17, 1,  '通知',     '1',       		'sys_notice_type',     '',   'warning', 'Y', '0', 'admin', sysdate(), '', null, '通知');
-insert into sys_dict_data values(18, 2,  '公告',     '2',       		'sys_notice_type',     '',   'success', 'N', '0', 'admin', sysdate(), '', null, '公告');
-insert into sys_dict_data values(19, 1,  '正常',     '0',       		'sys_notice_status',   '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '正常状态');
-insert into sys_dict_data values(20, 2,  '关闭',     '1',       		'sys_notice_status',   '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '关闭状态');
-insert into sys_dict_data values(21, 99, '其他',     '0',       		'sys_oper_type',       '',   'info',    'N', '0', 'admin', sysdate(), '', null, '其他操作');
-insert into sys_dict_data values(22, 1,  '新增',     '1',       		'sys_oper_type',       '',   'info',    'N', '0', 'admin', sysdate(), '', null, '新增操作');
-insert into sys_dict_data values(23, 2,  '修改',     '2',       		'sys_oper_type',       '',   'info',    'N', '0', 'admin', sysdate(), '', null, '修改操作');
-insert into sys_dict_data values(24, 3,  '删除',     '3',       		'sys_oper_type',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '删除操作');
-insert into sys_dict_data values(25, 4,  '授权',     '4',       		'sys_oper_type',       '',   'primary', 'N', '0', 'admin', sysdate(), '', null, '授权操作');
-insert into sys_dict_data values(26, 5,  '导出',     '5',       		'sys_oper_type',       '',   'warning', 'N', '0', 'admin', sysdate(), '', null, '导出操作');
-insert into sys_dict_data values(27, 6,  '导入',     '6',       		'sys_oper_type',       '',   'warning', 'N', '0', 'admin', sysdate(), '', null, '导入操作');
-insert into sys_dict_data values(28, 7,  '强退',     '7',       		'sys_oper_type',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '强退操作');
-insert into sys_dict_data values(29, 8,  '生成代码', '8',       		'sys_oper_type',       '',   'warning', 'N', '0', 'admin', sysdate(), '', null, '生成操作');
-insert into sys_dict_data values(30, 9,  '清空数据', '9',       		'sys_oper_type',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '清空操作');
-insert into sys_dict_data values(31, 1,  '成功',     '0',       		'sys_common_status',   '',   'primary', 'N', '0', 'admin', sysdate(), '', null, '正常状态');
-insert into sys_dict_data values(32, 2,  '失败',     '1',       		'sys_common_status',   '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '停用状态');
+insert into sys_dict_data values(1,  1,  '男',             '0',                'sys_user_sex',        '',   '',        'Y', '0', 'admin', sysdate(), '', null, '性别男');
+insert into sys_dict_data values(2,  2,  '女',             '1',                'sys_user_sex',        '',   '',        'N', '0', 'admin', sysdate(), '', null, '性别女');
+insert into sys_dict_data values(3,  3,  '未知',            '2',                'sys_user_sex',        '',   '',        'N', '0', 'admin', sysdate(), '', null, '性别未知');
+insert into sys_dict_data values(4,  1,  '显示',            '0',                'sys_show_hide',       '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '显示菜单');
+insert into sys_dict_data values(5,  2,  '隐藏',            '1',                'sys_show_hide',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '隐藏菜单');
+insert into sys_dict_data values(6,  1,  '正常',            '0',                'sys_normal_disable',  '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '正常状态');
+insert into sys_dict_data values(7,  2,  '停用',            '1',                'sys_normal_disable',  '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '停用状态');
+insert into sys_dict_data values(8,  1,  '正常',            '0',                'sys_job_status',      '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '正常状态');
+insert into sys_dict_data values(9,  2,  '暂停',            '1',                'sys_job_status',      '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '停用状态');
+insert into sys_dict_data values(10, 1,  '默认',            'default',          'sys_job_group',       '',   '',        'Y', '0', 'admin', sysdate(), '', null, '默认分组');
+insert into sys_dict_data values(11, 2,  '数据库',          'sqlalchemy',       'sys_job_group',       '',   '',        'N', '0', 'admin', sysdate(), '', null, '数据库分组');
+insert into sys_dict_data values(12, 3,  'redis',          'redis',  			     'sys_job_group',       '',   '',        'N', '0', 'admin', sysdate(), '', null, 'reids分组');
+insert into sys_dict_data values(13, 1,  '默认',            'default',  		    'sys_job_executor',    '',   '',        'N', '0', 'admin', sysdate(), '', null, '线程池');
+insert into sys_dict_data values(14, 2,  '进程池',          'processpool',      'sys_job_executor',    '',   '',        'N', '0', 'admin', sysdate(), '', null, '进程池');
+insert into sys_dict_data values(15, 1,  '是',              'Y',       		      'sys_yes_no',          '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '系统默认是');
+insert into sys_dict_data values(16, 2,  '否',              'N',       		      'sys_yes_no',          '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '系统默认否');
+insert into sys_dict_data values(17, 1,  '通知',            '1',       		      'sys_notice_type',     '',   'warning', 'Y', '0', 'admin', sysdate(), '', null, '通知');
+insert into sys_dict_data values(18, 2,  '公告',            '2',       		      'sys_notice_type',     '',   'success', 'N', '0', 'admin', sysdate(), '', null, '公告');
+insert into sys_dict_data values(19, 1,  '正常',            '0',       		      'sys_notice_status',   '',   'primary', 'Y', '0', 'admin', sysdate(), '', null, '正常状态');
+insert into sys_dict_data values(20, 2,  '关闭',            '1',       		      'sys_notice_status',   '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '关闭状态');
+insert into sys_dict_data values(21, 99, '其他',            '0',       		      'sys_oper_type',       '',   'info',    'N', '0', 'admin', sysdate(), '', null, '其他操作');
+insert into sys_dict_data values(22, 1,  '新增',            '1',       		      'sys_oper_type',       '',   'info',    'N', '0', 'admin', sysdate(), '', null, '新增操作');
+insert into sys_dict_data values(23, 2,  '修改',            '2',       		      'sys_oper_type',       '',   'info',    'N', '0', 'admin', sysdate(), '', null, '修改操作');
+insert into sys_dict_data values(24, 3,  '删除',            '3',       		      'sys_oper_type',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '删除操作');
+insert into sys_dict_data values(25, 4,  '授权',            '4',       		      'sys_oper_type',       '',   'primary', 'N', '0', 'admin', sysdate(), '', null, '授权操作');
+insert into sys_dict_data values(26, 5,  '导出',            '5',       		      'sys_oper_type',       '',   'warning', 'N', '0', 'admin', sysdate(), '', null, '导出操作');
+insert into sys_dict_data values(27, 6,  '导入',            '6',       		      'sys_oper_type',       '',   'warning', 'N', '0', 'admin', sysdate(), '', null, '导入操作');
+insert into sys_dict_data values(28, 7,  '强退',            '7',       		      'sys_oper_type',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '强退操作');
+insert into sys_dict_data values(29, 8,  '生成代码',         '8',       		     'sys_oper_type',       '',   'warning', 'N', '0', 'admin', sysdate(), '', null, '生成操作');
+insert into sys_dict_data values(30, 9,  '清空数据',         '9',       		     'sys_oper_type',       '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '清空操作');
+insert into sys_dict_data values(31, 1,  '成功',            '0',       		       'sys_common_status',   '',   'primary', 'N', '0', 'admin', sysdate(), '', null, '正常状态');
+insert into sys_dict_data values(32, 2,  '失败',            '1',       		       'sys_common_status',   '',   'danger',  'N', '0', 'admin', sysdate(), '', null, '停用状态');
+insert into sys_dict_data values(33, 1,  'AIMLAPI',         'AIMLAPI',          'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'AIMLAPI');
+insert into sys_dict_data values(34, 2,  'Anthropic',       'Anthropic',        'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Anthropic');
+insert into sys_dict_data values(35, 3,  'Cerebras',        'Cerebras',         'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Cerebras');
+insert into sys_dict_data values(36, 4,  'CerebrasOpenAI',  'CerebrasOpenAI',   'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'CerebrasOpenAI');
+insert into sys_dict_data values(37, 5,  'Cohere',          'Cohere',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Cohere');
+insert into sys_dict_data values(38, 6,  'CometAPI',        'CometAPI',         'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'CometAPI');
+insert into sys_dict_data values(39, 7,  'DashScope',       'DashScope',        'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'DashScope');
+insert into sys_dict_data values(40, 8,  'DeepInfra',       'DeepInfra',        'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'DeepInfra');
+insert into sys_dict_data values(41, 9,  'DeepSeek',        'DeepSeek',         'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'DeepSeek');
+insert into sys_dict_data values(42, 10,  'Fireworks',       'Fireworks',        'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Fireworks');
+insert into sys_dict_data values(43, 11,  'Google',          'Google',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Google');
+insert into sys_dict_data values(44, 12,  'Groq',            'Groq',             'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Groq');
+insert into sys_dict_data values(45, 13,  'HuggingFace',     'HuggingFace',      'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'HuggingFace');
+insert into sys_dict_data values(46, 14,  'LangDB',          'LangDB',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'LangDB');
+insert into sys_dict_data values(47, 15,  'LiteLLM',         'LiteLLM',          'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'LiteLLM');
+insert into sys_dict_data values(48, 16,  'LiteLLMOpenAI',   'LiteLLMOpenAI',    'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'LiteLLMOpenAI');
+insert into sys_dict_data values(49, 17,  'LlamaCpp',        'LlamaCpp',         'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'LlamaCpp');
+insert into sys_dict_data values(50, 18,  'LMStudio',        'LMStudio',         'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'LMStudio');
+insert into sys_dict_data values(51, 19,  'Meta',            'Meta',             'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Meta');
+insert into sys_dict_data values(52, 20,  'Mistral',         'Mistral',          'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Mistral');
+insert into sys_dict_data values(53, 21,  'N1N',             'N1N',              'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'N1N');
+insert into sys_dict_data values(54, 22,  'Nebius',          'Nebius',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Nebius');
+insert into sys_dict_data values(55, 23,  'Nexus',           'Nexus',            'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Nexus');
+insert into sys_dict_data values(56, 24,  'Nvidia',          'Nvidia',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Nvidia');
+insert into sys_dict_data values(57, 25,  'Ollama',          'Ollama',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Ollama');
+insert into sys_dict_data values(58, 26,  'OpenAI',          'OpenAI',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'OpenAI');
+insert into sys_dict_data values(59, 27,  'OpenAIResponses', 'OpenAIResponses',  'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'OpenAIResponses');
+insert into sys_dict_data values(60, 28,  'OpenRouter',      'OpenRouter',       'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'OpenRouter');
+insert into sys_dict_data values(61, 29,  'Perplexity',      'Perplexity',       'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Perplexity');
+insert into sys_dict_data values(62, 30,  'Portkey',         'Portkey',          'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Portkey');
+insert into sys_dict_data values(63, 31,  'Requesty',        'Requesty',         'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Requesty');
+insert into sys_dict_data values(64, 32,  'Sambanova',       'Sambanova',        'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Sambanova');
+insert into sys_dict_data values(65, 33,  'SiliconFlow',     'SiliconFlow',      'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'SiliconFlow');
+insert into sys_dict_data values(66, 34,  'Together',        'Together',         'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Together');
+insert into sys_dict_data values(67, 35,  'Vercel',          'Vercel',           'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'Vercel');
+insert into sys_dict_data values(68, 36,  'VLLM',            'VLLM',             'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'VLLM');
+insert into sys_dict_data values(69, 37,  'xAI',             'xAI',              'ai_provider_type',    '',   'info',    'N', '0', 'admin', sysdate(), '', null, 'xAI');
 
 
 -- ----------------------------
@@ -740,3 +788,51 @@ CREATE TABLE `sys_file` (
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_0900_ai_ci
   COMMENT='文件管理表';
+
+-- ----------------------------
+-- 20、AI模型表
+-- ----------------------------
+drop table if exists ai_models;
+create table ai_models (
+  model_id          bigint(20)      not null auto_increment    comment '模型主键',
+  model_code        varchar(100)    not null                   comment '模型编码',
+  model_name        varchar(100)    default null               comment '模型名称',
+  provider          varchar(50)     not null                   comment '提供商',
+  model_sort        int(4)          not null                   comment '显示顺序',
+  api_key           varchar(255)    default null               comment 'API Key',
+  base_url          varchar(255)    default null               comment 'Base URL',
+  model_type        varchar(50)     default null               comment '模型类型',
+  max_tokens        int(11)         default null               comment '最大输出token',
+  temperature       float           default null               comment '默认温度',
+  support_reasoning char(1)         default 'N'                comment '是否支持推理',
+  support_images    char(1)         default 'N'                comment '是否支持图片',
+  status            char(1)         default '0'                comment '模型状态',
+  user_id           bigint(20)                                 comment '用户ID',
+  dept_id           bigint(20)                                 comment '部门ID',
+  create_by         varchar(64)     default ''                 comment '创建者',
+  create_time       datetime                                   comment '创建时间',
+  update_by         varchar(64)     default ''                 comment '更新者',
+  update_time       datetime                                   comment '更新时间',
+  remark            varchar(500)    default null               comment '备注',
+  primary key (model_id)
+) engine=innodb auto_increment=1 comment = 'AI模型表';
+
+
+-- ----------------------------
+-- 21、AI对话配置表
+-- ----------------------------
+drop table if exists ai_chat_config;
+create table ai_chat_config (
+  chat_config_id          bigint(20)      not null auto_increment    comment '配置主键',
+  user_id                 bigint(20)      not null unique            comment '用户ID',
+  temperature             float           default null               comment '默认温度',
+  add_history_to_context  char(1)         default '0'                comment '是否添加历史记录(0是, 1否)',
+  num_history_runs        int(4)          default null               comment '历史记录条数',
+  system_prompt           text            default null               comment '系统提示词',
+  metrics_default_visible char(1)         default '0'                comment '默认显示指标(0是, 1否)',
+  vision_enabled          char(1)         default '1'                comment '是否开启视觉(0是, 1否)',
+  image_max_size_mb       int(4)          default null               comment '图片最大大小(MB)',
+  create_time             datetime                                   comment '创建时间',
+  update_time             datetime                                   comment '更新时间',
+  primary key (chat_config_id)
+) engine=innodb auto_increment=1 comment = 'AI对话配置表';

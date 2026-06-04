@@ -6,10 +6,13 @@ from fastapi.responses import StreamingResponse
 from pydantic_validation_decorator import ValidateFields
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.annotation.cache_annotation import ApiCache, ApiCacheEvict
 from common.annotation.log_annotation import Log
+from common.annotation.rate_limit_annotation import ApiRateLimit, ApiRateLimitPreset
 from common.aspect.db_seesion import DBSessionDependency
 from common.aspect.interface_auth import UserInterfaceAuthDependency
 from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
+from common.constant import ApiGroup, ApiNamespace
 from common.enums import BusinessType
 from common.router import APIRouterPro
 from common.vo import DataResponseModel, PageResponseModel, ResponseBaseModel
@@ -39,6 +42,7 @@ dict_controller = APIRouterPro(
     response_model=PageResponseModel[DictTypeModel],
     dependencies=[UserInterfaceAuthDependency('system:dict:list')],
 )
+@ApiCache(namespace=ApiNamespace.SYSTEM_DICT_TYPE_LIST)
 async def get_system_dict_type_list(
     request: Request,
     dict_type_page_query: Annotated[DictTypePageQueryModel, Query()],
@@ -61,6 +65,7 @@ async def get_system_dict_type_list(
     dependencies=[UserInterfaceAuthDependency('system:dict:add')],
 )
 @ValidateFields(validate_model='add_dict_type')
+@ApiCacheEvict(namespaces=ApiGroup.DICT_TYPE_MUTATION)
 @Log(title='字典类型', business_type=BusinessType.INSERT)
 async def add_system_dict_type(
     request: Request,
@@ -86,6 +91,7 @@ async def add_system_dict_type(
     dependencies=[UserInterfaceAuthDependency('system:dict:edit')],
 )
 @ValidateFields(validate_model='edit_dict_type')
+@ApiCacheEvict(namespaces=ApiGroup.DICT_TYPE_MUTATION)
 @Log(title='字典类型', business_type=BusinessType.UPDATE)
 async def edit_system_dict_type(
     request: Request,
@@ -108,6 +114,7 @@ async def edit_system_dict_type(
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('system:dict:remove')],
 )
+@ApiRateLimit(namespace=ApiNamespace.SYSTEM_DICT_REFRESH_CACHE, preset=ApiRateLimitPreset.USER_COMMON_MUTATION)
 @Log(title='字典类型', business_type=BusinessType.UPDATE)
 async def refresh_system_dict(request: Request, query_db: Annotated[AsyncSession, DBSessionDependency()]) -> Response:
     refresh_dict_result = await DictTypeService.refresh_sys_dict_services(request, query_db)
@@ -123,6 +130,7 @@ async def refresh_system_dict(request: Request, query_db: Annotated[AsyncSession
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('system:dict:remove')],
 )
+@ApiCacheEvict(namespaces=ApiGroup.DICT_TYPE_MUTATION)
 @Log(title='字典类型', business_type=BusinessType.DELETE)
 async def delete_system_dict_type(
     request: Request,
@@ -142,6 +150,7 @@ async def delete_system_dict_type(
     description='用于获取字典类型下拉列表',
     response_model=DataResponseModel[list[DictTypeModel]],
 )
+@ApiCache(namespace=ApiNamespace.SYSTEM_DICT_TYPE_OPTIONS)
 async def query_system_dict_type_options(
     request: Request, query_db: Annotated[AsyncSession, DBSessionDependency()]
 ) -> Response:
@@ -160,6 +169,7 @@ async def query_system_dict_type_options(
     response_model=DataResponseModel[DictTypeModel],
     dependencies=[UserInterfaceAuthDependency('system:dict:query')],
 )
+@ApiCache(namespace=ApiNamespace.SYSTEM_DICT_TYPE_DETAIL)
 async def query_detail_system_dict_type(
     request: Request,
     dict_id: Annotated[int, Path(description='字典主键')],
@@ -186,6 +196,7 @@ async def query_detail_system_dict_type(
     },
     dependencies=[UserInterfaceAuthDependency('system:dict:export')],
 )
+@ApiRateLimit(namespace=ApiNamespace.SYSTEM_DICT_TYPE_EXPORT, preset=ApiRateLimitPreset.USER_RESOURCE_EXPORT)
 @Log(title='字典类型', business_type=BusinessType.EXPORT)
 async def export_system_dict_type_list(
     request: Request,
@@ -229,6 +240,7 @@ async def query_system_dict_type_data(
     response_model=PageResponseModel[DictDataModel],
     dependencies=[UserInterfaceAuthDependency('system:dict:list')],
 )
+@ApiCache(namespace=ApiNamespace.SYSTEM_DICT_DATA_LIST)
 async def get_system_dict_data_list(
     request: Request,
     dict_data_page_query: Annotated[DictDataPageQueryModel, Query()],
@@ -251,6 +263,7 @@ async def get_system_dict_data_list(
     dependencies=[UserInterfaceAuthDependency('system:dict:add')],
 )
 @ValidateFields(validate_model='add_dict_data')
+@ApiCacheEvict(namespaces=ApiGroup.DICT_DATA_MUTATION)
 @Log(title='字典数据', business_type=BusinessType.INSERT)
 async def add_system_dict_data(
     request: Request,
@@ -276,6 +289,7 @@ async def add_system_dict_data(
     dependencies=[UserInterfaceAuthDependency('system:dict:edit')],
 )
 @ValidateFields(validate_model='edit_dict_data')
+@ApiCacheEvict(namespaces=ApiGroup.DICT_DATA_MUTATION)
 @Log(title='字典数据', business_type=BusinessType.UPDATE)
 async def edit_system_dict_data(
     request: Request,
@@ -298,6 +312,7 @@ async def edit_system_dict_data(
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('system:dict:remove')],
 )
+@ApiCacheEvict(namespaces=ApiGroup.DICT_DATA_MUTATION)
 @Log(title='字典数据', business_type=BusinessType.DELETE)
 async def delete_system_dict_data(
     request: Request,
@@ -318,6 +333,7 @@ async def delete_system_dict_data(
     response_model=DataResponseModel[DictDataModel],
     dependencies=[UserInterfaceAuthDependency('system:dict:query')],
 )
+@ApiCache(namespace=ApiNamespace.SYSTEM_DICT_DATA_DETAIL)
 async def query_detail_system_dict_data(
     request: Request,
     dict_code: Annotated[int, Path(description='字典编码')],
@@ -344,6 +360,7 @@ async def query_detail_system_dict_data(
     },
     dependencies=[UserInterfaceAuthDependency('system:dict:export')],
 )
+@ApiRateLimit(namespace=ApiNamespace.SYSTEM_DICT_DATA_EXPORT, preset=ApiRateLimitPreset.USER_RESOURCE_EXPORT)
 @Log(title='字典数据', business_type=BusinessType.EXPORT)
 async def export_system_dict_data_list(
     request: Request,

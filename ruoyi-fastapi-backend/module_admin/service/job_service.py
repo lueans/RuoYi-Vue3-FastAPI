@@ -1,4 +1,4 @@
-from typing import Any, Union
+from typing import Any
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,7 @@ class JobService:
     @classmethod
     async def get_job_list_services(
         cls, query_db: AsyncSession, query_object: JobPageQueryModel, is_page: bool = False
-    ) -> Union[PageModel, list[dict[str, Any]]]:
+    ) -> PageModel | list[dict[str, Any]]:
         """
         获取定时任务列表信息service
 
@@ -83,6 +83,7 @@ class JobService:
             if job_info.status == '0':
                 SchedulerUtil.add_scheduler_job(job_info=job_info)
             await query_db.commit()
+            await SchedulerUtil.request_scheduler_sync()
             result = {'is_success': True, 'message': '新增成功'}
         except Exception as e:
             await query_db.rollback()
@@ -144,6 +145,7 @@ class JobService:
                     job_info = await cls.job_detail_services(query_db, edit_job.get('job_id'))
                     SchedulerUtil.add_scheduler_job(job_info=job_info)
                 await query_db.commit()
+                await SchedulerUtil.request_scheduler_sync()
                 return CrudResponseModel(is_success=True, message='更新成功')
             except Exception as e:
                 await query_db.rollback()
@@ -183,6 +185,7 @@ class JobService:
                     await JobDao.delete_job_dao(query_db, JobModel(jobId=job_id))
                     SchedulerUtil.remove_scheduler_job(job_id=job_id)
                 await query_db.commit()
+                await SchedulerUtil.request_scheduler_sync()
                 return CrudResponseModel(is_success=True, message='删除成功')
             except Exception as e:
                 await query_db.rollback()

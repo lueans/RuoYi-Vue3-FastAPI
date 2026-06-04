@@ -21,8 +21,14 @@ class AppSettings(BaseSettings):
     app_port: int = 9099
     app_version: str = '1.0.0'
     app_reload: bool = True
+    app_workers: int = 1
     app_ip_location_query: bool = True
     app_same_time_login: bool = True
+    app_demo_mode: bool = False
+    app_disable_swagger: bool = False
+    app_disable_redoc: bool = False
+    app_trusted_proxy_ips: str = '127.0.0.1,::1'
+    app_trusted_proxy_hops: int = 1
 
 
 class JwtSettings(BaseSettings):
@@ -77,6 +83,71 @@ class FeishuSettings(BaseSettings):
     feishu_app_id: str = 'cli_a9d17fc51cf8dcc9'
     feishu_app_secret: str = '29XiHrFqt9C71trvq7UiZgSypXedQvab'
     feishu_redirect_uri: str = 'http://localhost/feishu-login'
+
+
+class LogSettings(BaseSettings):
+    """
+    日志与队列配置
+    """
+
+    log_mask_enabled: bool = True
+    log_mask_placeholder: str = '******'
+    log_mask_fields: str = (
+        'password,old_password,new_password,confirm_password,api_key,token,access_token,refresh_token,'
+        'authorization,client_secret,secret,secret_key,private_key,private_key_pem,credential,credentials,'
+        'sms_code,captcha_code,system_prompt'
+    )
+    log_partial_mask_fields: str = 'phonenumber,phone,mobile,email'
+    log_config_secret_patterns: str = 'password,token,secret,key,private,credential,access,jwt,captcha,sms'
+    log_stream_key: str = 'log:stream'
+    log_stream_group: str = 'log_aggregator'
+    log_stream_consumer_prefix: str = 'worker'
+    log_stream_batch_size: int = 100
+    log_stream_block_ms: int = 2000
+    log_stream_maxlen: int = 100000
+    log_stream_claim_idle_ms: int = 60000
+    log_stream_claim_interval_ms: int = 5000
+    log_stream_claim_batch_size: int = 100
+    log_stream_dedup_ttl: int = 3600
+    log_stream_dedup_prefix: str = 'log:dedup'
+
+    loguru_json: bool = False
+    loguru_level: str = 'INFO'
+    loguru_stdout: bool = True
+    log_file_enabled: bool = True
+    log_file_base_dir: str = 'logs'
+    loguru_rotation: str = '50MB'
+    loguru_retention: str = '30 days'
+    loguru_compression: str = 'zip'
+    log_instance_id: str = 'prod'
+    log_service_name: str = 'ruoyi-fastapi-backend'
+    log_worker_id: str = 'auto'
+
+
+class TransportCryptoSettings(BaseSettings):
+    """
+    传输层加解密配置
+    """
+
+    transport_crypto_enabled: bool = True
+    transport_crypto_mode: Literal['off', 'optional', 'required'] = 'optional'
+    transport_crypto_algorithm: str = 'RSA_OAEP_AES_256_GCM'
+    transport_crypto_kid: str = 'default'
+    transport_crypto_public_key: str = ''
+    transport_crypto_private_key: str = ''
+    transport_crypto_legacy_key_pairs: str = '[]'
+    transport_crypto_rsa_key_size: int = 2048
+    transport_crypto_public_key_ttl_seconds: int = 3600
+    transport_crypto_frontend_config_ttl_seconds: int = 300
+    transport_crypto_max_get_url_length: int = 4096
+    transport_crypto_clock_skew_seconds: int = 120
+    transport_crypto_replay_ttl_seconds: int = 300
+    transport_crypto_enabled_paths: str = ''
+    transport_crypto_required_paths: str = ''
+    transport_crypto_exclude_paths: str = (
+        '/openapi.json,/docs,/docs/oauth2-redirect,/redoc,'
+        '/transport/crypto/frontend-config,/transport/crypto/public-key,/common/download,/common/download/resource'
+    )
 
 
 class GenSettings:
@@ -194,6 +265,18 @@ class GetConfig:
     def get_feishu_config(self) -> FeishuSettings:
         return FeishuSettings()
 
+    def get_log_config(self) -> LogSettings:
+        """
+        获取日志配置
+        """
+        return LogSettings()
+
+    def get_transport_crypto_config(self) -> TransportCryptoSettings:
+        """
+        获取传输层加解密配置
+        """
+        return TransportCryptoSettings()
+
     def get_gen_config(self) -> GenSettings:
         """
         获取代码生成配置
@@ -229,7 +312,7 @@ class GetConfig:
             parser = argparse.ArgumentParser(description='命令行参数')
             parser.add_argument('--env', type=str, default='', help='运行环境')
             # 解析命令行参数
-            args = parser.parse_args()
+            args, _ = parser.parse_known_args()
             # 设置环境变量，如果未设置命令行参数，默认APP_ENV为dev
             os.environ['APP_ENV'] = args.env if args.env else 'dev'
         # 读取运行环境
@@ -255,6 +338,10 @@ DataBaseConfig = get_config.get_database_config()
 RedisConfig = get_config.get_redis_config()
 # 飞书配置
 FeishuConfig = get_config.get_feishu_config()
+# 日志配置
+LogConfig = get_config.get_log_config()
+# 传输层加解密配置
+TransportCryptoConfig = get_config.get_transport_crypto_config()
 # 代码生成配置
 GenConfig = get_config.get_gen_config()
 # 上传配置

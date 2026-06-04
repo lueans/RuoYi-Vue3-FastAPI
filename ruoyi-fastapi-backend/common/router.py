@@ -1,9 +1,10 @@
+import glob
 import importlib
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from enum import Enum
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from typing import Annotated, Any, Literal
 
 from annotated_doc import Doc
 from fastapi import FastAPI, params
@@ -51,7 +52,7 @@ class APIRouterPro(APIRouter):
         order_num: Annotated[int, Doc('An optional order number for the router.')] = 100,
         auto_register: Annotated[bool, Doc('An optional auto register flag for the router.')] = True,
         tags: Annotated[
-            Optional[list[Union[str, Enum]]],
+            list[str | Enum] | None,
             Doc(
                 """
                 A list of tags to be applied to all the *path operations* in this
@@ -65,7 +66,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = None,
         dependencies: Annotated[
-            Optional[Sequence[params.Depends]],
+            Sequence[params.Depends] | None,
             Doc(
                 """
                 A list of dependencies (using `Depends()`) to be applied to all the
@@ -88,7 +89,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = Default(JSONResponse),
         responses: Annotated[
-            Optional[dict[Union[int, str], dict[str, Any]]],
+            dict[int | str, dict[str, Any]] | None,
             Doc(
                 """
                 Additional responses to be shown in OpenAPI.
@@ -104,7 +105,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = None,
         callbacks: Annotated[
-            Optional[list[BaseRoute]],
+            list[BaseRoute] | None,
             Doc(
                 """
                 OpenAPI callbacks that should apply to all *path operations* in this
@@ -118,7 +119,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = None,
         routes: Annotated[
-            Optional[list[BaseRoute]],
+            list[BaseRoute] | None,
             Doc(
                 """
                 **Note**: you probably shouldn't use this parameter, it is inherited
@@ -149,7 +150,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = True,
         default: Annotated[
-            Optional[ASGIApp],
+            ASGIApp | None,
             Doc(
                 """
                 Default function handler for this router. Used to handle
@@ -158,7 +159,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = None,
         dependency_overrides_provider: Annotated[
-            Optional[Any],
+            Any | None,
             Doc(
                 """
                 Only used internally by FastAPI to handle dependency overrides.
@@ -180,7 +181,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = APIRoute,
         on_startup: Annotated[
-            Optional[Sequence[Callable[[], Any]]],
+            Sequence[Callable[[], Any]] | None,
             Doc(
                 """
                 A list of startup event handler functions.
@@ -192,7 +193,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = None,
         on_shutdown: Annotated[
-            Optional[Sequence[Callable[[], Any]]],
+            Sequence[Callable[[], Any]] | None,
             Doc(
                 """
                 A list of shutdown event handler functions.
@@ -207,7 +208,7 @@ class APIRouterPro(APIRouter):
         # the generic to Lifespan[AppType] is the type of the top level application
         # which the router cannot know statically, so we use typing.Any
         lifespan: Annotated[
-            Optional[Lifespan[Any]],
+            Lifespan[Any] | None,
             Doc(
                 """
                 A `Lifespan` context manager handler. This replaces `startup` and
@@ -219,7 +220,7 @@ class APIRouterPro(APIRouter):
             ),
         ] = None,
         deprecated: Annotated[
-            Optional[bool],
+            bool | None,
             Doc(
                 """
                 Mark all *path operations* in this router as deprecated.
@@ -306,17 +307,8 @@ class RouterRegister:
 
         :return: py文件路径列表
         """
-        controller_files = []
-        # 遍历所有目录，查找controller目录
-        for root, _dirs, files in os.walk(self.project_root):
-            # 检查当前目录是否为controller目录
-            if os.path.basename(root) == 'controller':
-                # 遍历controller目录下的所有py文件
-                for file in files:
-                    if file.endswith('.py') and not file.startswith('__'):
-                        file_path = os.path.join(root, file)
-                        controller_files.append(file_path)
-        return controller_files
+        pattern = os.path.join(self.project_root, '*', 'controller', '[!_]*.py')
+        return sorted(glob.glob(pattern))
 
     def _import_module_and_get_routers(self, controller_files: list[str]) -> list[tuple[str, APIRouter]]:
         """
@@ -331,21 +323,17 @@ class RouterRegister:
             relative_path = os.path.relpath(file_path, self.project_root)
             module_name = relative_path.replace(os.sep, '.')[:-3]
 
-            try:
-                # 动态导入模块
-                module = importlib.import_module(module_name)
-                # 遍历模块属性，寻找APIRouter和APIRouterPro实例
-                for attr_name in dir(module):
-                    attr = getattr(module, attr_name)
-                    # 对于APIRouterPro实例，只有当auto_register=True时才添加
-                    if isinstance(attr, APIRouterPro):
-                        if attr.auto_register:
-                            routers.append((attr_name, attr))
-                    # 对于APIRouter实例，直接添加
-                    elif isinstance(attr, APIRouter):
+            # 动态导入模块
+            module = importlib.import_module(module_name)
+            # 直接遍历模块__dict__，只检查模块自身定义的属性
+            for attr_name, attr in module.__dict__.items():
+                # 对于APIRouterPro实例，只有当auto_register=True时才添加
+                if isinstance(attr, APIRouterPro):
+                    if attr.auto_register:
                         routers.append((attr_name, attr))
-            except Exception as e:
-                print(f'Error importing module {module_name}: {e}')
+                # 对于APIRouter实例，直接添加
+                elif isinstance(attr, APIRouter):
+                    routers.append((attr_name, attr))
         return routers
 
     def _sort_routers(self, routers: list[tuple[str, APIRouter]]) -> list[tuple[str, APIRouter]]:
@@ -357,7 +345,7 @@ class RouterRegister:
         """
 
         # 按规则排序路由
-        def sort_key(item: tuple[str, APIRouter]) -> Union[tuple[Literal[0], int, str], tuple[Literal[1], str]]:
+        def sort_key(item: tuple[str, APIRouter]) -> tuple[Literal[0], int, str] | tuple[Literal[1], str]:
             attr_name, router = item
             # APIRouterPro实例按order_num排序，序号越小越靠前
             if isinstance(router, APIRouterPro):

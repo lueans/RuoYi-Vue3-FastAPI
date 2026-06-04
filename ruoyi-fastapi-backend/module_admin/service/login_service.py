@@ -1,7 +1,7 @@
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional, Union
+from typing import Any
 
 import jwt
 from fastapi import Depends, Form, Request
@@ -32,6 +32,7 @@ from module_admin.entity.vo.user_vo import (
     UserModel,
 )
 from module_admin.service.user_service import UserService
+from utils.client_ip_util import ClientIPUtil
 from utils.common_util import CamelCaseUtil
 from utils.log_util import logger
 from utils.message_util import message_service
@@ -47,15 +48,15 @@ class CustomOAuth2PasswordRequestForm(OAuth2PasswordRequestForm):
 
     def __init__(
         self,
-        grant_type: str = Form(default=None, regex='password'),
+        grant_type: str = Form(default=None, pattern='password'),
         username: str = Form(),
         password: str = Form(),
         scope: str = Form(default=''),
-        client_id: Optional[str] = Form(default=None),
-        client_secret: Optional[str] = Form(default=None),
-        code: Optional[str] = Form(default=''),
-        uuid: Optional[str] = Form(default=''),
-        login_info: Optional[dict[str, str]] = Form(default=None),
+        client_id: str | None = Form(default=None),
+        client_secret: str | None = Form(default=None),
+        code: str | None = Form(default=''),
+        uuid: str | None = Form(default=''),
+        login_info: dict[str, str] | None = Form(default=None),
     ) -> None:
         super().__init__(
             grant_type=grant_type,
@@ -214,7 +215,7 @@ class LoginService:
         """
         black_ip_value = await request.app.state.redis.get(f'{RedisInitKeyConfig.SYS_CONFIG.key}:sys.login.blackIPList')
         black_ip_list = black_ip_value.split(',') if black_ip_value else []
-        if request.headers.get('X-Forwarded-For') in black_ip_list:
+        if ClientIPUtil.get_client_ip(request) in black_ip_list:
             logger.warning('当前IP禁止登录')
             raise LoginException(data='', message='当前IP禁止登录')
         return True
@@ -238,7 +239,7 @@ class LoginService:
         return True
 
     @classmethod
-    async def create_access_token(cls, data: dict, expires_delta: Union[timedelta, None] = None) -> str:
+    async def create_access_token(cls, data: dict, expires_delta: timedelta | None = None) -> str:
         """
         根据登录信息创建当前用户token
 
@@ -629,7 +630,7 @@ class RouterUtil:
         return router_name.capitalize()
 
     @classmethod
-    def get_router_path(cls, menu: MenuTreeModel) -> Union[str, None]:
+    def get_router_path(cls, menu: MenuTreeModel) -> str | None:
         """
         获取路由地址
 
@@ -717,6 +718,6 @@ class RouterUtil:
         """
         old_values = [CommonConstant.HTTP, CommonConstant.HTTPS, CommonConstant.WWW, '.', ':']
         new_values = ['', '', '', '/', '/']
-        for old, new in zip(old_values, new_values):
+        for old, new in zip(old_values, new_values, strict=False):
             path = path.replace(old, new)
         return path

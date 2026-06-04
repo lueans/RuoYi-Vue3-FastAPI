@@ -1,7 +1,7 @@
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any
 
 import jwt
 from fastapi import Depends, Form, Request
@@ -150,7 +150,7 @@ class LoginService:
 
     @classmethod
     async def authenticate_feishu(
-        cls, request: Request, query_db: AsyncSession, code: str, login_info: Optional[dict[str, str]] = None
+        cls, request: Request, query_db: AsyncSession, code: str, login_info: dict[str, str] | None = None
     ) -> SysUser:
         await cls.__check_login_ip(request)
         import asyncio

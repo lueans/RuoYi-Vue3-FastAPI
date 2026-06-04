@@ -199,7 +199,10 @@ class View {
       Object.keys(viewData.state).forEach(prop => {
         this[prop] = viewData.state[prop]
       })
-      this.transform()
+      this.mindMap.draw.transform({
+        ...viewData.transform
+      })
+      this.mindMap.emit('view_data_change', this.getTransformData())
       this.emitEvent('scale')
       this.emitEvent('translate')
     }
@@ -277,49 +280,28 @@ class View {
 
   //   应用变换
   transform() {
-    // 开发模式下的性能监控
-    let perfStart
-    if (process.env.NODE_ENV === 'development') {
-      perfStart = performance.now()
-    }
+    // 重入锁：防止 transform → emit → listener → transform 的递归死循环
+    if (this._transforming) return
+    this._transforming = true
 
     try {
       this.limitMindMapInCanvas()
+
+      this.mindMap.draw.transform({
+        origin: [0, 0],
+        scale: this.scale,
+        translate: [this.x, this.y]
+      })
+      // 记录已应用的变换值，供下一帧 limitMindMapInCanvas 反推坐标使用
+      this._appliedX = this.x
+      this._appliedY = this.y
+      this._appliedScale = this.scale
+      this.mindMap.emit('view_data_change', this.getTransformData())
     } catch (error) {
-      console.warn('[MindMap] limitMindMapInCanvas error:', error)
+      console.warn('[MindMap] transform error:', error)
+    } finally {
+      this._transforming = false
     }
-
-    // 开发模式下记录性能
-    if (process.env.NODE_ENV === 'development') {
-      const duration = performance.now() - perfStart
-      if (duration > 5) {
-        console.warn('[MindMap] limitMindMapInCanvas took', duration.toFixed(2), 'ms')
-      }
-    }
-
-    // 安全检查：防止 this.x/y/scale 被设置为无效值
-    if (!Number.isFinite(this.x) || !Number.isFinite(this.y) || !Number.isFinite(this.scale) || this.scale <= 0) {
-      if (process.env.NODE_ENV === 'development') {
-        console.warn('[MindMap] transform: invalid values detected, resetting', {
-          x: this.x, y: this.y, scale: this.scale
-        })
-      }
-      // 重置为安全值
-      if (!Number.isFinite(this.x)) this.x = this._appliedX ?? 0
-      if (!Number.isFinite(this.y)) this.y = this._appliedY ?? 0
-      if (!Number.isFinite(this.scale) || this.scale <= 0) this.scale = this._appliedScale ?? 1
-    }
-
-    this.mindMap.draw.transform({
-      origin: [0, 0],
-      scale: this.scale,
-      translate: [this.x, this.y]
-    })
-    // 记录已应用的变换值，供下一帧 limitMindMapInCanvas 反推坐标使用
-    this._appliedX = this.x
-    this._appliedY = this.y
-    this._appliedScale = this.scale
-    this.mindMap.emit('view_data_change', this.getTransformData())
   }
 
   //  恢复
@@ -481,117 +463,63 @@ class View {
     const now = performance.now()
     if (now - this._lastLimitCheck >= this._limitThrottleMs) {
       this._lastLimitCheck = now
-      const drawRect = draw.rbox()
 
-      // 安全检查：初始化阶段绘制区域可能尚未就绪
-      if (drawRect && drawRect.width && drawRect.height) {
+      try {
+        const drawRect = draw.rbox()
+        if (!drawRect || !drawRect.width || !drawRect.height) return
+
         const prevX = this._appliedX ?? this.x
         const prevY = this._appliedY ?? this.y
         const prevScale = this._appliedScale ?? this.scale
 
-        // 除零保护和有效性检查
-        if (prevScale === 0 || !Number.isFinite(prevScale) ||
-            !Number.isFinite(prevX) || !Number.isFinite(prevY)) {
-          if (process.env.NODE_ENV === 'development') {
-            console.warn('[MindMap] limitMindMapInCanvas: invalid previous state', { prevX, prevY, prevScale })
-          }
-          return
-        }
+        if (!prevScale || !Number.isFinite(prevScale)) return
 
-        // rbox() 转为容器相对坐标，与 fit()、Scrollbar、MiniMap 一致
+        // rbox() 转为容器相对坐标
         const screenLeft = drawRect.x - elRect.left
         const screenTop = drawRect.y - elRect.top
 
-        // 检查转换后的坐标是否有效
-        if (!Number.isFinite(screenLeft) || !Number.isFinite(screenTop)) {
-          if (process.env.NODE_ENV === 'development') {
-            console.warn('[MindMap] limitMindMapInCanvas: invalid screen coordinates', { screenLeft, screenTop })
-          }
-          return
-        }
-
-        // 反推脑图在内部坐标系下的固有位置（与缩放/平移无关的原始尺寸）
-        // 缓存结果，节流期间复用
+        // 反推脑图内部固有坐标（缓存，节流期间复用）
         const intLeft = (screenLeft - prevX) / prevScale
         const intTop = (screenTop - prevY) / prevScale
         const intW = drawRect.width / prevScale
         const intH = drawRect.height / prevScale
 
-        // 验证计算结果
-        if (Number.isFinite(intLeft) && Number.isFinite(intTop) &&
-            Number.isFinite(intW) && Number.isFinite(intH) &&
-            intW > 0 && intH > 0) {
+        if (Number.isFinite(intLeft) && Number.isFinite(intW) && intW > 0) {
           this._cachedBounds = { intLeft, intTop, intW, intH }
-        } else if (process.env.NODE_ENV === 'development') {
-          console.warn('[MindMap] limitMindMapInCanvas: invalid calculated bounds', { intLeft, intTop, intW, intH })
         }
+      } catch (e) {
+        // rbox() 可能在 SVG 未就绪时抛异常，安全忽略
+        return
       }
     }
 
-    // 没有缓存数据（首次调用 rbox 失败），跳过本次钳制
+    // 没有缓存数据，跳过钳制
     if (!this._cachedBounds) return
 
     const { intLeft, intTop, intW, intH } = this._cachedBounds
+    if (!Number.isFinite(this.scale) || this.scale <= 0) return
 
-    // ---- 以下纯数学计算，每帧都执行（避免节流导致抖动） ----
-
-    // 验证当前 scale 是否有效
-    if (!Number.isFinite(this.scale) || this.scale <= 0) {
-      return
-    }
-
-    // 用新的 this.x/y/scale 正推屏幕坐标
-    // newScreenLeft = intLeft × this.scale + this.x
-    const newRight = (intLeft + intW) * this.scale + this.x
-    const newBottom = (intTop + intH) * this.scale + this.y
-
-    // ---- 约束：脑图不能完全离开画布 ----
-    // 至少保证 minVisible 像素的脑图内容可见于画布中
     const canvasW = this.mindMap.width
     const canvasH = this.mindMap.height
+    if (!canvasW || !canvasH) return
     const minVisible = this.mindMap.opt.minVisibleInCanvas ?? 80
 
-    // 验证画布尺寸
-    if (!Number.isFinite(canvasW) || !Number.isFinite(canvasH) || canvasW <= 0 || canvasH <= 0) {
-      return
-    }
-
-    // 向右拖：脑图左边不能超过 (画布右边 - minVisible)
-    //   intLeft × scale + x < canvasW - minVisible
-    //   x < canvasW - minVisible - intLeft × scale
+    // 计算 x/y 约束范围
     const maxX = canvasW - minVisible - intLeft * this.scale
-
-    // 向左拖：脑图右边不能低于 (画布左边 + minVisible)
-    //   (intLeft + intW) × scale + x > minVisible
-    //   x > minVisible - newRight（不含 x）
     const minX = minVisible - (intLeft + intW) * this.scale
-
-    // 同理 Y 轴
     const maxY = canvasH - minVisible - intTop * this.scale
     const minY = minVisible - (intTop + intH) * this.scale
 
-    // 验证边界值是否有效
-    if (!Number.isFinite(maxX) || !Number.isFinite(minX) ||
-        !Number.isFinite(maxY) || !Number.isFinite(minY)) {
-      if (process.env.NODE_ENV === 'development') {
-        console.warn('[MindMap] limitMindMapInCanvas: invalid boundary values', { minX, maxX, minY, maxY })
-      }
-      return
-    }
+    if (!Number.isFinite(maxX) || !Number.isFinite(minX)) return
 
-    // ---- 钳制 ----
+    // 钳制
     if (minX <= maxX) {
       if (this.x > maxX) this.x = maxX
       if (this.x < minX) this.x = minX
-    } else if (process.env.NODE_ENV === 'development') {
-      console.debug('[MindMap] Mind map wider than canvas, skip X constraint', { minX, maxX })
     }
-
     if (minY <= maxY) {
       if (this.y > maxY) this.y = maxY
       if (this.y < minY) this.y = minY
-    } else if (process.env.NODE_ENV === 'development') {
-      console.debug('[MindMap] Mind map taller than canvas, skip Y constraint', { minY, maxY })
     }
   }
 

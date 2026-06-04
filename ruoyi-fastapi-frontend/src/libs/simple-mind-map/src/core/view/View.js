@@ -171,10 +171,7 @@ class View {
       Object.keys(viewData.state).forEach(prop => {
         this[prop] = viewData.state[prop]
       })
-      this.mindMap.draw.transform({
-        ...viewData.transform
-      })
-      this.mindMap.emit('view_data_change', this.getTransformData())
+      this.transform()
       this.emitEvent('scale')
       this.emitEvent('translate')
     }
@@ -223,12 +220,18 @@ class View {
   transform() {
     try {
       this.limitMindMapInCanvas()
-    } catch (error) {}
+    } catch (error) {
+      console.warn('[MindMap] limitMindMapInCanvas error:', error)
+    }
     this.mindMap.draw.transform({
       origin: [0, 0],
       scale: this.scale,
       translate: [this.x, this.y]
     })
+    // 记录已应用的变换值，供下一帧 limitMindMapInCanvas 反推坐标使用
+    this._appliedX = this.x
+    this._appliedY = this.y
+    this._appliedScale = this.scale
     this.mindMap.emit('view_data_change', this.getTransformData())
   }
 
@@ -370,67 +373,71 @@ class View {
   }
 
   // 将思维导图限制在画布内
+  // 设计原则：无论缩放级别，至少保证脑图有小部分（80px）可见于画布中
   limitMindMapInCanvas() {
     if (!this.checkNeedMindMapInCanvas()) return
 
-    let { scale, left, top, right, bottom } = this.getPositionLimit()
+    const draw = this.mindMap.draw
+    const drawRect = draw.rbox()
+    const elRect = this.mindMap.elRect
 
-    // 画布宽高改变了，但是思维导图元素变换的中心点依旧是原有位置，所以需要加上中心点变化量
-    const centerXChange =
-      ((this.mindMap.width - this.mindMap.initWidth) / 2) * scale
-    const centerYChange =
-      ((this.mindMap.height - this.mindMap.initHeight) / 2) * scale
+    // 安全检查：初始化阶段绘制区域或容器信息可能尚未就绪
+    if (!drawRect || !drawRect.width || !elRect) return
 
-    // 如果缩放值改变了
-    const scaleRatio = this.scale / scale
-    left *= scaleRatio
-    right *= scaleRatio
-    top *= scaleRatio
-    bottom *= scaleRatio
+    // ---- 第一步：将 rbox 转为容器相对坐标 ----
+    // rbox() 返回文档绝对坐标，减去容器偏移量得到容器相对坐标
+    // 这与 fit()、Scrollbar、MiniMap 中的处理方式一致
+    const prevX = this._appliedX ?? this.x
+    const prevY = this._appliedY ?? this.y
+    const prevScale = this._appliedScale ?? this.scale
 
-    // 加上画布中心点距离
-    const centerX = this.mindMap.width / 2
-    const centerY = this.mindMap.height / 2
-    const scaleOffset = this.scale - 1
-    left -= scaleOffset * centerX - centerXChange
-    right -= scaleOffset * centerX - centerXChange
-    top -= scaleOffset * centerY - centerYChange
-    bottom -= scaleOffset * centerY - centerYChange
+    // draw.rbox() 是上一帧变换的结果，需要用上一帧的 this.x/y/scale 来反推
+    const screenLeft = drawRect.x - elRect.left
+    const screenTop = drawRect.y - elRect.top
 
-    // 判断是否超出边界
-    if (this.x > left) {
-      this.x = left
+    // ---- 第二步：反推脑图在内部坐标系下的固有位置 ----
+    // 上一帧：screenLeft = intLeft × prevScale + prevX
+    // 反推：  intLeft = (screenLeft - prevX) / prevScale
+    const intLeft = (screenLeft - prevX) / prevScale
+    const intTop = (screenTop - prevY) / prevScale
+    const intW = drawRect.width / prevScale
+    const intH = drawRect.height / prevScale
+
+    // ---- 第三步：用新的 this.x/y/scale 正推屏幕坐标 ----
+    // newScreenLeft = intLeft × this.scale + this.x
+    const newLeft = intLeft * this.scale + this.x
+    const newTop = intTop * this.scale + this.y
+    const newRight = newLeft + intW * this.scale
+    const newBottom = newTop + intH * this.scale
+
+    // ---- 第四步：约束 —— 脑图不能完全离开画布 ----
+    // 至少保证 minVisible 像素的脑图内容可见于画布中
+    const canvasW = this.mindMap.width
+    const canvasH = this.mindMap.height
+    const minVisible = 80
+
+    // 向右拖：脑图左边不能超过 (画布右边 - minVisible)
+    //   newLeft < canvasW - minVisible
+    //   x < canvasW - minVisible - intLeft × scale
+    const maxX = canvasW - minVisible - intLeft * this.scale
+
+    // 向左拖：脑图右边不能低于 (画布左边 + minVisible)
+    //   newRight > minVisible
+    //   x > minVisible - (intLeft + intW) × scale
+    const minX = minVisible - (intLeft + intW) * this.scale
+
+    // 同理 Y 轴
+    const maxY = canvasH - minVisible - intTop * this.scale
+    const minY = minVisible - (intTop + intH) * this.scale
+
+    // ---- 第五步：钳制 ----
+    if (minX <= maxX) {
+      if (this.x > maxX) this.x = maxX
+      if (this.x < minX) this.x = minX
     }
-    if (this.x < right) {
-      this.x = right
-    }
-    if (this.y > top) {
-      this.y = top
-    }
-    if (this.y < bottom) {
-      this.y = bottom
-    }
-  }
-
-  // 计算图形四个方向的位置边界值
-  getPositionLimit() {
-    const { scaleX, scaleY } = this.mindMap.draw.transform()
-    const drawRect = this.mindMap.draw.rbox()
-    const rootRect = this.mindMap.renderer.root.group.rbox()
-    const rootCenterOffset = this.mindMap.renderer.layout.getRootCenterOffset(
-      rootRect.width,
-      rootRect.height
-    )
-    const left = rootRect.x - drawRect.x - rootCenterOffset.x * scaleX
-    const right = rootRect.x - drawRect.x2 - rootCenterOffset.x * scaleX
-    const top = rootRect.y - drawRect.y - rootCenterOffset.y * scaleY
-    const bottom = rootRect.y - drawRect.y2 - rootCenterOffset.y * scaleY
-    return {
-      scale: scaleX,
-      left,
-      right,
-      top,
-      bottom
+    if (minY <= maxY) {
+      if (this.y > maxY) this.y = maxY
+      if (this.y < minY) this.y = minY
     }
   }
 
@@ -439,8 +446,10 @@ class View {
     switch (type) {
       case 'scale':
         this.mindMap.emit('scale', this.scale)
+        break
       case 'translate':
         this.mindMap.emit('translate', this.x, this.y)
+        break
     }
   }
 }

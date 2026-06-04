@@ -297,6 +297,19 @@ class View {
       }
     }
 
+    // 安全检查：防止 this.x/y/scale 被设置为无效值
+    if (!Number.isFinite(this.x) || !Number.isFinite(this.y) || !Number.isFinite(this.scale) || this.scale <= 0) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] transform: invalid values detected, resetting', {
+          x: this.x, y: this.y, scale: this.scale
+        })
+      }
+      // 重置为安全值
+      if (!Number.isFinite(this.x)) this.x = this._appliedX ?? 0
+      if (!Number.isFinite(this.y)) this.y = this._appliedY ?? 0
+      if (!Number.isFinite(this.scale) || this.scale <= 0) this.scale = this._appliedScale ?? 1
+    }
+
     this.mindMap.draw.transform({
       origin: [0, 0],
       scale: this.scale,
@@ -471,15 +484,16 @@ class View {
       const drawRect = draw.rbox()
 
       // 安全检查：初始化阶段绘制区域可能尚未就绪
-      if (drawRect && drawRect.width) {
+      if (drawRect && drawRect.width && drawRect.height) {
         const prevX = this._appliedX ?? this.x
         const prevY = this._appliedY ?? this.y
         const prevScale = this._appliedScale ?? this.scale
 
-        // 除零保护
-        if (prevScale === 0 || !Number.isFinite(prevScale)) {
+        // 除零保护和有效性检查
+        if (prevScale === 0 || !Number.isFinite(prevScale) ||
+            !Number.isFinite(prevX) || !Number.isFinite(prevY)) {
           if (process.env.NODE_ENV === 'development') {
-            console.warn('[MindMap] limitMindMapInCanvas: invalid prevScale', prevScale)
+            console.warn('[MindMap] limitMindMapInCanvas: invalid previous state', { prevX, prevY, prevScale })
           }
           return
         }
@@ -488,13 +502,28 @@ class View {
         const screenLeft = drawRect.x - elRect.left
         const screenTop = drawRect.y - elRect.top
 
+        // 检查转换后的坐标是否有效
+        if (!Number.isFinite(screenLeft) || !Number.isFinite(screenTop)) {
+          if (process.env.NODE_ENV === 'development') {
+            console.warn('[MindMap] limitMindMapInCanvas: invalid screen coordinates', { screenLeft, screenTop })
+          }
+          return
+        }
+
         // 反推脑图在内部坐标系下的固有位置（与缩放/平移无关的原始尺寸）
         // 缓存结果，节流期间复用
-        this._cachedBounds = {
-          intLeft: (screenLeft - prevX) / prevScale,
-          intTop: (screenTop - prevY) / prevScale,
-          intW: drawRect.width / prevScale,
-          intH: drawRect.height / prevScale
+        const intLeft = (screenLeft - prevX) / prevScale
+        const intTop = (screenTop - prevY) / prevScale
+        const intW = drawRect.width / prevScale
+        const intH = drawRect.height / prevScale
+
+        // 验证计算结果
+        if (Number.isFinite(intLeft) && Number.isFinite(intTop) &&
+            Number.isFinite(intW) && Number.isFinite(intH) &&
+            intW > 0 && intH > 0) {
+          this._cachedBounds = { intLeft, intTop, intW, intH }
+        } else if (process.env.NODE_ENV === 'development') {
+          console.warn('[MindMap] limitMindMapInCanvas: invalid calculated bounds', { intLeft, intTop, intW, intH })
         }
       }
     }
@@ -506,6 +535,11 @@ class View {
 
     // ---- 以下纯数学计算，每帧都执行（避免节流导致抖动） ----
 
+    // 验证当前 scale 是否有效
+    if (!Number.isFinite(this.scale) || this.scale <= 0) {
+      return
+    }
+
     // 用新的 this.x/y/scale 正推屏幕坐标
     // newScreenLeft = intLeft × this.scale + this.x
     const newRight = (intLeft + intW) * this.scale + this.x
@@ -516,6 +550,11 @@ class View {
     const canvasW = this.mindMap.width
     const canvasH = this.mindMap.height
     const minVisible = this.mindMap.opt.minVisibleInCanvas ?? 80
+
+    // 验证画布尺寸
+    if (!Number.isFinite(canvasW) || !Number.isFinite(canvasH) || canvasW <= 0 || canvasH <= 0) {
+      return
+    }
 
     // 向右拖：脑图左边不能超过 (画布右边 - minVisible)
     //   intLeft × scale + x < canvasW - minVisible
@@ -530,6 +569,15 @@ class View {
     // 同理 Y 轴
     const maxY = canvasH - minVisible - intTop * this.scale
     const minY = minVisible - (intTop + intH) * this.scale
+
+    // 验证边界值是否有效
+    if (!Number.isFinite(maxX) || !Number.isFinite(minX) ||
+        !Number.isFinite(maxY) || !Number.isFinite(minY)) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] limitMindMapInCanvas: invalid boundary values', { minX, maxX, minY, maxY })
+      }
+      return
+    }
 
     // ---- 钳制 ----
     if (minX <= maxX) {

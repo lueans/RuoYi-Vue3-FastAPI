@@ -12,12 +12,20 @@ class View {
     this.x = 0
     this.y = 0
     this.firstDrag = true
+
+    // 节流控制：限制 limitMindMapInCanvas 的调用频率
+    this._lastLimitCheck = 0
+    this._limitThrottleMs = this.mindMap.opt.limitThrottleMs ?? 16 // 默认 ~60fps
+
     this.setTransformData(this.mindMap.opt.viewData)
     this.bind()
   }
 
   //  绑定
   bind() {
+    // 保存事件处理函数引用，用于 unbind
+    this._handlers = {}
+
     // 快捷键
     this.mindMap.keyCommand.addShortcut('Control+=', () => {
       this.enlarge()
@@ -29,7 +37,7 @@ class View {
       this.fit()
     })
     // 拖动视图
-    this.mindMap.event.on('mousedown', e => {
+    this._handlers.mousedown = e => {
       const { isDisableDrag, mousedownEventPreventDefault } = this.mindMap.opt
       if (isDisableDrag) return
       if (mousedownEventPreventDefault) {
@@ -37,8 +45,10 @@ class View {
       }
       this.sx = this.x
       this.sy = this.y
-    })
-    this.mindMap.event.on('drag', (e, event) => {
+    }
+    this.mindMap.event.on('mousedown', this._handlers.mousedown)
+
+    this._handlers.drag = (e, event) => {
       // 按住ctrl键拖动为多选
       // 禁用拖拽
       if (e.ctrlKey || e.metaKey || this.mindMap.opt.isDisableDrag) {
@@ -54,12 +64,15 @@ class View {
       this.x = this.sx + event.mousemoveOffset.x
       this.y = this.sy + event.mousemoveOffset.y
       this.transform()
-    })
-    this.mindMap.event.on('mouseup', () => {
+    }
+    this.mindMap.event.on('drag', this._handlers.drag)
+
+    this._handlers.mouseup = () => {
       this.firstDrag = true
-    })
+    }
+    this.mindMap.event.on('mouseup', this._handlers.mouseup)
     // 放大缩小视图
-    this.mindMap.event.on('mousewheel', (e, dirs, event, isTouchPad) => {
+    this._handlers.mousewheel = (e, dirs, event, isTouchPad) => {
       const {
         customHandleMousewheel,
         mousewheelAction,
@@ -144,11 +157,26 @@ class View {
         }
         this.translateXY(mx * translateRatio, my * translateRatio)
       }
-    })
-    this.mindMap.on('resize', () => {
+    }
+    this.mindMap.event.on('mousewheel', this._handlers.mousewheel)
+
+    this._handlers.resize = () => {
       if (!this.checkNeedMindMapInCanvas()) return
       this.transform()
-    })
+    }
+    this.mindMap.on('resize', this._handlers.resize)
+  }
+
+  //  解绑事件（防止内存泄漏）
+  unbind() {
+    if (this._handlers) {
+      this.mindMap.event.off('mousedown', this._handlers.mousedown)
+      this.mindMap.event.off('drag', this._handlers.drag)
+      this.mindMap.event.off('mouseup', this._handlers.mouseup)
+      this.mindMap.event.off('mousewheel', this._handlers.mousewheel)
+      this.mindMap.off('resize', this._handlers.resize)
+      this._handlers = null
+    }
   }
 
   //  获取当前变换状态数据
@@ -179,6 +207,13 @@ class View {
 
   //  平移x,y方向
   translateXY(x, y) {
+    // 参数验证：防止 NaN 或 Infinity
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] translateXY: invalid parameters', { x, y })
+      }
+      return
+    }
     if (x === 0 && y === 0) return
     this.x += x
     this.y += y
@@ -188,6 +223,12 @@ class View {
 
   //  平移x方向
   translateX(step) {
+    if (!Number.isFinite(step)) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] translateX: invalid parameter', step)
+      }
+      return
+    }
     if (step === 0) return
     this.x += step
     this.transform()
@@ -196,6 +237,12 @@ class View {
 
   //  平移x方式到
   translateXTo(x) {
+    if (!Number.isFinite(x)) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] translateXTo: invalid parameter', x)
+      }
+      return
+    }
     this.x = x
     this.transform()
     this.emitEvent('translate')
@@ -203,6 +250,12 @@ class View {
 
   //  平移y方向
   translateY(step) {
+    if (!Number.isFinite(step)) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] translateY: invalid parameter', step)
+      }
+      return
+    }
     if (step === 0) return
     this.y += step
     this.transform()
@@ -211,6 +264,12 @@ class View {
 
   //  平移y方向到
   translateYTo(y) {
+    if (!Number.isFinite(y)) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] translateYTo: invalid parameter', y)
+      }
+      return
+    }
     this.y = y
     this.transform()
     this.emitEvent('translate')
@@ -298,6 +357,14 @@ class View {
       cy = this.mindMap.height / 2
     }
     const prevScale = this.scale
+    // 除零保护：防止 prevScale 为 0 或无效值
+    if (prevScale === 0 || !Number.isFinite(prevScale)) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] scaleInCenter: invalid prevScale', prevScale)
+      }
+      this.scale = scale
+      return
+    }
     const ratio = 1 - scale / prevScale
     const dx = (cx - this.x) * ratio
     const dy = (cy - this.y) * ratio
@@ -392,6 +459,13 @@ class View {
   limitMindMapInCanvas() {
     if (!this.checkNeedMindMapInCanvas()) return
 
+    // 节流控制：避免过于频繁的 DOM 查询
+    const now = performance.now()
+    if (now - this._lastLimitCheck < this._limitThrottleMs) {
+      return
+    }
+    this._lastLimitCheck = now
+
     const draw = this.mindMap.draw
     const drawRect = draw.rbox()
     const elRect = this.mindMap.elRect
@@ -408,7 +482,9 @@ class View {
 
     // 除零保护：如果 prevScale 无效，跳过边界限制
     if (prevScale === 0 || !Number.isFinite(prevScale)) {
-      console.warn('[MindMap] Invalid prevScale, skip limiting:', prevScale)
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[MindMap] limitMindMapInCanvas: invalid prevScale', prevScale)
+      }
       return
     }
 

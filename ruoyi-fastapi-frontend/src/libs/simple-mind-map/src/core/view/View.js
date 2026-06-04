@@ -218,11 +218,26 @@ class View {
 
   //   应用变换
   transform() {
+    // 开发模式下的性能监控
+    let perfStart
+    if (process.env.NODE_ENV === 'development') {
+      perfStart = performance.now()
+    }
+
     try {
       this.limitMindMapInCanvas()
     } catch (error) {
       console.warn('[MindMap] limitMindMapInCanvas error:', error)
     }
+
+    // 开发模式下记录性能
+    if (process.env.NODE_ENV === 'development') {
+      const duration = performance.now() - perfStart
+      if (duration > 5) {
+        console.warn('[MindMap] limitMindMapInCanvas took', duration.toFixed(2), 'ms')
+      }
+    }
+
     this.mindMap.draw.transform({
       origin: [0, 0],
       scale: this.scale,
@@ -373,7 +388,7 @@ class View {
   }
 
   // 将思维导图限制在画布内
-  // 设计原则：无论缩放级别，至少保证脑图有小部分（80px）可见于画布中
+  // 设计原则：无论缩放级别，至少保证脑图有小部分可见于画布中
   limitMindMapInCanvas() {
     if (!this.checkNeedMindMapInCanvas()) return
 
@@ -390,6 +405,12 @@ class View {
     const prevX = this._appliedX ?? this.x
     const prevY = this._appliedY ?? this.y
     const prevScale = this._appliedScale ?? this.scale
+
+    // 除零保护：如果 prevScale 无效，跳过边界限制
+    if (prevScale === 0 || !Number.isFinite(prevScale)) {
+      console.warn('[MindMap] Invalid prevScale, skip limiting:', prevScale)
+      return
+    }
 
     // draw.rbox() 是上一帧变换的结果，需要用上一帧的 this.x/y/scale 来反推
     const screenLeft = drawRect.x - elRect.left
@@ -414,7 +435,7 @@ class View {
     // 至少保证 minVisible 像素的脑图内容可见于画布中
     const canvasW = this.mindMap.width
     const canvasH = this.mindMap.height
-    const minVisible = 80
+    const minVisible = this.mindMap.opt.minVisibleInCanvas ?? 80
 
     // 向右拖：脑图左边不能超过 (画布右边 - minVisible)
     //   newLeft < canvasW - minVisible
@@ -434,10 +455,15 @@ class View {
     if (minX <= maxX) {
       if (this.x > maxX) this.x = maxX
       if (this.x < minX) this.x = minX
+    } else if (process.env.NODE_ENV === 'development') {
+      console.debug('[MindMap] Mind map wider than canvas, skip X constraint', { minX, maxX })
     }
+
     if (minY <= maxY) {
       if (this.y > maxY) this.y = maxY
       if (this.y < minY) this.y = minY
+    } else if (process.env.NODE_ENV === 'development') {
+      console.debug('[MindMap] Mind map taller than canvas, skip Y constraint', { minY, maxY })
     }
   }
 

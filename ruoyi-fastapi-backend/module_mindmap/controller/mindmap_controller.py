@@ -5,6 +5,7 @@ from fastapi import Path, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.annotation.log_annotation import Log
+from pydantic_validation_decorator import ValidateFields
 from common.aspect.db_seesion import DBSessionDependency
 from common.aspect.interface_auth import UserInterfaceAuthDependency
 from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
@@ -60,6 +61,7 @@ async def get_mindmap_list(
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:add')],
 )
+@ValidateFields(validate_model='add_mindmap')
 @Log(title='脑图管理', business_type=BusinessType.INSERT)
 async def add_mindmap(
     request: Request,
@@ -85,6 +87,7 @@ async def add_mindmap(
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:edit')],
 )
+@ValidateFields(validate_model='edit_mindmap')
 @Log(title='脑图管理', business_type=BusinessType.UPDATE)
 async def edit_mindmap(
     request: Request,
@@ -205,8 +208,8 @@ async def delete_mindmap(
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
-    delete_mindmap = DeleteMindmapModel(mindmapIds=mindmap_ids)
-    result = await MindmapService.delete_mindmap_services(query_db, delete_mindmap, current_user.user.user_id)
+    delete_model = DeleteMindmapModel(mindmapIds=mindmap_ids)
+    result = await MindmapService.delete_mindmap_services(query_db, delete_model, current_user.user.user_id)
     logger.info(result.message)
 
     return ResponseUtil.success(msg=result.message)

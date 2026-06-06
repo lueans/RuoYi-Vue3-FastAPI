@@ -563,7 +563,8 @@ function unbindBusEvents() {
 
 defineExpose({
   mindMap,
-  getMindMap: () => mindMap.value
+  getMindMap: () => mindMap.value,
+  getYjsSync: () => yjsSync
 })
 </script>
 

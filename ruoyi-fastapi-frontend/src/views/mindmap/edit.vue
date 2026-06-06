@@ -8,6 +8,7 @@
             <el-icon v-if="!isReadonly"><Edit /></el-icon>
           </span>
           <el-tag v-if="isReadonly" type="info" size="small" style="margin-left: 8px;">只读</el-tag>
+          <Collaborators v-if="collaborators.length > 0" :collaborators="collaborators" style="margin-left: 12px;" />
         </template>
       </el-page-header>
     </div>
@@ -38,6 +39,7 @@ import { Edit as EditIcon } from '@element-plus/icons-vue'
 import Toolbar from '@/components/MindMap/Toolbar.vue'
 import Edit from '@/components/MindMap/Edit.vue'
 import NavigatorToolbar from '@/components/MindMap/NavigatorToolbar.vue'
+import Collaborators from '@/components/MindMap/Collaborators.vue'
 import { store } from '@/components/MindMap/useStore'
 import { renameMindmap } from '@/api/mindmap/mindmap'
 import { useRoute, useRouter } from 'vue-router'
@@ -53,6 +55,10 @@ const mindmapName = ref('')
 const renameOpen = ref(false)
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const mindMapInstance = computed(() => editRef.value?.mindMap || null)
+const collaborators = computed(() => {
+  const sync = editRef.value?.getYjsSync?.()
+  return sync?.collaborators?.value || []
+})
 
 const renameForm = reactive({ id: undefined, name: '' })
 const renameRules = {

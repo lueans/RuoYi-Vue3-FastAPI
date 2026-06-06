@@ -112,6 +112,23 @@ const saveStatus = ref('idle') // 'idle' | 'saving' | 'saved' | 'error'
 let saveStatusTimer = null
 const AUTO_SAVE_DELAY = 2000
 
+// 文本编辑模式退出检测
+let isExitingTextEdit = false
+
+// 设置文本编辑退出检测
+function setupTextEditExitDetection() {
+  // 监听会触发 hideEditTextBox() 的事件
+  const exitEvents = ['draw_click', 'svg_mousedown', 'expand_btn_click', 'before_node_active']
+  exitEvents.forEach(event => {
+    bus.on(event, () => {
+      // 如果当前正在文本编辑，标记即将退出
+      if (mindMap.value?.renderer?.textEdit?.isShowTextEdit?.()) {
+        isExitingTextEdit = true
+      }
+    })
+  })
+}
+
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const openNodeRichText = computed(() => store.localConfig.openNodeRichText)
 const isShowScrollbar = computed(() => store.localConfig.isShowScrollbar)
@@ -178,6 +195,7 @@ watch(isShowScrollbar, (val) => {
 onMounted(async () => {
   actions.initLocalConfig()
   await initMindMap()
+  setupTextEditExitDetection()
   bindBusEvents()
   window.addEventListener('resize', handleResize)
 })
@@ -382,10 +400,18 @@ function setSaveStatus(status) {
 
 function onBusDataChange(data) {
   if (props.mindmapId) {
-    clearTimeout(autoSaveTimer)
-    autoSaveTimer = setTimeout(() => {
+    if (isExitingTextEdit) {
+      // 刚从文本编辑模式退出，立即保存
+      isExitingTextEdit = false
+      clearTimeout(autoSaveTimer)
       saveToBackend()
-    }, AUTO_SAVE_DELAY)
+    } else {
+      // 常规变更，使用防抖延迟
+      clearTimeout(autoSaveTimer)
+      autoSaveTimer = setTimeout(() => {
+        saveToBackend()
+      }, AUTO_SAVE_DELAY)
+    }
   } else {
     actions.storeData({ root: data })
   }

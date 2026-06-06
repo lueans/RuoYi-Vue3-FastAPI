@@ -55,6 +55,7 @@ import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import bus from './useEventBus'
 import { store, actions } from './useStore'
 import { defaultData } from './config'
+import { getMindmap, updateMindmapContent } from '@/api/mindmap/mindmap'
 import './assets/icon-font/iconfont.css'
 
 import Contextmenu from './Contextmenu.vue'
@@ -85,12 +86,23 @@ import OutlineEdit from './OutlineEdit.vue'
 registerPlugins('full')
 Themes.init(MindMap)
 
+const props = defineProps({
+  mindmapId: { type: Number, default: null },
+  readonly: { type: Boolean, default: false }
+})
+
+const emit = defineEmits(['name-change'])
+
 const editContainerRef = ref(null)
 const mindMapContainerRef = ref(null)
 const mindMap = shallowRef(null)
 const showDragMask = ref(false)
 let storeConfigTimer = null
 let enableShowLoading = true
+let autoSaveTimer = null
+const isSaving = ref(false)
+const pendingSave = ref(false)
+const AUTO_SAVE_DELAY = 5000
 
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const openNodeRichText = computed(() => store.localConfig.openNodeRichText)
@@ -155,9 +167,9 @@ watch(isShowScrollbar, (val) => {
   }
 })
 
-onMounted(() => {
+onMounted(async () => {
   actions.initLocalConfig()
-  initMindMap()
+  await initMindMap()
   bindBusEvents()
   window.addEventListener('resize', handleResize)
 })
@@ -165,6 +177,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unbindBusEvents()
   window.removeEventListener('resize', handleResize)
+  clearTimeout(autoSaveTimer)
   if (mindMap.value) {
     mindMap.value.destroy()
     mindMap.value = null
@@ -173,17 +186,41 @@ onBeforeUnmount(() => {
   actions.resetState()
 })
 
-function initMindMap() {
+async function initMindMap() {
   if (!mindMapContainerRef.value) return
 
-  const savedData = actions.getData()
-  const savedConfig = actions.getConfig() || {}
+  let root = defaultData
+  let layout = 'logicalStructure'
+  let themeTemplate = 'default'
+  let themeConfig = {}
+  let viewData = null
+  let savedConfig = {}
 
-  let root = savedData?.root || defaultData
-  let layout = savedData?.layout || 'logicalStructure'
-  let themeTemplate = savedData?.theme?.template || 'default'
-  let themeConfig = savedData?.theme?.config || {}
-  let viewData = savedData?.view || null
+  // 如果有 mindmapId，从后端加载
+  if (props.mindmapId) {
+    try {
+      const response = await getMindmap(props.mindmapId)
+      const data = response.data
+      root = data.nodeTree || defaultData
+      layout = data.layout || 'logicalStructure'
+      themeTemplate = data.theme?.template || 'default'
+      themeConfig = data.theme?.config || {}
+      viewData = data.viewData || null
+      emit('name-change', data.name)
+    } catch (error) {
+      ElMessage.error('加载脑图失败')
+      return
+    }
+  } else {
+    // 回退到 localStorage
+    const savedData = actions.getData()
+    savedConfig = actions.getConfig() || {}
+    root = savedData?.root || defaultData
+    layout = savedData?.layout || 'logicalStructure'
+    themeTemplate = savedData?.theme?.template || 'default'
+    themeConfig = savedData?.theme?.config || {}
+    viewData = savedData?.view || null
+  }
 
   const mm = new MindMap({
     el: mindMapContainerRef.value,
@@ -193,6 +230,7 @@ function initMindMap() {
     theme: themeTemplate,
     themeConfig: themeConfig,
     viewData: viewData,
+    readonly: props.readonly,
     nodeTextEditZIndex: 1000,
     nodeNoteTooltipZIndex: 1000,
     customNoteContentShow: {
@@ -296,26 +334,70 @@ function initMindMap() {
   })
 
   // Bind save events (use named functions for proper cleanup)
-  bus.on('data_change', onBusDataChange)
-  bus.on('view_data_change', onBusViewDataChange)
+  if (!props.readonly) {
+    bus.on('data_change', onBusDataChange)
+    bus.on('view_data_change', onBusViewDataChange)
 
-  // Ctrl+S manual save
-  mm.keyCommand.addShortcut('Control+s', () => {
-    manualSave()
-  })
+    // Ctrl+S manual save
+    mm.keyCommand.addShortcut('Control+s', () => {
+      manualSave()
+    })
+  }
+}
+
+function onBusDataChange(data) {
+  if (props.mindmapId) {
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = setTimeout(() => {
+      saveToBackend()
+    }, AUTO_SAVE_DELAY)
+  } else {
+    actions.storeData({ root: data })
+  }
+}
+
+async function saveToBackend() {
+  if (!mindMap.value || !props.mindmapId || props.readonly) return
+
+  if (isSaving.value) {
+    pendingSave.value = true
+    return
+  }
+
+  isSaving.value = true
+  pendingSave.value = false
+  try {
+    const fullData = mindMap.value.getData(true)
+    await updateMindmapContent({
+      id: props.mindmapId,
+      nodeTree: fullData.root,
+      viewData: fullData.view,
+      layout: fullData.layout,
+      theme: fullData.theme
+    })
+  } catch (error) {
+    console.error('自动保存失败:', error)
+  } finally {
+    isSaving.value = false
+    if (pendingSave.value) {
+      pendingSave.value = false
+      clearTimeout(autoSaveTimer)
+      autoSaveTimer = setTimeout(() => saveToBackend(), AUTO_SAVE_DELAY)
+    }
+  }
 }
 
 function manualSave() {
   if (!mindMap.value) return
   const fullData = mindMap.value.getData(true)
-  actions.storeData(fullData)
-  ElMessage.success('已保存')
-}
-
-// --- Bus command handlers ---
-
-function onBusDataChange(data) {
-  actions.storeData({ root: data })
+  if (props.mindmapId) {
+    clearTimeout(autoSaveTimer)
+    saveToBackend()
+    ElMessage.success('已保存到服务器')
+  } else {
+    actions.storeData(fullData)
+    ElMessage.success('已保存')
+  }
 }
 
 function onBusViewDataChange(data) {

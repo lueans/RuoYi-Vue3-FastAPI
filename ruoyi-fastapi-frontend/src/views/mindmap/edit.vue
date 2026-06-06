@@ -12,6 +12,15 @@
           <el-button v-if="!isReadonly" type="primary" size="small" @click="openShareDialog" style="margin-left: 12px;">
             分享
           </el-button>
+          <!-- 保存状态指示器 -->
+          <span v-if="!isReadonly" class="save-status" :class="saveStatus">
+            <el-icon v-if="saveStatus === 'saving'" class="is-loading"><Loading /></el-icon>
+            <el-icon v-else-if="saveStatus === 'saved'"><Check /></el-icon>
+            <el-icon v-else-if="saveStatus === 'error'"><WarningFilled /></el-icon>
+            <span class="save-text">
+              {{ saveStatus === 'saving' ? '保存中...' : saveStatus === 'saved' ? '已保存' : saveStatus === 'error' ? '保存失败' : '' }}
+            </span>
+          </span>
         </template>
       </el-page-header>
     </div>
@@ -40,7 +49,7 @@
 </template>
 
 <script setup name="MindmapEditorPage">
-import { Edit as EditIcon } from '@element-plus/icons-vue'
+import { Edit as EditIcon, Loading, Check, WarningFilled } from '@element-plus/icons-vue'
 import Toolbar from '@/components/MindMap/Toolbar.vue'
 import Edit from '@/components/MindMap/Edit.vue'
 import NavigatorToolbar from '@/components/MindMap/NavigatorToolbar.vue'
@@ -65,6 +74,7 @@ const collaborators = computed(() => {
   const sync = editRef.value?.getYjsSync?.()
   return sync?.collaborators?.value || []
 })
+const saveStatus = computed(() => editRef.value?.saveStatus?.value || 'idle')
 
 const shareDialogRef = ref(null)
 
@@ -124,6 +134,19 @@ function submitRename() {
     align-items: center;
     gap: 4px;
     &:hover { color: var(--el-color-primary); }
+  }
+  .save-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 12px;
+    font-size: 12px;
+    color: #909399;
+    transition: color 0.3s;
+    &.saving { color: #E6A23C; }
+    &.saved { color: #67C23A; }
+    &.error { color: #F56C6C; }
+    .save-text { white-space: nowrap; }
   }
 }
 .mindmap-edit-body {

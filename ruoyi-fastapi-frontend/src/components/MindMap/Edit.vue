@@ -108,7 +108,9 @@ let autoSaveTimer = null
 let yjsSync = null
 const isSaving = ref(false)
 const pendingSave = ref(false)
-const AUTO_SAVE_DELAY = 5000
+const saveStatus = ref('idle') // 'idle' | 'saving' | 'saved' | 'error'
+let saveStatusTimer = null
+const AUTO_SAVE_DELAY = 2000
 
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const openNodeRichText = computed(() => store.localConfig.openNodeRichText)
@@ -188,6 +190,7 @@ onBeforeUnmount(() => {
     yjsSync = null
   }
   clearTimeout(autoSaveTimer)
+  clearTimeout(saveStatusTimer)
   if (mindMap.value) {
     mindMap.value.destroy()
     mindMap.value = null
@@ -368,6 +371,15 @@ async function initMindMap() {
   }
 }
 
+// ── Save status tracking ──
+function setSaveStatus(status) {
+  saveStatus.value = status
+  clearTimeout(saveStatusTimer)
+  if (status === 'saved') {
+    saveStatusTimer = setTimeout(() => { saveStatus.value = 'idle' }, 3000)
+  }
+}
+
 function onBusDataChange(data) {
   if (props.mindmapId) {
     clearTimeout(autoSaveTimer)
@@ -376,6 +388,22 @@ function onBusDataChange(data) {
     }, AUTO_SAVE_DELAY)
   } else {
     actions.storeData({ root: data })
+  }
+}
+
+function onBusViewDataChange(data) {
+  if (props.readonly) return
+  if (props.mindmapId) {
+    // 后端模式：视图变更也触发保存（平移/缩放后 2 秒自动保存）
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = setTimeout(() => {
+      saveToBackend()
+    }, AUTO_SAVE_DELAY)
+  } else {
+    clearTimeout(storeConfigTimer)
+    storeConfigTimer = setTimeout(() => {
+      actions.storeData({ view: data })
+    }, 300)
   }
 }
 
@@ -389,6 +417,8 @@ async function saveToBackend() {
 
   isSaving.value = true
   pendingSave.value = false
+  setSaveStatus('saving')
+
   try {
     const fullData = mindMap.value.getData(true)
     await updateMindmapContent({
@@ -398,8 +428,12 @@ async function saveToBackend() {
       layout: fullData.layout,
       theme: fullData.theme
     })
+    setSaveStatus('saved')
+    return true
   } catch (error) {
     console.error('自动保存失败:', error)
+    setSaveStatus('error')
+    return false
   } finally {
     isSaving.value = false
     if (pendingSave.value) {
@@ -414,25 +448,17 @@ async function manualSave() {
   if (!mindMap.value) return
   if (props.mindmapId) {
     clearTimeout(autoSaveTimer)
-    await saveToBackend()
-    ElMessage.success('已保存到服务器')
+    const ok = await saveToBackend()
+    if (ok !== false) {
+      ElMessage.success('已保存到服务器')
+    } else {
+      ElMessage.error('保存失败，请检查网络')
+    }
   } else {
     const fullData = mindMap.value.getData(true)
     actions.storeData(fullData)
     ElMessage.success('已保存')
   }
-}
-
-function onBusViewDataChange(data) {
-  if (props.readonly) return
-  clearTimeout(storeConfigTimer)
-  storeConfigTimer = setTimeout(() => {
-    if (props.mindmapId) {
-      // 后端模式：视图变更通过 saveToBackend 一起保存
-    } else {
-      actions.storeData({ view: data })
-    }
-  }, 300)
 }
 
 function onExecCommand(...args) {
@@ -568,7 +594,8 @@ function unbindBusEvents() {
 defineExpose({
   mindMap,
   getMindMap: () => mindMap.value,
-  getYjsSync: () => yjsSync
+  getYjsSync: () => yjsSync,
+  saveStatus
 })
 </script>
 

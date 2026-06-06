@@ -28,13 +28,14 @@ class MindmapService:
         return await MindmapDao.get_mindmap_list(query_db, query_object, is_page)
 
     @classmethod
-    async def get_mindmap_detail_services(cls, query_db: AsyncSession, mindmap_id: int) -> MindmapModel:
-        """获取思维导图详细信息"""
+    async def get_mindmap_detail_services(cls, query_db: AsyncSession, mindmap_id: int, user_id: int) -> MindmapModel:
+        """获取思维导图详细信息（含所有权校验）"""
         mindmap = await MindmapDao.get_mindmap_by_id(query_db, mindmap_id)
         if not mindmap:
             raise ServiceException(message='思维导图不存在')
+        if mindmap.owner_id != user_id:
+            raise ServiceException(message='无访问权限')
 
-        # Parse JSON fields from string
         result_dict = CamelCaseUtil.transform_result(mindmap)
         if isinstance(result_dict.get('node_tree'), str):
             result_dict['node_tree'] = json.loads(result_dict['node_tree'])
@@ -64,13 +65,14 @@ class MindmapService:
             raise e
 
     @classmethod
-    async def edit_mindmap_services(cls, query_db: AsyncSession, page_object: MindmapModel) -> CrudResponseModel:
+    async def edit_mindmap_services(cls, query_db: AsyncSession, page_object: MindmapModel, user_id: int) -> CrudResponseModel:
         """编辑思维导图元数据（名称、描述、封面等）"""
         mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
         if not mindmap:
             raise ServiceException(message='思维导图不存在')
+        if mindmap.owner_id != user_id:
+            raise ServiceException(message='无编辑权限')
 
-        # Check name uniqueness if name changed
         if page_object.name and page_object.name != mindmap.name:
             is_unique = await MindmapDao.check_name_unique(
                 query_db, page_object.name, mindmap.owner_id, exclude_id=page_object.id
@@ -124,12 +126,14 @@ class MindmapService:
 
     @classmethod
     async def rename_mindmap_services(
-        cls, query_db: AsyncSession, page_object: MindmapRenameModel
+        cls, query_db: AsyncSession, page_object: MindmapRenameModel, user_id: int
     ) -> CrudResponseModel:
         """重命名思维导图"""
         mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
         if not mindmap:
             raise ServiceException(message='思维导图不存在')
+        if mindmap.owner_id != user_id:
+            raise ServiceException(message='无编辑权限')
 
         is_unique = await MindmapDao.check_name_unique(
             query_db, page_object.name, mindmap.owner_id, exclude_id=page_object.id
@@ -151,13 +155,20 @@ class MindmapService:
 
     @classmethod
     async def delete_mindmap_services(
-        cls, query_db: AsyncSession, page_object: DeleteMindmapModel
+        cls, query_db: AsyncSession, page_object: DeleteMindmapModel, user_id: int
     ) -> CrudResponseModel:
-        """删除思维导图"""
+        """删除思维导图（含所有权校验）"""
         if not page_object.mindmap_ids:
             raise ServiceException(message='传入思维导图ID为空')
 
         id_list = [int(i) for i in page_object.mindmap_ids.split(',') if i.strip()]
+
+        # 逐个校验所有权
+        for mindmap_id in id_list:
+            mindmap = await MindmapDao.get_mindmap_by_id(query_db, mindmap_id)
+            if mindmap and mindmap.owner_id != user_id:
+                raise ServiceException(message=f'无权限删除脑图ID={mindmap_id}')
+
         try:
             await MindmapDao.batch_delete_mindmap_dao(query_db, id_list)
             await query_db.commit()

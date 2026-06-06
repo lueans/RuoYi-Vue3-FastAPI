@@ -53,13 +53,6 @@ class MindmapService:
     @classmethod
     async def add_mindmap_services(cls, query_db: AsyncSession, page_object: MindmapModel) -> CrudResponseModel:
         """新增思维导图"""
-        # Check name uniqueness
-        is_unique = await MindmapDao.check_name_unique(
-            query_db, page_object.name, page_object.owner_id
-        )
-        if not is_unique:
-            raise ServiceException(message=f'新增思维导图{page_object.name}失败，名称已存在')
-
         # Serialize node_tree to JSON string for LONGTEXT storage
         insert_data = page_object.model_dump(exclude_none=True)
         if isinstance(insert_data.get('node_tree'), dict):
@@ -87,13 +80,6 @@ class MindmapService:
             raise ServiceException(message='思维导图不存在')
         if mindmap.owner_id != user_id:
             raise ServiceException(message='无编辑权限')
-
-        if page_object.name and page_object.name != mindmap.name:
-            is_unique = await MindmapDao.check_name_unique(
-                query_db, page_object.name, mindmap.owner_id, exclude_id=page_object.id
-            )
-            if not is_unique:
-                raise ServiceException(message=f'修改思维导图失败，名称{page_object.name}已存在')
 
         try:
             update_data = page_object.model_dump(exclude_unset=True, exclude={'node_tree', 'view_data'})
@@ -170,12 +156,6 @@ class MindmapService:
             raise ServiceException(message='思维导图不存在')
         if mindmap.owner_id != user_id:
             raise ServiceException(message='无编辑权限')
-
-        is_unique = await MindmapDao.check_name_unique(
-            query_db, page_object.name, mindmap.owner_id, exclude_id=page_object.id
-        )
-        if not is_unique:
-            raise ServiceException(message=f'名称{page_object.name}已存在')
 
         try:
             await MindmapDao.edit_mindmap_dao(query_db, {

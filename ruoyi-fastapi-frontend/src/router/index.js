@@ -63,15 +63,15 @@ export const constantRoutes = [
     hidden: true
   },
   {
-    path: '/test/mindmap',
+    path: '/mindmap/edit',
     component: Layout,
     hidden: true,
     children: [
       {
         path: '',
-        component: () => import('@/views/test/mindmap'),
-        name: 'MindMapTest',
-        meta: { title: '思维导图测试' }
+        component: () => import('@/views/mindmap/edit'),
+        name: 'MindmapEditor',
+        meta: { title: '脑图编辑' }
       }
     ]
   },

@@ -43,10 +43,131 @@
 
 ---
 
-## Task 1: 后端 Controller — 列表与详情接口
+## Task 1: 后端 Service 层 — 所有权校验与增强
+
+**Files:**
+- Modify: `ruoyi-fastapi-backend/module_mindmap/service/mindmap_service.py`
+
+所有权校验必须在 Controller 之前就位，避免 Controller 调用时出现权限漏洞。
+
+- [ ] **Step 1: 为 detail/edit/rename/delete 添加所有权校验**
+
+修改 `mindmap_service.py`，完整替换以下方法：
+
+```python
+@classmethod
+async def get_mindmap_detail_services(cls, query_db: AsyncSession, mindmap_id: int, user_id: int) -> MindmapModel:
+    """获取思维导图详细信息（含所有权校验）"""
+    mindmap = await MindmapDao.get_mindmap_by_id(query_db, mindmap_id)
+    if not mindmap:
+        raise ServiceException(message='思维导图不存在')
+    if mindmap.owner_id != user_id:
+        raise ServiceException(message='无访问权限')
+
+    result_dict = CamelCaseUtil.transform_result(mindmap)
+    if isinstance(result_dict.get('node_tree'), str):
+        result_dict['node_tree'] = json.loads(result_dict['node_tree'])
+    return MindmapModel(**result_dict)
+
+
+@classmethod
+async def edit_mindmap_services(cls, query_db: AsyncSession, page_object: MindmapModel, user_id: int) -> CrudResponseModel:
+    """编辑思维导图元数据（名称、描述、封面等）"""
+    mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
+    if not mindmap:
+        raise ServiceException(message='思维导图不存在')
+    if mindmap.owner_id != user_id:
+        raise ServiceException(message='无编辑权限')
+
+    if page_object.name and page_object.name != mindmap.name:
+        is_unique = await MindmapDao.check_name_unique(
+            query_db, page_object.name, mindmap.owner_id, exclude_id=page_object.id
+        )
+        if not is_unique:
+            raise ServiceException(message=f'修改思维导图失败，名称{page_object.name}已存在')
+
+    try:
+        update_data = page_object.model_dump(exclude_unset=True, exclude={'node_tree', 'view_data'})
+        await MindmapDao.edit_mindmap_dao(query_db, update_data)
+        await query_db.commit()
+        return CrudResponseModel(is_success=True, message='更新成功')
+    except Exception as e:
+        await query_db.rollback()
+        raise e
+
+
+@classmethod
+async def rename_mindmap_services(
+    cls, query_db: AsyncSession, page_object: MindmapRenameModel, user_id: int
+) -> CrudResponseModel:
+    """重命名思维导图"""
+    mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
+    if not mindmap:
+        raise ServiceException(message='思维导图不存在')
+    if mindmap.owner_id != user_id:
+        raise ServiceException(message='无编辑权限')
+
+    is_unique = await MindmapDao.check_name_unique(
+        query_db, page_object.name, mindmap.owner_id, exclude_id=page_object.id
+    )
+    if not is_unique:
+        raise ServiceException(message=f'名称{page_object.name}已存在')
+
+    try:
+        await MindmapDao.edit_mindmap_dao(query_db, {
+            'id': page_object.id,
+            'name': page_object.name,
+            'update_time': datetime.now(),
+        })
+        await query_db.commit()
+        return CrudResponseModel(is_success=True, message='重命名成功')
+    except Exception as e:
+        await query_db.rollback()
+        raise e
+
+
+@classmethod
+async def delete_mindmap_services(
+    cls, query_db: AsyncSession, page_object: DeleteMindmapModel, user_id: int
+) -> CrudResponseModel:
+    """删除思维导图（含所有权校验）"""
+    if not page_object.mindmap_ids:
+        raise ServiceException(message='传入思维导图ID为空')
+
+    id_list = [int(i) for i in page_object.mindmap_ids.split(',') if i.strip()]
+
+    # 逐个校验所有权
+    for mindmap_id in id_list:
+        mindmap = await MindmapDao.get_mindmap_by_id(query_db, mindmap_id)
+        if mindmap and mindmap.owner_id != user_id:
+            raise ServiceException(message=f'无权限删除脑图ID={mindmap_id}')
+
+    try:
+        await MindmapDao.batch_delete_mindmap_dao(query_db, id_list)
+        await query_db.commit()
+        return CrudResponseModel(is_success=True, message='删除成功')
+    except Exception as e:
+        await query_db.rollback()
+        raise e
+```
+
+注意 `get_mindmap_detail_services` 签名变更：新增 `user_id: int` 参数。`copy_mindmap_services` 已经接收 `user_id`，无需修改。
+
+- [ ] **Step 2: 提交**
+
+```bash
+git add ruoyi-fastapi-backend/module_mindmap/service/mindmap_service.py
+git commit -m "fix(mindmap): add ownership validation to detail/edit/rename/delete services"
+```
+
+---
+
+## Task 2: 后端 Controller — 完整 CRUD 接口
 
 **Files:**
 - Create: `ruoyi-fastapi-backend/module_mindmap/controller/mindmap_controller.py`
+
+注意：本 Task 创建 Controller 时已适配 Task 1 的 Service 签名（含 `user_id` 参数），无需后续返工。
 
 - [ ] **Step 1: 创建 mindmap_controller.py**
 
@@ -64,6 +185,7 @@ from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
 from common.enums import BusinessType
 from common.router import APIRouterPro
 from common.vo import DataResponseModel, PageResponseModel, ResponseBaseModel
+from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_mindmap.entity.vo.mindmap_vo import (
     DeleteMindmapModel,
     MindmapContentUpdateModel,
@@ -72,7 +194,6 @@ from module_mindmap.entity.vo.mindmap_vo import (
     MindmapPageQueryModel,
     MindmapRenameModel,
 )
-from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_mindmap.service.mindmap_service import MindmapService
 from utils.log_util import logger
 from utils.response_util import ResponseUtil
@@ -84,6 +205,8 @@ mindmap_controller = APIRouterPro(
     dependencies=[PreAuthDependency()],
 )
 
+
+# ──────────────────── 列表 ────────────────────
 
 @mindmap_controller.get(
     '/list',
@@ -106,6 +229,8 @@ async def get_mindmap_list(
     return ResponseUtil.success(model_content=mindmap_page_query_result)
 
 
+# ──────────────────── 详情 ────────────────────
+
 @mindmap_controller.get(
     '/{mindmap_id}',
     summary='获取脑图详情接口',
@@ -120,43 +245,14 @@ async def get_mindmap_detail(
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
     mindmap_detail_result = await MindmapService.get_mindmap_detail_services(
-        query_db, mindmap_id
+        query_db, mindmap_id, current_user.user.user_id
     )
     logger.info(f'获取脑图ID为{mindmap_id}的详情成功')
     return ResponseUtil.success(data=mindmap_detail_result)
-```
 
-- [ ] **Step 2: 验证路由自动注册**
 
-启动后端服务，检查 `/docs` 页面是否出现 `/mindmap/list` 和 `/mindmap/{mindmap_id}` 端点。
+# ──────────────────── 新增 ────────────────────
 
-```bash
-cd ruoyi-fastapi-backend
-python server.py
-# 访问 http://localhost:9099/docs 确认路由
-```
-
-Expected: Swagger UI 中出现 `脑图管理` 分组，包含 GET `/mindmap/list` 和 GET `/mindmap/{mindmap_id}`。
-
-- [ ] **Step 3: 提交**
-
-```bash
-git add ruoyi-fastapi-backend/module_mindmap/controller/mindmap_controller.py
-git commit -m "feat(mindmap): add controller with list and detail endpoints"
-```
-
----
-
-## Task 2: 后端 Controller — 增删改接口
-
-**Files:**
-- Modify: `ruoyi-fastapi-backend/module_mindmap/controller/mindmap_controller.py`
-
-- [ ] **Step 1: 添加新增、编辑、删除、重命名、复制、导入、内容更新接口**
-
-在 `mindmap_controller.py` 末尾追加以下端点：
-
-```python
 @mindmap_controller.post(
     '',
     summary='新增脑图接口',
@@ -181,6 +277,8 @@ async def add_mindmap(
     return ResponseUtil.success(msg=result.message)
 
 
+# ──────────────────── 编辑元数据 ────────────────────
+
 @mindmap_controller.put(
     '',
     summary='编辑脑图元数据接口',
@@ -197,10 +295,14 @@ async def edit_mindmap(
 ) -> Response:
     edit_mindmap.update_by = current_user.user.user_name
     edit_mindmap.update_time = datetime.now()
-    result = await MindmapService.edit_mindmap_services(query_db, edit_mindmap)
+    result = await MindmapService.edit_mindmap_services(
+        query_db, edit_mindmap, current_user.user.user_id
+    )
     logger.info(result.message)
     return ResponseUtil.success(msg=result.message)
 
+
+# ──────────────────── 删除 ────────────────────
 
 @mindmap_controller.delete(
     '/{mindmap_ids}',
@@ -214,12 +316,17 @@ async def delete_mindmap(
     request: Request,
     mindmap_ids: Annotated[str, Path(description='需要删除的脑图ID，逗号分隔')],
     query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
     delete_mindmap = DeleteMindmapModel(mindmapIds=mindmap_ids)
-    result = await MindmapService.delete_mindmap_services(query_db, delete_mindmap)
+    result = await MindmapService.delete_mindmap_services(
+        query_db, delete_mindmap, current_user.user.user_id
+    )
     logger.info(result.message)
     return ResponseUtil.success(msg=result.message)
 
+
+# ──────────────────── 重命名 ────────────────────
 
 @mindmap_controller.put(
     '/rename',
@@ -233,11 +340,16 @@ async def rename_mindmap(
     request: Request,
     rename_model: MindmapRenameModel,
     query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
-    result = await MindmapService.rename_mindmap_services(query_db, rename_model)
+    result = await MindmapService.rename_mindmap_services(
+        query_db, rename_model, current_user.user.user_id
+    )
     logger.info(result.message)
     return ResponseUtil.success(msg=result.message)
 
+
+# ──────────────────── 复制 ────────────────────
 
 @mindmap_controller.post(
     '/copy/{mindmap_id}',
@@ -260,6 +372,8 @@ async def copy_mindmap(
     return ResponseUtil.success(msg=result.message)
 
 
+# ──────────────────── 更新内容（自动保存） ────────────────────
+
 @mindmap_controller.put(
     '/content',
     summary='更新脑图内容接口',
@@ -279,6 +393,8 @@ async def update_mindmap_content(
     logger.info(result.message)
     return ResponseUtil.success(msg=result.message)
 
+
+# ──────────────────── 导入 ────────────────────
 
 @mindmap_controller.post(
     '/import',
@@ -311,92 +427,61 @@ async def import_mindmap(
     return ResponseUtil.success(msg=result.message)
 ```
 
-- [ ] **Step 2: 验证 Swagger 文档**
+- [ ] **Step 2: 验证路由自动注册**
 
-重启后端，访问 `/docs` 确认所有 8 个端点已注册。
+启动后端服务，检查 `/docs` 页面确认所有 8 个端点已注册：
+
+```bash
+cd ruoyi-fastapi-backend
+python server.py
+# 访问 http://localhost:9099/docs 确认路由
+```
+
+Expected: Swagger UI 中出现 `脑图管理` 分组，包含 GET `/list`、GET `/{id}`、POST `/`、PUT `/`、DELETE `/{ids}`、PUT `/rename`、POST `/copy/{id}`、PUT `/content`、POST `/import`。
 
 - [ ] **Step 3: 提交**
 
 ```bash
 git add ruoyi-fastapi-backend/module_mindmap/controller/mindmap_controller.py
-git commit -m "feat(mindmap): add CRUD, rename, copy, content update, import endpoints"
+git commit -m "feat(mindmap): add controller with all CRUD, rename, copy, content, import endpoints"
 ```
 
 ---
 
-## Task 3: 后端 Service 层 — 添加所有权校验
-
-**Files:**
-- Modify: `ruoyi-fastapi-backend/module_mindmap/service/mindmap_service.py`
-
-- [ ] **Step 1: 为 edit/rename/delete 添加所有权校验**
-
-在 `edit_mindmap_services` 方法中，在名称唯一性检查之后、更新操作之前，添加：
-
-```python
-@classmethod
-async def edit_mindmap_services(cls, query_db: AsyncSession, page_object: MindmapModel, user_id: int) -> CrudResponseModel:
-    """编辑思维导图元数据（名称、描述、封面等）"""
-    mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
-    if not mindmap:
-        raise ServiceException(message='思维导图不存在')
-
-    # 所有权校验
-    if mindmap.owner_id != user_id:
-        raise ServiceException(message='无编辑权限')
-
-    # ... 后续代码不变
-```
-
-同样修改 `rename_mindmap_services` 和 `delete_mindmap_services` 方法签名，添加 `user_id` 参数并增加所有权校验。
-
-- [ ] **Step 2: 更新 Controller 传递 user_id**
-
-在 `mindmap_controller.py` 的 edit 和 rename 端点中，传递 `current_user.user.user_id` 给 service 方法：
-
-```python
-# edit_mindmap
-result = await MindmapService.edit_mindmap_services(query_db, edit_mindmap, current_user.user.user_id)
-
-# rename_mindmap
-result = await MindmapService.rename_mindmap_services(query_db, rename_model, current_user.user.user_id)
-```
-
-- [ ] **Step 3: 提交**
-
-```bash
-git add ruoyi-fastapi-backend/module_mindmap/service/mindmap_service.py ruoyi-fastapi-backend/module_mindmap/controller/mindmap_controller.py
-git commit -m "fix(mindmap): add ownership validation to edit/rename/delete services"
-```
-
----
-
-## Task 4: 菜单权限 SQL
+## Task 3: 菜单权限 SQL
 
 **Files:**
 - Create: `sql/mindmap_menu.sql`
 
 - [ ] **Step 1: 创建菜单和权限 SQL**
 
+使用 ID 9000+ 范围，避免与现有菜单冲突：
+
 ```sql
 -- 脑图管理菜单（parent_id=0 为一级菜单）
-INSERT INTO sys_menu VALUES('2000', '脑图管理', '0', '6', 'mindmap', NULL, '', '1', '0', 'M', '0', '0', '', 'mindmap', 'admin', NOW(), '', NULL, '脑图管理目录');
+INSERT INTO sys_menu VALUES('9000', '脑图管理', '0', '6', 'mindmap', NULL, '', '1', '0', 'M', '0', '0', '', 'mindmap', 'admin', NOW(), '', NULL, '脑图管理目录');
 
--- 脑图列表页（parent_id=2000）
-INSERT INTO sys_menu VALUES('2001', '脑图列表', '2000', '1', 'index', 'mindmap/index', '', '1', '0', 'C', '0', '0', 'mindmap:mindmap:list', 'mindmap', 'admin', NOW(), '', NULL, '脑图列表菜单');
+-- 脑图列表页（parent_id=9000）
+INSERT INTO sys_menu VALUES('9001', '脑图列表', '9000', '1', 'index', 'mindmap/index', '', '1', '0', 'C', '0', '0', 'mindmap:mindmap:list', 'mindmap', 'admin', NOW(), '', NULL, '脑图列表菜单');
 
 -- 脑图管理按钮权限
-INSERT INTO sys_menu VALUES('2002', '脑图查询', '2001', '1', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:query', '#', 'admin', NOW(), '', NULL, '');
-INSERT INTO sys_menu VALUES('2003', '脑图新增', '2001', '2', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:add', '#', 'admin', NOW(), '', NULL, '');
-INSERT INTO sys_menu VALUES('2004', '脑图修改', '2001', '3', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:edit', '#', 'admin', NOW(), '', NULL, '');
-INSERT INTO sys_menu VALUES('2005', '脑图删除', '2001', '4', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:remove', '#', 'admin', NOW(), '', NULL, '');
+INSERT INTO sys_menu VALUES('9002', '脑图查询', '9001', '1', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:query', '#', 'admin', NOW(), '', NULL, '');
+INSERT INTO sys_menu VALUES('9003', '脑图新增', '9001', '2', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:add', '#', 'admin', NOW(), '', NULL, '');
+INSERT INTO sys_menu VALUES('9004', '脑图修改', '9001', '3', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:edit', '#', 'admin', NOW(), '', NULL, '');
+INSERT INTO sys_menu VALUES('9005', '脑图删除', '9001', '4', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:remove', '#', 'admin', NOW(), '', NULL, '');
 ```
 
-- [ ] **Step 2: 执行 SQL**
+- [ ] **Step 2: 验证 ID 无冲突**
 
-在数据库中执行该 SQL 脚本，或通过项目的 SQL 初始化工具导入。
+执行前在数据库中确认 ID 9000-9005 未被占用：
 
-- [ ] **Step 3: 提交**
+```sql
+SELECT menu_id FROM sys_menu WHERE menu_id BETWEEN 9000 AND 9005;
+```
+
+Expected: 返回空结果。
+
+- [ ] **Step 3: 执行 SQL 并提交**
 
 ```bash
 git add sql/mindmap_menu.sql
@@ -405,7 +490,7 @@ git commit -m "feat(mindmap): add menu entries and permission data"
 
 ---
 
-## Task 5: 前端 API 层
+## Task 4: 前端 API 层
 
 **Files:**
 - Create: `ruoyi-fastapi-frontend/src/api/mindmap/mindmap.js`
@@ -503,12 +588,14 @@ git commit -m "feat(mindmap): add frontend API layer for mindmap CRUD"
 
 ---
 
-## Task 6: 前端脑图管理列表页
+## Task 5: 前端脑图管理列表页
 
 **Files:**
 - Create: `ruoyi-fastapi-frontend/src/views/mindmap/index.vue`
 
 - [ ] **Step 1: 创建列表页**
+
+包含"查看"（只读）、"编辑"、"复制"、"删除"四个操作按钮：
 
 ```vue
 <template>
@@ -568,8 +655,11 @@ git commit -m "feat(mindmap): add frontend API layer for mindmap CRUD"
           <span>{{ parseTime(scope.row.updateTime) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="260" align="center" class-name="small-padding fixed-width">
+      <el-table-column label="操作" width="320" align="center" class-name="small-padding fixed-width">
         <template #default="scope">
+          <el-button link type="primary" icon="View" @click="handleView(scope.row)" v-hasPermi="['mindmap:mindmap:query']">
+            查看
+          </el-button>
           <el-button link type="primary" icon="Edit" @click="handleEdit(scope.row)" v-hasPermi="['mindmap:mindmap:edit']">
             编辑
           </el-button>
@@ -678,6 +768,11 @@ function handleAdd() {
   })
 }
 
+/** 查看（只读模式） */
+function handleView(row) {
+  router.push({ path: '/mindmap/edit', query: { id: row.id, readonly: '1' } })
+}
+
 /** 编辑（跳转到编辑器页面） */
 function handleEdit(row) {
   router.push({ path: '/mindmap/edit', query: { id: row.id } })
@@ -728,12 +823,12 @@ getList()
 
 ```bash
 git add ruoyi-fastapi-frontend/src/views/mindmap/index.vue
-git commit -m "feat(mindmap): add mindmap management list page"
+git commit -m "feat(mindmap): add mindmap management list page with view/edit/copy/delete"
 ```
 
 ---
 
-## Task 7: 前端编辑器页面
+## Task 6: 前端编辑器页面
 
 **Files:**
 - Create: `ruoyi-fastapi-frontend/src/views/mindmap/edit.vue`
@@ -749,15 +844,16 @@ git commit -m "feat(mindmap): add mindmap management list page"
         <template #content>
           <span class="mindmap-title" @click="showRenameDialog">
             {{ mindmapName || '加载中...' }}
-            <el-icon><Edit /></el-icon>
+            <el-icon v-if="!isReadonly"><Edit /></el-icon>
           </span>
+          <el-tag v-if="isReadonly" type="info" size="small" style="margin-left: 8px;">只读</el-tag>
         </template>
       </el-page-header>
     </div>
     <div class="mindmap-edit-body">
-      <Toolbar v-if="!isZenMode" />
+      <Toolbar v-if="!isZenMode && !isReadonly" />
       <div class="mindmap-editor-container">
-        <Edit ref="editRef" :mindmap-id="mindmapId" @name-change="onNameChange" />
+        <Edit ref="editRef" :mindmap-id="mindmapId" :readonly="isReadonly" @name-change="onNameChange" />
       </div>
       <NavigatorToolbar v-if="!isZenMode" :mindMap="mindMapInstance" />
     </div>
@@ -792,6 +888,7 @@ const { proxy } = getCurrentInstance()
 
 const editRef = ref(null)
 const mindmapId = computed(() => Number(route.query.id))
+const isReadonly = computed(() => route.query.readonly === '1')
 const mindmapName = ref('')
 const renameOpen = ref(false)
 const isZenMode = computed(() => store.localConfig.isZenMode)
@@ -811,6 +908,7 @@ function onNameChange(name) {
 }
 
 function showRenameDialog() {
+  if (isReadonly.value) return
   renameForm.id = mindmapId.value
   renameForm.name = mindmapName.value
   renameOpen.value = true
@@ -889,16 +987,15 @@ function submitRename() {
 
 ```bash
 git add ruoyi-fastapi-frontend/src/views/mindmap/edit.vue ruoyi-fastapi-frontend/src/router/index.js
-git commit -m "feat(mindmap): add editor page with rename and back navigation"
+git commit -m "feat(mindmap): add editor page with readonly mode and rename"
 ```
 
 ---
 
-## Task 8: 前端编辑器对接后端 API
+## Task 7: 前端编辑器对接后端 API
 
 **Files:**
 - Modify: `ruoyi-fastapi-frontend/src/components/MindMap/Edit.vue`
-- Modify: `ruoyi-fastapi-frontend/src/components/MindMap/useStore.js`
 
 这是 Phase 1 最关键的一步：将 Edit.vue 从 localStorage 数据源切换到后端 API。
 
@@ -908,7 +1005,8 @@ git commit -m "feat(mindmap): add editor page with rename and back navigation"
 
 ```javascript
 const props = defineProps({
-  mindmapId: { type: Number, default: null }
+  mindmapId: { type: Number, default: null },
+  readonly: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['name-change'])
@@ -921,6 +1019,8 @@ import { getMindmap, updateMindmapContent } from '@/api/mindmap/mindmap'
 
 let autoSaveTimer = null
 const isSaving = ref(false)
+const lastSaveTime = ref(0)
+const pendingSave = ref(false)
 
 async function initMindMap() {
   if (!mindMapContainerRef.value) return
@@ -957,22 +1057,24 @@ async function initMindMap() {
     viewData = savedData?.view || null
   }
 
-  // ... 后续 MindMap 初始化代码不变
+  // ... 后续 MindMap 初始化代码不变（new MindMap({...})）
 }
 ```
 
 - [ ] **Step 2: 修改自动保存逻辑**
 
-替换 `onBusDataChange` 和 `manualSave`：
+替换 `onBusDataChange` 和 `manualSave`，使用 5 秒防抖 + 并发控制：
 
 ```javascript
+const AUTO_SAVE_DELAY = 5000 // 5秒防抖，避免频繁请求
+
 function onBusDataChange(data) {
   if (props.mindmapId) {
     // 后端模式：防抖自动保存到后端
     clearTimeout(autoSaveTimer)
     autoSaveTimer = setTimeout(() => {
       saveToBackend()
-    }, 2000)
+    }, AUTO_SAVE_DELAY)
   } else {
     // localStorage 模式：保持不变
     actions.storeData({ root: data })
@@ -980,8 +1082,16 @@ function onBusDataChange(data) {
 }
 
 async function saveToBackend() {
-  if (!mindMap.value || !props.mindmapId || isSaving.value) return
+  if (!mindMap.value || !props.mindmapId || props.readonly) return
+
+  // 并发控制：如果正在保存，标记为待保存，等当前保存完成后再触发
+  if (isSaving.value) {
+    pendingSave.value = true
+    return
+  }
+
   isSaving.value = true
+  pendingSave.value = false
   try {
     const fullData = mindMap.value.getData(true)
     await updateMindmapContent({
@@ -991,10 +1101,17 @@ async function saveToBackend() {
       layout: fullData.layout,
       theme: fullData.theme
     })
+    lastSaveTime.value = Date.now()
   } catch (error) {
     console.error('自动保存失败:', error)
   } finally {
     isSaving.value = false
+    // 如果在保存期间有新的变更，立即触发下一次保存
+    if (pendingSave.value) {
+      pendingSave.value = false
+      clearTimeout(autoSaveTimer)
+      autoSaveTimer = setTimeout(() => saveToBackend(), AUTO_SAVE_DELAY)
+    }
   }
 }
 
@@ -1002,6 +1119,8 @@ function manualSave() {
   if (!mindMap.value) return
   const fullData = mindMap.value.getData(true)
   if (props.mindmapId) {
+    // 手动保存：跳过防抖，立即保存
+    clearTimeout(autoSaveTimer)
     saveToBackend()
     ElMessage.success('已保存到服务器')
   } else {
@@ -1011,7 +1130,31 @@ function manualSave() {
 }
 ```
 
-- [ ] **Step 3: 清理 onBeforeUnmount**
+- [ ] **Step 3: 只读模式支持**
+
+在 MindMap 初始化配置中，当 `props.readonly` 为 true 时设置只读：
+
+```javascript
+// 在 new MindMap({...}) 的配置中添加
+const mm = new MindMap({
+  el: mindMapContainerRef.value,
+  data: root,
+  // ... 其他配置不变
+  readonly: props.readonly,  // 只读模式
+  // ...
+})
+
+// 只读模式下不绑定保存事件
+if (!props.readonly) {
+  bus.on('data_change', onBusDataChange)
+  bus.on('view_data_change', onBusViewDataChange)
+  mm.keyCommand.addShortcut('Control+s', () => {
+    manualSave()
+  })
+}
+```
+
+- [ ] **Step 4: 清理 onBeforeUnmount**
 
 ```javascript
 onBeforeUnmount(() => {
@@ -1027,16 +1170,16 @@ onBeforeUnmount(() => {
 })
 ```
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add ruoyi-fastapi-frontend/src/components/MindMap/Edit.vue
-git commit -m "feat(mindmap): integrate editor with backend API for save/load"
+git commit -m "feat(mindmap): integrate editor with backend API, add readonly mode and safe auto-save"
 ```
 
 ---
 
-## Task 9: 集成测试
+## Task 8: 集成测试
 
 **Files:**
 - Create: `ruoyi-fastapi-test/mindmap/test_mindmap_management.py`
@@ -1126,6 +1269,25 @@ class TestMindmapManagement:
         res = requests.delete(f'{BASE_URL}/{mindmap_id}', headers=self.headers)
         assert res.json()['code'] == 200
         self.created_ids.clear()
+
+    def test_nonexistent_mindmap(self):
+        """测试访问不存在的脑图"""
+        res = requests.get(f'{BASE_URL}/999999999', headers=self.headers)
+        assert res.json()['code'] != 200
+
+    def test_duplicate_name(self):
+        """测试同用户下名称唯一性"""
+        data = {
+            'name': '唯一性测试脑图',
+            'nodeTree': {'data': {'text': '中心'}, 'children': []},
+        }
+        # 第一次创建应成功
+        res1 = requests.post(BASE_URL, json=data, headers=self.headers)
+        assert res1.json()['code'] == 200
+
+        # 第二次同名创建应失败
+        res2 = requests.post(BASE_URL, json=data, headers=self.headers)
+        assert res2.json()['code'] != 200
 ```
 
 - [ ] **Step 2: 运行测试**
@@ -1141,7 +1303,7 @@ Expected: 所有测试 PASS。
 
 ```bash
 git add ruoyi-fastapi-test/mindmap/
-git commit -m "test(mindmap): add integration tests for mindmap management"
+git commit -m "test(mindmap): add integration tests for mindmap CRUD lifecycle and edge cases"
 ```
 
 ---
@@ -1153,63 +1315,104 @@ git commit -m "test(mindmap): add integration tests for mindmap management"
 **Yjs (CRDT)** 是实现实时协作的最佳选择：
 - 天然支持树形结构（`Y.Map` + `Y.Array`）
 - 内置 Awareness 协议实现多人光标
-- 支持离线编辑（虽然本项目不需要）
 - 前端生态成熟（`y-websocket`, `y-protocols`）
 
-**后端 WebSocket 架构：**
+### Yjs 数据模型设计（细粒度，非整体替换）
+
+**关键决策**：不能把整个 `nodeTree` 当作一个 `Y.Map` 值来存储，否则每次更新都是整体替换，失去 CRDT 的意义。
+
+采用细粒度映射方案：
+
+```
+Y.Doc
+├── Y.Map('meta')                     # 脑图元数据
+│   ├── layout: string
+│   ├── theme: Y.Map
+│   └── viewData: Y.Map
+└── Y.Map('nodes')                    # 节点存储（扁平化，以 nodeId 为 key）
+    ├── "root": Y.Map                 # 每个节点
+    │   ├── data: Y.Map { text, richText, ... }
+    │   ├── children: Y.Array<string> # 子节点 ID 列表
+    │   └── parent: string            # 父节点 ID
+    ├── "node_1": Y.Map { ... }
+    └── "node_2": Y.Map { ... }
+```
+
+**优势**：
+- 修改单个节点文本只触发该节点的 `Y.Map` 变更，不影响其他节点
+- 添加/删除子节点只操作 `Y.Array` 的增删，CRDT 自动合并
+- 移动节点只需修改 `parent` 和 `children` 数组
+- 两个用户同时编辑不同节点不会冲突
+
+### WebSocket 认证方案（安全方式）
+
+**不使用 URL query parameter 传递 token**。改为连接后发送认证消息：
+
+```
+客户端连接 → 服务端 accept
+客户端发送: { "type": "auth", "token": "jwt_token_here" }
+服务端验证: 通过 → 发送 { "type": "auth_ok", "user": {...} }
+           失败 → 发送 { "type": "auth_error", "message": "..." } + close(4001)
+后续消息正常处理
+```
+
+这样 token 不会出现在 URL、日志或浏览器历史中。
+
+### 后端 WebSocket 架构
 - FastAPI 原生 WebSocket 端点
-- JWT token 通过 URL query parameter 认证
 - 每个脑图对应一个 "room"，用户加入/离开 room
 - 内存中维护 Yjs 文档状态，定期持久化到数据库
 
 ## 新增数据库表
 
 ```sql
--- mindmap_ws_room 表（WebSocket 房间状态）
 CREATE TABLE mindmap_ws_state (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     mindmap_id BIGINT NOT NULL,
     yjs_state MEDIUMBLOB COMMENT 'Yjs 文档二进制状态',
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE INDEX idx_ws_mindmap (mindmap_id)
-);
+) COMMENT '脑图 Yjs 文档持久化状态表';
 ```
 
 ## 新增文件
 
 ### 后端
+- `module_mindmap/websocket/__init__.py`
 - `module_mindmap/websocket/mindmap_ws.py` — WebSocket 端点
 - `module_mindmap/websocket/yjs_doc.py` — Yjs 文档管理
 - `module_mindmap/websocket/room_manager.py` — 房间管理器
+- `module_mindmap/entity/do/mindmap_ws_state_do.py` — WS 状态 ORM
 
 ### 前端
 - `src/components/MindMap/Collaborators.vue` — 协作者头像列表
-- `src/utils/yjs-sync.js` — Yjs 同步逻辑
+- `src/utils/yjs-sync.js` — Yjs 同步逻辑（细粒度数据模型）
 - `src/utils/ws-client.js` — WebSocket 客户端封装
 
-## API 设计
+## WebSocket 消息协议
 
-### WebSocket 端点
-```
-WS /ws/mindmap/{mindmap_id}?token=<jwt_token>
-```
-
-消息协议（JSON）：
 ```json
+// ─── 认证 ───
 // 客户端 → 服务端
-{ "type": "join", "mindmapId": 1 }
-{ "type": "sync_step1", "state": <Uint8Array base64> }
-{ "type": "sync_step2", "update": <Uint8Array base64> }
-{ "type": "update", "update": <Uint8Array base64> }
-{ "type": "awareness", "update": <base64> }
+{ "type": "auth", "token": "jwt_token" }
+// 服务端 → 客户端
+{ "type": "auth_ok", "user": { "id": 1, "name": "张三", "avatar": "..." } }
+{ "type": "auth_error", "message": "token无效" }
+
+// ─── 协作同步 ───
+// 客户端 → 服务端
+{ "type": "sync_step1", "state": "<base64>" }
+{ "type": "sync_step2", "update": "<base64>" }
+{ "type": "update", "update": "<base64>" }
+{ "type": "awareness", "update": "<base64>" }
 
 // 服务端 → 客户端
-{ "type": "sync_step1", "state": <Uint8Array base64> }
-{ "type": "sync_step2", "update": <Uint8Array base64> }
-{ "type": "update", "update": <Uint8Array base64>, "origin": "user_123" }
-{ "type": "awareness", "update": <base64> }
+{ "type": "sync_init", "state": "<base64>" }
+{ "type": "update", "update": "<base64>", "origin": "user_123" }
+{ "type": "awareness", "update": "<base64>", "userId": 1 }
 { "type": "user_joined", "user": { "id": 1, "name": "张三", "avatar": "..." } }
 { "type": "user_left", "userId": 1 }
+{ "type": "room_users", "users": [...] }
 { "type": "error", "message": "权限不足" }
 ```
 
@@ -1218,6 +1421,7 @@ WS /ws/mindmap/{mindmap_id}?token=<jwt_token>
 **Files:**
 - Create: `ruoyi-fastapi-backend/module_mindmap/websocket/room_manager.py`
 - Create: `ruoyi-fastapi-backend/module_mindmap/websocket/yjs_doc.py`
+- Create: `ruoyi-fastapi-backend/module_mindmap/entity/do/mindmap_ws_state_do.py`
 
 - [ ] **Step 1: 实现 RoomManager**
 
@@ -1232,7 +1436,7 @@ class RoomManager:
 
     def __init__(self):
         self._rooms: dict[int, set] = {}  # mindmap_id -> set of websocket connections
-        self._user_info: dict[int, dict] = {}  # websocket_id -> user info
+        self._user_info: dict[int, dict] = {}  # id(websocket) -> user info
         self._lock = asyncio.Lock()
 
     async def join(self, mindmap_id: int, websocket, user_info: dict):
@@ -1273,12 +1477,40 @@ class RoomManager:
 room_manager = RoomManager()
 ```
 
-- [ ] **Step 2: 实现 Yjs 文档管理**
+- [ ] **Step 2: 创建 WS 状态 ORM 模型**
+
+参照 `mindmap_do.py` 的模式：
+
+```python
+"""脑图 Yjs 文档持久化状态模型"""
+from sqlalchemy import BigInteger, Column, DateTime
+from sqlalchemy.dialects import mysql, postgresql
+from config.database import Base
+from config.env import DataBaseConfig
+from datetime import datetime
+
+
+class MindmapWsState(Base):
+    __tablename__ = 'mindmap_ws_state'
+    __table_args__ = ({'comment': '脑图Yjs文档持久化状态表'},)
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    mindmap_id = Column(BigInteger, nullable=False, unique=True, comment='脑图ID')
+    yjs_state = Column(
+        mysql.MEDIUMBLOB if DataBaseConfig.db_type == 'mysql' else postgresql.BYTEA,
+        nullable=True,
+        comment='Yjs文档二进制状态',
+    )
+    updated_at = Column(DateTime, nullable=True, default=datetime.now, onupdate=datetime.now, comment='更新时间')
+```
+
+- [ ] **Step 3: 实现 Yjs 文档管理**
 
 ```python
 """Yjs 文档持久化管理"""
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from module_mindmap.entity.do.mindmap_ws_state_do import MindmapWsState
 
 
 class YjsDocManager:
@@ -1287,7 +1519,6 @@ class YjsDocManager:
     @classmethod
     async def load_state(cls, db: AsyncSession, mindmap_id: int) -> bytes | None:
         """从数据库加载 Yjs 文档状态"""
-        from module_mindmap.entity.do.mindmap_ws_state_do import MindmapWsState
         result = (await db.execute(
             select(MindmapWsState.yjs_state)
             .where(MindmapWsState.mindmap_id == mindmap_id)
@@ -1296,8 +1527,7 @@ class YjsDocManager:
 
     @classmethod
     async def save_state(cls, db: AsyncSession, mindmap_id: int, state: bytes):
-        """保存 Yjs 文档状态到数据库"""
-        from module_mindmap.entity.do.mindmap_ws_state_do import MindmapWsState
+        """保存 Yjs 文档状态到数据库（upsert）"""
         existing = (await db.execute(
             select(MindmapWsState).where(MindmapWsState.mindmap_id == mindmap_id)
         )).scalar_one_or_none()
@@ -1313,11 +1543,11 @@ class YjsDocManager:
         await db.commit()
 ```
 
-- [ ] **Step 3: 提交**
+- [ ] **Step 4: 提交**
 
 ```bash
-git add ruoyi-fastapi-backend/module_mindmap/websocket/
-git commit -m "feat(mindmap): add WebSocket room manager and Yjs doc persistence"
+git add ruoyi-fastapi-backend/module_mindmap/websocket/ ruoyi-fastapi-backend/module_mindmap/entity/do/mindmap_ws_state_do.py
+git commit -m "feat(mindmap): add WebSocket room manager, Yjs doc persistence and WS state ORM"
 ```
 
 ---
@@ -1327,34 +1557,47 @@ git commit -m "feat(mindmap): add WebSocket room manager and Yjs doc persistence
 **Files:**
 - Create: `ruoyi-fastapi-backend/module_mindmap/websocket/mindmap_ws.py`
 
-- [ ] **Step 1: 实现 WebSocket 端点**
+- [ ] **Step 1: 实现 WebSocket 端点（连接后认证）**
 
 ```python
 """脑图 WebSocket 端点"""
-import json
-from fastapi import WebSocket, WebSocketDisconnect, Query
+import asyncio
+import base64
+from fastapi import WebSocket, WebSocketDisconnect
 from utils.log_util import logger
 
 from module_mindmap.websocket.room_manager import room_manager
 from module_mindmap.websocket.yjs_doc import YjsDocManager
 from config.get_db import AsyncSessionLocal
 
+# 认证超时：连接后 10 秒内必须发送 auth 消息
+AUTH_TIMEOUT_SECONDS = 10
+# Yjs 状态持久化间隔：每 30 秒最多持久化一次
+PERSIST_INTERVAL_SECONDS = 30
 
-async def mindmap_websocket_endpoint(
-    websocket: WebSocket,
-    mindmap_id: int,
-    token: str = Query(default=''),
-):
+
+async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int):
     """脑图实时协作 WebSocket 端点"""
-    # 1. JWT 认证
-    from module_admin.service.login_service import LoginService
-    try:
-        current_user = await LoginService.validate_token_for_ws(token)
-    except Exception as e:
-        await websocket.close(code=4001, reason=str(e))
-        return
-
     await websocket.accept()
+
+    # ── 连接后认证（不通过 URL 传递 token） ──
+    try:
+        auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=AUTH_TIMEOUT_SECONDS)
+        if auth_msg.get('type') != 'auth' or not auth_msg.get('token'):
+            await websocket.send_json({'type': 'auth_error', 'message': '请发送认证消息'})
+            await websocket.close(code=4001)
+            return
+
+        from module_admin.service.login_service import LoginService
+        current_user = await LoginService.validate_token_for_ws(auth_msg['token'])
+    except asyncio.TimeoutError:
+        await websocket.send_json({'type': 'auth_error', 'message': '认证超时'})
+        await websocket.close(code=4001)
+        return
+    except Exception as e:
+        await websocket.send_json({'type': 'auth_error', 'message': str(e)})
+        await websocket.close(code=4001)
+        return
 
     user_info = {
         'id': current_user.user.user_id,
@@ -1362,12 +1605,13 @@ async def mindmap_websocket_endpoint(
         'avatar': current_user.user.avatar or '',
     }
 
+    # 认证通过
+    await websocket.send_json({'type': 'auth_ok', 'user': user_info})
     await room_manager.join(mindmap_id, websocket, user_info)
 
     # 通知其他人
     await room_manager.broadcast(mindmap_id, {
-        'type': 'user_joined',
-        'user': user_info,
+        'type': 'user_joined', 'user': user_info,
     }, exclude=websocket)
 
     # 发送当前房间用户列表
@@ -1379,7 +1623,6 @@ async def mindmap_websocket_endpoint(
         async with AsyncSessionLocal() as db:
             state = await YjsDocManager.load_state(db, mindmap_id)
             if state:
-                import base64
                 await websocket.send_json({
                     'type': 'sync_init',
                     'state': base64.b64encode(state).decode(),
@@ -1387,32 +1630,35 @@ async def mindmap_websocket_endpoint(
     except Exception as e:
         logger.error(f'加载 Yjs 状态失败: {e}')
 
+    # ── 消息循环 ──
+    last_persist_time = 0
     try:
         while True:
             data = await websocket.receive_json()
             msg_type = data.get('type')
 
             if msg_type in ('sync_step1', 'sync_step2', 'update'):
-                # 转发 Yjs 更新给房间内其他人
                 await room_manager.broadcast(mindmap_id, {
                     'type': msg_type,
                     'update': data.get('update'),
                     'origin': str(user_info['id']),
                 }, exclude=websocket)
 
-                # 定期持久化（每 30 秒或有 update 时）
-                if msg_type == 'update':
+                # 节流持久化：每 30 秒最多一次
+                import time
+                now = time.monotonic()
+                if msg_type == 'update' and (now - last_persist_time) >= PERSIST_INTERVAL_SECONDS:
+                    last_persist_time = now
                     try:
-                        import base64
-                        async with AsyncSessionLocal() as db:
-                            state_bytes = base64.b64decode(data.get('state', ''))
-                            if state_bytes:
+                        state_b64 = data.get('state', '')
+                        if state_b64:
+                            state_bytes = base64.b64decode(state_b64)
+                            async with AsyncSessionLocal() as db:
                                 await YjsDocManager.save_state(db, mindmap_id, state_bytes)
                     except Exception as e:
                         logger.error(f'持久化 Yjs 状态失败: {e}')
 
             elif msg_type == 'awareness':
-                # 转发 awareness 更新
                 await room_manager.broadcast(mindmap_id, {
                     'type': 'awareness',
                     'update': data.get('update'),
@@ -1420,23 +1666,22 @@ async def mindmap_websocket_endpoint(
                 }, exclude=websocket)
 
     except WebSocketDisconnect:
-        await room_manager.leave(mindmap_id, websocket)
-        await room_manager.broadcast(mindmap_id, {
-            'type': 'user_left',
-            'userId': user_info['id'],
-        })
+        pass
     except Exception as e:
         logger.error(f'WebSocket 错误: {e}')
+    finally:
         await room_manager.leave(mindmap_id, websocket)
+        await room_manager.broadcast(mindmap_id, {
+            'type': 'user_left', 'userId': user_info['id'],
+        })
 ```
 
 - [ ] **Step 2: 注册 WebSocket 路由**
 
-在 `server.py` 或路由注册文件中添加：
+在 `server.py` 中 `create_app()` 函数内添加：
 
 ```python
 from module_mindmap.websocket.mindmap_ws import mindmap_websocket_endpoint
-
 app.websocket('/ws/mindmap/{mindmap_id}')(mindmap_websocket_endpoint)
 ```
 
@@ -1444,7 +1689,7 @@ app.websocket('/ws/mindmap/{mindmap_id}')(mindmap_websocket_endpoint)
 
 ```bash
 git add ruoyi-fastapi-backend/module_mindmap/websocket/mindmap_ws.py
-git commit -m "feat(mindmap): add WebSocket endpoint for real-time collaboration"
+git commit -m "feat(mindmap): add WebSocket endpoint with post-connect auth and throttled persistence"
 ```
 
 ---
@@ -1455,7 +1700,7 @@ git commit -m "feat(mindmap): add WebSocket endpoint for real-time collaboration
 - Create: `ruoyi-fastapi-frontend/src/utils/ws-client.js`
 - Create: `ruoyi-fastapi-frontend/src/utils/yjs-sync.js`
 
-- [ ] **Step 1: WebSocket 客户端封装**
+- [ ] **Step 1: WebSocket 客户端封装（连接后发送 auth 消息）**
 
 ```javascript
 // src/utils/ws-client.js
@@ -1469,30 +1714,41 @@ export class MindmapWsClient {
     this.reconnectTimer = null
     this.reconnectAttempts = 0
     this.maxReconnectAttempts = 5
+    this.isAuthenticated = false
   }
 
   connect() {
-    const token = getToken()
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/mindmap/${this.mindmapId}?token=${token}`
+    const wsUrl = `${protocol}//${window.location.host}/ws/mindmap/${this.mindmapId}`
 
     this.ws = new WebSocket(wsUrl)
 
     this.ws.onopen = () => {
-      this.reconnectAttempts = 0
-      this.handlers.onOpen?.()
+      // 连接建立后发送认证消息（token 不在 URL 中）
+      const token = getToken()
+      this.ws.send(JSON.stringify({ type: 'auth', token }))
     }
 
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-        this.handlers[data.type]?.(data)
+        if (data.type === 'auth_ok') {
+          this.isAuthenticated = true
+          this.reconnectAttempts = 0
+          this.handlers.onAuthenticated?.(data.user)
+        } else if (data.type === 'auth_error') {
+          this.handlers.onAuthError?.(data.message)
+          this.ws.close()
+        } else if (this.isAuthenticated) {
+          this.handlers[data.type]?.(data)
+        }
       } catch (e) {
         console.error('WS message parse error:', e)
       }
     }
 
     this.ws.onclose = () => {
+      this.isAuthenticated = false
       this.handlers.onClose?.()
       this._scheduleReconnect()
     }
@@ -1504,7 +1760,7 @@ export class MindmapWsClient {
   }
 
   send(data) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.ws?.readyState === WebSocket.OPEN && this.isAuthenticated) {
       this.ws.send(JSON.stringify(data))
     }
   }
@@ -1513,6 +1769,7 @@ export class MindmapWsClient {
     clearTimeout(this.reconnectTimer)
     this.ws?.close()
     this.ws = null
+    this.isAuthenticated = false
   }
 
   _scheduleReconnect() {
@@ -1526,25 +1783,37 @@ export class MindmapWsClient {
 }
 ```
 
-- [ ] **Step 2: Yjs 同步逻辑**
+- [ ] **Step 2: Yjs 同步逻辑（细粒度数据模型）**
 
 ```javascript
 // src/utils/yjs-sync.js
 import * as Y from 'yjs'
 import { MindmapWsClient } from '@/utils/ws-client'
 
+/**
+ * Yjs 脑图同步管理器
+ *
+ * 数据模型（细粒度，非整体替换）：
+ *   Y.Doc
+ *   ├── Y.Map('meta')           → { layout, theme: Y.Map, viewData: Y.Map }
+ *   └── Y.Map('nodes')          → { [nodeId]: Y.Map({ data: Y.Map, children: Y.Array<string>, parent: string }) }
+ *
+ * 优势：修改单个节点只触发该节点的变更，CRDT 自动合并不同节点的并发编辑。
+ */
 export class YjsMindmapSync {
-  constructor(mindmapId, mindMapInstance, options = {}) {
+  constructor(mindmapId, mindMapInstance) {
     this.mindmapId = mindmapId
     this.mindMap = mindMapInstance
     this.doc = new Y.Doc()
     this.collaborators = ref([])
     this.isSynced = ref(false)
+    this._applyingRemote = false // 防止远程更新触发本地变更事件
 
-    this.yRoot = this.doc.getMap('mindmap')
+    this.yMeta = this.doc.getMap('meta')
+    this.yNodes = this.doc.getMap('nodes')
 
     this.wsClient = new MindmapWsClient(mindmapId, {
-      onOpen: () => { this.isSynced.value = true },
+      onAuthenticated: (user) => { this.isSynced.value = true },
       onClose: () => { this.isSynced.value = false },
       sync_init: (data) => this._handleSyncInit(data),
       update: (data) => this._handleUpdate(data),
@@ -1555,15 +1824,21 @@ export class YjsMindmapSync {
   }
 
   start() {
-    // 监听 Yjs 文档变更
+    // 监听 Yjs 文档变更，转发到 WebSocket
     this.doc.on('update', (update, origin) => {
       if (origin !== 'remote') {
-        const state = Y.encodeStateAsUpdate(this.doc)
         this.wsClient.send({
           type: 'update',
-          update: btoa(String.fromCharCode(...state)),
-          state: btoa(String.fromCharCode(...Y.encodeStateAsUpdate(this.doc))),
+          update: this._encodeUpdate(update),
+          state: this._encodeUpdate(Y.encodeStateAsUpdate(this.doc)),
         })
+      }
+    })
+
+    // 监听节点变更，同步到脑图实例
+    this.yNodes.observeDeep(() => {
+      if (!this._applyingRemote) {
+        this._applyYjsToMindmap()
       }
     })
 
@@ -1575,23 +1850,82 @@ export class YjsMindmapSync {
     this.doc.destroy()
   }
 
-  _handleSyncInit(data) {
-    const state = Uint8Array.from(atob(data.state), c => c.charCodeAt(0))
-    Y.applyUpdate(this.doc, state, 'remote')
-    this._applyYjsToMindmap()
+  /** 将脑图的完整节点树写入 Yjs（初始化或加载远程数据后调用） */
+  initFromMindmap(nodeTree) {
+    this.doc.transact(() => {
+      this._flattenTreeToYjs(nodeTree, null)
+    })
   }
 
-  _handleUpdate(data) {
-    const update = Uint8Array.from(atob(data.update), c => c.charCodeAt(0))
-    Y.applyUpdate(this.doc, update, 'remote')
-    this._applyYjsToMindmap()
+  /** 将 simple-mind-map 的树形结构扁平化写入 Y.Map('nodes') */
+  _flattenTreeToYjs(node, parentId, index = 0) {
+    const nodeId = node.data?.uuid || node.data?.id || `node_${index}`
+    const yNode = new Y.Map()
+    yNode.set('data', new Y.Map(Object.entries(node.data || {})))
+    yNode.set('children', new Y.Array())
+    yNode.set('parent', parentId || '')
+    this.yNodes.set(nodeId, yNode)
+
+    if (node.children?.length) {
+      const childIds = node.children.map((child, i) => {
+        const childId = this._flattenTreeToYjs(child, nodeId, i)
+        return childId
+      })
+      yNode.get('children').push(childIds)
+    }
+
+    return nodeId
+  }
+
+  /** 从 Yjs 扁平节点重建 simple-mind-map 树形结构 */
+  _rebuildTreeFromYjs() {
+    const nodes = {}
+    this.yNodes.forEach((yNode, nodeId) => {
+      nodes[nodeId] = {
+        data: Object.fromEntries(yNode.get('data')?.entries() || []),
+        children: [],
+        _parentId: yNode.get('parent') || '',
+        _childIds: yNode.get('children')?.toArray() || [],
+      }
+    })
+
+    // 构建树
+    const rootId = Object.keys(nodes).find(id => !nodes[id]._parentId)
+    if (!rootId || !nodes[rootId]) return null
+
+    function buildTree(id) {
+      const node = nodes[id]
+      if (!node) return null
+      return {
+        data: node.data,
+        children: node._childIds.map(buildTree).filter(Boolean),
+      }
+    }
+
+    return buildTree(rootId)
   }
 
   _applyYjsToMindmap() {
-    const nodeTree = this.yRoot.get('nodeTree')
-    if (nodeTree && this.mindMap) {
-      this.mindMap.setData(JSON.parse(JSON.stringify(nodeTree)))
+    if (!this.mindMap) return
+    this._applyingRemote = true
+    try {
+      const tree = this._rebuildTreeFromYjs()
+      if (tree) {
+        this.mindMap.setData(tree)
+      }
+    } finally {
+      this._applyingRemote = false
     }
+  }
+
+  _handleSyncInit(data) {
+    const state = this._decodeUpdate(data.state)
+    Y.applyUpdate(this.doc, state, 'remote')
+  }
+
+  _handleUpdate(data) {
+    const update = this._decodeUpdate(data.update)
+    Y.applyUpdate(this.doc, update, 'remote')
   }
 
   _handleUserJoined(data) {
@@ -1606,11 +1940,12 @@ export class YjsMindmapSync {
     this.collaborators.value = data.users
   }
 
-  /** 将当前脑图数据写入 Yjs */
-  syncMindmapToYjs(nodeTree) {
-    this.doc.transact(() => {
-      this.yRoot.set('nodeTree', nodeTree)
-    })
+  _encodeUpdate(uint8Array) {
+    return btoa(String.fromCharCode(...uint8Array))
+  }
+
+  _decodeUpdate(base64Str) {
+    return Uint8Array.from(atob(base64Str), c => c.charCodeAt(0))
   }
 }
 ```
@@ -1624,10 +1959,11 @@ import { YjsMindmapSync } from '@/utils/yjs-sync'
 
 let yjsSync = null
 
-// 在 MindMap 创建成功后
-if (props.mindmapId) {
+// 在 MindMap 创建成功后（非只读模式）
+if (props.mindmapId && !props.readonly) {
   yjsSync = new YjsMindmapSync(props.mindmapId, mm)
   yjsSync.start()
+  yjsSync.initFromMindmap(root) // 将当前数据写入 Yjs
 }
 
 // 在 onBeforeUnmount 中
@@ -1641,7 +1977,7 @@ if (yjsSync) {
 
 ```bash
 git add ruoyi-fastapi-frontend/src/utils/ws-client.js ruoyi-fastapi-frontend/src/utils/yjs-sync.js ruoyi-fastapi-frontend/src/components/MindMap/Edit.vue
-git commit -m "feat(mindmap): integrate Yjs CRDT for real-time collaboration"
+git commit -m "feat(mindmap): integrate Yjs CRDT with fine-grained node model for real-time collaboration"
 ```
 
 ---
@@ -1686,7 +2022,6 @@ const extraCount = computed(() => Math.max(0, props.collaborators.length - props
 .collaborators {
   display: flex;
   align-items: center;
-  gap: -8px;
 }
 .collaborators .el-avatar {
   border: 2px solid #fff;
@@ -1722,9 +2057,10 @@ git commit -m "feat(mindmap): add collaborators avatar list component"
 
 ## 技术方案
 
-- **草稿版本**：自动保存时创建（防抖 2 秒），保留最近 50 个
+- **草稿版本**：自动保存时创建，保留最近 **10 个**（减少存储开销）
 - **正式版本**：用户手动 Ctrl+S 时创建，永久保留
-- **版本数据结构**：快照式存储（存完整 node_tree），非增量 diff
+- **版本数据结构**：快照式存储（存完整 node_tree）
+- **存储估算**：10 个草稿 × 平均 200KB = 2MB/脑图，可接受
 
 ## 新增数据库表
 
@@ -1766,7 +2102,7 @@ CREATE TABLE mindmap_version (
 | GET | `/mindmap/version/{version_id}` | 获取版本详情（完整 node_tree） |
 | POST | `/mindmap/version/restore/{version_id}` | 回滚到指定版本 |
 | POST | `/mindmap/version/save` | 手动创建正式版本 |
-| DELETE | `/mindmap/version/{version_id}` | 删除指定版本 |
+| DELETE | `/mindmap/version/{version_id}` | 删除指定版本（仅正式版本可删） |
 
 ## Task 1: 版本数据模型与 DAO
 
@@ -1776,7 +2112,12 @@ CREATE TABLE mindmap_version (
 
 - [ ] **Step 1: 创建 ORM 模型和 DAO**
 
-（参照 mindmap_do.py 和 mindmap_dao.py 的模式实现）
+参照 Task 1 中 `mindmap_do.py` 和 `mindmap_dao.py` 的模式。DAO 需包含：
+- `add_version()` — 插入版本记录
+- `get_version_list()` — 分页查询，支持 `version_type` 筛选
+- `get_version_by_id()` — 单条查询
+- `delete_old_drafts()` — 删除超过 10 个的旧草稿版本
+- `delete_version()` — 删除指定版本
 
 - [ ] **Step 2: 提交**
 
@@ -1791,23 +2132,25 @@ git commit -m "feat(mindmap): add version history ORM model and DAO"
 
 **Files:**
 - Create: `module_mindmap/service/mindmap_version_service.py`
-- Create: 版本相关的 Controller 端点
+- Modify: `module_mindmap/controller/mindmap_controller.py` — 添加版本端点
 
 - [ ] **Step 1: 实现 Service 层**
 
 核心方法：
-- `create_draft_version()` — 创建草稿版本，自动清理超出 50 个的旧草稿
+- `create_draft_version()` — 创建草稿版本，自动清理超出 10 个的旧草稿
 - `create_formal_version()` — 创建正式版本，递增主表 version_count
-- `get_version_list()` — 分页查询版本列表
-- `restore_version()` — 回滚到指定版本（将版本的 node_tree 写回主表）
+- `get_version_list()` — 分页查询版本列表（不含 node_tree 大字段）
+- `get_version_detail()` — 查询单个版本完整数据
+- `restore_version()` — 回滚到指定版本（将版本的 node_tree 写回主表 + 创建新的正式版本记录）
+- `delete_version()` — 仅允许删除正式版本
 
 - [ ] **Step 2: 添加 Controller 端点**
 
-在 mindmap_controller.py 中添加 5 个版本相关端点。
+在 `mindmap_controller.py` 中添加 5 个版本相关端点，均需要所有权校验。
 
 - [ ] **Step 3: 修改自动保存流程**
 
-在 `update_content_services` 中，每次保存成功后自动调用 `create_draft_version()`。
+在 `update_content_services` 中，每次保存成功后自动调用 `create_draft_version()`。在 `manualSave`（Ctrl+S）时调用 `create_formal_version()`。
 
 - [ ] **Step 4: 提交**
 
@@ -1853,14 +2196,14 @@ export function deleteVersion(versionId) {
 
 功能：
 - 分 Tab 显示"正式版本"和"草稿版本"
-- 每个版本显示时间、创建者
-- 点击"查看"可预览该版本
-- 点击"恢复"回滚到该版本
-- "保存正式版本"按钮
+- 每个版本显示时间、创建者、版本号
+- 点击"查看"可预览该版本（只读模式加载）
+- 点击"恢复"回滚到该版本（需确认对话框）
+- "保存正式版本"按钮（调用 Ctrl+S 逻辑）
 
 - [ ] **Step 3: 集成到编辑器**
 
-在 SidebarTrigger 中添加"版本历史"入口，在 Sidebar 中加载 VersionHistory 组件。
+在 `SidebarTrigger` 中添加"版本历史"入口，在 `Sidebar` 中加载 `VersionHistory` 组件。
 
 - [ ] **Step 4: 提交**
 
@@ -1876,7 +2219,7 @@ git commit -m "feat(mindmap): add version history sidebar with draft/formal vers
 
 - **分享链接**：生成唯一 token 的 URL，支持设置过期时间和权限级别
 - **协作者管理**：脑图所有者可以添加/移除协作者，设置读/写权限
-- **权限模型**：Phase 4 先实现简单模型（查看/编辑），Phase 4 后续升级到精细权限
+- **权限模型**：Phase 4 先实现简单模型（查看/编辑），后续升级到精细权限
 
 ## 新增数据库表
 
@@ -1885,7 +2228,7 @@ git commit -m "feat(mindmap): add version history sidebar with draft/formal vers
 CREATE TABLE mindmap_share (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     mindmap_id BIGINT NOT NULL,
-    share_token VARCHAR(64) NOT NULL UNIQUE COMMENT '分享token',
+    share_token VARCHAR(64) NOT NULL UNIQUE COMMENT '分享token（uuid4）',
     share_type SMALLINT NOT NULL DEFAULT 0 COMMENT '0=查看 1=编辑',
     expire_time DATETIME COMMENT '过期时间（NULL=永久）',
     created_by BIGINT NOT NULL,
@@ -1929,7 +2272,7 @@ CREATE TABLE mindmap_collaborator (
 | POST | `/mindmap/share/link` | 生成分享链接 |
 | GET | `/mindmap/share/link/{mindmap_id}` | 获取当前分享链接列表 |
 | DELETE | `/mindmap/share/link/{share_id}` | 删除/禁用分享链接 |
-| GET | `/mindmap/share/view/{share_token}` | 通过分享链接查看脑图（公开接口） |
+| GET | `/mindmap/share/view/{share_token}` | 通过分享链接查看脑图（**公开接口**，无需登录） |
 | POST | `/mindmap/collaborator` | 添加协作者 |
 | GET | `/mindmap/collaborator/list/{mindmap_id}` | 获取协作者列表 |
 | PUT | `/mindmap/collaborator` | 修改协作者权限 |
@@ -1938,7 +2281,7 @@ CREATE TABLE mindmap_collaborator (
 ## Task 1: 分享链接功能
 
 - [ ] **Step 1: 创建数据模型和 DAO**
-- [ ] **Step 2: 实现 Service 和 Controller**
+- [ ] **Step 2: 实现 Service 和 Controller**（公开查看接口使用 `PreAuthDependency(exclude_routes=[...])` 跳过认证）
 - [ ] **Step 3: 前端分享对话框 UI**
 - [ ] **Step 4: 公开查看页面**（新增 `/mindmap/view/:share_token` 路由，只读模式）
 
@@ -1949,7 +2292,7 @@ CREATE TABLE mindmap_collaborator (
 - [ ] **Step 1: 创建协作者数据模型和 DAO**
 - [ ] **Step 2: 实现协作者 CRUD Service 和 Controller**
 - [ ] **Step 3: 前端协作者管理 UI**（在编辑器侧边栏中添加）
-- [ ] **Step 4: 权限校验集成**（在脑图详情和内容更新 API 中检查协作者权限）
+- [ ] **Step 4: 权限校验集成** — 修改 `get_mindmap_detail_services` 和 `update_content_services`，在所有权校验之后增加协作者权限检查：`owner_id == user_id` OR `mindmap_collaborator 中存在该用户且权限匹配`
 
 ---
 
@@ -1970,6 +2313,9 @@ CREATE TABLE mindmap_template_category (
     sort_order INT DEFAULT 0,
     created_time DATETIME DEFAULT CURRENT_TIMESTAMP
 ) COMMENT '脑图模板分类表';
+
+-- mindmap 表新增 category_id 字段
+ALTER TABLE mindmap ADD COLUMN template_category_id BIGINT DEFAULT NULL COMMENT '模板分类ID';
 ```
 
 ## 新增文件
@@ -1990,25 +2336,25 @@ CREATE TABLE mindmap_template_category (
 | GET | `/mindmap/template/list` | 获取模板列表（公开） |
 | GET | `/mindmap/template/categories` | 获取模板分类 |
 | GET | `/mindmap/template/{id}` | 获取模板详情 |
-| POST | `/mindmap/template/use/{id}` | 使用模板创建脑图 |
-| POST | `/mindmap/template` | 管理员发布模板 |
-| PUT | `/mindmap/template` | 管理员编辑模板 |
-| DELETE | `/mindmap/template/{id}` | 管理员删除模板 |
+| POST | `/mindmap/template/use/{id}` | 使用模板创建脑图（复制为新脑图） |
+| POST | `/mindmap/template` | 管理员发布模板（需 `mindmap:template:add` 权限） |
+| PUT | `/mindmap/template` | 管理员编辑模板（需 `mindmap:template:edit` 权限） |
+| DELETE | `/mindmap/template/{id}` | 管理员删除模板（需 `mindmap:template:remove` 权限） |
 
 ## Task 1: 模板管理后端
 
 - [ ] **Step 1: 创建模板分类表和 ORM 模型**
-- [ ] **Step 2: 实现模板 CRUD Service 和 Controller**
-- [ ] **Step 3: "使用模板"功能**（复制模板脑图为用户新脑图）
+- [ ] **Step 2: 实现模板 CRUD Service 和 Controller**（模板查询接口 `is_template=1`）
+- [ ] **Step 3: "使用模板"功能** — 调用 `copy_mindmap_services`，将模板脑图复制为用户的新脑图，修改 `owner_id` 为当前用户
 
 ---
 
 ## Task 2: 模板市场前端
 
-- [ ] **Step 1: 创建模板市场页面**（卡片式布局，分类筛选，搜索）
-- [ ] **Step 2: 模板预览功能**（只读模式打开脑图）
-- [ ] **Step 3: "使用模板"按钮 → 创建新脑图并跳转编辑器**
-- [ ] **Step 4: 管理后台模板管理页面**（标准 CRUD 列表）
+- [ ] **Step 1: 创建模板市场页面** — 卡片式布局，分类筛选，搜索
+- [ ] **Step 2: 模板预览功能** — 只读模式打开脑图（复用 edit.vue 的 readonly 模式）
+- [ ] **Step 3: "使用模板"按钮** → 调用 API 创建新脑图并跳转编辑器
+- [ ] **Step 4: 管理后台模板管理页面** — 标准 CRUD 列表（参照 post/index.vue 模式）
 
 ---
 
@@ -2023,7 +2369,7 @@ CREATE TABLE mindmap_template_category (
 | `mindmap:mindmap:add` | 新增脑图 |
 | `mindmap:mindmap:edit` | 编辑脑图 |
 | `mindmap:mindmap:remove` | 删除脑图 |
-| `mindmap:template:list` | 查看模板列表 |
+| `mindmap:template:list` | 查看模板列表（公开） |
 | `mindmap:template:add` | 发布模板（管理员） |
 | `mindmap:template:edit` | 编辑模板（管理员） |
 | `mindmap:template:remove` | 删除模板（管理员） |
@@ -2033,6 +2379,18 @@ CREATE TABLE mindmap_template_category (
 | 路径 | 组件 | 说明 |
 |------|------|------|
 | `/mindmap/index` | `views/mindmap/index.vue` | 脑图管理列表 |
-| `/mindmap/edit?id=X` | `views/mindmap/edit.vue` | 脑图编辑器 |
+| `/mindmap/edit?id=X` | `views/mindmap/edit.vue` | 脑图编辑器（编辑模式） |
+| `/mindmap/edit?id=X&readonly=1` | `views/mindmap/edit.vue` | 脑图查看器（只读模式） |
 | `/mindmap/templates` | `views/mindmap/templates.vue` | 模板市场（Phase 5） |
 | `/mindmap/view/:token` | `views/mindmap/view.vue` | 公开查看页（Phase 4） |
+
+## 安全与性能约束
+
+| 约束 | 措施 |
+|------|------|
+| 脑图大小限制 | `MindmapModel.node_tree` JSON 序列化后不超过 **5MB**，在 Service 层校验 |
+| 自动保存频率 | 前端 5 秒防抖 + 后端 `@ApiRateLimit`（每用户每秒最多 2 次） |
+| WebSocket 认证 | 连接后发送 auth 消息（token 不在 URL 中），10 秒超时 |
+| 所有权校验 | 所有写操作（edit/delete/rename/content）均校验 `owner_id == user_id` |
+| 草稿版本上限 | 每个脑图最多 10 个草稿版本，超出自动清理 |
+| 菜单 ID 范围 | 使用 9000+ 避免与现有菜单冲突 |

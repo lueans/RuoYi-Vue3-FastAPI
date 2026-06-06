@@ -68,9 +68,11 @@ class MindmapService:
         insert_data.pop('id', None)
 
         try:
-            await MindmapDao.add_mindmap_dao(query_db, insert_data)
+            new_mindmap = await MindmapDao.add_mindmap_dao(query_db, insert_data)
+            # flush() 后主键 ID 立即可用，在 commit 前获取
+            new_id = new_mindmap.id
             await query_db.commit()
-            return CrudResponseModel(is_success=True, message='新增成功')
+            return CrudResponseModel(is_success=True, message='新增成功', result={'id': new_id})
         except Exception as e:
             await query_db.rollback()
             raise e

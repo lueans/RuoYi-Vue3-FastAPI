@@ -81,7 +81,7 @@ async def add_mindmap(
     result = await MindmapService.add_mindmap_services(query_db, model)
     logger.info(result.message)
 
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)
 
 
 @mindmap_controller.put(

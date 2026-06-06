@@ -165,9 +165,10 @@ function handleAdd() {
   addMindmap({
     name: '未命名脑图',
     nodeTree: { data: { text: '中心主题' }, children: [] }
-  }).then(() => {
+  }).then((response) => {
     proxy.$modal.msgSuccess("新建成功")
-    getList()
+    // 跳转到新脑图编辑页
+    router.push({ path: '/mindmap/edit', query: { id: response.data.id } })
   })
 }
 

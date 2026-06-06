@@ -387,23 +387,28 @@ async function saveToBackend() {
   }
 }
 
-function manualSave() {
+async function manualSave() {
   if (!mindMap.value) return
-  const fullData = mindMap.value.getData(true)
   if (props.mindmapId) {
     clearTimeout(autoSaveTimer)
-    saveToBackend()
+    await saveToBackend()
     ElMessage.success('已保存到服务器')
   } else {
+    const fullData = mindMap.value.getData(true)
     actions.storeData(fullData)
     ElMessage.success('已保存')
   }
 }
 
 function onBusViewDataChange(data) {
+  if (props.readonly) return
   clearTimeout(storeConfigTimer)
   storeConfigTimer = setTimeout(() => {
-    actions.storeData({ view: data })
+    if (props.mindmapId) {
+      // 后端模式：视图变更通过 saveToBackend 一起保存
+    } else {
+      actions.storeData({ view: data })
+    }
   }, 300)
 }
 

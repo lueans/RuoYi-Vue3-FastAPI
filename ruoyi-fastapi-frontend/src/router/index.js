@@ -53,6 +53,13 @@ export const constantRoutes = [
     hidden: true
   },
   {
+    path: '/mindmap/view/:token',
+    component: () => import('@/views/mindmap/view'),
+    name: 'MindmapShareView',
+    meta: { title: '脑图分享' },
+    hidden: true,
+  },
+  {
     path: "/:pathMatch(.*)*",
     component: () => import('@/views/error/404'),
     hidden: true

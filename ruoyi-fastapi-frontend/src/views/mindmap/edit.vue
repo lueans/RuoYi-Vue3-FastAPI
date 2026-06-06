@@ -9,6 +9,9 @@
           </span>
           <el-tag v-if="isReadonly" type="info" size="small" style="margin-left: 8px;">只读</el-tag>
           <Collaborators v-if="collaborators.length > 0" :collaborators="collaborators" style="margin-left: 12px;" />
+          <el-button v-if="!isReadonly" type="primary" size="small" @click="openShareDialog" style="margin-left: 12px;">
+            分享
+          </el-button>
         </template>
       </el-page-header>
     </div>
@@ -31,6 +34,8 @@
         <el-button @click="renameOpen = false">取消</el-button>
       </template>
     </el-dialog>
+
+    <ShareDialog ref="shareDialogRef" :mindmap-id="mindmapId" />
   </div>
 </template>
 
@@ -40,6 +45,7 @@ import Toolbar from '@/components/MindMap/Toolbar.vue'
 import Edit from '@/components/MindMap/Edit.vue'
 import NavigatorToolbar from '@/components/MindMap/NavigatorToolbar.vue'
 import Collaborators from '@/components/MindMap/Collaborators.vue'
+import ShareDialog from '@/components/MindMap/ShareDialog.vue'
 import { store } from '@/components/MindMap/useStore'
 import { renameMindmap } from '@/api/mindmap/mindmap'
 import { useRoute, useRouter } from 'vue-router'
@@ -59,6 +65,12 @@ const collaborators = computed(() => {
   const sync = editRef.value?.getYjsSync?.()
   return sync?.collaborators?.value || []
 })
+
+const shareDialogRef = ref(null)
+
+function openShareDialog() {
+  shareDialogRef.value?.open()
+}
 
 const renameForm = reactive({ id: undefined, name: '' })
 const renameRules = {

@@ -113,19 +113,21 @@ let saveStatusTimer = null
 const AUTO_SAVE_DELAY = 2000
 
 // 文本编辑模式退出检测
-let isExitingTextEdit = false
-
 // 设置文本编辑退出检测
 function setupTextEditExitDetection() {
-  // 监听会触发 hideEditTextBox() 的事件
-  const exitEvents = ['draw_click', 'svg_mousedown', 'expand_btn_click', 'before_node_active']
-  exitEvents.forEach(event => {
-    bus.on(event, () => {
-      // 如果当前正在文本编辑，标记即将退出
-      if (mindMap.value?.renderer?.textEdit?.isShowTextEdit?.()) {
-        isExitingTextEdit = true
-      }
-    })
+  // 直接监听 hide_text_edit 事件（simple-mind-map 在退出文本编辑时触发）
+  // 覆盖所有退出方式：点击画布、按 Enter/Tab、切换节点、缩放等
+  // 同时兼容普通文本模式和富文本模式
+  //
+  // 注意时序：hideEditTextBox() 内部先 execCommand('SET_NODE_TEXT') 触发 data_change，
+  // 然后才 emit hide_text_edit。所以 data_change 到达时我们还不知道是文本编辑退出。
+  // 解决方案：data_change 启动 2 秒防抖，hide_text_edit 紧随其后触发时取消防抖并立即保存。
+  bus.on('hide_text_edit', () => {
+    // 取消 data_change 启动的防抖计时器，立即保存
+    clearTimeout(autoSaveTimer)
+    if (props.mindmapId) {
+      saveToBackend()
+    }
   })
 }
 
@@ -162,6 +164,7 @@ const forwardEvents = [
   'exit_demonstrate',
   'node_note_dblclick',
   'node_mousedown',
+  'hide_text_edit',
 ]
 
 // Watch openNodeRichText to dynamically add/remove RichText plugin.
@@ -400,18 +403,13 @@ function setSaveStatus(status) {
 
 function onBusDataChange(data) {
   if (props.mindmapId) {
-    if (isExitingTextEdit) {
-      // 刚从文本编辑模式退出，立即保存
-      isExitingTextEdit = false
-      clearTimeout(autoSaveTimer)
+    // 常规变更，使用防抖延迟
+    // 如果是文本编辑退出，hide_text_edit 事件会紧随其后触发，
+    // 取消此防抖计时器并立即保存（见 setupTextEditExitDetection）
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = setTimeout(() => {
       saveToBackend()
-    } else {
-      // 常规变更，使用防抖延迟
-      clearTimeout(autoSaveTimer)
-      autoSaveTimer = setTimeout(() => {
-        saveToBackend()
-      }, AUTO_SAVE_DELAY)
-    }
+    }, AUTO_SAVE_DELAY)
   } else {
     actions.storeData({ root: data })
   }

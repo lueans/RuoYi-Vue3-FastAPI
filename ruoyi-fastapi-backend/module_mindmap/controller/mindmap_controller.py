@@ -21,7 +21,11 @@ from module_mindmap.entity.vo.mindmap_vo import (
     MindmapPageQueryModel,
     MindmapRenameModel,
 )
+from module_mindmap.entity.vo.mindmap_version_vo import (
+    MindmapVersionSaveModel,
+)
 from module_mindmap.service.mindmap_service import MindmapService
+from module_mindmap.service.mindmap_version_service import MindmapVersionService
 from utils.log_util import logger
 from utils.response_util import ResponseUtil
 
@@ -232,3 +236,102 @@ async def query_detail_mindmap(
     logger.info(f'获取mindmap_id为{mindmap_id}的信息成功')
 
     return ResponseUtil.success(data=result)
+
+
+# ──────────────────── 版本历史 ────────────────────
+
+@mindmap_controller.get(
+    '/version/list/{mindmap_id}',
+    summary='获取版本列表',
+    description='获取脑图的版本历史列表（不含 node_tree 大字段）',
+    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:query')],
+)
+async def get_version_list(
+    request: Request,
+    mindmap_id: Annotated[int, Path(description='脑图ID')],
+    version_type: Annotated[int | None, Query(description='版本类型: 0=草稿 1=正式')] = None,
+    page_num: Annotated[int, Query(description='页码')] = 1,
+    page_size: Annotated[int, Query(description='每页数量')] = 20,
+    query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
+) -> Response:
+    result = await MindmapVersionService.get_version_list_services(
+        query_db, mindmap_id, version_type, page_num, page_size,
+        user_id=current_user.user.user_id,
+    )
+    return ResponseUtil.success(model_content=result)
+
+
+@mindmap_controller.get(
+    '/version/{version_id}',
+    summary='获取版本详情',
+    description='获取单个版本的完整数据（含 node_tree）',
+    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:query')],
+)
+async def get_version_detail(
+    request: Request,
+    version_id: Annotated[int, Path(description='版本ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapVersionService.get_version_detail_services(
+        query_db, version_id, current_user.user.user_id,
+    )
+    return ResponseUtil.success(data=result)
+
+
+@mindmap_controller.post(
+    '/version/restore/{version_id}',
+    summary='回滚到指定版本',
+    description='将脑图恢复到指定版本的状态',
+    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:edit')],
+)
+@Log(title='脑图版本', business_type=BusinessType.UPDATE)
+async def restore_version(
+    request: Request,
+    version_id: Annotated[int, Path(description='版本ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapVersionService.restore_version_services(
+        query_db, version_id, current_user.user.user_id, current_user.user.user_name,
+    )
+    return ResponseUtil.success(msg=result.message)
+
+
+@mindmap_controller.post(
+    '/version/save',
+    summary='创建正式版本',
+    description='手动创建一个正式版本快照',
+    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:edit')],
+)
+@Log(title='脑图版本', business_type=BusinessType.INSERT)
+async def save_formal_version(
+    request: Request,
+    save_model: MindmapVersionSaveModel,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapVersionService.create_formal_version(
+        query_db, save_model, current_user.user.user_id, current_user.user.user_name,
+    )
+    return ResponseUtil.success(msg=result.message)
+
+
+@mindmap_controller.delete(
+    '/version/{version_id}',
+    summary='删除版本',
+    description='删除指定版本（仅正式版本可删除）',
+    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:edit')],
+)
+@Log(title='脑图版本', business_type=BusinessType.DELETE)
+async def delete_version(
+    request: Request,
+    version_id: Annotated[int, Path(description='版本ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapVersionService.delete_version_services(
+        query_db, version_id, current_user.user.user_id,
+    )
+    return ResponseUtil.success(msg=result.message)

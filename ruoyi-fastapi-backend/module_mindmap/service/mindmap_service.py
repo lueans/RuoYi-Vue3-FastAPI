@@ -15,6 +15,7 @@ from module_mindmap.entity.vo.mindmap_vo import (
     MindmapRenameModel,
 )
 from utils.common_util import CamelCaseUtil
+from utils.log_util import logger
 
 
 class MindmapService:
@@ -119,6 +120,21 @@ class MindmapService:
         try:
             await MindmapDao.update_content_dao(query_db, page_object.id, update_data)
             await query_db.commit()
+
+            # 自动创建草稿版本
+            try:
+                from module_mindmap.service.mindmap_version_service import MindmapVersionService
+                await MindmapVersionService.create_draft_version(
+                    query_db, page_object.id,
+                    node_tree=page_object.node_tree,
+                    view_data=page_object.view_data,
+                    layout=page_object.layout,
+                    theme=page_object.theme,
+                    created_by=str(user_id),
+                )
+            except Exception as e:
+                logger.warning(f'创建草稿版本失败: {e}')
+
             return CrudResponseModel(is_success=True, message='保存成功')
         except Exception as e:
             await query_db.rollback()

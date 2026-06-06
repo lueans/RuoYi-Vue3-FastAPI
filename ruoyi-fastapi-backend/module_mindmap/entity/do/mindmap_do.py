@@ -37,6 +37,7 @@ class Mindmap(Base):
     )
     cover_image = Column(String(500), nullable=True, server_default=SqlalchemyUtil.get_server_default_null(DataBaseConfig.db_type), comment='封面图片URL')
     is_template = Column(SmallInteger, nullable=False, server_default='0', comment='是否模板（0否 1是）')
+    template_category_id = Column(BigInteger, nullable=True, comment='模板分类ID')
     last_version_id = Column(BigInteger, nullable=True, server_default=SqlalchemyUtil.get_server_default_null(DataBaseConfig.db_type), comment='最新版本ID')
     version_count = Column(Integer, nullable=False, server_default='1', comment='版本总数')
     status = Column(SmallInteger, nullable=False, server_default='0', comment='状态（0正常 1归档）')

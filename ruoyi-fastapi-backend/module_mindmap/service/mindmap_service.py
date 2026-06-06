@@ -35,7 +35,13 @@ class MindmapService:
         if not mindmap:
             raise ServiceException(message='思维导图不存在')
         if mindmap.owner_id != user_id:
-            raise ServiceException(message='无访问权限')
+            # 检查是否为协作者
+            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService
+            is_collaborator = await MindmapCollaboratorService.check_collaborator_access(
+                query_db, mindmap_id, user_id, require_edit=False,
+            )
+            if not is_collaborator:
+                raise ServiceException(message='无访问权限')
 
         result_dict = CamelCaseUtil.transform_result(mindmap)
         if isinstance(result_dict.get('node_tree'), str):
@@ -101,7 +107,13 @@ class MindmapService:
 
         # Check ownership or collaborator permission
         if mindmap.owner_id != user_id:
-            raise ServiceException(message='无编辑权限')
+            # 检查是否为有编辑权限的协作者
+            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService
+            is_collaborator = await MindmapCollaboratorService.check_collaborator_access(
+                query_db, page_object.id, user_id, require_edit=True,
+            )
+            if not is_collaborator:
+                raise ServiceException(message='无编辑权限')
 
         # Serialize node_tree to JSON string
         update_data = {

@@ -56,6 +56,7 @@ import bus from './useEventBus'
 import { store, actions } from './useStore'
 import { defaultData } from './config'
 import { getMindmap, updateMindmapContent } from '@/api/mindmap/mindmap'
+import { YjsMindmapSync } from '@/utils/yjs-sync'
 import './assets/icon-font/iconfont.css'
 
 import Contextmenu from './Contextmenu.vue'
@@ -100,6 +101,7 @@ const showDragMask = ref(false)
 let storeConfigTimer = null
 let enableShowLoading = true
 let autoSaveTimer = null
+let yjsSync = null
 const isSaving = ref(false)
 const pendingSave = ref(false)
 const AUTO_SAVE_DELAY = 5000
@@ -177,6 +179,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unbindBusEvents()
   window.removeEventListener('resize', handleResize)
+  if (yjsSync) {
+    yjsSync.destroy()
+    yjsSync = null
+  }
   clearTimeout(autoSaveTimer)
   if (mindMap.value) {
     mindMap.value.destroy()
@@ -318,6 +324,13 @@ async function initMindMap() {
   mindMap.value = mm
   actions.setMindMap(mm)
 
+  // Yjs 实时协作（仅后端模式 + 非只读）
+  if (props.mindmapId && !props.readonly) {
+    yjsSync = new YjsMindmapSync(props.mindmapId, mm)
+    yjsSync.start()
+    yjsSync.initFromMindmap(root)
+  }
+
   // Load dynamic plugins based on config
   if (openNodeRichText.value) {
     mm.addPlugin(RichText)
@@ -337,6 +350,12 @@ async function initMindMap() {
   if (!props.readonly) {
     bus.on('data_change', onBusDataChange)
     bus.on('view_data_change', onBusViewDataChange)
+    // Yjs 增量同步
+    if (yjsSync) {
+      mm.on('data_change_detail', (detailList) => {
+        yjsSync.onDataChangeDetail(detailList)
+      })
+    }
 
     // Ctrl+S manual save
     mm.keyCommand.addShortcut('Control+s', () => {

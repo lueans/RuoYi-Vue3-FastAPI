@@ -1,7 +1,6 @@
 """脑图版本历史服务层"""
 import json
 from datetime import datetime
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,10 +66,7 @@ class MindmapVersionService:
 
         # 读取当前脑图数据作为快照
         node_tree = mindmap.node_tree
-        if isinstance(node_tree, str):
-            node_tree_str = node_tree
-        else:
-            node_tree_str = json.dumps(node_tree, ensure_ascii=False)
+        node_tree_str = node_tree if isinstance(node_tree, str) else json.dumps(node_tree, ensure_ascii=False)
 
         try:
             await MindmapVersionDao.add_version(db, {

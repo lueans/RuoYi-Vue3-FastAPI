@@ -119,6 +119,4 @@ class MindmapCollaboratorService:
         permission = await MindmapCollaboratorDao.get_collaborator_permission(db, mindmap_id, user_id)
         if permission is None:
             return False
-        if require_edit and permission < 1:
-            return False
-        return True
+        return not (require_edit and permission < 1)

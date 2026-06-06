@@ -1,17 +1,17 @@
 """WebSocket 专用认证模块"""
 from datetime import timedelta
+from typing import Any
 
 import jwt
 from jwt import InvalidTokenError
 
+from common.enums import RedisInitKeyConfig
 from config.database import AsyncSessionLocal
 from config.env import AppConfig, JwtConfig
-from common.enums import RedisInitKeyConfig
 from module_admin.dao.user_dao import UserDao
-from utils.log_util import logger
 
 
-async def validate_ws_token(token: str, redis) -> dict:
+async def validate_ws_token(token: str, redis: Any) -> dict:
     """
     WebSocket 专用 token 验证
 
@@ -29,7 +29,7 @@ async def validate_ws_token(token: str, redis) -> dict:
         if not user_id:
             raise ValueError('token缺少user_id')
     except InvalidTokenError:
-        raise ValueError('token已失效')
+        raise ValueError('token已失效') from None
 
     # DB 查询用户
     async with AsyncSessionLocal() as db:

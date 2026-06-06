@@ -2,10 +2,10 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import Path, Query, Request, Response
+from pydantic_validation_decorator import ValidateFields
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.annotation.log_annotation import Log
-from pydantic_validation_decorator import ValidateFields
 from common.aspect.db_seesion import DBSessionDependency
 from common.aspect.interface_auth import UserInterfaceAuthDependency
 from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
@@ -13,6 +13,9 @@ from common.enums import BusinessType
 from common.router import APIRouterPro
 from common.vo import DataResponseModel, PageResponseModel, ResponseBaseModel
 from module_admin.entity.vo.user_vo import CurrentUserModel
+from module_mindmap.entity.vo.mindmap_version_vo import (
+    MindmapVersionSaveModel,
+)
 from module_mindmap.entity.vo.mindmap_vo import (
     DeleteMindmapModel,
     MindmapContentUpdateModel,
@@ -20,9 +23,6 @@ from module_mindmap.entity.vo.mindmap_vo import (
     MindmapModel,
     MindmapPageQueryModel,
     MindmapRenameModel,
-)
-from module_mindmap.entity.vo.mindmap_version_vo import (
-    MindmapVersionSaveModel,
 )
 from module_mindmap.service.mindmap_service import MindmapService
 from module_mindmap.service.mindmap_version_service import MindmapVersionService

@@ -1,5 +1,4 @@
 """脑图版本历史 DAO"""
-from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession

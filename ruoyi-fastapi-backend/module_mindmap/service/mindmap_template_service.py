@@ -59,8 +59,8 @@ class MindmapTemplateService:
         if isinstance(node_tree, str):
             node_tree = json.loads(node_tree)
 
-        # 复制为新脑图
-        from module_mindmap.entity.vo.mindmap_vo import MindmapModel
+        # 复制为新脑图 (lazy import to avoid circular dependency)
+        from module_mindmap.entity.vo.mindmap_vo import MindmapModel  # noqa: PLC0415
         new_mindmap = MindmapModel(
             name=f'{template.name}',
             description=template.description,
@@ -75,7 +75,7 @@ class MindmapTemplateService:
             update_time=datetime.now(),
         )
 
-        from module_mindmap.service.mindmap_service import MindmapService
+        from module_mindmap.service.mindmap_service import MindmapService  # noqa: PLC0415
         return await MindmapService.add_mindmap_services(db, new_mindmap)
 
     # ── 管理接口（管理员） ──
@@ -90,10 +90,7 @@ class MindmapTemplateService:
             raise ServiceException(message='源脑图不存在')
 
         node_tree = source.node_tree
-        if isinstance(node_tree, str):
-            node_tree_str = node_tree
-        else:
-            node_tree_str = json.dumps(node_tree, ensure_ascii=False)
+        node_tree_str = node_tree if isinstance(node_tree, str) else json.dumps(node_tree, ensure_ascii=False)
 
         try:
             await MindmapTemplateDao.publish_template(db, {

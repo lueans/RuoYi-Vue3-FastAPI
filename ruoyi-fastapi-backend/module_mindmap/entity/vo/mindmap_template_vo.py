@@ -1,6 +1,5 @@
 """脑图模板 Pydantic 模型"""
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel

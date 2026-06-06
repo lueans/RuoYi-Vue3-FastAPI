@@ -18,7 +18,7 @@ class YjsDocManager:
         return result
 
     @classmethod
-    async def save_state(cls, db: AsyncSession, mindmap_id: int, state: bytes):
+    async def save_state(cls, db: AsyncSession, mindmap_id: int, state: bytes) -> None:
         """保存 Yjs 文档状态到数据库（upsert）"""
         existing = (await db.execute(
             select(MindmapWsState).where(MindmapWsState.mindmap_id == mindmap_id)

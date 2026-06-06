@@ -1,11 +1,11 @@
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.vo import PageModel
 from module_mindmap.entity.do.mindmap_do import Mindmap
-from module_mindmap.entity.vo.mindmap_vo import MindmapModel, MindmapPageQueryModel
+from module_mindmap.entity.vo.mindmap_vo import MindmapPageQueryModel
 from utils.page_util import PageUtil
 
 
@@ -56,7 +56,9 @@ class MindmapDao:
         )
 
         # Sorting
-        sort_column = getattr(Mindmap, query_object.sort_field, Mindmap.update_time) if query_object.sort_field else Mindmap.update_time
+        sort_column = getattr(
+            Mindmap, query_object.sort_field, Mindmap.update_time
+        ) if query_object.sort_field else Mindmap.update_time
         if query_object.sort_order == 'desc':
             query = query.order_by(sort_column.desc())
         else:
@@ -67,9 +69,8 @@ class MindmapDao:
                 db, query, query_object.page_num, query_object.page_size, True
             )
             return mindmap_list
-        else:
-            result = (await db.execute(query)).all()
-            return [dict(row._mapping) for row in result]
+        result = (await db.execute(query)).all()
+        return [dict(row._mapping) for row in result]
 
     @classmethod
     async def add_mindmap_dao(cls, db: AsyncSession, data: dict) -> Mindmap:

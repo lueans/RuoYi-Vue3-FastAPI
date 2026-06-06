@@ -35,8 +35,8 @@ class MindmapService:
         if not mindmap:
             raise ServiceException(message='思维导图不存在')
         if mindmap.owner_id != user_id:
-            # 检查是否为协作者
-            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService
+            # 检查是否为协作者 (lazy import to avoid circular dependency)
+            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService  # noqa: PLC0415
             is_collaborator = await MindmapCollaboratorService.check_collaborator_access(
                 query_db, mindmap_id, user_id, require_edit=False,
             )
@@ -76,7 +76,9 @@ class MindmapService:
             raise e
 
     @classmethod
-    async def edit_mindmap_services(cls, query_db: AsyncSession, page_object: MindmapModel, user_id: int) -> CrudResponseModel:
+    async def edit_mindmap_services(
+        cls, query_db: AsyncSession, page_object: MindmapModel, user_id: int,
+    ) -> CrudResponseModel:
         """编辑思维导图元数据（名称、描述、封面等）"""
         mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
         if not mindmap:
@@ -111,8 +113,8 @@ class MindmapService:
 
         # Check ownership or collaborator permission
         if mindmap.owner_id != user_id:
-            # 检查是否为有编辑权限的协作者
-            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService
+            # 检查是否为有编辑权限的协作者 (lazy import to avoid circular dependency)
+            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService  # noqa: PLC0415
             is_collaborator = await MindmapCollaboratorService.check_collaborator_access(
                 query_db, page_object.id, user_id, require_edit=True,
             )
@@ -139,7 +141,7 @@ class MindmapService:
 
             # 自动创建草稿版本
             try:
-                from module_mindmap.service.mindmap_version_service import MindmapVersionService
+                from module_mindmap.service.mindmap_version_service import MindmapVersionService  # noqa: PLC0415
                 await MindmapVersionService.create_draft_version(
                     query_db, page_object.id,
                     node_tree=page_object.node_tree,

@@ -17,7 +17,7 @@ AUTH_TIMEOUT_SECONDS = 10
 PERSIST_INTERVAL_SECONDS = 30
 
 
-async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int):
+async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> None:  # noqa: PLR0912, PLR0915
     """脑图实时协作 WebSocket 端点"""
     await websocket.accept()
 

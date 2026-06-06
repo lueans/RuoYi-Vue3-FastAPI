@@ -2,6 +2,7 @@
 from datetime import datetime
 
 from sqlalchemy import BigInteger, Column, DateTime, Integer, String
+
 from config.database import Base
 
 

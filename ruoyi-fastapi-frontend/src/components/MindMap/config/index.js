@@ -225,6 +225,7 @@ export const sidebarTriggerList = [
   { name: '设置', value: 'setting', icon: 'iconshezhi' },
   { name: '快捷键', value: 'shortcutKey', icon: 'iconjianpan' },
   { name: '版本历史', value: 'versionHistory', icon: 'iconlishijilu' },
+  { name: '协作者', value: 'collaboratorManager', icon: 'iconxiezuo' },
 ]
 
 export const alignList = [

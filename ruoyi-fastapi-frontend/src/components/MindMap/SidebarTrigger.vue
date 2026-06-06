@@ -37,7 +37,7 @@ const triggerList = computed(() => {
   let list = [...sidebarTriggerList]
   if (isReadonly.value) {
     list = list.filter(item => {
-      return ['outline', 'shortcutKey', 'ai', 'versionHistory'].includes(item.value)
+      return ['outline', 'shortcutKey', 'ai', 'versionHistory', 'collaboratorManager'].includes(item.value)
     })
   }
   return list

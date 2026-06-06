@@ -36,6 +36,7 @@
     <FormulaSidebar v-if="mindMap" :mindMap="mindMap" />
     <OutlineEdit v-if="mindMap" :mindMap="mindMap" />
     <VersionHistory v-if="mindMap" :mindMap="mindMap" :mindmapId="props.mindmapId" />
+    <CollaboratorManager v-if="mindMap" :mindmapId="props.mindmapId" />
     <div
       class="dragMask"
       v-if="showDragMask"
@@ -84,6 +85,7 @@ import NodeImgPreview from './NodeImgPreview.vue'
 import FormulaSidebar from './FormulaSidebar.vue'
 import OutlineEdit from './OutlineEdit.vue'
 import VersionHistory from './VersionHistory.vue'
+import CollaboratorManager from './CollaboratorManager.vue'
 
 // Register all plugins and themes
 registerPlugins('full')

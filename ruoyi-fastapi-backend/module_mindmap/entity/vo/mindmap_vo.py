@@ -9,7 +9,7 @@ from pydantic_validation_decorator import NotBlank, Size
 class MindmapModel(BaseModel):
     """思维导图模型"""
 
-    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     id: int | None = Field(default=None, description='思维导图ID')
     name: str | None = Field(default=None, description='思维导图名称')
@@ -58,7 +58,7 @@ class MindmapPageQueryModel(MindmapQueryModel):
 class MindmapContentUpdateModel(BaseModel):
     """思维导图内容更新模型（自动保存）"""
 
-    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     id: int = Field(description='思维导图ID')
     node_tree: dict[str, Any] = Field(description='完整节点树')
@@ -70,7 +70,7 @@ class MindmapContentUpdateModel(BaseModel):
 class MindmapRenameModel(BaseModel):
     """思维导图重命名模型"""
 
-    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     id: int = Field(description='思维导图ID')
     name: str = Field(description='新名称')
@@ -87,7 +87,7 @@ class MindmapRenameModel(BaseModel):
 class MindmapListItemModel(BaseModel):
     """思维导图列表项模型（轻量，不含node_tree）"""
 
-    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     id: int | None = Field(default=None, description='思维导图ID')
     name: str | None = Field(default=None, description='思维导图名称')
@@ -112,7 +112,7 @@ class DeleteMindmapModel(BaseModel):
 class MindmapImportModel(BaseModel):
     """从localStorage导入思维导图模型"""
 
-    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     name: str = Field(description='思维导图名称')
     root: dict[str, Any] = Field(description='节点树（来自localStorage）')

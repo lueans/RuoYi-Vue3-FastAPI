@@ -44,6 +44,8 @@ class MindmapService:
                 raise ServiceException(message='无访问权限')
 
         result_dict = CamelCaseUtil.transform_result(mindmap)
+        if isinstance(result_dict.get('nodeTree'), str):
+            result_dict['nodeTree'] = json.loads(result_dict['nodeTree'])
         if isinstance(result_dict.get('node_tree'), str):
             result_dict['node_tree'] = json.loads(result_dict['node_tree'])
         return MindmapModel(**result_dict)
@@ -59,9 +61,11 @@ class MindmapService:
             raise ServiceException(message=f'新增思维导图{page_object.name}失败，名称已存在')
 
         # Serialize node_tree to JSON string for LONGTEXT storage
-        insert_data = page_object.model_dump(exclude_unset=True)
+        insert_data = page_object.model_dump(exclude_none=True)
         if isinstance(insert_data.get('node_tree'), dict):
             insert_data['node_tree'] = json.dumps(insert_data['node_tree'], ensure_ascii=False)
+        # Remove id if present (auto-generated)
+        insert_data.pop('id', None)
 
         try:
             await MindmapDao.add_mindmap_dao(query_db, insert_data)

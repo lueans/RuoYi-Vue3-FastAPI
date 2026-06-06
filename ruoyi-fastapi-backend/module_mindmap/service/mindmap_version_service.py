@@ -126,6 +126,8 @@ class MindmapVersionService:
             raise ServiceException(message='无访问权限')
 
         result_dict = CamelCaseUtil.transform_result(version)
+        if isinstance(result_dict.get('nodeTree'), str):
+            result_dict['nodeTree'] = json.loads(result_dict['nodeTree'])
         if isinstance(result_dict.get('node_tree'), str):
             result_dict['node_tree'] = json.loads(result_dict['node_tree'])
         return MindmapVersionModel(**result_dict)

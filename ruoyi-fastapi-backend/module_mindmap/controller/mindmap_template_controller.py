@@ -157,12 +157,12 @@ async def unpublish_template(
 @Log(title='脑图模板分类', business_type=BusinessType.INSERT)
 async def add_template_category(
     request: Request,
-    name: Annotated[str, Query(description='分类名称')],
+    category_name: Annotated[str, Query(description='分类名称')],
     sort_order: Annotated[int, Query(description='排序')] = 0,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
-    result = await MindmapTemplateService.add_category(query_db, name, sort_order)
+    result = await MindmapTemplateService.add_category(query_db, category_name, sort_order)
     return ResponseUtil.success(msg=result.message)
 
 

@@ -9,7 +9,7 @@ from pydantic.alias_generators import to_camel
 class MindmapVersionModel(BaseModel):
     """版本完整模型"""
 
-    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     id: int | None = Field(default=None, description='版本ID')
     mindmap_id: int | None = Field(default=None, description='脑图ID')
@@ -27,7 +27,7 @@ class MindmapVersionModel(BaseModel):
 class MindmapVersionListModel(BaseModel):
     """版本列表项模型（不含 node_tree 大字段）"""
 
-    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     id: int | None = Field(default=None, description='版本ID')
     mindmap_id: int | None = Field(default=None, description='脑图ID')

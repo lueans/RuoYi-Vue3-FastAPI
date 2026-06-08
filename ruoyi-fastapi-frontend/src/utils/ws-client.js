@@ -38,6 +38,9 @@ export class MindmapWsClient {
         } else if (data.type === 'auth_error') {
           this.handlers.onAuthError?.(data.message)
           this.ws.close()
+        } else if (data.type === 'ping') {
+          // 心跳响应
+          this.send({ type: 'pong' })
         } else if (this.isAuthenticated) {
           this.handlers[data.type]?.(data)
         }

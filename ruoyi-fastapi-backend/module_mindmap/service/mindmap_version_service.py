@@ -18,6 +18,12 @@ from utils.common_util import CamelCaseUtil
 MAX_DRAFT_VERSIONS = 10
 
 
+async def _check_version_access(db: AsyncSession, mindmap_id: int, user_id: int, require_edit: bool = False):
+    """版本服务的统一权限检查代理"""
+    from module_mindmap.service.mindmap_service import MindmapService  # noqa: PLC0415
+    return await MindmapService.check_mindmap_access(db, mindmap_id, user_id, require_edit=require_edit)
+
+
 class MindmapVersionService:
     """版本历史服务层"""
 
@@ -48,19 +54,15 @@ class MindmapVersionService:
 
         # 清理旧草稿
         await MindmapVersionDao.delete_old_drafts(db, mindmap_id, keep_count=MAX_DRAFT_VERSIONS)
-        await db.commit()
+        # 注意：不在此处 commit，由调用方统一提交以保证事务原子性
+        await db.flush()
 
     @classmethod
     async def create_formal_version(
         cls, db: AsyncSession, model: MindmapVersionSaveModel, user_id: int, user_name: str,
     ) -> CrudResponseModel:
         """创建正式版本（Ctrl+S 手动保存时调用）"""
-        # 验证脑图存在
-        mindmap = await MindmapDao.get_mindmap_by_id(db, model.mindmap_id)
-        if not mindmap:
-            raise ServiceException(message='思维导图不存在')
-        if mindmap.owner_id != user_id:
-            raise ServiceException(message='无权限操作')
+        mindmap = await _check_version_access(db, model.mindmap_id, user_id, require_edit=True)
 
         version_number = await MindmapVersionDao.get_next_version_number(db, model.mindmap_id)
 
@@ -96,12 +98,7 @@ class MindmapVersionService:
         page_num: int = 1, page_size: int = 20, user_id: int = 0,
     ) -> PageModel:
         """获取版本列表（不含 node_tree 大字段）"""
-        # 验证脑图所有权
-        mindmap = await MindmapDao.get_mindmap_by_id(db, mindmap_id)
-        if not mindmap:
-            raise ServiceException(message='思维导图不存在')
-        if mindmap.owner_id != user_id:
-            raise ServiceException(message='无访问权限')
+        await _check_version_access(db, mindmap_id, user_id, require_edit=False)
 
         return await MindmapVersionDao.get_version_list(
             db, mindmap_id, version_type, page_num, page_size,
@@ -116,10 +113,8 @@ class MindmapVersionService:
         if not version:
             raise ServiceException(message='版本不存在')
 
-        # 验证脑图所有权
-        mindmap = await MindmapDao.get_mindmap_by_id(db, version.mindmap_id)
-        if not mindmap or mindmap.owner_id != user_id:
-            raise ServiceException(message='无访问权限')
+        # 验证脑图访问权限
+        await _check_version_access(db, version.mindmap_id, user_id, require_edit=False)
 
         result_dict = CamelCaseUtil.transform_result(version)
         if isinstance(result_dict.get('nodeTree'), str):
@@ -137,11 +132,8 @@ class MindmapVersionService:
         if not version:
             raise ServiceException(message='版本不存在')
 
-        mindmap = await MindmapDao.get_mindmap_by_id(db, version.mindmap_id)
-        if not mindmap:
-            raise ServiceException(message='思维导图不存在')
-        if mindmap.owner_id != user_id:
-            raise ServiceException(message='无权限操作')
+        # 恢复版本需要编辑权限
+        await _check_version_access(db, version.mindmap_id, user_id, require_edit=True)
 
         try:
             # 将版本的 node_tree 写回主表
@@ -189,9 +181,7 @@ class MindmapVersionService:
         if version.version_type == 0:
             raise ServiceException(message='草稿版本不允许手动删除')
 
-        mindmap = await MindmapDao.get_mindmap_by_id(db, version.mindmap_id)
-        if not mindmap or mindmap.owner_id != user_id:
-            raise ServiceException(message='无权限操作')
+        await _check_version_access(db, version.mindmap_id, user_id, require_edit=True)
 
         try:
             await MindmapVersionDao.delete_version(db, version_id)

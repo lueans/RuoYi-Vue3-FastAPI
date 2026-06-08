@@ -1,6 +1,15 @@
 <template>
   <Sidebar ref="sidebarRef" title="版本历史">
     <div class="versionHistoryContainer">
+      <!-- 预览状态提示 -->
+      <div v-if="isPreviewing" class="previewBanner">
+        <el-icon><InfoFilled /></el-icon>
+        <span>正在预览历史版本</span>
+        <el-button type="primary" size="small" @click="exitPreview">
+          退出预览
+        </el-button>
+      </div>
+
       <!-- 操作栏 -->
       <div class="actionBar" v-if="!isReadonly">
         <el-button type="primary" size="small" @click="handleSaveVersion">
@@ -71,12 +80,16 @@ import Sidebar from './Sidebar.vue'
 import { store, actions } from './useStore'
 import { listVersions, getVersionDetail, restoreVersion, saveFormalVersion, deleteVersion } from '@/api/mindmap/version'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { InfoFilled } from '@element-plus/icons-vue'
 import bus from './useEventBus'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
   mindmapId: { type: Number, default: null },
+  yjsSync: { type: Object, default: null },
 })
+
+const emit = defineEmits(['yjs-reinit'])
 
 const { proxy } = getCurrentInstance()
 const sidebarRef = ref(null)
@@ -87,6 +100,10 @@ const pageNum = ref(1)
 const pageSize = ref(20)
 const activeTab = ref('formal')
 const isReadonly = computed(() => store.isReadonly)
+const isPreviewing = ref(false)
+
+// 预览前保存的状态，用于退出预览时恢复
+let _prePreviewState = null
 
 const parseTime = (time) => {
   return proxy.parseTime(time)
@@ -98,6 +115,10 @@ watch(() => store.activeSidebar, (val) => {
     loadVersions()
     sidebarRef.value?.open()
   } else {
+    // 侧边栏关闭时，如果正在预览则退出预览恢复数据
+    if (isPreviewing.value) {
+      exitPreview()
+    }
     sidebarRef.value?.close()
   }
 })
@@ -148,23 +169,61 @@ async function handleSaveVersion() {
 }
 
 async function handlePreview(item) {
+  if (!props.mindMap) return
   try {
+    // 如果已经在预览中，先退出上一次预览
+    if (isPreviewing.value) {
+      exitPreview()
+    }
+
     const res = await getVersionDetail(item.id)
     const versionData = res.data
     if (versionData?.nodeTree && props.mindMap) {
-      // 以只读方式预览：设置数据但不允许编辑
+      // 保存当前实时状态，用于退出预览时恢复
+      _prePreviewState = props.mindMap.getData(true)
+      isPreviewing.value = true
+
+      // 暂停 Yjs 同步，防止预览数据广播给协作者
+      if (props.yjsSync) {
+        props.yjsSync.pause()
+      }
+
+      // 以版本数据替换当前显示
       props.mindMap.setFullData({
         root: versionData.nodeTree,
         layout: versionData.layout,
         theme: versionData.theme,
         view: versionData.viewData,
       })
-      ElMessage.info('正在预览版本，关闭侧边栏可恢复编辑状态')
+      ElMessage.info('正在预览版本，点击"退出预览"或关闭侧边栏可恢复')
     }
   } catch (e) {
     console.error('预览版本失败:', e)
     ElMessage.error('预览版本失败')
   }
+}
+
+function exitPreview() {
+  if (!isPreviewing.value || !_prePreviewState) return
+
+  // 恢复预览前的状态
+  if (props.mindMap) {
+    props.mindMap.setFullData({
+      root: _prePreviewState.root,
+      layout: _prePreviewState.layout,
+      theme: _prePreviewState.theme,
+      view: _prePreviewState.view,
+    })
+  }
+
+  // 恢复 Yjs 同步
+  if (props.yjsSync) {
+    props.yjsSync.resume()
+  }
+
+  _prePreviewState = null
+  isPreviewing.value = false
+  ElMessage.success('已恢复到编辑状态')
 }
 
 async function handleRestore(item) {
@@ -174,10 +233,16 @@ async function handleRestore(item) {
       '确认恢复',
       { type: 'warning' }
     )
+
+    // 如果正在预览，先退出预览
+    if (isPreviewing.value) {
+      exitPreview()
+    }
+
     await restoreVersion(item.id)
     ElMessage.success('版本恢复成功')
 
-    // 重新加载脑图数据
+    // 从后端获取恢复后的最新数据
     if (props.mindMap) {
       const res = await getVersionDetail(item.id)
       const versionData = res.data
@@ -188,6 +253,9 @@ async function handleRestore(item) {
           theme: versionData.theme,
           view: versionData.viewData,
         })
+
+        // 通知父组件重新初始化 Yjs，使协作者也看到恢复后的内容
+        emit('yjs-reinit', versionData.nodeTree)
       }
     }
     loadVersions()
@@ -221,6 +289,23 @@ async function handleDelete(item) {
 <style lang="scss" scoped>
 .versionHistoryContainer {
   padding: 10px;
+
+  .previewBanner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #ecf5ff;
+    border: 1px solid #b3d8ff;
+    border-radius: 4px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    color: #409eff;
+
+    .el-button {
+      margin-left: auto;
+    }
+  }
 
   .actionBar {
     margin-bottom: 10px;

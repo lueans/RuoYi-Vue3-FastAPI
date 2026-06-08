@@ -22,6 +22,40 @@ class MindmapService:
     """思维导图模块服务层"""
 
     @classmethod
+    async def check_mindmap_access(
+        cls, db: AsyncSession, mindmap_id: int, user_id: int, require_edit: bool = False,
+    ):
+        """统一的脑图访问权限检查
+
+        检查用户是否为脑图所有者，或是否有协作者权限。
+
+        :param db: 数据库会话
+        :param mindmap_id: 脑图ID
+        :param user_id: 用户ID
+        :param require_edit: True 则要求编辑权限，False 只需查看权限
+        :return: 脑图记录
+        :raises ServiceException: 无权限时抛出
+        """
+        mindmap = await MindmapDao.get_mindmap_by_id(db, mindmap_id)
+        if not mindmap:
+            raise ServiceException(message='思维导图不存在')
+
+        # 所有者拥有所有权限
+        if mindmap.owner_id == user_id:
+            return mindmap
+
+        # 检查协作者权限
+        from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService  # noqa: PLC0415
+        is_collaborator = await MindmapCollaboratorService.check_collaborator_access(
+            db, mindmap_id, user_id, require_edit=require_edit,
+        )
+        if not is_collaborator:
+            raise ServiceException(
+                message='无编辑权限' if require_edit else '无访问权限'
+            )
+        return mindmap
+
+    @classmethod
     async def get_mindmap_list_services(
         cls, query_db: AsyncSession, query_object: MindmapPageQueryModel, is_page: bool = True
     ) -> PageModel | list[dict[str, Any]]:
@@ -31,17 +65,7 @@ class MindmapService:
     @classmethod
     async def get_mindmap_detail_services(cls, query_db: AsyncSession, mindmap_id: int, user_id: int) -> MindmapModel:
         """获取思维导图详细信息（含所有权校验）"""
-        mindmap = await MindmapDao.get_mindmap_by_id(query_db, mindmap_id)
-        if not mindmap:
-            raise ServiceException(message='思维导图不存在')
-        if mindmap.owner_id != user_id:
-            # 检查是否为协作者 (lazy import to avoid circular dependency)
-            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService  # noqa: PLC0415
-            is_collaborator = await MindmapCollaboratorService.check_collaborator_access(
-                query_db, mindmap_id, user_id, require_edit=False,
-            )
-            if not is_collaborator:
-                raise ServiceException(message='无访问权限')
+        mindmap = await cls.check_mindmap_access(query_db, mindmap_id, user_id, require_edit=False)
 
         result_dict = CamelCaseUtil.transform_result(mindmap)
         if isinstance(result_dict.get('nodeTree'), str):
@@ -75,11 +99,7 @@ class MindmapService:
         cls, query_db: AsyncSession, page_object: MindmapModel, user_id: int,
     ) -> CrudResponseModel:
         """编辑思维导图元数据（名称、描述、封面等）"""
-        mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
-        if not mindmap:
-            raise ServiceException(message='思维导图不存在')
-        if mindmap.owner_id != user_id:
-            raise ServiceException(message='无编辑权限')
+        await cls.check_mindmap_access(query_db, page_object.id, user_id, require_edit=True)
 
         try:
             update_data = page_object.model_dump(exclude_unset=True, exclude={'node_tree', 'view_data'})
@@ -95,19 +115,7 @@ class MindmapService:
         cls, query_db: AsyncSession, page_object: MindmapContentUpdateModel, user_id: int
     ) -> CrudResponseModel:
         """更新思维导图内容（自动保存端点）"""
-        mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
-        if not mindmap:
-            raise ServiceException(message='思维导图不存在')
-
-        # Check ownership or collaborator permission
-        if mindmap.owner_id != user_id:
-            # 检查是否为有编辑权限的协作者 (lazy import to avoid circular dependency)
-            from module_mindmap.service.mindmap_collaborator_service import MindmapCollaboratorService  # noqa: PLC0415
-            is_collaborator = await MindmapCollaboratorService.check_collaborator_access(
-                query_db, page_object.id, user_id, require_edit=True,
-            )
-            if not is_collaborator:
-                raise ServiceException(message='无编辑权限')
+        await cls.check_mindmap_access(query_db, page_object.id, user_id, require_edit=True)
 
         # Serialize node_tree to JSON string
         update_data = {
@@ -125,9 +133,8 @@ class MindmapService:
 
         try:
             await MindmapDao.update_content_dao(query_db, page_object.id, update_data)
-            await query_db.commit()
 
-            # 自动创建草稿版本
+            # 自动创建草稿版本（在同一事务中，统一提交）
             try:
                 from module_mindmap.service.mindmap_version_service import MindmapVersionService  # noqa: PLC0415
                 await MindmapVersionService.create_draft_version(
@@ -141,6 +148,9 @@ class MindmapService:
             except Exception as e:
                 logger.warning(f'创建草稿版本失败: {e}')
 
+            # 统一提交：内容更新 + 草稿版本创建
+            await query_db.commit()
+
             return CrudResponseModel(is_success=True, message='保存成功')
         except Exception as e:
             await query_db.rollback()
@@ -151,11 +161,7 @@ class MindmapService:
         cls, query_db: AsyncSession, page_object: MindmapRenameModel, user_id: int
     ) -> CrudResponseModel:
         """重命名思维导图"""
-        mindmap = await MindmapDao.get_mindmap_by_id(query_db, page_object.id)
-        if not mindmap:
-            raise ServiceException(message='思维导图不存在')
-        if mindmap.owner_id != user_id:
-            raise ServiceException(message='无编辑权限')
+        await cls.check_mindmap_access(query_db, page_object.id, user_id, require_edit=True)
 
         try:
             await MindmapDao.edit_mindmap_dao(query_db, {
@@ -198,9 +204,7 @@ class MindmapService:
         cls, query_db: AsyncSession, mindmap_id: int, user_id: int
     ) -> CrudResponseModel:
         """复制思维导图"""
-        source = await MindmapDao.get_mindmap_by_id(query_db, mindmap_id)
-        if not source:
-            raise ServiceException(message='源思维导图不存在')
+        source = await cls.check_mindmap_access(query_db, mindmap_id, user_id, require_edit=False)
 
         # Parse node_tree from string (stored as LONGTEXT) to dict
         source_tree = source.node_tree

@@ -31,6 +31,31 @@ function flattenTree(node, parentUid, result) {
   }
 }
 
+/**
+ * 分块 base64 编码，避免大数组调用栈溢出
+ */
+function uint8ArrayToBase64(bytes) {
+  let binary = ''
+  const chunkSize = 8192
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
+    binary += String.fromCharCode.apply(null, chunk)
+  }
+  return btoa(binary)
+}
+
+/**
+ * base64 解码为 Uint8Array
+ */
+function base64ToUint8Array(base64Str) {
+  const binary = atob(base64Str)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes
+}
+
 export class YjsMindmapSync {
   constructor(mindmapId, mindMapInstance) {
     this.mindmapId = mindmapId
@@ -39,6 +64,8 @@ export class YjsMindmapSync {
     this.collaborators = ref([])
     this.isSynced = ref(false)
     this._applyingRemote = false
+    this._paused = false
+    this._receivedServerState = false
 
     this.yMeta = this.doc.getMap('meta')
     this.yNodes = this.doc.getMap('nodes')
@@ -57,7 +84,7 @@ export class YjsMindmapSync {
   start() {
     // 监听 Yjs 文档变更 → 转发到 WebSocket
     this.doc.on('update', (update, origin) => {
-      if (origin !== 'remote') {
+      if (origin !== 'remote' && !this._paused) {
         this.wsClient.send({
           type: 'update',
           update: this._encodeUpdate(update),
@@ -68,7 +95,7 @@ export class YjsMindmapSync {
 
     // 监听节点变更 → 同步到脑图实例
     this.yNodes.observeDeep(() => {
-      if (!this._applyingRemote && this.mindMap) {
+      if (!this._applyingRemote && !this._paused && this.mindMap) {
         this._applyYjsToMindmap()
       }
     })
@@ -79,6 +106,31 @@ export class YjsMindmapSync {
   destroy() {
     this.wsClient.disconnect()
     this.doc.destroy()
+  }
+
+  /** 检查当前是否正在应用远程变更 */
+  isApplyingRemote() {
+    return this._applyingRemote
+  }
+
+  /** 暂停同步（版本预览时使用） */
+  pause() {
+    this._paused = true
+  }
+
+  /** 恢复同步 */
+  resume() {
+    this._paused = false
+  }
+
+  /** 检查 Yjs 文档是否已有数据 */
+  hasData() {
+    return this.yNodes.size > 0
+  }
+
+  /** 检查是否已收到服务端的 sync_init 状态 */
+  hasReceivedServerState() {
+    return this._receivedServerState
   }
 
   /** 将当前脑图数据写入 Yjs（初始化时调用） */
@@ -104,29 +156,37 @@ export class YjsMindmapSync {
   /** 监听 simple-mind-map 的 data_change_detail 事件，翻译为 Yjs 操作 */
   onDataChangeDetail(detailList) {
     if (!detailList || !detailList.length) return
+    if (this._paused) return
 
     this.doc.transact(() => {
       for (const detail of detailList) {
-        const uid = detail.data?.uid || detail.oldData?.uid
+        const uid = detail.data?.data?.uid || detail.oldData?.uid
         if (!uid) continue
 
         switch (detail.action) {
           case 'create': {
+            const nodeData = detail.data?.data || {}
             const yNode = new Y.Map()
             const yData = new Y.Map()
-            for (const [k, v] of Object.entries(detail.data.data || {})) {
+            for (const [k, v] of Object.entries(nodeData)) {
               yData.set(k, v)
             }
             yNode.set('data', yData)
             yNode.set('children', Y.Array.from(
               (detail.data.children || []).map(c => c.data?.uid).filter(Boolean)
             ))
-            yNode.set('parentUid', '')
-            this.yNodes.set(uid, yNode)
 
-            // 更新父节点的 children
-            // 找到父节点 — 简单策略：遍历找不包含此 uid 的节点
-            // TODO: 从 detail 中获取父节点信息更高效
+            // 查找父节点：遍历现有节点，找到 children 中包含此 uid 的节点
+            let parentUid = ''
+            this.yNodes.forEach((existingYNode, existingUid) => {
+              if (existingUid === uid) return
+              const existingChildren = existingYNode.get('children')
+              if (existingChildren && existingChildren.toArray().includes(uid)) {
+                parentUid = existingUid
+              }
+            })
+            yNode.set('parentUid', parentUid)
+            this.yNodes.set(uid, yNode)
             break
           }
 
@@ -139,12 +199,43 @@ export class YjsMindmapSync {
                   yData.set(k, v)
                 }
               }
+              // 同步 children 变更（节点被移动时 children 会变化）
+              if (detail.data?.children) {
+                const yChildren = yNode.get('children')
+                if (yChildren) {
+                  const newChildUids = (detail.data.children || [])
+                    .map(c => c.data?.uid).filter(Boolean)
+                  // 简单替换策略
+                  yChildren.delete(0, yChildren.length)
+                  yChildren.push(newChildUids)
+                }
+              }
             }
             break
           }
 
           case 'delete': {
-            this.yNodes.delete(uid)
+            // 从父节点的 children 中移除
+            const deletedUid = detail.oldData?.uid || uid
+            if (deletedUid) {
+              const deletedYNode = this.yNodes.get(deletedUid)
+              if (deletedYNode) {
+                const pUid = deletedYNode.get('parentUid')
+                if (pUid) {
+                  const parentYNode = this.yNodes.get(pUid)
+                  if (parentYNode) {
+                    const parentChildren = parentYNode.get('children')
+                    if (parentChildren) {
+                      const idx = parentChildren.toArray().indexOf(deletedUid)
+                      if (idx >= 0) {
+                        parentChildren.delete(idx, 1)
+                      }
+                    }
+                  }
+                }
+              }
+              this.yNodes.delete(deletedUid)
+            }
             break
           }
         }
@@ -186,16 +277,22 @@ export class YjsMindmapSync {
     try {
       const tree = this._rebuildTreeFromYjs()
       if (tree) {
-        this.mindMap.setData(tree)
+        // 使用 updateData 而非 setData，保留节点缓存、执行 diff-based render
+        this.mindMap.updateData(tree)
+        // 清除撤销历史，防止远程变更被 Ctrl+Z 撤销
+        // updateData 会 addHistory，但协作者的编辑不应该出现在本地撤销栈中
+        this.mindMap.command?.clearHistory?.()
       }
     } finally {
-      this._applyingRemote = false
+      // 延迟清除标志，确保 updateData 触发的 data_change 事件在标志仍为 true 时传播
+      setTimeout(() => { this._applyingRemote = false }, 0)
     }
   }
 
   _handleSyncInit(data) {
     const state = this._decodeUpdate(data.state)
     Y.applyUpdate(this.doc, state, 'remote')
+    this._receivedServerState = true
   }
 
   _handleUpdate(data) {
@@ -216,10 +313,10 @@ export class YjsMindmapSync {
   }
 
   _encodeUpdate(uint8Array) {
-    return btoa(String.fromCharCode(...uint8Array))
+    return uint8ArrayToBase64(uint8Array)
   }
 
   _decodeUpdate(base64Str) {
-    return Uint8Array.from(atob(base64Str), c => c.charCodeAt(0))
+    return base64ToUint8Array(base64Str)
   }
 }

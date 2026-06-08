@@ -136,10 +136,14 @@ async function handleUseTemplate(item) {
     )
     const res = await useTemplate(item.id)
     ElMessage.success('脑图创建成功')
-    // 从返回信息中提取新脑图 ID 并跳转编辑
-    // 由于 add_mindmap_services 返回的是 CrudResponseModel，不直接返回 ID
-    // 跳转到列表页让用户找到新建的脑图
-    router.push('/mindmap/index')
+    // 从响应中提取新脑图 ID 并直接跳转编辑
+    const newId = res.data?.id
+    if (newId) {
+      router.push(`/mindmap/edit/${newId}`)
+    } else {
+      // 兼容 fallback：如果未能提取 ID，跳转到列表页
+      router.push('/mindmap/index')
+    }
   } catch (e) {
     if (e !== 'cancel') {
       console.error('使用模板失败:', e)

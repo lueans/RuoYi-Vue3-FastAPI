@@ -4,8 +4,35 @@
       <!-- 添加协作者 -->
       <div class="addSection">
         <el-form :model="addForm" :inline="true" size="small">
-          <el-form-item label="用户ID">
-            <el-input-number v-model="addForm.userId" :min="1" :controls="false" placeholder="用户ID" style="width: 100px" />
+          <el-form-item label="用户">
+            <el-select
+              v-model="addForm.userId"
+              filterable
+              remote
+              reserve-keyword
+              clearable
+              :remote-method="handleSearchUsers"
+              :loading="searchLoading"
+              placeholder="搜索用户名或昵称"
+              style="width: 200px"
+            >
+              <el-option
+                v-for="user in userOptions"
+                :key="user.userId"
+                :label="`${user.nickName || user.userName} (${user.userName})`"
+                :value="user.userId"
+              >
+                <div class="userOption">
+                  <el-avatar :size="24" :src="user.avatar || undefined">
+                    {{ user.nickName?.charAt(0) || user.userName?.charAt(0) || '?' }}
+                  </el-avatar>
+                  <div class="userOptionInfo">
+                    <span class="userOptionName">{{ user.nickName || user.userName }}</span>
+                    <span class="userOptionId">{{ user.userName }}</span>
+                  </div>
+                </div>
+              </el-option>
+            </el-select>
           </el-form-item>
           <el-form-item label="权限">
             <el-select v-model="addForm.permission" style="width: 90px">
@@ -57,7 +84,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import Sidebar from './Sidebar.vue'
 import { store, actions } from './useStore'
-import { addCollaborator, getCollaborators, updateCollaboratorPermission, removeCollaborator } from '@/api/mindmap/collaborator'
+import { addCollaborator, getCollaborators, updateCollaboratorPermission, removeCollaborator, searchUsers } from '@/api/mindmap/collaborator'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const props = defineProps({
@@ -67,6 +94,9 @@ const props = defineProps({
 const sidebarRef = ref(null)
 const loading = ref(false)
 const collaborators = ref([])
+const userOptions = ref([])
+const searchLoading = ref(false)
+let searchTimer = null
 
 const addForm = reactive({
   userId: null,
@@ -96,9 +126,30 @@ async function loadCollaborators() {
   }
 }
 
+function handleSearchUsers(keyword) {
+  clearTimeout(searchTimer)
+  if (!keyword || keyword.length < 1) {
+    userOptions.value = []
+    return
+  }
+  // 防抖 300ms
+  searchTimer = setTimeout(async () => {
+    searchLoading.value = true
+    try {
+      const res = await searchUsers(keyword)
+      userOptions.value = res.data || []
+    } catch (e) {
+      console.error('搜索用户失败:', e)
+      userOptions.value = []
+    } finally {
+      searchLoading.value = false
+    }
+  }, 300)
+}
+
 async function handleAdd() {
   if (!props.mindmapId || !addForm.userId) {
-    ElMessage.warning('请输入用户ID')
+    ElMessage.warning('请选择要添加的用户')
     return
   }
   try {
@@ -110,6 +161,7 @@ async function handleAdd() {
     ElMessage.success('协作者添加成功')
     addForm.userId = null
     addForm.permission = 0
+    userOptions.value = []
     loadCollaborators()
   } catch (e) {
     console.error('添加协作者失败:', e)
@@ -200,6 +252,31 @@ async function handleRemove(item) {
           margin-top: 4px;
         }
       }
+    }
+  }
+}
+</style>
+
+<!-- el-option 的 slot 内容会被 teleport 到 body，scoped 样式不生效，需要单独的 non-scoped 样式 -->
+<style lang="scss">
+.userOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .userOptionInfo {
+    display: flex;
+    flex-direction: column;
+
+    .userOptionName {
+      font-size: 13px;
+      font-weight: 500;
+      color: #333;
+    }
+
+    .userOptionId {
+      font-size: 11px;
+      color: #999;
     }
   }
 }

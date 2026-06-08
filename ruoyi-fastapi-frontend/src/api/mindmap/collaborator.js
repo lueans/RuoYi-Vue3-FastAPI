@@ -33,3 +33,12 @@ export function removeCollaborator(collabId) {
     method: 'delete'
   })
 }
+
+// 搜索用户（用于添加协作者时搜索）
+export function searchUsers(keyword) {
+  return request({
+    url: '/mindmap/collaborator/search-users',
+    method: 'get',
+    params: { keyword }
+  })
+}

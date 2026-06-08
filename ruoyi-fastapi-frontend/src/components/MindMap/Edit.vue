@@ -35,7 +35,7 @@
     <NodeImgPreview v-if="mindMap" :mindMap="mindMap" />
     <FormulaSidebar v-if="mindMap" :mindMap="mindMap" />
     <OutlineEdit v-if="mindMap" :mindMap="mindMap" />
-    <VersionHistory v-if="mindMap" :mindMap="mindMap" :mindmapId="props.mindmapId" />
+    <VersionHistory v-if="mindMap" :mindMap="mindMap" :mindmapId="props.mindmapId" :yjsSync="yjsSync" @yjs-reinit="onYjsReinit" />
     <CollaboratorManager v-if="mindMap" :mindmapId="props.mindmapId" />
     <div
       class="dragMask"
@@ -111,6 +111,7 @@ const pendingSave = ref(false)
 const saveStatus = ref('idle') // 'idle' | 'saving' | 'saved' | 'error'
 let saveStatusTimer = null
 const AUTO_SAVE_DELAY = 2000
+let dataChangeDetailHandler = null
 
 // 文本编辑模式退出检测
 // 设置文本编辑退出检测
@@ -356,7 +357,20 @@ async function initMindMap() {
   if (props.mindmapId && !props.readonly) {
     yjsSync = new YjsMindmapSync(props.mindmapId, mm)
     yjsSync.start()
-    yjsSync.initFromMindmap(root)
+    // 事件驱动初始化：等待 sync_init 到达后再决定是否需要写入本地数据
+    // 服务端在 auth_ok 后立即发送 sync_init，因此短暂等待即可
+    const initDelay = setTimeout(() => {
+      // 超时未收到 sync_init，且 doc 为空 → 首次创建，写入本地数据
+      if (yjsSync && !yjsSync.hasData()) {
+        yjsSync.initFromMindmap(root)
+      }
+    }, 800)
+    // 如果提前收到 sync_init（doc 已有数据），取消延时 init
+    const originalHandleSyncInit = yjsSync._handleSyncInit.bind(yjsSync)
+    yjsSync._handleSyncInit = (data) => {
+      clearTimeout(initDelay)
+      originalHandleSyncInit(data)
+    }
   }
 
   // Load dynamic plugins based on config
@@ -378,11 +392,14 @@ async function initMindMap() {
   if (!props.readonly) {
     bus.on('data_change', onBusDataChange)
     bus.on('view_data_change', onBusViewDataChange)
-    // Yjs 增量同步
+    // Yjs 增量同步（带反馈循环保护）
     if (yjsSync) {
-      mm.on('data_change_detail', (detailList) => {
+      dataChangeDetailHandler = (detailList) => {
+        // 跳过远程变更引发的本地事件，防止回写 Yjs 形成放大循环
+        if (yjsSync.isApplyingRemote()) return
         yjsSync.onDataChangeDetail(detailList)
-      })
+      }
+      mm.on('data_change_detail', dataChangeDetailHandler)
     }
 
     // Ctrl+S manual save
@@ -403,6 +420,8 @@ function setSaveStatus(status) {
 
 function onBusDataChange(data) {
   if (props.mindmapId) {
+    // 跳过远程变更引发的本地 data_change，防止自动保存捕获中间状态
+    if (yjsSync && yjsSync.isApplyingRemote()) return
     // 常规变更，使用防抖延迟
     // 如果是文本编辑退出，hide_text_edit 事件会紧随其后触发，
     // 取消此防抖计时器并立即保存（见 setupTextEditExitDetection）
@@ -418,6 +437,8 @@ function onBusDataChange(data) {
 function onBusViewDataChange(data) {
   if (props.readonly) return
   if (props.mindmapId) {
+    // 跳过远程变更引发的本地视图变更
+    if (yjsSync && yjsSync.isApplyingRemote()) return
     // 后端模式：视图变更也触发保存（平移/缩放后 2 秒自动保存）
     clearTimeout(autoSaveTimer)
     autoSaveTimer = setTimeout(() => {
@@ -613,6 +634,34 @@ function unbindBusEvents() {
   bus.off('data_change', onBusDataChange)
   bus.off('view_data_change', onBusViewDataChange)
   bus.off('toggleOpenNodeRichText', onToggleOpenNodeRichText)
+}
+
+/**
+ * Yjs 重新初始化（版本恢复时由 VersionHistory 触发）
+ * 销毁旧的 Yjs 连接，用恢复后的数据创建新的同步实例
+ */
+function onYjsReinit(restoredRoot) {
+  if (!props.mindmapId || props.readonly) return
+  // 销毁旧的 Yjs 同步
+  if (yjsSync) {
+    yjsSync.destroy()
+    yjsSync = null
+  }
+  // 移除旧的 data_change_detail 监听器（使用具名引用）
+  if (dataChangeDetailHandler) {
+    mindMap.value.off('data_change_detail', dataChangeDetailHandler)
+    dataChangeDetailHandler = null
+  }
+  // 创建新的 Yjs 同步，使用恢复后的数据
+  yjsSync = new YjsMindmapSync(props.mindmapId, mindMap.value)
+  yjsSync.start()
+  yjsSync.initFromMindmap(restoredRoot)
+  // 重新绑定 data_change_detail 事件（具名引用）
+  dataChangeDetailHandler = (detailList) => {
+    if (yjsSync && yjsSync.isApplyingRemote()) return
+    yjsSync.onDataChangeDetail(detailList)
+  }
+  mindMap.value.on('data_change_detail', dataChangeDetailHandler)
 }
 
 defineExpose({

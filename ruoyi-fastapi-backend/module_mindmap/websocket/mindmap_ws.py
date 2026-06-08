@@ -6,6 +6,8 @@ import time
 from fastapi import WebSocket, WebSocketDisconnect
 
 from config.database import AsyncSessionLocal
+from exceptions.exception import ServiceException
+from module_mindmap.service.mindmap_service import MindmapService
 from module_mindmap.websocket.room_manager import room_manager
 from module_mindmap.websocket.ws_auth import validate_ws_token
 from module_mindmap.websocket.yjs_doc import YjsDocManager
@@ -15,6 +17,10 @@ from utils.log_util import logger
 AUTH_TIMEOUT_SECONDS = 10
 # Yjs 状态持久化间隔：每 30 秒最多持久化一次
 PERSIST_INTERVAL_SECONDS = 30
+# 心跳间隔：每 30 秒发送一次 ping
+HEARTBEAT_INTERVAL_SECONDS = 30
+# 连续未响应 pong 次数上限，超过则判定连接死亡
+HEARTBEAT_MISS_LIMIT = 3
 
 
 async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> None:  # noqa: PLR0912, PLR0915
@@ -43,6 +49,25 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
         await websocket.close(code=4001)
         return
 
+    # ── 脑图访问权限校验（防止认证用户访问无权限的脑图） ──
+    try:
+        async with AsyncSessionLocal() as db:
+            await MindmapService.check_mindmap_access(
+                db, mindmap_id, user_info['id'], require_edit=False,
+            )
+    except ServiceException:
+        await websocket.send_json({
+            'type': 'auth_error',
+            'message': '无访问权限',
+        })
+        await websocket.close(code=4003)
+        return
+    except Exception as e:
+        logger.error(f'WebSocket 权限校验异常: {e}')
+        await websocket.send_json({'type': 'auth_error', 'message': '权限校验失败'})
+        await websocket.close(code=4003)
+        return
+
     # 认证通过
     await websocket.send_json({'type': 'auth_ok', 'user': user_info})
     await room_manager.join(mindmap_id, websocket, user_info)
@@ -69,6 +94,32 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
                 })
     except Exception as e:
         logger.error(f'加载 Yjs 状态失败: {e}')
+
+    # ── 心跳任务 ──
+    missed_pongs = 0
+
+    async def heartbeat():
+        """定期发送 ping，检测死亡连接"""
+        nonlocal missed_pongs
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+                if missed_pongs >= HEARTBEAT_MISS_LIMIT:
+                    logger.warning(f'心跳超时: 用户 {user_info["id"]} 连续 {missed_pongs} 次未响应 pong，关闭连接')
+                    try:
+                        await websocket.close(code=4002)
+                    except Exception:
+                        pass
+                    return
+                missed_pongs += 1
+                try:
+                    await websocket.send_json({'type': 'ping'})
+                except Exception:
+                    return
+        except (WebSocketDisconnect, Exception):
+            pass
+
+    heartbeat_task = asyncio.create_task(heartbeat())
 
     # ── 消息循环 ──
     last_persist_time = 0.0
@@ -102,6 +153,10 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
                     except Exception as e:
                         logger.error(f'持久化 Yjs 状态失败: {e}')
 
+            elif msg_type == 'pong':
+                # 心跳响应，重置未响应计数
+                missed_pongs = 0
+
             elif msg_type == 'awareness':
                 # 转发 awareness 更新（光标、选区等）
                 await room_manager.broadcast(
@@ -119,6 +174,7 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
     except Exception as e:
         logger.error(f'WebSocket 错误: {e}')
     finally:
+        heartbeat_task.cancel()
         await room_manager.leave(mindmap_id, websocket)
         await room_manager.broadcast(
             mindmap_id,

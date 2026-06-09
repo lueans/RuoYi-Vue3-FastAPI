@@ -83,8 +83,7 @@ class MindmapTagService:
         cat = await MindmapTagDao.get_category_by_id(db, category_id)
         if not cat:
             raise ServiceException(message='分类不存在')
-        if cat.owner_id != user_id and cat.owner_id != 0:
-            raise ServiceException(message='无权限删除该分类')
+        _check_write_permission(cat.owner_id, user_id, '分类')
 
         tag_count = await MindmapTagDao.count_tags_in_category(db, category_id)
         if tag_count > 0:
@@ -168,10 +167,10 @@ class MindmapTagService:
             raise ServiceException(message='标签不存在')
         _check_write_permission(tag.owner_id, user_id, '标签')
 
-        # key 唯一性检查（排除自身）
+        # key 唯一性检查（排除自身），使用标签自身的 owner scope
         if model.tag_key != tag.tag_key:
             is_unique = await MindmapTagDao.check_key_unique(
-                db, user_id, model.tag_key, exclude_id=model.id,
+                db, tag.owner_id, model.tag_key, exclude_id=model.id,
             )
             if not is_unique:
                 raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')

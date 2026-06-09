@@ -55,7 +55,7 @@ async def get_tag_categories(
 @Log(title='标签分类', business_type=BusinessType.INSERT)
 async def add_tag_category(
     request: Request,
-    category_name: Annotated[str, Query(description='分类名称', alias='categoryName')],
+    category_name: Annotated[str, Query(description='分类名称', alias='categoryName', min_length=1, max_length=100)],
     sort_order: Annotated[int, Query(description='排序', alias='sortOrder')] = 0,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
@@ -78,7 +78,7 @@ async def add_tag_category(
 async def update_tag_category(
     request: Request,
     category_id: Annotated[int, Query(description='分类ID', alias='categoryId')],
-    category_name: Annotated[str, Query(description='分类名称', alias='categoryName')],
+    category_name: Annotated[str, Query(description='分类名称', alias='categoryName', min_length=1, max_length=100)],
     sort_order: Annotated[int, Query(description='排序', alias='sortOrder')] = 0,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,

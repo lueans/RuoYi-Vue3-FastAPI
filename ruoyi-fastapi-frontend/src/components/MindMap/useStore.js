@@ -52,8 +52,16 @@ function initLocalConfig() {
     const saved = localStorage.getItem(STORAGE_KEY_LOCAL_CONFIG)
     if (saved) {
       const parsed = JSON.parse(saved)
-      // 以默认值为基底，仅覆盖用户显式修改过的项
+      // 一次性迁移：旧代码会将所有配置项（含默认值）存入 localStorage，
+      // 导致 useLeftKeySelectionRightKeyDrag 的旧默认值 false 覆盖新默认值 true。
+      // 此处删除已知被旧默认值污染的 key，让新默认值生效。
+      if (parsed.useLeftKeySelectionRightKeyDrag === false) {
+        delete parsed.useLeftKeySelectionRightKeyDrag
+      }
+      // 以默认值为基底，仅叠加用户显式修改过的项
       Object.assign(state.localConfig, defaultLocalConfig, parsed)
+      // 回写清理后的配置
+      setLocalConfig(state.localConfig)
     }
   } catch {}
 }

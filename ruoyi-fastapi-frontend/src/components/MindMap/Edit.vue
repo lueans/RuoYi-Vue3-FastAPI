@@ -115,6 +115,14 @@ let dataChangeDetailHandler = null
 
 // 文本编辑模式退出检测
 // 设置文本编辑退出检测
+function onHideTextEdit() {
+  // 取消 data_change 启动的防抖计时器，立即保存
+  clearTimeout(autoSaveTimer)
+  if (props.mindmapId) {
+    saveToBackend()
+  }
+}
+
 function setupTextEditExitDetection() {
   // 直接监听 hide_text_edit 事件（simple-mind-map 在退出文本编辑时触发）
   // 覆盖所有退出方式：点击画布、按 Enter/Tab、切换节点、缩放等
@@ -123,13 +131,7 @@ function setupTextEditExitDetection() {
   // 注意时序：hideEditTextBox() 内部先 execCommand('SET_NODE_TEXT') 触发 data_change，
   // 然后才 emit hide_text_edit。所以 data_change 到达时我们还不知道是文本编辑退出。
   // 解决方案：data_change 启动 2 秒防抖，hide_text_edit 紧随其后触发时取消防抖并立即保存。
-  bus.on('hide_text_edit', () => {
-    // 取消 data_change 启动的防抖计时器，立即保存
-    clearTimeout(autoSaveTimer)
-    if (props.mindmapId) {
-      saveToBackend()
-    }
-  })
+  bus.on('hide_text_edit', onHideTextEdit)
 }
 
 const isZenMode = computed(() => store.localConfig.isZenMode)
@@ -420,8 +422,8 @@ function setSaveStatus(status) {
 
 function onBusDataChange(data) {
   if (props.mindmapId) {
-    // 跳过远程变更引发的本地 data_change，防止自动保存捕获中间状态
-    if (yjsSync && yjsSync.isApplyingRemote()) return
+    // 跳过远程变更或暂停状态（版本预览）引发的本地 data_change
+    if (yjsSync && (yjsSync.isApplyingRemote() || yjsSync.isPaused())) return
     // 常规变更，使用防抖延迟
     // 如果是文本编辑退出，hide_text_edit 事件会紧随其后触发，
     // 取消此防抖计时器并立即保存（见 setupTextEditExitDetection）
@@ -437,8 +439,8 @@ function onBusDataChange(data) {
 function onBusViewDataChange(data) {
   if (props.readonly) return
   if (props.mindmapId) {
-    // 跳过远程变更引发的本地视图变更
-    if (yjsSync && yjsSync.isApplyingRemote()) return
+    // 跳过远程变更或暂停状态引发的本地视图变更
+    if (yjsSync && (yjsSync.isApplyingRemote() || yjsSync.isPaused())) return
     // 后端模式：视图变更也触发保存（平移/缩放后 2 秒自动保存）
     clearTimeout(autoSaveTimer)
     autoSaveTimer = setTimeout(() => {
@@ -634,6 +636,7 @@ function unbindBusEvents() {
   bus.off('data_change', onBusDataChange)
   bus.off('view_data_change', onBusViewDataChange)
   bus.off('toggleOpenNodeRichText', onToggleOpenNodeRichText)
+  bus.off('hide_text_edit', onHideTextEdit)
 }
 
 /**
@@ -654,6 +657,17 @@ function onYjsReinit(restoredRoot) {
   }
   // 创建新的 Yjs 同步，使用恢复后的数据
   yjsSync = new YjsMindmapSync(props.mindmapId, mindMap.value)
+
+  // 拦截 sync_init：版本恢复后，本地已有正确数据，忽略服务端可能过期的旧状态
+  const originalHandleSyncInit = yjsSync._handleSyncInit.bind(yjsSync)
+  yjsSync._handleSyncInit = (data) => {
+    if (yjsSync.hasData()) {
+      // 本地已有恢复后的数据，跳过服务端的旧状态
+      return
+    }
+    originalHandleSyncInit(data)
+  }
+
   yjsSync.start()
   yjsSync.initFromMindmap(restoredRoot)
   // 重新绑定 data_change_detail 事件（具名引用）

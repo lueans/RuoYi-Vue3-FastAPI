@@ -208,12 +208,14 @@ function exitPreview() {
 
   // 恢复预览前的状态
   if (props.mindMap) {
-    props.mindMap.setFullData({
-      root: _prePreviewState.root,
-      layout: _prePreviewState.layout,
-      theme: _prePreviewState.theme,
-      view: _prePreviewState.view,
-    })
+    // 使用 updateData 而非 setFullData，保留撤销历史
+    // updateData 只做 diff-based render，不调用 clearHistory()
+    props.mindMap.updateData(_prePreviewState.root)
+    // 单独恢复布局/主题/视图（这些不影响撤销栈）
+    if (_prePreviewState.layout) props.mindMap.setLayout(_prePreviewState.layout)
+    if (_prePreviewState.theme?.template) props.mindMap.setTheme(_prePreviewState.theme.template)
+    if (_prePreviewState.theme?.config) props.mindMap.setThemeConfig(_prePreviewState.theme.config)
+    if (_prePreviewState.view) props.mindMap.view.setTransformData(_prePreviewState.view)
   }
 
   // 恢复 Yjs 同步

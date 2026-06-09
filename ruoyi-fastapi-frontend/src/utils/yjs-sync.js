@@ -116,6 +116,11 @@ export class YjsMindmapSync {
     return this._applyingRemote
   }
 
+  /** 检查同步是否已暂停（版本预览时使用） */
+  isPaused() {
+    return this._paused
+  }
+
   /** 暂停同步（版本预览时使用） */
   pause() {
     this._paused = true
@@ -141,6 +146,7 @@ export class YjsMindmapSync {
     const flat = {}
     flattenTree(nodeTree, null, flat)
 
+    // 使用 'init' origin，doc.on('update') 中可据此区分初始化和增量编辑
     this.doc.transact(() => {
       for (const [uid, nodeInfo] of Object.entries(flat)) {
         const yNode = new Y.Map()
@@ -153,7 +159,7 @@ export class YjsMindmapSync {
         yNode.set('parentUid', nodeInfo.parentUid)
         this.yNodes.set(uid, yNode)
       }
-    })
+    }, 'init')
   }
 
   /** 监听 simple-mind-map 的 data_change_detail 事件，翻译为 Yjs 操作 */

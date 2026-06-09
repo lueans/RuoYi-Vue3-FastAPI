@@ -14,6 +14,15 @@ from module_mindmap.entity.vo.mindmap_tag_vo import (
 from utils.common_util import CamelCaseUtil
 
 
+def _check_write_permission(resource_owner_id: int, user_id: int, resource_name: str = '资源') -> None:
+    """校验写权限：私有资源仅创建者可操作，全局资源仅管理员可操作"""
+    if resource_owner_id == 0:
+        if user_id != 1:
+            raise ServiceException(message=f'仅管理员可修改全局{resource_name}')
+    elif resource_owner_id != user_id:
+        raise ServiceException(message=f'无权限修改该{resource_name}')
+
+
 class MindmapTagService:
     """标签服务层"""
 
@@ -54,8 +63,7 @@ class MindmapTagService:
         cat = await MindmapTagDao.get_category_by_id(db, category_id)
         if not cat:
             raise ServiceException(message='分类不存在')
-        if cat.owner_id != user_id and cat.owner_id != 0:
-            raise ServiceException(message='无权限修改该分类')
+        _check_write_permission(cat.owner_id, user_id, '分类')
         try:
             await MindmapTagDao.update_category(db, category_id, {
                 'name': name,
@@ -121,8 +129,13 @@ class MindmapTagService:
         cls, db: AsyncSession, model: MindmapTagModel, user_id: int, user_name: str,
     ) -> CrudResponseModel:
         """新增标签"""
+        # 管理员可创建全局标签(owner_id=0)，普通用户只能创建私有标签
+        owner_id = user_id
+        if model.owner_id == 0 and user_id == 1:
+            owner_id = 0
+
         # key 唯一性检查
-        is_unique = await MindmapTagDao.check_key_unique(db, user_id, model.tag_key)
+        is_unique = await MindmapTagDao.check_key_unique(db, owner_id, model.tag_key)
         if not is_unique:
             raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')
 
@@ -132,7 +145,7 @@ class MindmapTagService:
                 'tag_key': model.tag_key,
                 'name': model.name,
                 'category_id': model.category_id,
-                'owner_id': user_id,
+                'owner_id': owner_id,
                 'style': model.style,
                 'description': model.description,
                 'created_by': user_name,
@@ -153,13 +166,12 @@ class MindmapTagService:
         tag = await MindmapTagDao.get_tag_by_id(db, model.id)
         if not tag:
             raise ServiceException(message='标签不存在')
-        if tag.owner_id != user_id and tag.owner_id != 0:
-            raise ServiceException(message='无权限修改该标签')
+        _check_write_permission(tag.owner_id, user_id, '标签')
 
         # key 唯一性检查（排除自身）
         if model.tag_key != tag.tag_key:
             is_unique = await MindmapTagDao.check_key_unique(
-                db, tag.owner_id, model.tag_key, exclude_id=model.id,
+                db, user_id, model.tag_key, exclude_id=model.id,
             )
             if not is_unique:
                 raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')
@@ -191,8 +203,8 @@ class MindmapTagService:
         # 逐个校验权限
         for tag_id in id_list:
             tag = await MindmapTagDao.get_tag_by_id(db, tag_id)
-            if tag and tag.owner_id != user_id and tag.owner_id != 0:
-                raise ServiceException(message=f'无权限删除标签ID={tag_id}')
+            if tag:
+                _check_write_permission(tag.owner_id, user_id, '标签')
 
         try:
             await MindmapTagDao.delete_tags(db, id_list)

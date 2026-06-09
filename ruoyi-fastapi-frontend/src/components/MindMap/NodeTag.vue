@@ -68,6 +68,7 @@
 <script setup>
 import bus from './useEventBus'
 import { getTagSuggestions } from '@/api/mindmap/tag'
+import { ElMessage } from 'element-plus'
 
 const dialogVisible = ref(false)
 const tagInput = ref('')
@@ -137,10 +138,11 @@ function onLibraryTagSelect(tagId) {
   if (!libTag) return
 
   // 检查是否已存在（通过 tagId 或 text 去重）
-  const exists = tagArr.value.some(t =>
-    (typeof t === 'object' && t.tagId === tagId) ||
-    (typeof t === 'object' ? t.text : t) === libTag.name
-  )
+  const exists = tagArr.value.some(t => {
+    if (typeof t === 'object' && t.tagId === tagId) return true
+    const text = typeof t === 'object' ? t.text : t
+    return text === libTag.name
+  })
   if (exists) {
     ElMessage.warning('该标签已存在')
     selectedLibraryTag.value = null

@@ -159,6 +159,21 @@
         <el-form-item label="字号">
           <el-input-number v-model="tagStyleForm.fontSize" :min="10" :max="24" />
         </el-form-item>
+        <el-form-item label="位置">
+          <el-select v-model="tagStyleForm.placement" style="width: 100%">
+            <el-option label="右侧" value="right" />
+            <el-option label="左侧" value="left" />
+            <el-option label="顶部" value="top" />
+            <el-option label="底部" value="bottom" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="对齐方式">
+          <el-select v-model="tagStyleForm.align" style="width: 100%">
+            <el-option label="居中" value="center" />
+            <el-option label="靠左/上" value="start" />
+            <el-option label="靠右/下" value="end" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="预览">
           <span class="tagBadge" :style="getTagStyle(tagStyleForm)">
             {{ tagForm.name || '标签预览' }}
@@ -272,7 +287,7 @@ const tagFormRef = ref(null)
 const tagForm = reactive({
   id: null, tagKey: '', name: '', categoryId: null, description: '',
 })
-const tagStyleForm = reactive({ fill: '#409eff', color: '#ffffff', fontSize: 12 })
+const tagStyleForm = reactive({ fill: '#409eff', color: '#ffffff', fontSize: 12, placement: 'right', align: 'center' })
 const tagRules = {
   tagKey: [{ required: true, message: '请输入标签Key', trigger: 'blur' }],
   name: [{ required: true, message: '请输入标签名称', trigger: 'blur' }],
@@ -305,6 +320,8 @@ function handleAddTag() {
   tagStyleForm.fill = '#409eff'
   tagStyleForm.color = '#ffffff'
   tagStyleForm.fontSize = 12
+  tagStyleForm.placement = 'right'
+  tagStyleForm.align = 'center'
   tagDialogVisible.value = true
 }
 
@@ -318,6 +335,8 @@ function handleEditTag(row) {
   tagStyleForm.fill = style.fill || '#409eff'
   tagStyleForm.color = style.color || '#ffffff'
   tagStyleForm.fontSize = style.fontSize || 12
+  tagStyleForm.placement = style.placement || 'right'
+  tagStyleForm.align = style.align || 'center'
   tagDialogVisible.value = true
 }
 
@@ -346,6 +365,8 @@ async function submitTag() {
       fill: tagStyleForm.fill,
       color: tagStyleForm.color,
       fontSize: tagStyleForm.fontSize,
+      placement: tagStyleForm.placement,
+      align: tagStyleForm.align,
     },
   }
 

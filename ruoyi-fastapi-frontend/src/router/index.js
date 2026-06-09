@@ -110,6 +110,20 @@ export const constantRoutes = [
       }
     ]
   },
+  // 标签管理（需要登录+权限）
+  {
+    path: '/mindmap/tags',
+    component: Layout,
+    hidden: true,
+    children: [
+      {
+        path: '',
+        component: () => import('@/views/mindmap/tags'),
+        name: 'TagManagement',
+        meta: { title: '标签管理' }
+      }
+    ]
+  },
   {
     path: '',
     component: Layout,

@@ -36,14 +36,25 @@ function setIsReadonly(val) {
 function setLocalConfig(config) {
   Object.assign(state.localConfig, config)
   try {
-    localStorage.setItem(STORAGE_KEY_LOCAL_CONFIG, JSON.stringify(state.localConfig))
+    // 只保存与默认值不同的项，避免新默认值被旧 localStorage 覆盖
+    const toSave = {}
+    for (const key of Object.keys(state.localConfig)) {
+      if (state.localConfig[key] !== defaultLocalConfig[key]) {
+        toSave[key] = state.localConfig[key]
+      }
+    }
+    localStorage.setItem(STORAGE_KEY_LOCAL_CONFIG, JSON.stringify(toSave))
   } catch {}
 }
 
 function initLocalConfig() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY_LOCAL_CONFIG)
-    if (saved) Object.assign(state.localConfig, JSON.parse(saved))
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      // 以默认值为基底，仅覆盖用户显式修改过的项
+      Object.assign(state.localConfig, defaultLocalConfig, parsed)
+    }
   } catch {}
 }
 

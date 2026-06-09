@@ -61,7 +61,8 @@ class MindmapTemplateDao:
         if category_id is not None:
             query = query.where(Mindmap.template_category_id == category_id)
         if keyword:
-            query = query.where(Mindmap.name.like(f'%{keyword}%'))
+            escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            query = query.where(Mindmap.name.like(f'%{escaped}%'))
 
         query = query.order_by(Mindmap.create_time.desc())
         return await PageUtil.paginate(db, query, page_num, page_size, True)

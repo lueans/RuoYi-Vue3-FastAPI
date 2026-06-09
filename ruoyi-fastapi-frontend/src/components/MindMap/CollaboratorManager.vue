@@ -113,6 +113,10 @@ watch(() => store.activeSidebar, (val) => {
   }
 })
 
+onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
+})
+
 async function loadCollaborators() {
   if (!props.mindmapId) return
   loading.value = true

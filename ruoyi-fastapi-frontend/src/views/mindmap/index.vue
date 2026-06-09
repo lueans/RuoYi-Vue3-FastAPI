@@ -138,6 +138,9 @@ function getList() {
   listMindmap(queryParams.value).then(response => {
     mindmapList.value = response.rows
     total.value = response.total
+  }).catch(() => {
+    ElMessage.error('加载脑图列表失败')
+  }).finally(() => {
     loading.value = false
   })
 }

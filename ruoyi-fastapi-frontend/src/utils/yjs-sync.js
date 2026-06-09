@@ -167,6 +167,17 @@ export class YjsMindmapSync {
     if (!detailList || !detailList.length) return
     if (this._paused) return
 
+    // 预构建 childUid → parentUid 反向索引，O(1) 查找父节点
+    const childToParent = new Map()
+    this.yNodes.forEach((yNode, uid) => {
+      const children = yNode.get('children')
+      if (children) {
+        for (const childUid of children.toArray()) {
+          childToParent.set(childUid, uid)
+        }
+      }
+    })
+
     this._localYjsChange = true
     try {
     this.doc.transact(() => {
@@ -187,15 +198,8 @@ export class YjsMindmapSync {
               (detail.data.children || []).map(c => c.data?.uid).filter(Boolean)
             ))
 
-            // 查找父节点：遍历现有节点，找到 children 中包含此 uid 的节点
-            let parentUid = ''
-            this.yNodes.forEach((existingYNode, existingUid) => {
-              if (existingUid === uid) return
-              const existingChildren = existingYNode.get('children')
-              if (existingChildren && existingChildren.toArray().includes(uid)) {
-                parentUid = existingUid
-              }
-            })
+            // O(1) 查找父节点
+            const parentUid = childToParent.get(uid) || ''
             yNode.set('parentUid', parentUid)
             this.yNodes.set(uid, yNode)
             break
@@ -273,16 +277,21 @@ export class YjsMindmapSync {
     const rootUid = Object.keys(nodes).find(id => !nodes[id]._parentUid)
     if (!rootUid || !nodes[rootUid]) return null
 
-    const buildTree = (uid) => {
+    // 带循环检测的树构建，防止损坏数据导致栈溢出
+    const buildTree = (uid, visited) => {
       const node = nodes[uid]
       if (!node) return null
+      if (visited.has(uid)) return null // 检测到循环，截断
+      visited.add(uid)
       return {
         data: node.data,
-        children: node._childUids.map(buildTree).filter(Boolean),
+        children: node._childUids
+          .map(childUid => buildTree(childUid, new Set(visited)))
+          .filter(Boolean),
       }
     }
 
-    return buildTree(rootUid)
+    return buildTree(rootUid, new Set())
   }
 
   _applyYjsToMindmap() {

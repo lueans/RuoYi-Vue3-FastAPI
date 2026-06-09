@@ -259,7 +259,9 @@ async function initMindMap() {
     viewData = savedData?.view || null
   }
 
+  // savedConfig 放在最前面，后续显式配置覆盖它，防止 localStorage 污染覆盖关键选项
   const mm = new MindMap({
+    ...savedConfig,
     el: mindMapContainerRef.value,
     data: root,
     fit: false,
@@ -282,7 +284,6 @@ async function initMindMap() {
       openBlankMode: false
     },
     isLimitMindMapInCanvas: true,
-    ...savedConfig,
     useLeftKeySelectionRightKeyDrag: useLeftKeySelectionRightKeyDrag.value,
     customInnerElsAppendTo: null,
     initRootNodePosition: ['center', 'center'],
@@ -652,9 +653,11 @@ function onYjsReinit(restoredRoot) {
   }
   // 移除旧的 data_change_detail 监听器（使用具名引用）
   if (dataChangeDetailHandler) {
-    mindMap.value.off('data_change_detail', dataChangeDetailHandler)
+    mindMap.value?.off('data_change_detail', dataChangeDetailHandler)
     dataChangeDetailHandler = null
   }
+  // 组件可能正在卸载，检查 mindMap 是否仍可用
+  if (!mindMap.value) return
   // 创建新的 Yjs 同步，使用恢复后的数据
   yjsSync = new YjsMindmapSync(props.mindmapId, mindMap.value)
 

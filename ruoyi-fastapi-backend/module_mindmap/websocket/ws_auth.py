@@ -40,27 +40,31 @@ async def validate_ws_token(token: str, redis: Any) -> dict:
         user_info = query_user['user_basic_info']
 
         # Redis session 校验
-        if AppConfig.app_same_time_login:
-            redis_token = await redis.get(f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{session_id}')
-        else:
-            redis_token = await redis.get(f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{user_info.user_id}')
+        try:
+            if AppConfig.app_same_time_login:
+                redis_token = await redis.get(f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{session_id}')
+            else:
+                redis_token = await redis.get(f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{user_info.user_id}')
 
-        if token != redis_token:
-            raise ValueError('token已失效，请重新登录')
+            if token != redis_token:
+                raise ValueError('token已失效，请重新登录')
 
-        # 刷新 Redis TTL
-        if AppConfig.app_same_time_login:
-            await redis.set(
-                f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{session_id}',
-                redis_token,
-                ex=timedelta(minutes=JwtConfig.jwt_redis_expire_minutes),
-            )
-        else:
-            await redis.set(
-                f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{user_info.user_id}',
-                redis_token,
-                ex=timedelta(minutes=JwtConfig.jwt_redis_expire_minutes),
-            )
+            # 刷新 Redis TTL
+            if AppConfig.app_same_time_login:
+                await redis.set(
+                    f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{session_id}',
+                    redis_token,
+                    ex=timedelta(minutes=JwtConfig.jwt_redis_expire_minutes),
+                )
+            else:
+                await redis.set(
+                    f'{RedisInitKeyConfig.ACCESS_TOKEN.key}:{user_info.user_id}',
+                    redis_token,
+                    ex=timedelta(minutes=JwtConfig.jwt_redis_expire_minutes),
+                )
+        except (ConnectionError, TimeoutError, OSError):
+            # Redis 不可用时但 JWT 有效，允许连接（降级处理）
+            pass
 
         return {
             'id': user_info.user_id,

@@ -122,13 +122,13 @@ class MindmapService:
             'update_by': str(user_id),
             'update_time': datetime.now(),
         }
-        if page_object.node_tree:
+        if page_object.node_tree is not None:
             update_data['node_tree'] = json.dumps(page_object.node_tree, ensure_ascii=False)
-        if page_object.view_data:
+        if page_object.view_data is not None:
             update_data['view_data'] = page_object.view_data
-        if page_object.layout:
+        if page_object.layout is not None:
             update_data['layout'] = page_object.layout
-        if page_object.theme:
+        if page_object.theme is not None:
             update_data['theme'] = page_object.theme
 
         try:
@@ -179,7 +179,7 @@ class MindmapService:
     async def delete_mindmap_services(
         cls, query_db: AsyncSession, page_object: DeleteMindmapModel, user_id: int
     ) -> CrudResponseModel:
-        """删除思维导图（含所有权校验）"""
+        """删除思维导图（含所有权校验和关联数据级联清理）"""
         if not page_object.mindmap_ids:
             raise ServiceException(message='传入思维导图ID为空')
 
@@ -192,6 +192,18 @@ class MindmapService:
                 raise ServiceException(message=f'无权限删除脑图ID={mindmap_id}')
 
         try:
+            # 级联清理关联数据
+            from sqlalchemy import delete as sa_delete  # noqa: PLC0415
+            from module_mindmap.entity.do.mindmap_version_do import MindmapVersion  # noqa: PLC0415
+            from module_mindmap.entity.do.mindmap_share_do import MindmapShare  # noqa: PLC0415
+            from module_mindmap.entity.do.mindmap_collaborator_do import MindmapCollaborator  # noqa: PLC0415
+            from module_mindmap.entity.do.mindmap_ws_state_do import MindmapWsState  # noqa: PLC0415
+
+            for model in (MindmapVersion, MindmapShare, MindmapCollaborator, MindmapWsState):
+                await query_db.execute(
+                    sa_delete(model).where(model.mindmap_id.in_(id_list))
+                )
+
             await MindmapDao.batch_delete_mindmap_dao(query_db, id_list)
             await query_db.commit()
             return CrudResponseModel(is_success=True, message='删除成功')

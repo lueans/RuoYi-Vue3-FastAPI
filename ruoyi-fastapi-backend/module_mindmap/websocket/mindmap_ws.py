@@ -123,6 +123,7 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
 
     # ── 消息循环 ──
     last_persist_time = 0.0
+    latest_state_b64 = ''  # 跟踪最新的 Yjs 状态，用于断开时最终保存
     try:
         while True:
             data = await websocket.receive_json()
@@ -142,14 +143,15 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
 
                 # 节流持久化：每 30 秒最多一次
                 now = time.monotonic()
-                if msg_type == 'update' and (now - last_persist_time) >= PERSIST_INTERVAL_SECONDS:
+                state_b64 = data.get('state', '')
+                if state_b64:
+                    latest_state_b64 = state_b64
+                if msg_type == 'update' and state_b64 and (now - last_persist_time) >= PERSIST_INTERVAL_SECONDS:
                     last_persist_time = now
                     try:
-                        state_b64 = data.get('state', '')
-                        if state_b64:
-                            state_bytes = base64.b64decode(state_b64)
-                            async with AsyncSessionLocal() as db:
-                                await YjsDocManager.save_state(db, mindmap_id, state_bytes)
+                        state_bytes = base64.b64decode(state_b64)
+                        async with AsyncSessionLocal() as db:
+                            await YjsDocManager.save_state(db, mindmap_id, state_bytes)
                     except Exception as e:
                         logger.error(f'持久化 Yjs 状态失败: {e}')
 
@@ -175,6 +177,18 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
         logger.error(f'WebSocket 错误: {e}')
     finally:
         heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        # 断开时最终保存 Yjs 状态，防止丢失节流窗口内的数据
+        if latest_state_b64:
+            try:
+                state_bytes = base64.b64decode(latest_state_b64)
+                async with AsyncSessionLocal() as db:
+                    await YjsDocManager.save_state(db, mindmap_id, state_bytes)
+            except Exception as e:
+                logger.error(f'断开时保存 Yjs 状态失败: {e}')
         await room_manager.leave(mindmap_id, websocket)
         await room_manager.broadcast(
             mindmap_id,

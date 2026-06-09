@@ -101,6 +101,7 @@ const pageSize = ref(20)
 const activeTab = ref('formal')
 const isReadonly = computed(() => store.isReadonly)
 const isPreviewing = ref(false)
+const isOperating = ref(false) // 防止并发操作竞态
 
 // 预览前保存的状态，用于退出预览时恢复
 let _prePreviewState = null
@@ -169,7 +170,8 @@ async function handleSaveVersion() {
 }
 
 async function handlePreview(item) {
-  if (!props.mindMap) return
+  if (!props.mindMap || isOperating.value) return
+  isOperating.value = true
   try {
     // 如果已经在预览中，先退出上一次预览
     if (isPreviewing.value) {
@@ -200,6 +202,8 @@ async function handlePreview(item) {
   } catch (e) {
     console.error('预览版本失败:', e)
     ElMessage.error('预览版本失败')
+  } finally {
+    isOperating.value = false
   }
 }
 
@@ -229,43 +233,61 @@ function exitPreview() {
 }
 
 async function handleRestore(item) {
+  if (isOperating.value) return
   try {
     await ElMessageBox.confirm(
       `确认恢复到「${item.name || '版本 ' + item.versionNumber}」？当前未保存的更改将丢失。`,
       '确认恢复',
       { type: 'warning' }
     )
+  } catch {
+    return // 用户取消
+  }
 
+  isOperating.value = true
+  try {
     // 如果正在预览，先退出预览
     if (isPreviewing.value) {
       exitPreview()
     }
 
+    // 第一步：后端恢复（不可逆操作）
     await restoreVersion(item.id)
     ElMessage.success('版本恢复成功')
 
-    // 从后端获取恢复后的最新数据
+    // 第二步：获取恢复后的数据并更新本地显示
+    // 即使此步骤失败，后端恢复已成功，不算整体失败
     if (props.mindMap) {
-      const res = await getVersionDetail(item.id)
-      const versionData = res.data
-      if (versionData?.nodeTree) {
-        props.mindMap.setFullData({
-          root: versionData.nodeTree,
-          layout: versionData.layout,
-          theme: versionData.theme,
-          view: versionData.viewData,
-        })
-
-        // 通知父组件重新初始化 Yjs，使协作者也看到恢复后的内容
-        emit('yjs-reinit', versionData.nodeTree)
+      try {
+        const res = await getVersionDetail(item.id)
+        const versionData = res.data
+        if (versionData?.nodeTree) {
+          props.mindMap.setFullData({
+            root: versionData.nodeTree,
+            layout: versionData.layout,
+            theme: versionData.theme,
+            view: versionData.viewData,
+          })
+          // 通知父组件重新初始化 Yjs，使协作者也看到恢复后的内容
+          emit('yjs-reinit', versionData.nodeTree)
+        }
+      } catch (fetchErr) {
+        console.warn('恢复成功但获取版本详情失败，请刷新页面:', fetchErr)
+        ElMessage.warning('版本已恢复，但获取详情失败，建议刷新页面')
+        // 仍然触发 yjs-reinit 防止协作者状态不一致
+        // 使用当前脑图数据作为 fallback
+        const currentRoot = props.mindMap.getData()?.root
+        if (currentRoot) {
+          emit('yjs-reinit', currentRoot)
+        }
       }
     }
     loadVersions()
   } catch (e) {
-    if (e !== 'cancel') {
-      console.error('恢复版本失败:', e)
-      ElMessage.error('恢复版本失败')
-    }
+    console.error('恢复版本失败:', e)
+    ElMessage.error('恢复版本失败')
+  } finally {
+    isOperating.value = false
   }
 }
 

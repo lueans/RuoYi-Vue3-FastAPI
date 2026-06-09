@@ -13,7 +13,7 @@ export function addTagCategory(name, sortOrder) {
   return request({
     url: '/mindmap/tag/category',
     method: 'post',
-    params: { name, sortOrder: sortOrder || 0 }
+    params: { categoryName: name, sortOrder: sortOrder || 0 }
   })
 }
 
@@ -21,7 +21,7 @@ export function updateTagCategory(categoryId, name, sortOrder) {
   return request({
     url: '/mindmap/tag/category',
     method: 'put',
-    params: { categoryId, name, sortOrder: sortOrder || 0 }
+    params: { categoryId, categoryName: name, sortOrder: sortOrder || 0 }
   })
 }
 

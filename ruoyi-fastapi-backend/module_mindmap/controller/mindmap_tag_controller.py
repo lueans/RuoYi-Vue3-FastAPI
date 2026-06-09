@@ -55,13 +55,13 @@ async def get_tag_categories(
 @Log(title='标签分类', business_type=BusinessType.INSERT)
 async def add_tag_category(
     request: Request,
-    name: Annotated[str, Query(description='分类名称')],
-    sort_order: Annotated[int, Query(description='排序')] = 0,
+    category_name: Annotated[str, Query(description='分类名称', alias='categoryName')],
+    sort_order: Annotated[int, Query(description='排序', alias='sortOrder')] = 0,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
     result = await MindmapTagService.add_category(
-        query_db, name, current_user.user.user_id, current_user.user.user_name, sort_order,
+        query_db, category_name, current_user.user.user_id, current_user.user.user_name, sort_order,
     )
     logger.info(result.message)
     return ResponseUtil.success(msg=result.message)
@@ -77,14 +77,14 @@ async def add_tag_category(
 @Log(title='标签分类', business_type=BusinessType.UPDATE)
 async def update_tag_category(
     request: Request,
-    category_id: Annotated[int, Query(description='分类ID')],
-    name: Annotated[str, Query(description='分类名称')],
-    sort_order: Annotated[int, Query(description='排序')] = 0,
+    category_id: Annotated[int, Query(description='分类ID', alias='categoryId')],
+    category_name: Annotated[str, Query(description='分类名称', alias='categoryName')],
+    sort_order: Annotated[int, Query(description='排序', alias='sortOrder')] = 0,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
     result = await MindmapTagService.update_category(
-        query_db, category_id, name, sort_order, current_user.user.user_id,
+        query_db, category_id, category_name, sort_order, current_user.user.user_id,
     )
     logger.info(result.message)
     return ResponseUtil.success(msg=result.message)
@@ -121,11 +121,11 @@ async def delete_tag_category(
 )
 async def get_tag_list(
     request: Request,
-    category_id: Annotated[int | None, Query(description='分类ID')] = None,
+    category_id: Annotated[int | None, Query(description='分类ID', alias='categoryId')] = None,
     keyword: Annotated[str | None, Query(description='关键词')] = None,
-    owner_scope: Annotated[str | None, Query(description='范围:all/mine/global')] = 'all',
-    page_num: Annotated[int, Query(description='页码')] = 1,
-    page_size: Annotated[int, Query(description='每页数量')] = 20,
+    owner_scope: Annotated[str | None, Query(description='范围:all/mine/global', alias='ownerScope')] = 'all',
+    page_num: Annotated[int, Query(description='页码', alias='pageNum')] = 1,
+    page_size: Annotated[int, Query(description='每页数量', alias='pageSize')] = 20,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:

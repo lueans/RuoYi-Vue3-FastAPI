@@ -46,7 +46,9 @@ class MindmapDao:
             .where(
                 Mindmap.owner_id == query_object.owner_id,
                 Mindmap.del_flag == '0',
-                Mindmap.name.like(f'%{query_object.name}%') if query_object.name else True,
+                Mindmap.name.like(
+                    f'%{query_object.name.replace(chr(92), chr(92)*2).replace("%", chr(92) + "%").replace("_", chr(92) + "_")}%'
+                ) if query_object.name else True,
                 Mindmap.status == query_object.status if query_object.status is not None else True,
                 Mindmap.is_template == query_object.is_template if query_object.is_template is not None else True,
                 Mindmap.create_time >= query_object.begin_time if query_object.begin_time else True,
@@ -55,10 +57,11 @@ class MindmapDao:
             .distinct()
         )
 
-        # Sorting
+        # Sorting — 白名单防止任意属性访问
+        _allowed_sort_fields = {'name', 'create_time', 'update_time', 'version_count', 'status'}
         sort_column = getattr(
             Mindmap, query_object.sort_field, Mindmap.update_time
-        ) if query_object.sort_field else Mindmap.update_time
+        ) if query_object.sort_field in _allowed_sort_fields else Mindmap.update_time
         if query_object.sort_order == 'desc':
             query = query.order_by(sort_column.desc())
         else:

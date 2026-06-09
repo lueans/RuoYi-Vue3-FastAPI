@@ -53,7 +53,7 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
     try:
         async with AsyncSessionLocal() as db:
             await MindmapService.check_mindmap_access(
-                db, mindmap_id, user_info['id'], require_edit=False,
+                db, mindmap_id, user_info['id'], require_edit=True,
             )
     except ServiceException:
         await websocket.send_json({

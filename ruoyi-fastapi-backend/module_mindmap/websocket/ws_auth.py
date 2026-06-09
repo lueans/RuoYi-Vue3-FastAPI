@@ -63,8 +63,8 @@ async def validate_ws_token(token: str, redis: Any) -> dict:
                     ex=timedelta(minutes=JwtConfig.jwt_redis_expire_minutes),
                 )
         except (ConnectionError, TimeoutError, OSError):
-            # Redis 不可用时但 JWT 有效，允许连接（降级处理）
-            pass
+            # Redis 不可用时拒绝连接（fail-closed），防止已撤销 token 被接受
+            raise ValueError('认证服务暂时不可用，请稍后重试') from None
 
         return {
             'id': user_info.user_id,

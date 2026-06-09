@@ -9,7 +9,7 @@ const defaultLocalConfig = {
   isZenMode: false,
   openNodeRichText: true,
   isShowScrollbar: false,
-  useLeftKeySelectionRightKeyDrag: false,
+  useLeftKeySelectionRightKeyDrag: true,
   enableAi: false,
 }
 

@@ -81,6 +81,13 @@
         </div>
       </div>
       <div class="row">
+        <div class="rowItem">
+          <el-switch v-model="localConfig.useLeftKeySelectionRightKeyDrag" @change="onSelectionModeChange" />
+          <span class="name" style="margin-left: 10px">左键框选节点</span>
+          <span class="desc">开启后左键拖拽框选，右键拖拽画布</span>
+        </div>
+      </div>
+      <div class="row">
         <div class="rowItem" style="width: 100%">
           <span class="name">鼠标滚轮行为</span>
           <el-select v-model="config.mousewheelAction" size="small" style="width: 130px" @change="updateConfig('mousewheelAction')">
@@ -133,6 +140,7 @@ const props = defineProps({
 const sidebarRef = ref(null)
 const isDark = computed(() => store.localConfig.isDark)
 const enableRichText = computed(() => store.localConfig.openNodeRichText)
+const localConfig = computed(() => store.localConfig)
 
 const config = reactive({
   openPerformance: false,
@@ -195,6 +203,11 @@ function onAlwaysShowExpandBtnChange() {
 
 function onLimitCanvasChange() {
   updateConfig('isLimitMindMapInCanvas')
+}
+
+function onSelectionModeChange(val) {
+  actions.setLocalConfig({ useLeftKeySelectionRightKeyDrag: val })
+  props.mindMap?.updateConfig({ useLeftKeySelectionRightKeyDrag: val })
 }
 
 function onMarginChange(prop) {
@@ -275,6 +288,12 @@ watch(() => store.activeSidebar, (val) => {
         font-size: 12px;
         margin-right: 10px;
         white-space: nowrap;
+      }
+
+      .desc {
+        font-size: 11px;
+        color: #999;
+        margin-left: 4px;
       }
     }
   }

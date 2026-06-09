@@ -66,6 +66,7 @@ export class YjsMindmapSync {
     this._applyingRemote = false
     this._paused = false
     this._receivedServerState = false
+    this._localYjsChange = false
 
     this.yMeta = this.doc.getMap('meta')
     this.yNodes = this.doc.getMap('nodes')
@@ -94,8 +95,10 @@ export class YjsMindmapSync {
     })
 
     // 监听节点变更 → 同步到脑图实例
+    // 仅在远程变更时触发 _applyYjsToMindmap
+    // 本地编辑写入 Yjs 时也会触发 observeDeep，需要跳过（_localYjsChange 标志）
     this.yNodes.observeDeep(() => {
-      if (!this._applyingRemote && !this._paused && this.mindMap) {
+      if (!this._applyingRemote && !this._paused && !this._localYjsChange && this.mindMap) {
         this._applyYjsToMindmap()
       }
     })
@@ -158,6 +161,8 @@ export class YjsMindmapSync {
     if (!detailList || !detailList.length) return
     if (this._paused) return
 
+    this._localYjsChange = true
+    try {
     this.doc.transact(() => {
       for (const detail of detailList) {
         const uid = detail.data?.data?.uid || detail.oldData?.uid
@@ -241,6 +246,9 @@ export class YjsMindmapSync {
         }
       }
     })
+    } finally {
+      this._localYjsChange = false
+    }
   }
 
   /** 从 Yjs 扁平节点重建 simple-mind-map 树形结构 */

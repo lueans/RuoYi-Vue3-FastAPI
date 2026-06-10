@@ -155,10 +155,15 @@ function onLibraryTagSelect(tagId) {
   }
 
   // 以对象格式添加，包含 tagId 引用
+  // simple-mind-map 标签格式：placement/align 是顶层属性，fill/color/fontSize 在 style 内
+  const libStyle = libTag.style || {}
+  const { placement, align, ...innerStyle } = libStyle
   tagArr.value.push({
     tagId: libTag.id,
     text: libTag.name,
-    style: libTag.style || {},
+    style: Object.keys(innerStyle).length > 0 ? innerStyle : undefined,
+    placement: placement || undefined,
+    align: align || undefined,
   })
   selectedLibraryTag.value = null
   librarySuggestions.value = []

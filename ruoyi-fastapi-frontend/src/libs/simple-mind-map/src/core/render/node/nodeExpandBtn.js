@@ -1,5 +1,5 @@
 import btnsSvg from '../../../svg/btns'
-import { SVG, Circle, G, Text } from '@svgdotjs/svg.js'
+import { SVG, Circle, G, Text, Path } from '@svgdotjs/svg.js'
 import { isUndef } from '../../../utils'
 
 // 创建展开收起按钮的内容节点
@@ -94,6 +94,54 @@ function updateExpandBtnNode() {
     }
     this._expandBtn.add(this._fillExpandNode).add(node)
   }
+  // 更新连接短线
+  this.updateExpandBtnConnectorLine(!expand)
+}
+
+// 创建或更新展开按钮与节点之间的连接短线
+function updateExpandBtnConnectorLine(show) {
+  const { expandBtnSize, expandBtnGap, expandBtnStyle } = this.mindMap.opt
+  const gap = expandBtnGap || 0
+  if (!this._expandBtn || gap <= 0) {
+    if (this._expandBtnConnectorLine) {
+      this._expandBtnConnectorLine.remove()
+      this._expandBtnConnectorLine = null
+    }
+    return
+  }
+  if (show) {
+    if (!this._expandBtnConnectorLine) {
+      this._expandBtnConnectorLine = new Path()
+    }
+    const y = 0
+    // 判断节点方向：左侧节点短线向右延伸，右侧节点短线向左延伸
+    const layout = this.renderer.layout
+    const isLeft = layout.isUseLeft !== undefined
+      ? layout.isUseLeft
+      : (this.dir !== undefined
+        ? this.dir === 'left'
+        : false)
+    // 留出足够像素避免与节点选中边框/按钮边框重叠
+    const pad = 3
+    if (isLeft) {
+      // 左侧：按钮在节点左边，短线从按钮右边连到节点左边缘
+      this._expandBtnConnectorLine.plot(`M ${expandBtnSize + gap - pad},${y} L ${expandBtnSize + pad},${y}`)
+    } else {
+      // 右侧：按钮在节点右边，短线从节点右边缘连到按钮左边
+      this._expandBtnConnectorLine.plot(`M ${-pad},${y} L ${-gap + pad},${y}`)
+    }
+    this._expandBtnConnectorLine.stroke({
+      color: expandBtnStyle.strokeColor,
+      width: 1
+    })
+    this._expandBtnConnectorLine.fill('none')
+    this._expandBtn.add(this._expandBtnConnectorLine)
+  } else {
+    if (this._expandBtnConnectorLine) {
+      this._expandBtnConnectorLine.remove()
+      this._expandBtnConnectorLine = null
+    }
+  }
 }
 
 //  更新展开收缩按钮位置
@@ -175,6 +223,7 @@ function hideExpandBtn() {
 export default {
   createExpandNodeContent,
   updateExpandBtnNode,
+  updateExpandBtnConnectorLine,
   updateExpandBtnPos,
   renderExpandBtn,
   removeExpandBtn,

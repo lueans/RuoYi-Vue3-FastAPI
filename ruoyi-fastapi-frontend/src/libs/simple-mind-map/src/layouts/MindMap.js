@@ -221,7 +221,8 @@ class MindMap extends Base {
       return []
     }
     let { left, top, width, height, expandBtnSize } = node
-    const { alwaysShowExpandBtn, notShowExpandBtn } = this.mindMap.opt
+    const { alwaysShowExpandBtn, notShowExpandBtn, expandBtnGap } = this.mindMap.opt
+    const gap = expandBtnGap || 0
     if (!alwaysShowExpandBtn || notShowExpandBtn) {
       expandBtnSize = 0
     }
@@ -235,11 +236,11 @@ class MindMap extends Base {
       let nodeUseLineStyleOffset = nodeUseLineStyle ? item.width : 0
       if (item.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT) {
         _s = -s1
-        x1 = node.layerIndex === 0 ? left : left - expandBtnSize
+        x1 = node.layerIndex === 0 ? left : left - expandBtnSize - (expandBtnSize > 0 ? gap : 0)
         nodeUseLineStyleOffset = -nodeUseLineStyleOffset
       } else {
         _s = s1
-        x1 = node.layerIndex === 0 ? left + width : left + width + expandBtnSize
+        x1 = node.layerIndex === 0 ? left + width : left + width + expandBtnSize + (expandBtnSize > 0 ? gap : 0)
       }
       let y1 = top + height / 2
       let x2 =
@@ -265,7 +266,8 @@ class MindMap extends Base {
       return []
     }
     let { left, top, width, height, expandBtnSize } = node
-    const { alwaysShowExpandBtn, notShowExpandBtn } = this.mindMap.opt
+    const { alwaysShowExpandBtn, notShowExpandBtn, expandBtnGap } = this.mindMap.opt
+    const gap = expandBtnGap || 0
     if (!alwaysShowExpandBtn || notShowExpandBtn) {
       expandBtnSize = 0
     }
@@ -276,8 +278,8 @@ class MindMap extends Base {
       }
       let x1 =
         item.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT
-          ? left - expandBtnSize
-          : left + width + expandBtnSize
+          ? left - expandBtnSize - (expandBtnSize > 0 ? gap : 0)
+          : left + width + expandBtnSize + (expandBtnSize > 0 ? gap : 0)
       let y1 = top + height / 2
       let x2 =
         item.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT
@@ -306,7 +308,8 @@ class MindMap extends Base {
       return []
     }
     let { left, top, width, height, expandBtnSize } = node
-    const { alwaysShowExpandBtn, notShowExpandBtn } = this.mindMap.opt
+    const { alwaysShowExpandBtn, notShowExpandBtn, expandBtnGap } = this.mindMap.opt
+    const gap = expandBtnGap || 0
     if (!alwaysShowExpandBtn || notShowExpandBtn) {
       expandBtnSize = 0
     }
@@ -323,8 +326,8 @@ class MindMap extends Base {
         node.layerIndex === 0 && !rootLineStartPositionKeepSameInCurve
           ? left + width / 2
           : item.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT
-          ? left - expandBtnSize
-          : left + width + expandBtnSize
+          ? left - expandBtnSize - (expandBtnSize > 0 ? gap : 0)
+          : left + width + expandBtnSize + (expandBtnSize > 0 ? gap : 0)
       let y1 = top + height / 2
       let x2 =
         item.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT
@@ -355,6 +358,8 @@ class MindMap extends Base {
   //  渲染按钮
   renderExpandBtn(node, btn) {
     let { width, height, expandBtnSize } = node
+    const { expandBtnGap } = this.mindMap.opt
+    const gap = node.layerIndex === 0 ? 0 : (expandBtnGap || 0)
     let { translateX, translateY } = btn.transform()
     // 节点使用横线风格，需要调整展开收起按钮位置
     let nodeUseLineStyleOffset = this.mindMap.themeConfig.nodeUseLineStyle
@@ -362,7 +367,7 @@ class MindMap extends Base {
       : 0
     // 位置没有变化则返回
     let _x =
-      node.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT ? 0 - expandBtnSize : width
+      node.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT ? 0 - expandBtnSize - gap : width + gap
     let _y = height / 2 + nodeUseLineStyleOffset
     if (_x === translateX && _y === translateY) {
       return
@@ -406,10 +411,13 @@ class MindMap extends Base {
 
   // 渲染展开收起按钮的隐藏占位元素
   renderExpandBtnRect(rect, expandBtnSize, width, height, node) {
+    const { expandBtnGap } = this.mindMap.opt
+    const gap = (node && node.layerIndex === 0) ? 0 : (expandBtnGap || 0)
+    const totalSize = expandBtnSize + gap
     if (node.dir === CONSTANTS.LAYOUT_GROW_DIR.LEFT) {
-      rect.size(expandBtnSize, height).x(-expandBtnSize).y(0)
+      rect.size(totalSize, height).x(-totalSize).y(0)
     } else {
-      rect.size(expandBtnSize, height).x(width).y(0)
+      rect.size(totalSize, height).x(width).y(0)
     }
   }
 }

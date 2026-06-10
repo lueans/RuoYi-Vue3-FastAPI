@@ -37,6 +37,8 @@ export const defaultOpt = {
   maxTag: 5,
   // 展开收缩按钮尺寸
   expandBtnSize: 20,
+  // 展开收缩按钮与节点之间的间距（含连接短线）
+  expandBtnGap: 10,
   // 节点里图片和文字的间距
   imgTextMargin: 5,
   // 节点里各种文字信息的间距，如图标和文字的间距
@@ -163,7 +165,7 @@ export const defaultOpt = {
   // 节点鼠标hover和激活时显示的矩形边框的颜色（品牌蓝）
   hoverRectColor: '#4D73FF',
   // 节点鼠标hover和激活时显示的矩形边框距节点内容的距离
-  hoverRectPadding: 2,
+  hoverRectPadding: 0,
   // 双击节点进入节点文本编辑时是否默认选中文本，默认只在创建新节点时会选中
   selectTextOnEnterEditText: false,
   // 删除节点后激活相邻节点

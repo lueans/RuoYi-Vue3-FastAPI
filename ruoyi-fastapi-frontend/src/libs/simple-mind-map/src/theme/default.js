@@ -11,8 +11,8 @@ export default {
   iconSize: 20,
   // 连线的粗细
   lineWidth: 1,
-  // 连线的颜色（浅蓝灰色，弱化视觉干扰）
-  lineColor: '#C0D6F9',
+  // 连线的颜色（品牌宝蓝色）
+  lineColor: '#4D73FF',
   // 连线样式
   lineDasharray: 'none',
   // 连线是否开启流动效果，仅在虚线时有效（需要注册LineFlow插件）
@@ -108,8 +108,8 @@ export default {
     fontSize: 14,
     fontWeight: 'normal',
     fontStyle: 'normal',
-    borderColor: '#E8E8E8',
-    borderWidth: 1,
+    borderColor: 'transparent',
+    borderWidth: 0,
     borderDasharray: 'none',
     borderRadius: 4,
     textDecoration: 'none',
@@ -118,7 +118,7 @@ export default {
     endColor: '#fff',
     startDir: [0, 0],
     endDir: [1, 0],
-    lineColor: '#C0D6F9',
+    lineColor: '#4D73FF',
     lineWidth: 1,
     lineMarkerDir: 'end',
     hoverRectColor: '#4D73FF',
@@ -148,7 +148,7 @@ export default {
     endColor: '#fff',
     startDir: [0, 0],
     endDir: [1, 0],
-    lineColor: '#C0D6F9',
+    lineColor: '#4D73FF',
     lineWidth: 1,
     lineMarkerDir: 'end',
     hoverRectColor: '#4D73FF',

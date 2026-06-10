@@ -168,9 +168,16 @@ class MindmapTagService:
         _check_write_permission(tag.owner_id, user_id, '标签')
 
         # key 唯一性检查（排除自身），使用标签自身的 owner scope
+        # 处理 owner_id 变更（仅管理员可在私有/全局间切换）
+        new_owner_id = tag.owner_id
+        if model.owner_id is not None and model.owner_id != tag.owner_id:
+            if user_id == 1:
+                new_owner_id = model.owner_id
+            # 非管理员忽略 owner_id 变更请求
+
         if model.tag_key != tag.tag_key:
             is_unique = await MindmapTagDao.check_key_unique(
-                db, tag.owner_id, model.tag_key, exclude_id=model.id,
+                db, new_owner_id, model.tag_key, exclude_id=model.id,
             )
             if not is_unique:
                 raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')
@@ -180,6 +187,7 @@ class MindmapTagService:
                 'tag_key': model.tag_key,
                 'name': model.name,
                 'category_id': model.category_id,
+                'owner_id': new_owner_id,
                 'style': model.style,
                 'description': model.description,
                 'updated_time': datetime.now(),

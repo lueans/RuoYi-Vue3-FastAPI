@@ -150,11 +150,67 @@
             <el-option v-for="cat in categories" :key="cat.id" :label="cat.name" :value="cat.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="范围" v-if="isAdmin">
+          <el-radio-group v-model="tagForm.ownerScope">
+            <el-radio value="mine">私有</el-radio>
+            <el-radio value="global">全局</el-radio>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="背景色">
-          <el-color-picker v-model="tagStyleForm.fill" />
+          <div class="colorField">
+            <el-popover trigger="click" :width="230" placement="bottom-start">
+              <template #reference>
+                <span class="colorSwatch" :style="{ backgroundColor: tagStyleForm.fill }" />
+              </template>
+              <div class="colorGroupPanel">
+                <div v-for="group in fillColorGroups" :key="group.label" class="colorGroup">
+                  <div class="colorGroupLabel">{{ group.label }}</div>
+                  <div class="colorGroupSwatches">
+                    <span
+                      v-for="c in group.colors" :key="c"
+                      class="colorDot"
+                      :class="{ active: tagStyleForm.fill === c }"
+                      :style="{ backgroundColor: c }"
+                      @click="tagStyleForm.fill = c"
+                    />
+                  </div>
+                </div>
+                <div class="colorGroupMore">
+                  <el-color-picker v-model="tagStyleForm.fill" show-alpha size="small" />
+                  <span class="moreLabel">更多颜色</span>
+                </div>
+              </div>
+            </el-popover>
+            <span class="colorHex">{{ tagStyleForm.fill }}</span>
+          </div>
         </el-form-item>
         <el-form-item label="文字色">
-          <el-color-picker v-model="tagStyleForm.color" />
+          <div class="colorField">
+            <el-popover trigger="click" :width="230" placement="bottom-start">
+              <template #reference>
+                <span class="colorSwatch" :style="{ backgroundColor: tagStyleForm.color }" />
+              </template>
+              <div class="colorGroupPanel">
+                <div v-for="group in textColorGroups" :key="group.label" class="colorGroup">
+                  <div class="colorGroupLabel">{{ group.label }}</div>
+                  <div class="colorGroupSwatches">
+                    <span
+                      v-for="c in group.colors" :key="c"
+                      class="colorDot"
+                      :class="{ active: tagStyleForm.color === c }"
+                      :style="{ backgroundColor: c }"
+                      @click="tagStyleForm.color = c"
+                    />
+                  </div>
+                </div>
+                <div class="colorGroupMore">
+                  <el-color-picker v-model="tagStyleForm.color" show-alpha size="small" />
+                  <span class="moreLabel">更多颜色</span>
+                </div>
+              </div>
+            </el-popover>
+            <span class="colorHex">{{ tagStyleForm.color }}</span>
+          </div>
         </el-form-item>
         <el-form-item label="字号">
           <el-input-number v-model="tagStyleForm.fontSize" :min="10" :max="24" />
@@ -169,9 +225,12 @@
         </el-form-item>
         <el-form-item label="对齐方式">
           <el-select v-model="tagStyleForm.align" style="width: 100%">
-            <el-option label="居中" value="center" />
-            <el-option label="靠左/上" value="start" />
-            <el-option label="靠右/下" value="end" />
+            <el-option
+              v-for="opt in alignOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="预览">
@@ -192,13 +251,17 @@
 </template>
 
 <script setup name="TagManagement">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { Plus, Edit, Delete, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listTagCategories, addTagCategory, updateTagCategory, deleteTagCategory,
   listTags, addTag, updateTag, deleteTags
 } from '@/api/mindmap/tag'
+import useUserStore from '@/store/modules/user'
+
+const userStore = useUserStore()
+const isAdmin = computed(() => userStore.id === 1)
 
 const loading = ref(false)
 const categories = ref([])
@@ -285,9 +348,53 @@ async function submitCategory() {
 const tagDialogVisible = ref(false)
 const tagFormRef = ref(null)
 const tagForm = reactive({
-  id: null, tagKey: '', name: '', categoryId: null, description: '',
+  id: null, tagKey: '', name: '', categoryId: null, description: '', ownerScope: 'mine',
 })
 const tagStyleForm = reactive({ fill: '#409eff', color: '#ffffff', fontSize: 12, placement: 'right', align: 'center' })
+
+// 预设背景色（按色系分组，每组 5 色，从浅到深）
+const fillColorGroups = [
+  { label: '灰色', colors: ['#F5F5F5', '#D9D9D9', '#B3B3B3', '#666666', '#333333'] },
+  { label: '红色', colors: ['#FFCCC7', '#FFA39E', '#FF4D4F', '#CF1322', '#820014'] },
+  { label: '橙黄', colors: ['#FFF1B8', '#FFD666', '#FAAD14', '#D48806', '#874D00'] },
+  { label: '绿色', colors: ['#D9F7BE', '#95DE64', '#52C41A', '#237804', '#092B00'] },
+  { label: '青色', colors: ['#B5F5EC', '#5CDBD3', '#13C2C2', '#006D75', '#002329'] },
+  { label: '蓝色', colors: ['#D6E4FF', '#85A5FF', '#4D73FF', '#1D39C4', '#061178'] },
+  { label: '紫色', colors: ['#EFDBFF', '#B37FEB', '#722ED1', '#391085', '#120338'] },
+]
+// 预设文字色（灰色系 + 各色系标志色）
+const textColorGroups = [
+  { label: '灰色', colors: ['#FFFFFF', '#D9D9D9', '#666666', '#333333', '#000000'] },
+  { label: '彩色', colors: ['#FF4D4F', '#FAAD14', '#52C41A', '#13C2C2', '#4D73FF', '#722ED1'] },
+]
+
+// 对齐方式选项根据位置动态切换
+const alignOptions = computed(() => {
+  const p = tagStyleForm.placement
+  if (p === 'top' || p === 'bottom') {
+    return [
+      { label: '居中', value: 'center' },
+      { label: '靠左', value: 'left' },
+      { label: '靠右', value: 'right' },
+    ]
+  }
+  // left / right
+  return [
+    { label: '居中', value: 'center' },
+    { label: '靠上', value: 'top' },
+    { label: '靠下', value: 'bottom' },
+  ]
+})
+
+// 位置切换时重置对齐方式（旧值可能不兼容新位置）
+watch(() => tagStyleForm.placement, (newVal, oldVal) => {
+  if (oldVal === undefined) return
+  const validValues = alignOptions.value.map(o => o.value)
+  if (!validValues.includes(tagStyleForm.align)) {
+    tagStyleForm.align = 'center'
+  }
+})
+
 const tagRules = {
   tagKey: [{ required: true, message: '请输入标签Key', trigger: 'blur' }],
   name: [{ required: true, message: '请输入标签名称', trigger: 'blur' }],
@@ -317,6 +424,7 @@ function handleAddTag() {
   tagForm.name = ''
   tagForm.categoryId = selectedCategory.value
   tagForm.description = ''
+  tagForm.ownerScope = 'mine'
   tagStyleForm.fill = '#409eff'
   tagStyleForm.color = '#ffffff'
   tagStyleForm.fontSize = 12
@@ -331,12 +439,18 @@ function handleEditTag(row) {
   tagForm.name = row.name
   tagForm.categoryId = row.categoryId
   tagForm.description = row.description || ''
+  tagForm.ownerScope = row.ownerId === 0 ? 'global' : 'mine'
   const style = row.style || {}
   tagStyleForm.fill = style.fill || '#409eff'
   tagStyleForm.color = style.color || '#ffffff'
   tagStyleForm.fontSize = style.fontSize || 12
   tagStyleForm.placement = style.placement || 'right'
-  tagStyleForm.align = style.align || 'center'
+  // 兼容旧数据：start/end 转换为空间方向值
+  let align = style.align || 'center'
+  const p = tagStyleForm.placement
+  if (align === 'start') align = (p === 'top' || p === 'bottom') ? 'left' : 'top'
+  if (align === 'end') align = (p === 'top' || p === 'bottom') ? 'right' : 'bottom'
+  tagStyleForm.align = align
   tagDialogVisible.value = true
 }
 
@@ -361,6 +475,7 @@ async function submitTag() {
     name: tagForm.name,
     categoryId: tagForm.categoryId || null,
     description: tagForm.description || null,
+    ownerId: tagForm.ownerScope === 'global' ? 0 : userStore.id,
     style: {
       fill: tagStyleForm.fill,
       color: tagStyleForm.color,
@@ -484,5 +599,83 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+// 颜色选择器字段
+.colorField {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .colorSwatch {
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    border: 1px solid #dcdfe6;
+    cursor: pointer;
+    transition: box-shadow 0.2s;
+
+    &:hover {
+      box-shadow: 0 0 0 2px rgba(77, 115, 255, 0.3);
+    }
+  }
+
+  .colorHex {
+    font-size: 12px;
+    color: #999;
+    font-family: monospace;
+  }
+}
+
+// 分组颜色面板
+.colorGroupPanel {
+  .colorGroup {
+    margin-bottom: 8px;
+
+    .colorGroupLabel {
+      font-size: 11px;
+      color: #999;
+      margin-bottom: 4px;
+    }
+
+    .colorGroupSwatches {
+      display: flex;
+      gap: 6px;
+    }
+  }
+
+  .colorDot {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: all 0.15s;
+
+    &:hover {
+      transform: scale(1.15);
+    }
+
+    &.active {
+      border-color: #4D73FF;
+      box-shadow: 0 0 0 1px #4D73FF;
+    }
+  }
+
+  .colorGroupMore {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid #f0f0f0;
+
+    .moreLabel {
+      font-size: 12px;
+      color: #666;
+    }
+  }
 }
 </style>

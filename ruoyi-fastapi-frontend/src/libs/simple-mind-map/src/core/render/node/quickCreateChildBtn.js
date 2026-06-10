@@ -22,8 +22,8 @@ function showQuickCreateChildBtn() {
       fill: '#fff'
     }
     color = style.color || color
-    // 图标节点
-    const iconNode = SVG(icon || btnsSvg.quickCreateChild).size(
+    // 图标节点：默认复用展开按钮的 open 图标（空心圆环+十字），保持视觉统一
+    const iconNode = SVG(icon || btnsSvg.open).size(
       expandBtnSize,
       expandBtnSize
     )

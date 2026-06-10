@@ -137,107 +137,148 @@
     </el-dialog>
 
     <!-- 标签弹窗 -->
-    <el-dialog v-model="tagDialogVisible" :title="tagForm.id ? '编辑标签' : '新增标签'" width="520px">
-      <el-form :model="tagForm" label-width="80px" :rules="tagRules" ref="tagFormRef">
-        <el-form-item label="标签Key" prop="tagKey">
-          <el-input v-model="tagForm.tagKey" placeholder="唯一标识（英文/数字/下划线）" />
-        </el-form-item>
-        <el-form-item label="名称" prop="name">
-          <el-input v-model="tagForm.name" placeholder="标签显示名称" />
-        </el-form-item>
-        <el-form-item label="分类">
-          <el-select v-model="tagForm.categoryId" clearable placeholder="选择分类" style="width: 100%">
-            <el-option v-for="cat in categories" :key="cat.id" :label="cat.name" :value="cat.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="范围" v-if="isAdmin">
-          <el-radio-group v-model="tagForm.ownerScope">
-            <el-radio value="mine">私有</el-radio>
-            <el-radio value="global">全局</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="背景色">
-          <div class="colorField">
-            <el-popover trigger="click" :width="230" placement="bottom-start">
-              <template #reference>
-                <span class="colorSwatch" :style="{ backgroundColor: tagStyleForm.fill }" />
-              </template>
-              <div class="colorGroupPanel">
-                <div v-for="group in fillColorGroups" :key="group.label" class="colorGroup">
-                  <div class="colorGroupLabel">{{ group.label }}</div>
-                  <div class="colorGroupSwatches">
-                    <span
-                      v-for="c in group.colors" :key="c"
-                      class="colorDot"
-                      :class="{ active: tagStyleForm.fill === c }"
-                      :style="{ backgroundColor: c }"
-                      @click="tagStyleForm.fill = c"
-                    />
+    <el-dialog v-model="tagDialogVisible" :title="tagForm.id ? '编辑标签' : '新增标签'" width="600px" class="tagDialog">
+      <el-form :model="tagForm" label-width="70px" :rules="tagRules" ref="tagFormRef" class="tagForm">
+        <div class="sectionTitle">基本信息</div>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Key" prop="tagKey">
+              <el-input v-model="tagForm.tagKey" placeholder="英文/数字/下划线" :disabled="!!tagForm.id" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="名称" prop="name">
+              <el-input v-model="tagForm.name" placeholder="标签显示名称" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="分类">
+              <el-select v-model="tagForm.categoryId" clearable placeholder="选择分类" style="width: 100%">
+                <el-option v-for="cat in categories" :key="cat.id" :label="cat.name" :value="cat.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12" v-if="isAdmin">
+            <el-form-item label="范围">
+              <el-radio-group v-model="tagForm.ownerScope">
+                <el-radio value="mine">私有</el-radio>
+                <el-radio value="global">全局</el-radio>
+              </el-radio-group>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <div class="sectionTitle">外观样式</div>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="背景色">
+              <div class="colorField">
+                <el-popover trigger="click" :width="230" placement="bottom-start">
+                  <template #reference>
+                    <span class="colorSwatch" :style="{ backgroundColor: tagStyleForm.fill }" />
+                  </template>
+                  <div class="colorGroupPanel">
+                    <div v-for="group in fillColorGroups" :key="group.label" class="colorGroup">
+                      <div class="colorGroupLabel">{{ group.label }}</div>
+                      <div class="colorGroupSwatches">
+                        <span
+                          v-for="c in group.colors" :key="c"
+                          class="colorDot"
+                          :class="{ active: tagStyleForm.fill === c }"
+                          :style="{ backgroundColor: c }"
+                          @click="tagStyleForm.fill = c"
+                        />
+                      </div>
+                    </div>
+                    <div class="colorGroupMore">
+                      <el-color-picker v-model="tagStyleForm.fill" show-alpha size="small" />
+                      <span class="moreLabel">更多颜色</span>
+                    </div>
                   </div>
-                </div>
-                <div class="colorGroupMore">
-                  <el-color-picker v-model="tagStyleForm.fill" show-alpha size="small" />
-                  <span class="moreLabel">更多颜色</span>
-                </div>
+                </el-popover>
+                <span class="colorHex">{{ tagStyleForm.fill }}</span>
               </div>
-            </el-popover>
-            <span class="colorHex">{{ tagStyleForm.fill }}</span>
-          </div>
-        </el-form-item>
-        <el-form-item label="文字色">
-          <div class="colorField">
-            <el-popover trigger="click" :width="230" placement="bottom-start">
-              <template #reference>
-                <span class="colorSwatch" :style="{ backgroundColor: tagStyleForm.color }" />
-              </template>
-              <div class="colorGroupPanel">
-                <div v-for="group in textColorGroups" :key="group.label" class="colorGroup">
-                  <div class="colorGroupLabel">{{ group.label }}</div>
-                  <div class="colorGroupSwatches">
-                    <span
-                      v-for="c in group.colors" :key="c"
-                      class="colorDot"
-                      :class="{ active: tagStyleForm.color === c }"
-                      :style="{ backgroundColor: c }"
-                      @click="tagStyleForm.color = c"
-                    />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="文字色">
+              <div class="colorField">
+                <el-popover trigger="click" :width="230" placement="bottom-start">
+                  <template #reference>
+                    <span class="colorSwatch" :style="{ backgroundColor: tagStyleForm.color }" />
+                  </template>
+                  <div class="colorGroupPanel">
+                    <div v-for="group in textColorGroups" :key="group.label" class="colorGroup">
+                      <div class="colorGroupLabel">{{ group.label }}</div>
+                      <div class="colorGroupSwatches">
+                        <span
+                          v-for="c in group.colors" :key="c"
+                          class="colorDot"
+                          :class="{ active: tagStyleForm.color === c }"
+                          :style="{ backgroundColor: c }"
+                          @click="tagStyleForm.color = c"
+                        />
+                      </div>
+                    </div>
+                    <div class="colorGroupMore">
+                      <el-color-picker v-model="tagStyleForm.color" show-alpha size="small" />
+                      <span class="moreLabel">更多颜色</span>
+                    </div>
                   </div>
-                </div>
-                <div class="colorGroupMore">
-                  <el-color-picker v-model="tagStyleForm.color" show-alpha size="small" />
-                  <span class="moreLabel">更多颜色</span>
-                </div>
+                </el-popover>
+                <span class="colorHex">{{ tagStyleForm.color }}</span>
               </div>
-            </el-popover>
-            <span class="colorHex">{{ tagStyleForm.color }}</span>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="字号">
+              <el-input-number v-model="tagStyleForm.fontSize" :min="10" :max="24" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="圆角">
+              <el-input-number v-model="tagStyleForm.radius" :min="0" :max="20" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="位置">
+              <el-select v-model="tagStyleForm.placement" style="width: 100%">
+                <el-option label="右侧" value="right" />
+                <el-option label="左侧" value="left" />
+                <el-option label="顶部" value="top" />
+                <el-option label="底部" value="bottom" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="对齐">
+              <el-select v-model="tagStyleForm.align" style="width: 100%">
+                <el-option
+                  v-for="opt in alignOptions"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <div class="previewSection">
+          <span class="previewLabel">预览</span>
+          <div class="previewBox">
+            <span class="tagBadge" :style="getTagStyle(tagStyleForm)">
+              {{ tagForm.name || '标签预览' }}
+            </span>
           </div>
-        </el-form-item>
-        <el-form-item label="字号">
-          <el-input-number v-model="tagStyleForm.fontSize" :min="10" :max="24" />
-        </el-form-item>
-        <el-form-item label="位置">
-          <el-select v-model="tagStyleForm.placement" style="width: 100%">
-            <el-option label="右侧" value="right" />
-            <el-option label="左侧" value="left" />
-            <el-option label="顶部" value="top" />
-            <el-option label="底部" value="bottom" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="对齐方式">
-          <el-select v-model="tagStyleForm.align" style="width: 100%">
-            <el-option
-              v-for="opt in alignOptions"
-              :key="opt.value"
-              :label="opt.label"
-              :value="opt.value"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="预览">
-          <span class="tagBadge" :style="getTagStyle(tagStyleForm)">
-            {{ tagForm.name || '标签预览' }}
-          </span>
-        </el-form-item>
+        </div>
+
         <el-form-item label="描述">
           <el-input v-model="tagForm.description" type="textarea" :rows="2" placeholder="标签描述（可选）" />
         </el-form-item>
@@ -350,7 +391,7 @@ const tagFormRef = ref(null)
 const tagForm = reactive({
   id: null, tagKey: '', name: '', categoryId: null, description: '', ownerScope: 'mine',
 })
-const tagStyleForm = reactive({ fill: '#409eff', color: '#ffffff', fontSize: 12, placement: 'right', align: 'center' })
+const tagStyleForm = reactive({ fill: '#409eff', color: '#ffffff', fontSize: 12, radius: 3, placement: 'right', align: 'center' })
 
 // 预设背景色（按色系分组，每组 5 色，从浅到深）
 const fillColorGroups = [
@@ -428,6 +469,7 @@ function handleAddTag() {
   tagStyleForm.fill = '#409eff'
   tagStyleForm.color = '#ffffff'
   tagStyleForm.fontSize = 12
+  tagStyleForm.radius = 3
   tagStyleForm.placement = 'right'
   tagStyleForm.align = 'center'
   tagDialogVisible.value = true
@@ -444,6 +486,7 @@ function handleEditTag(row) {
   tagStyleForm.fill = style.fill || '#409eff'
   tagStyleForm.color = style.color || '#ffffff'
   tagStyleForm.fontSize = style.fontSize || 12
+  tagStyleForm.radius = style.radius ?? 3
   tagStyleForm.placement = style.placement || 'right'
   // 兼容旧数据：start/end 转换为空间方向值
   let align = style.align || 'center'
@@ -480,6 +523,7 @@ async function submitTag() {
       fill: tagStyleForm.fill,
       color: tagStyleForm.color,
       fontSize: tagStyleForm.fontSize,
+      radius: tagStyleForm.radius,
       placement: tagStyleForm.placement,
       align: tagStyleForm.align,
     },
@@ -512,7 +556,7 @@ function getTagStyle(style) {
     backgroundColor: style.fill || '#409eff',
     color: style.color || '#fff',
     fontSize: (style.fontSize || 12) + 'px',
-    borderRadius: '3px',
+    borderRadius: (style.radius ?? 3) + 'px',
     padding: '2px 8px',
     display: 'inline-block',
   }
@@ -675,6 +719,49 @@ onMounted(() => {
     .moreLabel {
       font-size: 12px;
       color: #666;
+    }
+  }
+}
+
+// 标签弹窗美化
+.tagForm {
+  .sectionTitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: #303133;
+    margin: 4px 0 12px 0;
+    padding-left: 8px;
+    border-left: 3px solid #4D73FF;
+
+    &:first-child {
+      margin-top: 0;
+    }
+  }
+
+  .el-form-item {
+    margin-bottom: 14px;
+  }
+
+  .previewSection {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    margin: 4px 0 14px;
+    background: #fafafa;
+    border-radius: 6px;
+    border: 1px dashed #e4e7ed;
+
+    .previewLabel {
+      font-size: 13px;
+      color: #909399;
+      flex-shrink: 0;
+    }
+
+    .previewBox {
+      flex: 1;
+      display: flex;
+      align-items: center;
     }
   }
 }

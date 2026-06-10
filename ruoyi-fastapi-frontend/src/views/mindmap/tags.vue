@@ -247,6 +247,11 @@
         </el-row>
         <el-row :gutter="16">
           <el-col :span="12">
+            <el-form-item label="内边距">
+              <el-input-number v-model="tagStyleForm.paddingX" :min="0" :max="30" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="位置">
               <el-select v-model="tagStyleForm.placement" style="width: 100%">
                 <el-option label="右侧" value="right" />
@@ -256,6 +261,8 @@
               </el-select>
             </el-form-item>
           </el-col>
+        </el-row>
+        <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="对齐">
               <el-select v-model="tagStyleForm.align" style="width: 100%">
@@ -391,7 +398,7 @@ const tagFormRef = ref(null)
 const tagForm = reactive({
   id: null, tagKey: '', name: '', categoryId: null, description: '', ownerScope: 'mine',
 })
-const tagStyleForm = reactive({ fill: '#409eff', color: '#ffffff', fontSize: 12, radius: 3, placement: 'right', align: 'center' })
+const tagStyleForm = reactive({ fill: '#409eff', color: '#ffffff', fontSize: 12, radius: 3, paddingX: 8, placement: 'right', align: 'center' })
 
 // 预设背景色（按色系分组，每组 5 色，从浅到深）
 const fillColorGroups = [
@@ -470,6 +477,7 @@ function handleAddTag() {
   tagStyleForm.color = '#ffffff'
   tagStyleForm.fontSize = 12
   tagStyleForm.radius = 3
+  tagStyleForm.paddingX = 8
   tagStyleForm.placement = 'right'
   tagStyleForm.align = 'center'
   tagDialogVisible.value = true
@@ -487,6 +495,7 @@ function handleEditTag(row) {
   tagStyleForm.color = style.color || '#ffffff'
   tagStyleForm.fontSize = style.fontSize || 12
   tagStyleForm.radius = style.radius ?? 3
+  tagStyleForm.paddingX = style.paddingX ?? 8
   tagStyleForm.placement = style.placement || 'right'
   // 兼容旧数据：start/end 转换为空间方向值
   let align = style.align || 'center'
@@ -524,6 +533,7 @@ async function submitTag() {
       color: tagStyleForm.color,
       fontSize: tagStyleForm.fontSize,
       radius: tagStyleForm.radius,
+      paddingX: tagStyleForm.paddingX,
       placement: tagStyleForm.placement,
       align: tagStyleForm.align,
     },
@@ -552,12 +562,13 @@ function getCategoryName(categoryId) {
 
 function getTagStyle(style) {
   if (!style) return { backgroundColor: '#409eff', color: '#fff', fontSize: '12px', borderRadius: '3px', padding: '2px 8px' }
+  const px = style.paddingX ?? 8
   return {
     backgroundColor: style.fill || '#409eff',
     color: style.color || '#fff',
     fontSize: (style.fontSize || 12) + 'px',
     borderRadius: (style.radius ?? 3) + 'px',
-    padding: '2px 8px',
+    padding: `2px ${px}px`,
     display: 'inline-block',
   }
 }

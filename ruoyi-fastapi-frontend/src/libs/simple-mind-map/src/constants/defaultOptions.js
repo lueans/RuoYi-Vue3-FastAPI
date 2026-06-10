@@ -66,10 +66,10 @@ export const defaultOpt = {
   defaultInsertBelowSecondLevelNodeText: '分支主题',
   // 展开收起按钮的颜色
   expandBtnStyle: {
-    color: '#808080',
+    color: '#4D73FF',
     fill: '#fff',
     fontSize: 13,
-    strokeColor: '#333333'
+    strokeColor: '#4D73FF'
   },
   // 自定义展开收起按钮的图标
   expandBtnIcon: {
@@ -160,8 +160,8 @@ export const defaultOpt = {
   },
   // 是否在鼠标双击时回到根节点，也就是让根节点居中显示
   enableDblclickBackToRootNode: false,
-  // 节点鼠标hover和激活时显示的矩形边框的颜色
-  hoverRectColor: 'rgb(94, 200, 248)',
+  // 节点鼠标hover和激活时显示的矩形边框的颜色（品牌蓝）
+  hoverRectColor: '#4D73FF',
   // 节点鼠标hover和激活时显示的矩形边框距节点内容的距离
   hoverRectPadding: 2,
   // 双击节点进入节点文本编辑时是否默认选中文本，默认只在创建新节点时会选中
@@ -339,13 +339,13 @@ export const defaultOpt = {
   dragMultiNodeRectConfig: {
     width: 40,
     height: 20,
-    fill: 'rgb(94, 200, 248)' // 填充颜色
+    fill: '#C0D6F9' // 填充颜色
   },
   // 节点拖拽时新位置的示意矩形的填充颜色
-  dragPlaceholderRectFill: 'rgb(94, 200, 248)',
+  dragPlaceholderRectFill: '#C0D6F9',
   // 节点拖拽时新位置的示意连线的样式配置
   dragPlaceholderLineConfig: {
-    color: 'rgb(94, 200, 248)',
+    color: '#C0D6F9',
     width: 2
   },
   // 节点拖拽时的透明度配置

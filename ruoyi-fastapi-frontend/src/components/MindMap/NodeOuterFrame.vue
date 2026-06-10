@@ -84,7 +84,7 @@ const hasActiveFrame = ref(false)
 
 const frameStyle = reactive({
   strokeWidth: 2,
-  strokeColor: '#549688',
+  strokeColor: '#4D73FF',
   radius: 5,
   fill: 'transparent',
   textFontSize: 14,
@@ -99,7 +99,7 @@ function onFrameActive(el, parentNode, range) {
       const data = node.getData('outerFrame') || {}
       const style = data.style || {}
       frameStyle.strokeWidth = style.strokeWidth ?? 2
-      frameStyle.strokeColor = style.strokeColor || '#549688'
+      frameStyle.strokeColor = style.strokeColor || '#4D73FF'
       frameStyle.radius = style.radius ?? 5
       frameStyle.fill = style.fill || 'transparent'
       frameStyle.textFontSize = style.textFontSize ?? 14

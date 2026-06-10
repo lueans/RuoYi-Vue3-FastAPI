@@ -2122,7 +2122,7 @@ class Render {
     // 如果当前正在渲染，那么不进行高亮，因为节点位置可能不正确
     if (this.isRendering) return
     style = {
-      stroke: 'rgb(94, 200, 248)',
+      stroke: '#4D73FF',
       fill: 'transparent',
       ...(style || {})
     }

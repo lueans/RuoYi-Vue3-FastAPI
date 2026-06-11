@@ -1,42 +1,36 @@
 <template>
-  <el-dialog v-model="dialogVisible" title="标签" width="520px" :close-on-click-modal="false"
+  <el-dialog v-model="dialogVisible" title="标签" width="560px" :close-on-click-modal="false"
     @open="onOpen" @close="onClose" append-to-body>
-    <!-- 从标签库选择 -->
-    <div class="tag-library-section">
-      <div class="sectionTitle">从标签库选择</div>
-      <div class="tag-search-row">
-        <el-select
-          v-model="selectedLibraryTag"
-          filterable
-          remote
-          reserve-keyword
-          clearable
-          :remote-method="searchLibraryTags"
-          :loading="libraryLoading"
-          placeholder="搜索标签库..."
-          style="flex: 1"
-          size="small"
-          @change="onLibraryTagSelect"
-        >
-          <el-option
-            v-for="tag in librarySuggestions"
-            :key="tag.id"
-            :label="`${tag.name} (${tag.tagKey})`"
-            :value="tag.id"
+    <!-- 字段选项面板 -->
+    <div class="field-section">
+      <div class="sectionTitle">字段标签</div>
+      <div v-if="fields.length === 0" class="empty-field-tip">暂无字段，请在标签管理中创建</div>
+      <div v-for="field in fields" :key="field.id" class="fieldGroup">
+        <div class="fieldHeader" @click="toggleField(field.id)">
+          <el-icon class="fieldArrow" :class="{ expanded: expandedFields.includes(field.id) }">
+            <ArrowRight />
+          </el-icon>
+          <span class="fieldName">{{ field.name }}</span>
+          <el-tag size="small" :type="field.selectMode === 'multi' ? 'warning' : 'info'" effect="plain">
+            {{ field.selectMode === 'multi' ? '多选' : '单选' }}
+          </el-tag>
+        </div>
+        <div v-show="expandedFields.includes(field.id)" class="fieldOptions">
+          <span v-for="opt in field.options" :key="opt.id"
+            class="optionBadge"
+            :class="{ selected: isOptionSelected(field.id, opt.id) }"
+            :style="getOptionBadgeStyle(opt, field)"
+            @click="toggleOption(field, opt)"
           >
-            <div class="libraryOption">
-              <span class="tagDot" :style="{ backgroundColor: tag.style?.fill || '#409eff' }"></span>
-              <span class="optionName">{{ tag.name }}</span>
-              <span class="optionKey">{{ tag.tagKey }}</span>
-              <el-tag v-if="tag.ownerId === 0" size="small" type="success" class="optionBadge">全局</el-tag>
-            </div>
-          </el-option>
-        </el-select>
+            {{ opt.name }}
+          </span>
+          <span v-if="!field.options || field.options.length === 0" class="empty-opt-tip">暂无选项</span>
+        </div>
       </div>
     </div>
 
     <!-- 手动输入 -->
-    <div class="sectionTitle" style="margin-top: 12px">自定义标签</div>
+    <div class="sectionTitle" style="margin-top: 14px">自定义标签</div>
     <div class="tag-input-row">
       <el-input v-model="tagInput" placeholder="输入标签后按 Enter 添加" size="small"
         @keydown.enter="addTag" ref="inputRef" />
@@ -44,12 +38,13 @@
     </div>
 
     <!-- 当前标签列表 -->
+    <div class="sectionTitle" style="margin-top: 14px">当前标签</div>
     <div class="tag-list" v-if="tagArr.length > 0">
       <el-tag v-for="(tag, index) in tagArr" :key="index" closable
         :color="getTagColor(tag)" effect="dark" @close="removeTag(index)"
         style="margin: 4px">
-        <template v-if="typeof tag === 'object' && tag.tagId">
-          📌 {{ tag.text }}
+        <template v-if="typeof tag === 'object' && tag.fieldId">
+          🏷️ {{ tag.text }}
         </template>
         <template v-else>
           {{ typeof tag === 'object' ? tag.text : tag }}
@@ -66,8 +61,10 @@
 </template>
 
 <script setup>
+import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ArrowRight } from '@element-plus/icons-vue'
 import bus from './useEventBus'
-import { getTagSuggestions } from '@/api/mindmap/tag'
+import { listTagFields, getTagFieldDetail } from '@/api/mindmap/tag'
 import { ElMessage } from 'element-plus'
 
 const dialogVisible = ref(false)
@@ -76,11 +73,9 @@ const tagArr = ref([])
 const activeNodes = ref([])
 const inputRef = ref(null)
 
-// 标签库
-const selectedLibraryTag = ref(null)
-const librarySuggestions = ref([])
-const libraryLoading = ref(false)
-let searchTimer = null
+// 字段数据
+const fields = ref([])
+const expandedFields = ref([])
 
 const tagColors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#00bcd4', '#9c27b0', '#ff5722']
 
@@ -94,11 +89,99 @@ function getTagColor(tag) {
   return tagColors[Math.abs(hash) % tagColors.length]
 }
 
+// ── 字段加载 ──
+async function loadFields() {
+  try {
+    const res = await listTagFields()
+    const fieldList = res.data || []
+    // 加载每个字段的详情（含选项）
+    const details = await Promise.all(
+      fieldList.map(f => getTagFieldDetail(f.id).then(r => r.data))
+    )
+    fields.value = details
+    // 默认展开所有字段
+    expandedFields.value = details.map(f => f.id)
+  } catch (e) {
+    console.error('加载字段列表失败:', e)
+    fields.value = []
+  }
+}
+
+function toggleField(fieldId) {
+  const idx = expandedFields.value.indexOf(fieldId)
+  if (idx >= 0) {
+    expandedFields.value.splice(idx, 1)
+  } else {
+    expandedFields.value.push(fieldId)
+  }
+}
+
+// ── 选项选择逻辑 ──
+function isOptionSelected(fieldId, optionId) {
+  return tagArr.value.some(t =>
+    typeof t === 'object' && t.fieldId === fieldId && t.optionId === optionId
+  )
+}
+
+function toggleOption(field, opt) {
+  if (field.selectMode === 'single') {
+    // 单选：先移除同字段的其他选项
+    tagArr.value = tagArr.value.filter(t =>
+      !(typeof t === 'object' && t.fieldId === field.id)
+    )
+    // 如果点击的是已选中的，则只取消（不重新添加）
+    if (isOptionSelected(field.id, opt.id)) return
+  } else {
+    // 多选：切换
+    if (isOptionSelected(field.id, opt.id)) {
+      tagArr.value = tagArr.value.filter(t =>
+        !(typeof t === 'object' && t.fieldId === field.id && t.optionId === opt.id)
+      )
+      return
+    }
+  }
+
+  if (tagArr.value.length >= 20) {
+    ElMessage.warning('最多添加 20 个标签')
+    return
+  }
+
+  // 构建标签对象，注入字段的基础样式
+  const fieldStyle = field.style || {}
+  tagArr.value.push({
+    fieldId: field.id,
+    optionId: opt.id,
+    text: opt.name,
+    style: {
+      fill: opt.fill || '#409eff',
+      color: opt.color || '#ffffff',
+      fontSize: fieldStyle.fontSize || 12,
+      radius: fieldStyle.radius ?? 3,
+      paddingX: fieldStyle.paddingX ?? 8,
+    },
+    placement: fieldStyle.placement || undefined,
+    align: fieldStyle.align || undefined,
+  })
+}
+
+// ── 选项样式 ──
+function getOptionBadgeStyle(opt, field) {
+  const selected = isOptionSelected(field.id, opt.id)
+  const base = {
+    backgroundColor: selected ? (opt.fill || '#409eff') : 'transparent',
+    color: selected ? (opt.color || '#fff') : (opt.fill || '#409eff'),
+    borderColor: opt.fill || '#409eff',
+  }
+  return base
+}
+
+// ── 弹窗生命周期 ──
 function handleShow() {
   const node = activeNodes.value[0]
   if (!node) return
   const tags = node.getData('tag') || []
   tagArr.value = [...tags]
+  loadFields()
   dialogVisible.value = true
 }
 
@@ -111,70 +194,12 @@ function onClose() {
   bus.emit('endTextEdit')
 }
 
-// ── 标签库搜索 ──
-function searchLibraryTags(keyword) {
-  clearTimeout(searchTimer)
-  if (!keyword || keyword.length < 1) {
-    librarySuggestions.value = []
-    return
-  }
-  searchTimer = setTimeout(async () => {
-    libraryLoading.value = true
-    try {
-      const res = await getTagSuggestions(keyword)
-      librarySuggestions.value = res.data || []
-    } catch (e) {
-      console.error('搜索标签库失败:', e)
-      librarySuggestions.value = []
-    } finally {
-      libraryLoading.value = false
-    }
-  }, 300)
-}
-
-function onLibraryTagSelect(tagId) {
-  if (!tagId) return
-  const libTag = librarySuggestions.value.find(t => t.id === tagId)
-  if (!libTag) return
-
-  // 检查是否已存在（通过 tagId 或 text 去重）
-  const exists = tagArr.value.some(t => {
-    if (typeof t === 'object' && t.tagId === tagId) return true
-    const text = typeof t === 'object' ? t.text : t
-    return text === libTag.name
-  })
-  if (exists) {
-    ElMessage.warning('该标签已存在')
-    selectedLibraryTag.value = null
-    return
-  }
-  if (tagArr.value.length >= 10) {
-    ElMessage.warning('最多添加 10 个标签')
-    selectedLibraryTag.value = null
-    return
-  }
-
-  // 以对象格式添加，包含 tagId 引用
-  // simple-mind-map 标签格式：placement/align 是顶层属性，fill/color/fontSize 在 style 内
-  const libStyle = libTag.style || {}
-  const { placement, align, ...innerStyle } = libStyle
-  tagArr.value.push({
-    tagId: libTag.id,
-    text: libTag.name,
-    style: Object.keys(innerStyle).length > 0 ? innerStyle : undefined,
-    placement: placement || undefined,
-    align: align || undefined,
-  })
-  selectedLibraryTag.value = null
-  librarySuggestions.value = []
-}
-
 // ── 手动标签 ──
 function addTag() {
   const text = tagInput.value.trim()
   if (!text) return
-  if (tagArr.value.length >= 10) {
-    ElMessage.warning('最多添加 10 个标签')
+  if (tagArr.value.length >= 20) {
+    ElMessage.warning('最多添加 20 个标签')
     return
   }
   tagArr.value.push(text)
@@ -203,7 +228,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   bus.off('node_active', onNodeActive)
   bus.off('showNodeTag', handleShow)
-  clearTimeout(searchTimer)
 })
 </script>
 
@@ -214,45 +238,103 @@ onBeforeUnmount(() => {
   color: #606266;
   margin-bottom: 8px;
 }
-.tag-library-section {
+
+.field-section {
   padding-bottom: 12px;
   border-bottom: 1px solid #ebeef5;
+  max-height: 320px;
+  overflow-y: auto;
 }
-.tag-search-row { display: flex; gap: 8px; }
-.tag-input-row { display: flex; gap: 8px; margin-bottom: 12px; }
-.tag-list { display: flex; flex-wrap: wrap; min-height: 40px; }
-.empty-tip { text-align: center; color: #999; padding: 20px 0; }
-</style>
 
-<!-- el-option slot 内容 teleport 到 body，需要 non-scoped 样式 -->
-<style lang="scss">
-.libraryOption {
+.empty-field-tip {
+  color: #999;
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+.fieldGroup {
+  margin-bottom: 6px;
+}
+
+.fieldHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.2s;
 
-  .tagDot {
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
-    flex-shrink: 0;
+  &:hover {
+    background: #f5f7fa;
   }
 
-  .optionName {
-    font-weight: 500;
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .optionKey {
-    font-size: 11px;
+  .fieldArrow {
+    font-size: 12px;
     color: #999;
+    transition: transform 0.2s;
+
+    &.expanded {
+      transform: rotate(90deg);
+    }
   }
 
-  .optionBadge {
-    margin-left: 4px;
+  .fieldName {
+    font-size: 13px;
+    font-weight: 500;
+    color: #303133;
+    flex: 1;
   }
+}
+
+.fieldOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px 6px 26px;
+}
+
+.optionBadge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  border: 1.5px solid;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  user-select: none;
+
+  &:hover {
+    opacity: 0.85;
+    transform: scale(1.05);
+  }
+
+  &.selected {
+    font-weight: 500;
+  }
+}
+
+.empty-opt-tip {
+  color: #bbb;
+  font-size: 12px;
+}
+
+.tag-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  min-height: 32px;
+}
+
+.empty-tip {
+  text-align: center;
+  color: #999;
+  padding: 12px 0;
+  font-size: 13px;
 }
 </style>

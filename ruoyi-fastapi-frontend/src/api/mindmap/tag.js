@@ -1,6 +1,88 @@
 import request from '@/utils/request'
 
-// ── 标签分类 ──
+// ── 标签字段 ──
+
+export function listTagFields() {
+  return request({
+    url: '/mindmap/tag-field/list',
+    method: 'get'
+  })
+}
+
+export function getTagFieldDetail(fieldId) {
+  return request({
+    url: '/mindmap/tag-field/' + fieldId,
+    method: 'get'
+  })
+}
+
+export function addTagField(data) {
+  return request({
+    url: '/mindmap/tag-field',
+    method: 'post',
+    data: data
+  })
+}
+
+export function updateTagField(data) {
+  return request({
+    url: '/mindmap/tag-field',
+    method: 'put',
+    data: data
+  })
+}
+
+export function deleteTagField(fieldId) {
+  return request({
+    url: '/mindmap/tag-field/' + fieldId,
+    method: 'delete'
+  })
+}
+
+// ── 字段选项 ──
+
+export function addTagFieldOption(data) {
+  return request({
+    url: '/mindmap/tag-field/option',
+    method: 'post',
+    data: data
+  })
+}
+
+export function updateTagFieldOption(data) {
+  return request({
+    url: '/mindmap/tag-field/option',
+    method: 'put',
+    data: data
+  })
+}
+
+export function deleteTagFieldOption(optionId) {
+  return request({
+    url: '/mindmap/tag-field/option/' + optionId,
+    method: 'delete'
+  })
+}
+
+export function batchUpdateOptionSort(fieldId, sortList) {
+  return request({
+    url: '/mindmap/tag-field/option/sort/' + fieldId,
+    method: 'put',
+    data: sortList
+  })
+}
+
+// ── 搜索建议（侧边栏用） ──
+
+export function getTagFieldSuggestions(keyword) {
+  return request({
+    url: '/mindmap/tag-field/suggestions',
+    method: 'get',
+    params: { keyword }
+  })
+}
+
+// ── 旧标签 API（过渡期保留） ──
 
 export function listTagCategories() {
   return request({
@@ -31,8 +113,6 @@ export function deleteTagCategory(categoryId) {
     method: 'delete'
   })
 }
-
-// ── 标签 ──
 
 export function listTags(query) {
   return request({
@@ -72,7 +152,6 @@ export function deleteTags(tagIds) {
   })
 }
 
-// 标签建议（编辑器自动补全）
 export function getTagSuggestions(keyword) {
   return request({
     url: '/mindmap/tag/suggestions',

@@ -102,7 +102,19 @@ class MindmapService:
         await cls.check_mindmap_access(query_db, page_object.id, user_id, require_edit=True)
 
         try:
-            update_data = page_object.model_dump(exclude_unset=True, exclude={'node_tree', 'view_data'})
+            # 防御性排除：特权字段（owner_id、审计字段、版本计数等）禁止客户端修改，
+            # 防止 Mass Assignment 攻击导致所有权劫持或数据篡改
+            update_data = page_object.model_dump(
+                exclude_unset=True,
+                exclude={
+                    'node_tree', 'view_data',       # 大内容字段，由 auto-save 端点单独处理
+                    'owner_id',                      # 所有权：只能由 add_mindmap 设置
+                    'id',                            # 主键：不应在 UPDATE 中被重设
+                    'is_template', 'status',         # 管理员控制的状态标记
+                    'version_count', 'last_version_id',  # 由版本服务维护
+                    'create_by', 'create_time',      # 审计字段：创建时一次性写入
+                },
+            )
             await MindmapDao.edit_mindmap_dao(query_db, update_data)
             await query_db.commit()
             return CrudResponseModel(is_success=True, message='更新成功')

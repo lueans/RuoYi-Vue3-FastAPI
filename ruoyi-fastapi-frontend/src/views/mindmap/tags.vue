@@ -145,16 +145,28 @@
               <template #default="{ row }">
                 <el-popover trigger="click" :width="230" placement="bottom-start">
                   <template #reference>
-                    <span class="colorSwatch" :style="{ backgroundColor: row.fill || '#409eff' }" />
+                    <span class="colorSwatch" :style="row.fill === 'transparent'
+                      ? { background: 'repeating-conic-gradient(#d9d9d9 0% 25%, #fff 0% 50%) 50% / 8px 8px' }
+                      : { backgroundColor: row.fill || '#409eff' }" />
                   </template>
                   <div class="colorGroupPanel">
-                    <div v-for="group in fillColorGroups" :key="group.label" class="colorGroup">
+                    <div v-for="group in colorGroups" :key="group.label" class="colorGroup">
                       <div class="colorGroupLabel">{{ group.label }}</div>
                       <div class="colorGroupSwatches">
                         <span v-for="c in group.colors" :key="c" class="colorDot"
-                          :class="{ active: row.fill === c }" :style="{ backgroundColor: c }"
+                          :class="{ active: row.fill === c, transparentDot: c === 'transparent', lightDot: isLightColor(c) }"
+                          :style="c === 'transparent' ? {} : { backgroundColor: c }"
                           @click="row.fill = c; onOptionChange(row)" />
                       </div>
+                    </div>
+                    <div class="customColorRow">
+                      <span class="colorGroupLabel">自定义</span>
+                      <el-color-picker
+                        :model-value="row.fill === 'transparent' ? '#ffffff' : row.fill"
+                        show-alpha
+                        size="small"
+                        :teleported="false"
+                        @change="(val) => applyFillColor(row, val)" />
                     </div>
                   </div>
                 </el-popover>
@@ -164,16 +176,28 @@
               <template #default="{ row }">
                 <el-popover trigger="click" :width="230" placement="bottom-start">
                   <template #reference>
-                    <span class="colorSwatch" :style="{ backgroundColor: row.color || '#ffffff', border: '1px solid #dcdfe6' }" />
+                    <span class="colorSwatch" :style="row.color === 'transparent'
+                      ? { background: 'repeating-conic-gradient(#d9d9d9 0% 25%, #fff 0% 50%) 50% / 8px 8px' }
+                      : { backgroundColor: row.color || '#ffffff' }" />
                   </template>
                   <div class="colorGroupPanel">
-                    <div v-for="group in textColorGroups" :key="group.label" class="colorGroup">
+                    <div v-for="group in colorGroups" :key="group.label" class="colorGroup">
                       <div class="colorGroupLabel">{{ group.label }}</div>
                       <div class="colorGroupSwatches">
                         <span v-for="c in group.colors" :key="c" class="colorDot"
-                          :class="{ active: row.color === c }" :style="{ backgroundColor: c }"
+                          :class="{ active: row.color === c, transparentDot: c === 'transparent', lightDot: isLightColor(c) }"
+                          :style="c === 'transparent' ? {} : { backgroundColor: c }"
                           @click="row.color = c; onOptionChange(row)" />
                       </div>
+                    </div>
+                    <div class="customColorRow">
+                      <span class="colorGroupLabel">自定义</span>
+                      <el-color-picker
+                        :model-value="row.color === 'transparent' ? '#ffffff' : row.color"
+                        show-alpha
+                        size="small"
+                        :teleported="false"
+                        @change="(val) => applyTextColor(row, val)" />
                     </div>
                   </div>
                 </el-popover>
@@ -484,8 +508,9 @@ async function onOptionChange(row) {
   }
 }
 
-// ── 颜色预设 ──
-const fillColorGroups = [
+// ── 颜色预设（背景色与文字色共用） ──
+const colorGroups = [
+  { label: '特殊', colors: ['transparent', '#FFFFFF'] },
   { label: '灰色', colors: ['#F5F5F5', '#D9D9D9', '#B3B3B3', '#666666', '#333333'] },
   { label: '红色', colors: ['#FFCCC7', '#FFA39E', '#FF4D4F', '#CF1322', '#820014'] },
   { label: '橙黄', colors: ['#FFF1B8', '#FFD666', '#FAAD14', '#D48806', '#874D00'] },
@@ -494,16 +519,44 @@ const fillColorGroups = [
   { label: '蓝色', colors: ['#D6E4FF', '#85A5FF', '#4D73FF', '#1D39C4', '#061178'] },
   { label: '紫色', colors: ['#EFDBFF', '#B37FEB', '#722ED1', '#391085', '#120338'] },
 ]
-const textColorGroups = [
-  { label: '灰色', colors: ['#FFFFFF', '#D9D9D9', '#666666', '#333333', '#000000'] },
-  { label: '彩色', colors: ['#FF4D4F', '#FAAD14', '#52C41A', '#13C2C2', '#4D73FF', '#722ED1'] },
-]
+// 浅色圆点集合（在白底弹窗中需加边框才能看见）
+const lightColors = new Set(['#FFFFFF', '#F5F5F5'])
+function isLightColor(c) { return lightColors.has(c) }
+
+// ── 颜色工具 ──
+/** 将 rgba()/rgb() 归一化为 hex（#RRGGBB 或 #RRGGBBAA），防止超过后端 VARCHAR(20) */
+function normalizeColor(val) {
+  if (!val) return val
+  const rgbaMatch = val.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/)
+  if (rgbaMatch) {
+    const r = (+rgbaMatch[1]).toString(16).padStart(2, '0')
+    const g = (+rgbaMatch[2]).toString(16).padStart(2, '0')
+    const b = (+rgbaMatch[3]).toString(16).padStart(2, '0')
+    const a = rgbaMatch[4] !== undefined ? Math.round(Math.min(1, Math.max(0, +rgbaMatch[4])) * 255).toString(16).padStart(2, '0') : ''
+    return `#${r}${g}${b}${a}`
+  }
+  return val
+}
+
+function applyFillColor(row, val) {
+  if (val === null) return
+  row.fill = normalizeColor(val)
+  onOptionChange(row)
+}
+
+function applyTextColor(row, val) {
+  if (val === null) return
+  row.color = normalizeColor(val)
+  onOptionChange(row)
+}
 
 // ── 预览样式 ──
 function getOptionStyle(opt) {
+  const fill = normalizeColor(opt.fill) || '#409eff'
+  const color = normalizeColor(opt.color) || '#fff'
   return {
-    backgroundColor: opt.fill || '#409eff',
-    color: opt.color || '#fff',
+    backgroundColor: fill === 'transparent' ? '#f5f5f5' : fill,
+    color: color === 'transparent' ? '#333333' : color,
     fontSize: (styleForm.fontSize || 12) + 'px',
     borderRadius: (styleForm.radius ?? 3) + 'px',
     padding: `2px ${styleForm.paddingX ?? 8}px`,
@@ -671,6 +724,24 @@ onMounted(() => {
       border-color: #4D73FF;
       box-shadow: 0 0 0 1px #4D73FF;
     }
+
+    &.lightDot {
+      border-color: #e4e7ed;
+    }
+
+    &.transparentDot {
+      background: repeating-conic-gradient(#d9d9d9 0% 25%, #fff 0% 50%) 50% / 8px 8px;
+      border-color: #e4e7ed;
+    }
+  }
+
+  .customColorRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 8px;
+    margin-top: 6px;
+    border-top: 1px solid #f0f0f0;
   }
 }
 </style>

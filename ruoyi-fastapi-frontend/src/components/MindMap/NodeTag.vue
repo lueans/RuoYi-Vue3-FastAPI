@@ -19,9 +19,10 @@
           <span v-for="opt in field.options" :key="opt.id"
             class="optionBadge"
             :class="{ selected: isOptionSelected(field.id, opt.id) }"
-            :style="getOptionBadgeStyle(opt, field)"
+            :style="getOptionBadgeStyle(opt, field, isOptionSelected(field.id, opt.id))"
             @click="toggleOption(field, opt)"
           >
+            <el-icon v-if="isOptionSelected(field.id, opt.id)" class="checkIcon"><Check /></el-icon>
             {{ opt.name }}
           </span>
           <span v-if="!field.options || field.options.length === 0" class="empty-opt-tip">暂无选项</span>
@@ -62,7 +63,7 @@
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { ArrowRight } from '@element-plus/icons-vue'
+import { ArrowRight, Check } from '@element-plus/icons-vue'
 import bus from './useEventBus'
 import { listTagFields, getTagFieldDetail } from '@/api/mindmap/tag'
 import { ElMessage } from 'element-plus'
@@ -164,15 +165,21 @@ function toggleOption(field, opt) {
   })
 }
 
-// ── 选项样式 ──
-function getOptionBadgeStyle(opt, field) {
-  const selected = isOptionSelected(field.id, opt.id)
-  const base = {
-    backgroundColor: selected ? (opt.fill || '#409eff') : 'transparent',
-    color: selected ? (opt.color || '#fff') : (opt.fill || '#409eff'),
-    borderColor: opt.fill || '#409eff',
+// ── 选项样式（始终按预览效果展示，选中态用边框+勾选标识） ──
+function getOptionBadgeStyle(opt, field, selected) {
+  const fieldStyle = field.style || {}
+  const fill = opt.fill || '#409eff'
+  const color = opt.color || '#fff'
+  const isFillTransparent = fill === 'transparent'
+  const isColorTransparent = color === 'transparent'
+  return {
+    backgroundColor: isFillTransparent ? '#f5f5f5' : fill,
+    color: isColorTransparent ? '#333333' : color,
+    borderColor: selected ? '#4D73FF' : (isFillTransparent ? '#d9d9d9' : fill),
+    fontSize: (fieldStyle.fontSize || 12) + 'px',
+    borderRadius: (fieldStyle.radius ?? 3) + 'px',
+    padding: `2px ${fieldStyle.paddingX ?? 8}px`,
   }
-  return base
 }
 
 // ── 弹窗生命周期 ──
@@ -295,14 +302,15 @@ onBeforeUnmount(() => {
 }
 
 .optionBadge {
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   border: 1.5px solid;
   font-size: 12px;
   cursor: pointer;
   transition: all 0.15s;
   user-select: none;
+  line-height: 1.6;
 
   &:hover {
     opacity: 0.85;
@@ -311,6 +319,12 @@ onBeforeUnmount(() => {
 
   &.selected {
     font-weight: 500;
+    border-color: #4D73FF;
+    box-shadow: 0 0 0 1.5px #4D73FF;
+  }
+
+  .checkIcon {
+    font-size: 11px;
   }
 }
 

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from common.vo import CrudResponseModel, PageModel
 from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_dao import MindmapDao
+from module_mindmap.dao.mindmap_folder_dao import MindmapFolderDao
 from module_mindmap.entity.vo.mindmap_vo import (
     DeleteMindmapModel,
     MindmapContentUpdateModel,
@@ -84,6 +85,12 @@ class MindmapService:
         # Remove id if present (auto-generated)
         insert_data.pop('id', None)
 
+        # 校验文件夹归属
+        if insert_data.get('folder_id'):
+            folder = await MindmapFolderDao.get_folder_by_id(query_db, insert_data['folder_id'])
+            if not folder or folder.owner_id != insert_data['owner_id']:
+                raise ServiceException(message='目标文件夹不存在或无权限')
+
         try:
             new_mindmap = await MindmapDao.add_mindmap_dao(query_db, insert_data)
             # flush() 后主键 ID 立即可用，在 commit 前获取
@@ -109,12 +116,13 @@ class MindmapService:
                 exclude={
                     'node_tree', 'view_data',       # 大内容字段，由 auto-save 端点单独处理
                     'owner_id',                      # 所有权：只能由 add_mindmap 设置
-                    'id',                            # 主键：不应在 UPDATE 中被重设
                     'is_template', 'status',         # 管理员控制的状态标记
                     'version_count', 'last_version_id',  # 由版本服务维护
                     'create_by', 'create_time',      # 审计字段：创建时一次性写入
+                    'folder_id',                     # 文件夹归属：仅通过 /mindmap/move 端点修改
                 },
             )
+            # id 保留在 update_data 中供 DAO 的 WHERE 子句使用，不会被 SET 覆盖
             await MindmapDao.edit_mindmap_dao(query_db, update_data)
             await query_db.commit()
             return CrudResponseModel(is_success=True, message='更新成功')

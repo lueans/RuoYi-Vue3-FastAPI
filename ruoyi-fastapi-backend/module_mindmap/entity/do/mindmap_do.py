@@ -28,6 +28,11 @@ class Mindmap(Base):
         comment='描述',
     )
     owner_id = Column(BigInteger, nullable=False, comment='所有者用户ID')
+    folder_id = Column(
+        BigInteger, nullable=True,
+        server_default=SqlalchemyUtil.get_server_default_null(DataBaseConfig.db_type),
+        comment='所属文件夹ID（NULL=根目录）',
+    )
     layout = Column(String(50), nullable=False, server_default='logicalStructure', comment='布局类型')
     theme = Column(
         mysql.JSON if DataBaseConfig.db_type == 'mysql' else postgresql.JSONB,

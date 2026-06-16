@@ -37,6 +37,7 @@ class MindmapDao:
                 Mindmap.description,
                 Mindmap.layout,
                 Mindmap.cover_image,
+                Mindmap.folder_id,
                 Mindmap.is_template,
                 Mindmap.version_count,
                 Mindmap.status,
@@ -51,6 +52,7 @@ class MindmapDao:
                 ) if query_object.name else True,
                 Mindmap.status == query_object.status if query_object.status is not None else True,
                 Mindmap.is_template == query_object.is_template if query_object.is_template is not None else True,
+                Mindmap.folder_id == query_object.folder_id if query_object.folder_id is not None else True,
                 Mindmap.create_time >= query_object.begin_time if query_object.begin_time else True,
                 Mindmap.create_time <= query_object.end_time if query_object.end_time else True,
             )
@@ -86,7 +88,10 @@ class MindmapDao:
     @classmethod
     async def edit_mindmap_dao(cls, db: AsyncSession, mindmap: dict) -> None:
         """编辑思维导图"""
-        await db.execute(update(Mindmap).where(Mindmap.id == mindmap['id']).values(**mindmap))
+        mindmap_id = mindmap.pop('id', None)
+        if mindmap_id is None:
+            raise ValueError('edit_mindmap_dao requires id in data dict')
+        await db.execute(update(Mindmap).where(Mindmap.id == mindmap_id).values(**mindmap))
 
     @classmethod
     async def update_content_dao(cls, db: AsyncSession, mindmap_id: int, data: dict) -> None:

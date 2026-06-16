@@ -15,6 +15,7 @@ class MindmapModel(BaseModel):
     name: str | None = Field(default=None, description='思维导图名称')
     description: str | None = Field(default=None, description='描述')
     owner_id: int | None = Field(default=None, description='所有者ID')
+    folder_id: int | None = Field(default=None, description='所属文件夹ID')
     layout: str | None = Field(default='logicalStructure', description='布局类型')
     theme: dict[str, Any] | None = Field(default=None, description='主题配置')
     node_tree: dict[str, Any] | None = Field(default=None, description='节点树')
@@ -53,6 +54,7 @@ class MindmapPageQueryModel(MindmapQueryModel):
     page_size: int = Field(default=10, description='每页记录数')
     sort_field: str | None = Field(default='update_time', description='排序字段')
     sort_order: str | None = Field(default='desc', description='排序方向')
+    folder_id: int | None = Field(default=None, description='文件夹ID筛选')
 
 
 class MindmapContentUpdateModel(BaseModel):
@@ -94,6 +96,7 @@ class MindmapListItemModel(BaseModel):
     description: str | None = Field(default=None, description='描述')
     layout: str | None = Field(default=None, description='布局类型')
     cover_image: str | None = Field(default=None, description='封面图片URL')
+    folder_id: int | None = Field(default=None, description='所属文件夹ID')
     is_template: int | None = Field(default=0, description='是否模板')
     version_count: int | None = Field(default=1, description='版本总数')
     status: int | None = Field(default=0, description='状态')

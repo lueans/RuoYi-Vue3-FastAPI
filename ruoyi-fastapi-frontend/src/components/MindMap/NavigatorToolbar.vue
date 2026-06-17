@@ -158,58 +158,79 @@ function backToRoot() {
 
 <style lang="less" scoped>
 .navigatorContainer {
-  padding: 0 12px;
+  padding: 0 8px;
   position: fixed;
-  right: 20px;
-  bottom: 20px;
+  right: 16px;
+  bottom: 16px;
   z-index: 2000;
-  background: hsla(0, 0%, 100%, 0.8);
-  border-radius: 5px;
-  opacity: 0.8;
-  height: 44px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.06);
+  border: 1px solid #dee0e3;
+  height: 40px;
   font-size: 12px;
   display: flex;
   align-items: center;
 
   &.isDark {
-    background: #262a2e;
+    background: #2a2d32;
+    border-color: #3d4046;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
 
     .item {
       a {
-        color: hsla(0, 0%, 100%, 0.6);
+        color: hsla(0, 0%, 100%, 0.7);
+        &:hover { color: hsla(0, 0%, 100%, 0.9); }
       }
-
       .btn {
-        color: hsla(0, 0%, 100%, 0.6);
+        color: hsla(0, 0%, 100%, 0.7);
+        &:hover { color: hsla(0, 0%, 100%, 0.9); background: hsla(0, 0%, 100%, 0.08); }
       }
     }
   }
 
   .item {
-    margin-right: 20px;
-
+    margin-right: 4px;
     &:last-of-type {
       margin-right: 0;
     }
 
     a {
-      color: #303133;
+      color: #646a73;
       text-decoration: none;
+      transition: color 0.15s;
+      &:hover { color: #1f2329; }
     }
 
     .btn {
       cursor: pointer;
       font-size: 18px;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      transition: all 0.15s;
+      color: #646a73;
+      &:hover {
+        background: #f5f6f7;
+        color: #1f2329;
+      }
+      &:active {
+        background: #edf4ff;
+        color: #3370ff;
+      }
     }
   }
 }
 
 @media screen and (max-width: 700px) {
   .navigatorContainer {
-    left: 20px;
+    left: 16px;
     overflow-x: auto;
     overflow-y: hidden;
-    height: 60px;
+    height: 52px;
   }
 }
 </style>

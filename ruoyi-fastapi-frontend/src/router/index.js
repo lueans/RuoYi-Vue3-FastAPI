@@ -78,7 +78,7 @@ export const constantRoutes = [
         path: '',
         component: () => import('@/views/mindmap/edit'),
         name: 'MindmapEditor',
-        meta: { title: '脑图编辑' }
+        meta: { title: '脑图编辑', hideLayout: true }
       }
     ]
   },

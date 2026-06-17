@@ -489,58 +489,73 @@ onBeforeUnmount(() => {
 
 <style lang="scss" scoped>
 .listBox {
-  width: 250px;
+  width: 240px;
   background: #fff;
-  box-shadow: 0 4px 12px 0 hsla(0, 0%, 69%, 0.5);
-  border-radius: 4px;
-  padding-top: 16px;
-  padding-bottom: 16px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 1px rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 6px;
+  border: 1px solid #dee0e3;
 
   &.isDark {
-    background: #363b3f;
+    background: #2a2d32;
+    border-color: #3d4046;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   }
 }
 
 .contextmenuContainer {
   position: fixed;
-  font-size: 14px;
-  font-family: PingFangSC-Regular, PingFang SC;
+  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
   font-weight: 400;
-  color: #1a1a1a;
+  color: #1f2329;
   z-index: 9999;
 
   &.isDark {
-    color: #fff;
+    color: #e5e6eb;
 
     .item {
       &:hover {
-        background: hsla(0, 0%, 100%, 0.05);
+        background: hsla(0, 0%, 100%, 0.06);
       }
+    }
+
+    .splitLine {
+      background-color: #3d4046;
+    }
+
+    .item .desc {
+      color: #646a73;
     }
   }
 
   .splitLine {
-    width: 95%;
+    width: calc(100% - 8px);
     height: 1px;
-    background-color: #e9edf2;
-    margin: 2px auto;
+    background-color: #f0f1f3;
+    margin: 4px auto;
   }
 
   .item {
     position: relative;
-    height: 28px;
-    padding: 0 16px;
+    height: 32px;
+    padding: 0 10px;
     cursor: pointer;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    border-radius: 6px;
+    transition: background 0.1s;
 
     &.danger {
-      color: #f56c6c;
+      color: #f54a45;
+      &:hover {
+        background: #fef0f0;
+      }
     }
 
     &:hover {
-      background: #f5f5f5;
+      background: #f5f6f7;
 
       .subItems {
         visibility: visible;
@@ -548,12 +563,12 @@ onBeforeUnmount(() => {
     }
 
     &.disabled {
-      color: grey;
+      color: #bbbfc4;
       cursor: not-allowed;
       pointer-events: none;
 
       &:hover {
-        background: #fff;
+        background: transparent;
       }
     }
 
@@ -561,13 +576,17 @@ onBeforeUnmount(() => {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      line-height: 1;
     }
 
     .desc {
-      color: #999;
+      color: #8f959e;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      font-size: 12px;
+      margin-left: 16px;
+      line-height: 1;
     }
 
     .subItems {
@@ -576,6 +595,7 @@ onBeforeUnmount(() => {
       visibility: hidden;
       width: 150px;
       cursor: auto;
+      top: -6px;
 
       &.showLeft {
         left: -150px;

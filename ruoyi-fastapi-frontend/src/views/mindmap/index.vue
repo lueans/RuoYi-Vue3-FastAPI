@@ -170,6 +170,36 @@
       </pane>
     </splitpanes>
 
+    <!-- 新建脑图对话框 -->
+    <el-dialog title="新建脑图" v-model="addDialogOpen" width="500px" append-to-body destroy-on-close>
+      <el-form ref="addFormRef" :model="addForm" :rules="addRules" label-width="80px">
+        <el-form-item label="所属目录" prop="folderId">
+          <el-tree-select
+            v-model="addForm.folderId"
+            :data="folderSelectTree"
+            :props="{ label: 'name', value: 'id', children: 'children' }"
+            value-key="id"
+            placeholder="根目录"
+            check-strictly
+            clearable
+            style="width: 100%;"
+          />
+        </el-form-item>
+        <el-form-item label="脑图名称" prop="name">
+          <el-input v-model="addForm.name" placeholder="请输入脑图名称" maxlength="200" show-word-limit />
+        </el-form-item>
+        <el-form-item label="脑图说明" prop="description">
+          <el-input v-model="addForm.description" type="textarea" placeholder="请输入脑图说明（选填）" maxlength="500" show-word-limit :rows="3" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="addDialogOpen = false">取 消</el-button>
+          <el-button type="primary" @click="submitAdd">确 定</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <!-- 新建/重命名文件夹对话框 -->
     <el-dialog :title="folderDialogTitle" v-model="folderDialogOpen" width="500px" append-to-body destroy-on-close>
       <el-form ref="folderFormRef" :model="folderForm" :rules="folderRules" label-width="80px">
@@ -256,6 +286,14 @@ const folderRules = {
 const moveDialogOpen = ref(false)
 const moveFolderId = ref(null)
 const moveMindmapIds = ref([])
+
+// ─── 新建脑图对话框 ───
+const addDialogOpen = ref(false)
+const addFormRef = ref(null)
+const addForm = reactive({ name: '', description: '', folderId: null })
+const addRules = {
+  name: [{ required: true, message: '脑图名称不能为空', trigger: 'blur' }]
+}
 
 const data = reactive({
   queryParams: {
@@ -437,16 +475,29 @@ function handleSelectionChange(selection) {
 }
 
 function handleAdd() {
-  const mindmapData = {
-    name: '未命名脑图',
-    nodeTree: { data: { text: '中心主题' }, children: [] }
-  }
-  if (typeof selectedFolderKey.value === 'number') {
-    mindmapData.folderId = selectedFolderKey.value
-  }
-  addMindmap(mindmapData).then((response) => {
-    proxy.$modal.msgSuccess('新建成功')
-    router.push({ path: '/mindmap/edit', query: { id: response.data.id } })
+  addForm.name = ''
+  addForm.description = ''
+  addForm.folderId = (typeof selectedFolderKey.value === 'number') ? selectedFolderKey.value : null
+  addDialogOpen.value = true
+}
+
+function submitAdd() {
+  proxy.$refs['addFormRef'].validate(valid => {
+    if (!valid) return
+    const mindmapData = {
+      name: addForm.name,
+      description: addForm.description || undefined,
+      nodeTree: { data: { text: addForm.name }, children: [] }
+    }
+    if (addForm.folderId) {
+      mindmapData.folderId = addForm.folderId
+    }
+    addMindmap(mindmapData).then((response) => {
+      proxy.$modal.msgSuccess('新建成功')
+      addDialogOpen.value = false
+      getList()
+      router.push({ path: '/mindmap/edit', query: { id: response.data.id } })
+    })
   })
 }
 

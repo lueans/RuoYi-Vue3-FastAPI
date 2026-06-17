@@ -312,19 +312,19 @@ async function handleDelete(item) {
 
 <style lang="scss" scoped>
 .versionHistoryContainer {
-  padding: 10px;
+  padding: 12px;
 
   .previewBanner {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: #ecf5ff;
-    border: 1px solid #b3d8ff;
-    border-radius: 4px;
-    margin-bottom: 10px;
-    font-size: 13px;
-    color: #409eff;
+    background: #edf4ff;
+    border: 1px solid #b3ccff;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: #3370ff;
 
     .el-button {
       margin-left: auto;
@@ -332,21 +332,50 @@ async function handleDelete(item) {
   }
 
   .actionBar {
-    margin-bottom: 10px;
+    margin-bottom: 12px;
     text-align: center;
+  }
+
+  :deep(.el-tabs) {
+    .el-tabs__header {
+      margin-bottom: 8px;
+    }
+    .el-tabs__nav-wrap::after {
+      height: 1px;
+      background: #f0f1f3;
+    }
+    .el-tabs__item {
+      font-size: 13px;
+      color: #646a73;
+      &.is-active {
+        color: #3370ff;
+        font-weight: 500;
+      }
+    }
+    .el-tabs__active-bar {
+      background-color: #3370ff;
+      height: 2px;
+    }
   }
 
   .versionList {
     min-height: 100px;
     max-height: calc(100vh - 320px);
     overflow-y: auto;
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+    &::-webkit-scrollbar-thumb {
+      background: #d4d6d9;
+      border-radius: 4px;
+    }
   }
 
   .emptyTip {
     text-align: center;
-    color: #999;
+    color: #8f959e;
     padding: 40px 0;
-    font-size: 14px;
+    font-size: 13px;
   }
 
   .versionItem {
@@ -354,11 +383,12 @@ async function handleDelete(item) {
     justify-content: space-between;
     align-items: center;
     padding: 10px 8px;
-    border-bottom: 1px solid #f0f0f0;
-    transition: background 0.2s;
+    border-radius: 6px;
+    transition: background 0.15s;
+    margin-bottom: 2px;
 
     &:hover {
-      background: #f5f7fa;
+      background: #f5f6f7;
     }
 
     .versionInfo {
@@ -368,7 +398,7 @@ async function handleDelete(item) {
       .versionName {
         font-size: 13px;
         font-weight: 500;
-        color: #333;
+        color: #1f2329;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -376,7 +406,7 @@ async function handleDelete(item) {
 
       .versionMeta {
         font-size: 12px;
-        color: #999;
+        color: #8f959e;
         margin-top: 4px;
         display: flex;
         gap: 8px;
@@ -386,6 +416,12 @@ async function handleDelete(item) {
     .versionActions {
       flex-shrink: 0;
       margin-left: 8px;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+
+    &:hover .versionActions {
+      opacity: 1;
     }
   }
 

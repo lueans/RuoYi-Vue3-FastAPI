@@ -6,148 +6,107 @@
         <div class="toolbarNodeBtnList">
           <template v-for="item in horizontalList" :key="item">
             <!-- Back -->
-            <div
-              v-if="item === 'back'"
-              class="toolbarBtn"
-              :class="{ disabled: isReadonly || backEnd }"
-              @click="exec('BACK')"
-            >
-              <span class="icon iconfont iconhoutui-shi"></span>
-              <span class="text">回退</span>
-            </div>
+            <el-tooltip v-if="item === 'back'" :content="btnLabels.back" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: isReadonly || backEnd }" @click="exec('BACK')">
+                <span class="icon iconfont iconhoutui-shi"></span>
+                <span class="text">回退</span>
+              </div>
+            </el-tooltip>
             <!-- Forward -->
-            <div
-              v-if="item === 'forward'"
-              class="toolbarBtn"
-              :class="{ disabled: isReadonly || forwardEnd }"
-              @click="exec('FORWARD')"
-            >
-              <span class="icon iconfont iconqianjin1"></span>
-              <span class="text">前进</span>
-            </div>
+            <el-tooltip v-if="item === 'forward'" :content="btnLabels.forward" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: isReadonly || forwardEnd }" @click="exec('FORWARD')">
+                <span class="icon iconfont iconqianjin1"></span>
+                <span class="text">前进</span>
+              </div>
+            </el-tooltip>
             <!-- Painter -->
-            <div
-              v-if="item === 'painter'"
-              class="toolbarBtn"
-              :class="{
-                disabled: noActive || hasGeneralization,
-                active: isInPainter
-              }"
-              @click="bus.emit('startPainter')"
-            >
-              <span class="icon iconfont iconjiedian"></span>
-              <span class="text">格式刷</span>
-            </div>
+            <el-tooltip v-if="item === 'painter'" :content="btnLabels.painter" placement="bottom" :show-after="300">
+              <div
+                class="toolbarBtn"
+                :class="{ disabled: noActive || hasGeneralization, active: isInPainter }"
+                @click="bus.emit('startPainter')"
+              >
+                <span class="icon iconfont iconjiedian"></span>
+                <span class="text">格式刷</span>
+              </div>
+            </el-tooltip>
             <!-- Sibling Node -->
-            <div
-              v-if="item === 'siblingNode'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive || hasRoot || hasGeneralization }"
-              @click="exec('INSERT_NODE')"
-            >
-              <span class="icon iconfont iconjiedian"></span>
-              <span class="text">同级节点</span>
-            </div>
+            <el-tooltip v-if="item === 'siblingNode'" :content="btnLabels.siblingNode" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('INSERT_NODE')">
+                <span class="icon iconfont iconjiedian"></span>
+                <span class="text">同级节点</span>
+              </div>
+            </el-tooltip>
             <!-- Child Node -->
-            <div
-              v-if="item === 'childNode'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive || hasGeneralization }"
-              @click="exec('INSERT_CHILD_NODE')"
-            >
-              <span class="icon iconfont icontianjiazijiedian"></span>
-              <span class="text">子节点</span>
-            </div>
+            <el-tooltip v-if="item === 'childNode'" :content="btnLabels.childNode" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('INSERT_CHILD_NODE')">
+                <span class="icon iconfont icontianjiazijiedian"></span>
+                <span class="text">子节点</span>
+              </div>
+            </el-tooltip>
             <!-- Delete Node -->
-            <div
-              v-if="item === 'deleteNode'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive }"
-              @click="exec('REMOVE_NODE')"
-            >
-              <span class="icon iconfont iconshanchu"></span>
-              <span class="text">删除节点</span>
-            </div>
+            <el-tooltip v-if="item === 'deleteNode'" :content="btnLabels.deleteNode" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="exec('REMOVE_NODE')">
+                <span class="icon iconfont iconshanchu"></span>
+                <span class="text">删除节点</span>
+              </div>
+            </el-tooltip>
             <!-- Image -->
-            <div
-              v-if="item === 'image'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive }"
-              @click="bus.emit('showNodeImage')"
-            >
-              <span class="icon iconfont iconimage"></span>
-              <span class="text">图片</span>
-            </div>
+            <el-tooltip v-if="item === 'image'" :content="btnLabels.image" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeImage')">
+                <span class="icon iconfont iconimage"></span>
+                <span class="text">图片</span>
+              </div>
+            </el-tooltip>
             <!-- Icon -->
-            <div
-              v-if="item === 'icon'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive }"
-              @click="showNodeIcon"
-            >
-              <span class="icon iconfont iconxiaolian"></span>
-              <span class="text">图标</span>
-            </div>
+            <el-tooltip v-if="item === 'icon'" :content="btnLabels.icon" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="showNodeIcon">
+                <span class="icon iconfont iconxiaolian"></span>
+                <span class="text">图标</span>
+              </div>
+            </el-tooltip>
             <!-- Link -->
-            <div
-              v-if="item === 'link'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive }"
-              @click="bus.emit('showNodeLink')"
-            >
-              <span class="icon iconfont iconchaolianjie"></span>
-              <span class="text">超链接</span>
-            </div>
+            <el-tooltip v-if="item === 'link'" :content="btnLabels.link" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeLink')">
+                <span class="icon iconfont iconchaolianjie"></span>
+                <span class="text">超链接</span>
+              </div>
+            </el-tooltip>
             <!-- Note -->
-            <div
-              v-if="item === 'note'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive }"
-              @click="bus.emit('showNodeNote')"
-            >
-              <span class="icon iconfont iconflow-Mark"></span>
-              <span class="text">备注</span>
-            </div>
+            <el-tooltip v-if="item === 'note'" :content="btnLabels.note" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeNote')">
+                <span class="icon iconfont iconflow-Mark"></span>
+                <span class="text">备注</span>
+              </div>
+            </el-tooltip>
             <!-- Tag -->
-            <div
-              v-if="item === 'tag'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive }"
-              @click="bus.emit('showNodeTag')"
-            >
-              <span class="icon iconfont iconbiaoqian"></span>
-              <span class="text">标签</span>
-            </div>
+            <el-tooltip v-if="item === 'tag'" :content="btnLabels.tag" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeTag')">
+                <span class="icon iconfont iconbiaoqian"></span>
+                <span class="text">标签</span>
+              </div>
+            </el-tooltip>
             <!-- Summary -->
-            <div
-              v-if="item === 'summary'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive || hasRoot || hasGeneralization }"
-              @click="exec('ADD_GENERALIZATION')"
-            >
-              <span class="icon iconfont icongaikuozonglan"></span>
-              <span class="text">概要</span>
-            </div>
+            <el-tooltip v-if="item === 'summary'" :content="btnLabels.summary" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('ADD_GENERALIZATION')">
+                <span class="icon iconfont icongaikuozonglan"></span>
+                <span class="text">概要</span>
+              </div>
+            </el-tooltip>
             <!-- Associative Line -->
-            <div
-              v-if="item === 'associativeLine'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive || hasGeneralization }"
-              @click="bus.emit('createAssociativeLine')"
-            >
-              <span class="icon iconfont iconlianjiexian"></span>
-              <span class="text">关联线</span>
-            </div>
+            <el-tooltip v-if="item === 'associativeLine'" :content="btnLabels.associativeLine" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="bus.emit('createAssociativeLine')">
+                <span class="icon iconfont iconlianjiexian"></span>
+                <span class="text">关联线</span>
+              </div>
+            </el-tooltip>
             <!-- Outer Frame -->
-            <div
-              v-if="item === 'outerFrame'"
-              class="toolbarBtn"
-              :class="{ disabled: noActive || hasGeneralization }"
-              @click="exec('ADD_OUTER_FRAME')"
-            >
-              <span class="icon iconfont iconwaikuang"></span>
-              <span class="text">外框</span>
-            </div>
+            <el-tooltip v-if="item === 'outerFrame'" :content="btnLabels.outerFrame" placement="bottom" :show-after="300">
+              <div class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('ADD_OUTER_FRAME')">
+                <span class="icon iconfont iconwaikuang"></span>
+                <span class="text">外框</span>
+              </div>
+            </el-tooltip>
           </template>
         </div>
         <!-- More button (overflow items) -->
@@ -167,131 +126,47 @@
           </template>
           <div class="toolbarNodeBtnList v" @click="popoverShow = false">
             <template v-for="item in verticalList" :key="item">
-              <div
-                v-if="item === 'back'"
-                class="toolbarBtn"
-                :class="{ disabled: isReadonly || backEnd }"
-                @click="exec('BACK')"
-              >
-                <span class="icon iconfont iconhoutui-shi"></span>
-                <span class="text">回退</span>
+              <div v-if="item === 'back'" class="toolbarBtn" :class="{ disabled: isReadonly || backEnd }" @click="exec('BACK')">
+                <span class="icon iconfont iconhoutui-shi"></span><span class="text">回退</span>
               </div>
-              <div
-                v-if="item === 'forward'"
-                class="toolbarBtn"
-                :class="{ disabled: isReadonly || forwardEnd }"
-                @click="exec('FORWARD')"
-              >
-                <span class="icon iconfont iconqianjin1"></span>
-                <span class="text">前进</span>
+              <div v-if="item === 'forward'" class="toolbarBtn" :class="{ disabled: isReadonly || forwardEnd }" @click="exec('FORWARD')">
+                <span class="icon iconfont iconqianjin1"></span><span class="text">前进</span>
               </div>
-              <div
-                v-if="item === 'painter'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive || hasGeneralization, active: isInPainter }"
-                @click="bus.emit('startPainter')"
-              >
-                <span class="icon iconfont iconjiedian"></span>
-                <span class="text">格式刷</span>
+              <div v-if="item === 'painter'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization, active: isInPainter }" @click="bus.emit('startPainter')">
+                <span class="icon iconfont iconjiedian"></span><span class="text">格式刷</span>
               </div>
-              <div
-                v-if="item === 'siblingNode'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive || hasRoot || hasGeneralization }"
-                @click="exec('INSERT_NODE')"
-              >
-                <span class="icon iconfont iconjiedian"></span>
-                <span class="text">同级节点</span>
+              <div v-if="item === 'siblingNode'" class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('INSERT_NODE')">
+                <span class="icon iconfont iconjiedian"></span><span class="text">同级节点</span>
               </div>
-              <div
-                v-if="item === 'childNode'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive || hasGeneralization }"
-                @click="exec('INSERT_CHILD_NODE')"
-              >
-                <span class="icon iconfont icontianjiazijiedian"></span>
-                <span class="text">子节点</span>
+              <div v-if="item === 'childNode'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('INSERT_CHILD_NODE')">
+                <span class="icon iconfont icontianjiazijiedian"></span><span class="text">子节点</span>
               </div>
-              <div
-                v-if="item === 'deleteNode'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive }"
-                @click="exec('REMOVE_NODE')"
-              >
-                <span class="icon iconfont iconshanchu"></span>
-                <span class="text">删除节点</span>
+              <div v-if="item === 'deleteNode'" class="toolbarBtn" :class="{ disabled: noActive }" @click="exec('REMOVE_NODE')">
+                <span class="icon iconfont iconshanchu"></span><span class="text">删除节点</span>
               </div>
-              <div
-                v-if="item === 'image'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive }"
-                @click="bus.emit('showNodeImage')"
-              >
-                <span class="icon iconfont iconimage"></span>
-                <span class="text">图片</span>
+              <div v-if="item === 'image'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeImage')">
+                <span class="icon iconfont iconimage"></span><span class="text">图片</span>
               </div>
-              <div
-                v-if="item === 'icon'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive }"
-                @click="showNodeIcon"
-              >
-                <span class="icon iconfont iconxiaolian"></span>
-                <span class="text">图标</span>
+              <div v-if="item === 'icon'" class="toolbarBtn" :class="{ disabled: noActive }" @click="showNodeIcon">
+                <span class="icon iconfont iconxiaolian"></span><span class="text">图标</span>
               </div>
-              <div
-                v-if="item === 'link'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive }"
-                @click="bus.emit('showNodeLink')"
-              >
-                <span class="icon iconfont iconchaolianjie"></span>
-                <span class="text">超链接</span>
+              <div v-if="item === 'link'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeLink')">
+                <span class="icon iconfont iconchaolianjie"></span><span class="text">超链接</span>
               </div>
-              <div
-                v-if="item === 'note'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive }"
-                @click="bus.emit('showNodeNote')"
-              >
-                <span class="icon iconfont iconflow-Mark"></span>
-                <span class="text">备注</span>
+              <div v-if="item === 'note'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeNote')">
+                <span class="icon iconfont iconflow-Mark"></span><span class="text">备注</span>
               </div>
-              <div
-                v-if="item === 'tag'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive }"
-                @click="bus.emit('showNodeTag')"
-              >
-                <span class="icon iconfont iconbiaoqian"></span>
-                <span class="text">标签</span>
+              <div v-if="item === 'tag'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeTag')">
+                <span class="icon iconfont iconbiaoqian"></span><span class="text">标签</span>
               </div>
-              <div
-                v-if="item === 'summary'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive || hasRoot || hasGeneralization }"
-                @click="exec('ADD_GENERALIZATION')"
-              >
-                <span class="icon iconfont icongaikuozonglan"></span>
-                <span class="text">概要</span>
+              <div v-if="item === 'summary'" class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('ADD_GENERALIZATION')">
+                <span class="icon iconfont icongaikuozonglan"></span><span class="text">概要</span>
               </div>
-              <div
-                v-if="item === 'associativeLine'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive || hasGeneralization }"
-                @click="bus.emit('createAssociativeLine')"
-              >
-                <span class="icon iconfont iconlianjiexian"></span>
-                <span class="text">关联线</span>
+              <div v-if="item === 'associativeLine'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="bus.emit('createAssociativeLine')">
+                <span class="icon iconfont iconlianjiexian"></span><span class="text">关联线</span>
               </div>
-              <div
-                v-if="item === 'outerFrame'"
-                class="toolbarBtn"
-                :class="{ disabled: noActive || hasGeneralization }"
-                @click="exec('ADD_OUTER_FRAME')"
-              >
-                <span class="icon iconfont iconwaikuang"></span>
-                <span class="text">外框</span>
+              <div v-if="item === 'outerFrame'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('ADD_OUTER_FRAME')">
+                <span class="icon iconfont iconwaikuang"></span><span class="text">外框</span>
               </div>
             </template>
           </div>
@@ -299,18 +174,18 @@
       </div>
       <!-- File operations block -->
       <div class="toolbarBlock">
-        <div class="toolbarBtn" @click="bus.emit('showImport')">
-          <span class="icon iconfont icondaoru"></span>
-          <span class="text">导入</span>
-        </div>
-        <div
-          class="toolbarBtn"
-          @click="bus.emit('showExport')"
-          style="margin-right: 0;"
-        >
-          <span class="icon iconfont iconexport"></span>
-          <span class="text">导出</span>
-        </div>
+        <el-tooltip :content="btnLabels.import" placement="bottom" :show-after="300">
+          <div class="toolbarBtn" @click="bus.emit('showImport')">
+            <span class="icon iconfont icondaoru"></span>
+            <span class="text">导入</span>
+          </div>
+        </el-tooltip>
+        <el-tooltip :content="btnLabels.export" placement="bottom" :show-after="300">
+          <div class="toolbarBtn" @click="bus.emit('showExport')" style="margin-right: 0;">
+            <span class="icon iconfont iconexport"></span>
+            <span class="text">导出</span>
+          </div>
+        </el-tooltip>
       </div>
     </div>
     <NodeImage />
@@ -333,6 +208,25 @@ import NodeNote from './NodeNote.vue'
 import NodeTag from './NodeTag.vue'
 import ExportDialog from './Export.vue'
 import ImportDialog from './Import.vue'
+
+const btnLabels = {
+  back: '回退',
+  forward: '前进',
+  painter: '格式刷',
+  siblingNode: '同级节点',
+  childNode: '子节点',
+  deleteNode: '删除节点',
+  image: '图片',
+  icon: '图标',
+  link: '超链接',
+  note: '备注',
+  tag: '标签',
+  summary: '概要',
+  associativeLine: '关联线',
+  outerFrame: '外框',
+  import: '导入',
+  export: '导出',
+}
 
 const defaultBtnList = [
   'back',
@@ -385,9 +279,14 @@ function showNodeIcon() {
 // Compute how many buttons fit horizontally
 function computeToolbarShow() {
   if (!toolbarRef.value) return
-  const windowWidth = window.innerWidth - 40
+  const containerWidth = toolbarRef.value.parentElement?.getBoundingClientRect().width || window.innerWidth - 40
   const all = [...btnList.value]
   let index = 1
+
+  const done = () => {
+    verticalList.value = all.slice(index)
+    showMoreBtn.value = verticalList.value.length > 0
+  }
 
   const loopCheck = () => {
     if (index > all.length) return done()
@@ -395,19 +294,15 @@ function computeToolbarShow() {
     nextTick(() => {
       if (!toolbarRef.value) return done()
       const width = toolbarRef.value.getBoundingClientRect().width
-      if (width < windowWidth) {
+      if (width < containerWidth) {
         index++
         loopCheck()
-      } else if (index > 0 && width > windowWidth) {
+      } else if (index > 0 && width > containerWidth) {
         index--
         horizontalList.value = all.slice(0, index)
         done()
       }
     })
-  }
-  const done = () => {
-    verticalList.value = all.slice(index)
-    showMoreBtn.value = verticalList.value.length > 0
   }
   loopCheck()
 }
@@ -487,9 +382,6 @@ onBeforeUnmount(() => {
 
       .toolbarBlock {
         background-color: hsla(210, 10%, 14%, 0.95);
-        /* 临时禁用 backdrop-filter 验证性能问题 */
-        /* backdrop-filter: blur(10px); */
-        /* -webkit-backdrop-filter: blur(10px); */
         border-color: rgba(255, 255, 255, 0.08);
       }
 
@@ -527,9 +419,6 @@ onBeforeUnmount(() => {
     .toolbarBlock {
       display: flex;
       background-color: hsla(0, 0%, 100%, 0.95);
-      /* 临时禁用 backdrop-filter 验证性能问题 */
-      /* backdrop-filter: blur(10px); */
-      /* -webkit-backdrop-filter: blur(10px); */
       padding: 10px 20px;
       border-radius: 6px;
       box-shadow: 0 2px 16px 0 rgba(0, 0, 0, 0.06);

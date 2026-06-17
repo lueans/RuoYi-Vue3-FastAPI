@@ -52,8 +52,8 @@ function triggerClick(item) {
 }
 
 function updateSize() {
-  const topMargin = 110
-  const bottomMargin = 80
+  const topMargin = 60
+  const bottomMargin = 60
   maxHeight.value = window.innerHeight - topMargin - bottomMargin
 }
 
@@ -80,26 +80,37 @@ onBeforeUnmount(() => {
 <style lang="less" scoped>
 .sidebarTriggerContainer {
   position: fixed;
-  top: 110px;
-  bottom: 80px;
+  top: 60px;
+  bottom: 60px;
   right: -60px;
   z-index: 2000;
-  transition: all 0.3s;
+  transition: all 0.3s ease;
   display: flex;
   flex-direction: column;
   justify-content: center;
 
   &.isDark {
     .trigger {
-      background-color: #262a2e;
+      background-color: #2a2d32;
+      border-color: #3d4046;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
 
       .triggerItem {
         color: hsla(0, 0%, 100%, 0.6);
 
         &:hover {
-          background-color: hsla(0, 0%, 100%, 0.05);
+          background-color: hsla(0, 0%, 100%, 0.06);
+        }
+
+        &.active {
+          color: #5b8def;
+          background-color: hsla(220, 70%, 60%, 0.1);
         }
       }
+    }
+
+    .toggleShowBtn {
+      background: #3370ff;
     }
   }
 
@@ -114,19 +125,20 @@ onBeforeUnmount(() => {
   .toggleShowBtn {
     position: absolute;
     left: -6px;
-    width: 35px;
-    height: 60px;
-    background: #409eff;
+    width: 32px;
+    height: 56px;
+    background: #3370ff;
     top: 50%;
     transform: translateY(-50%);
     cursor: pointer;
-    transition: left 0.1s linear;
+    transition: left 0.15s ease;
     z-index: 0;
-    border-top-left-radius: 10px;
-    border-bottom-left-radius: 10px;
+    border-top-left-radius: 8px;
+    border-bottom-left-radius: 8px;
     display: flex;
     align-items: center;
     padding-left: 4px;
+    box-shadow: -2px 0 8px rgba(51, 112, 255, 0.2);
 
     &.hide {
       left: -8px;
@@ -137,53 +149,66 @@ onBeforeUnmount(() => {
     }
 
     &:hover {
-      left: -18px;
+      left: -16px;
     }
 
     span {
       color: #fff;
-      transition: all 0.1s;
+      font-size: 14px;
+      transition: transform 0.15s ease;
     }
   }
 
   .trigger {
     position: relative;
-    width: 60px;
-    border-color: #eee;
+    width: 56px;
+    border: 1px solid #dee0e3;
     background-color: #fff;
-    box-shadow: 0 2px 16px 0 rgba(0, 0, 0, 0.06);
-    border-radius: 6px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+    border-radius: 8px;
     max-height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
 
+    &::-webkit-scrollbar {
+      width: 3px;
+    }
+    &::-webkit-scrollbar-thumb {
+      background: #d4d6d9;
+      border-radius: 3px;
+    }
+
     .triggerItem {
-      height: 60px;
+      height: 56px;
       display: flex;
       flex-direction: column;
       justify-content: center;
       align-items: center;
       cursor: pointer;
-      color: #464646;
+      color: #646a73;
       user-select: none;
       white-space: nowrap;
+      transition: all 0.15s ease;
 
       &:hover {
-        background-color: #ededed;
+        background-color: #f5f6f7;
+        color: #1f2329;
       }
 
       &.active {
-        color: #409eff;
-        font-weight: bold;
+        color: #3370ff;
+        font-weight: 500;
+        background-color: #edf4ff;
       }
 
       .triggerIcon {
         font-size: 18px;
-        margin-bottom: 5px;
+        margin-bottom: 4px;
       }
 
       .triggerName {
-        font-size: 13px;
+        font-size: 11px;
+        line-height: 1;
       }
     }
   }

@@ -178,18 +178,21 @@ onBeforeUnmount(() => {
 <style lang="less" scoped>
 .navigatorBox {
   position: absolute;
-  height: 220px;
+  height: 200px;
   background-color: #fff;
-  bottom: 80px;
+  bottom: 70px;
   right: 70px;
-  box-shadow: 0 0 16px #989898;
-  border-radius: 4px;
-  border: 1px solid #eee;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  border: 1px solid #dee0e3;
   cursor: pointer;
   user-select: none;
+  overflow: hidden;
 
   &.isDark {
-    background-color: #262a2e;
+    background-color: #2a2d32;
+    border-color: #3d4046;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   }
 
   .svgBox {
@@ -200,11 +203,12 @@ onBeforeUnmount(() => {
 
   .windowBox {
     position: absolute;
-    border: 2px solid rgb(238, 69, 69);
-    background-color: rgba(238, 69, 69, 0.2);
+    border: 1.5px solid #3370ff;
+    background-color: rgba(51, 112, 255, 0.08);
+    border-radius: 2px;
 
     &.withTransition {
-      transition: all 0.3s;
+      transition: all 0.2s ease;
     }
   }
 }

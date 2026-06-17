@@ -38,62 +38,65 @@ watch(() => store.activeSidebar, (val) => {
 
 <style lang="less" scoped>
 .box {
-  padding: 0 20px;
+  padding: 4px 16px 16px;
 
   &.isDark {
     .title {
-      color: #fff;
+      color: #e5e6eb;
     }
 
     .list {
       .item {
         .icon {
-          color: hsla(0, 0%, 100%, 0.6);
+          color: hsla(0, 0%, 100%, 0.5);
         }
         .name {
-          color: hsla(0, 0%, 100%, 0.6);
+          color: hsla(0, 0%, 100%, 0.7);
         }
-
         .value {
-          color: hsla(0, 0%, 100%, 0.3);
+          color: hsla(0, 0%, 100%, 0.35);
         }
       }
     }
   }
 
   .title {
-    font-size: 16px;
-    font-weight: 500;
-    color: #333;
-    margin: 26px 0 20px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #8f959e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 20px 0 12px;
+    &:first-child { margin-top: 8px; }
   }
 
   .list {
-    font-size: 14px;
+    font-size: 13px;
 
     .item {
       display: flex;
       align-items: center;
-      margin-bottom: 15px;
+      padding: 6px 0;
 
       .icon {
-        font-size: 16px;
-        margin-right: 16px;
+        font-size: 15px;
+        margin-right: 10px;
+        color: #8f959e;
       }
 
       .name {
-        color: #333;
+        color: #1f2329;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
       .value {
-        color: #909090;
+        color: #8f959e;
         margin-left: auto;
         white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        font-size: 12px;
+        padding-left: 12px;
       }
     }
   }

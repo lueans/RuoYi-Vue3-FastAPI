@@ -69,27 +69,39 @@ defineExpose({ show, open, close, bodyRef, getEl })
 .sidebarContainer {
   position: fixed;
   right: -300px;
-  top: 110px;
+  top: 52px;
   bottom: 0;
   width: 300px;
   background-color: #fff;
-  border-left: 1px solid #e8e8e8;
+  border-left: 1px solid #dee0e3;
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.04);
   display: flex;
   flex-direction: column;
-  transition: all 0.3s;
+  transition: right 0.25s ease;
   z-index: 2001;
 
   &.isDark {
-    background-color: #262a2e;
-    border-left-color: hsla(0, 0%, 100%, 0.1);
+    background-color: #2a2d32;
+    border-left-color: #3d4046;
+    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.2);
 
     .sidebarHeader {
-      border-bottom-color: hsla(0, 0%, 100%, 0.1);
-      color: #fff;
+      border-bottom-color: #3d4046;
+      color: #e5e6eb;
     }
 
     .closeBtn {
-      color: #fff;
+      color: #8f959e;
+      &:hover {
+        color: #e5e6eb;
+        background: hsla(0, 0%, 100%, 0.08);
+      }
+    }
+
+    .sidebarContent {
+      &::-webkit-scrollbar-thumb {
+        background: #4a4d52;
+      }
     }
   }
 
@@ -99,28 +111,57 @@ defineExpose({ show, open, close, bodyRef, getEl })
 
   .closeBtn {
     position: absolute;
-    right: 20px;
-    top: 12px;
-    font-size: 20px;
+    right: 12px;
+    top: 8px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
     cursor: pointer;
     z-index: 1;
+    color: #8f959e;
+    border-radius: 6px;
+    transition: all 0.15s;
+    &:hover {
+      color: #1f2329;
+      background: #f5f6f7;
+    }
   }
 
   .sidebarHeader {
     width: 100%;
     height: 44px;
-    border-bottom: 1px solid #e8e8e8;
+    border-bottom: 1px solid #f0f1f3;
     display: flex;
     justify-content: center;
     align-items: center;
     flex-grow: 0;
     flex-shrink: 0;
+    font-size: 14px;
+    font-weight: 500;
+    color: #1f2329;
+    letter-spacing: 0.2px;
   }
 
   .sidebarContent {
     width: 100%;
     height: 100%;
     overflow: auto;
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    &::-webkit-scrollbar-thumb {
+      background: #d4d6d9;
+      border-radius: 4px;
+      &:hover {
+        background: #b0b3b8;
+      }
+    }
   }
 }
 </style>

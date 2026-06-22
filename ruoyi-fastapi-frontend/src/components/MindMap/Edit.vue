@@ -309,9 +309,17 @@ async function initMindMap() {
         mm.emit('scale', mm.view.scale)
         return
       }
+      // 双指/触控板平移阻尼：整体降速 + 大位移非线性衰减，快速滑动时阻尼更强
+      // PAN_SENSITIVITY 控制整体速度（<1 降速）；PAN_NONLINEAR 控制非线性（<1 时大位移衰减更多）
+      const PAN_SENSITIVITY = 0.92
+      const PAN_NONLINEAR = 0.95
+      const dampen = delta =>
+        Math.sign(delta) *
+        Math.pow(Math.abs(delta), PAN_NONLINEAR) *
+        PAN_SENSITIVITY
       mm.view.translateXY(
-        -e.deltaX * translateRatio,
-        -e.deltaY * translateRatio
+        dampen(-e.deltaX * translateRatio),
+        dampen(-e.deltaY * translateRatio)
       )
     },
     handleIsSplitByWrapOnPasteCreateNewNode: () => {

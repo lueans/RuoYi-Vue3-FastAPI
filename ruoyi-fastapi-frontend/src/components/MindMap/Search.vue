@@ -245,7 +245,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1);
   position: fixed;
   top: 110px;
-  right: -296px;
+  left: -296px;
   transition: all 0.3s;
 
   &.isDark {
@@ -258,7 +258,7 @@ onBeforeUnmount(() => {
   }
 
   &.show {
-    right: 20px;
+    left: 20px;
   }
 
   .btnList {

@@ -160,7 +160,7 @@ function backToRoot() {
 .navigatorContainer {
   padding: 0 8px;
   position: fixed;
-  right: 16px;
+  left: 16px;
   bottom: 16px;
   z-index: 2000;
   background: #fff;

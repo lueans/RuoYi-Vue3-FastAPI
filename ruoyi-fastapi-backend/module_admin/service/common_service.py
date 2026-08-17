@@ -1,5 +1,7 @@
 import os
+import uuid
 from datetime import datetime
+from pathlib import Path
 
 import aiofiles
 from fastapi import BackgroundTasks, Request, UploadFile
@@ -9,7 +11,7 @@ from config.env import UploadConfig
 from exceptions.exception import ServiceException
 from module_admin.entity.vo.common_vo import UploadResponseModel
 from utils.upload_util import UploadUtil
-import uuid
+
 
 class CommonService:
     """
@@ -30,16 +32,18 @@ class CommonService:
         if file.size and file.size > UploadConfig.MAX_UPLOAD_SIZE:
             max_mb = UploadConfig.MAX_UPLOAD_SIZE // (1024 * 1024)
             raise ServiceException(message=f'文件大小超出限制，最大允许{max_mb}MB')
-        relative_path = (
-            f'upload/{datetime.now().strftime("%Y")}/{datetime.now().strftime("%m")}/{datetime.now().strftime("%d")}'
-        )
-        dir_path = os.path.join(UploadConfig.UPLOAD_PATH, relative_path)
-        try:
-            os.makedirs(dir_path)
-        except FileExistsError:
-            pass
-        filename = f'{file.filename.rsplit(".", 1)[0]}_{datetime.now().strftime("%Y%m%d%H%M%S")}{UploadConfig.UPLOAD_MACHINE}{UploadUtil.generate_random_number()}.{file.filename.rsplit(".")[-1]}'
-        filepath = os.path.join(dir_path, filename)
+        now = datetime.now()
+        relative_path = Path('upload', now.strftime('%Y'), now.strftime('%m'), now.strftime('%d'))
+        upload_root = Path(UploadConfig.UPLOAD_PATH).resolve()  # noqa: ASYNC240
+        dir_path = (upload_root / relative_path).resolve()
+        cls._ensure_path_within_root(dir_path, upload_root)
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+        original_filename = Path((file.filename or '').replace('\\', '/')).name
+        extension = Path(original_filename).suffix.lower()
+        filename = f'{uuid.uuid4().hex}{extension}'
+        filepath = (dir_path / filename).resolve()
+        cls._ensure_path_within_root(filepath, upload_root)
         async with aiofiles.open(filepath, 'wb') as f:
             # 流式写出大型文件，这里的10代表10MB
             while True:
@@ -51,10 +55,13 @@ class CommonService:
         return CrudResponseModel(
             is_success=True,
             result=UploadResponseModel(
-                fileName=f'{UploadConfig.UPLOAD_PREFIX}/{relative_path}/{filename}',
+                fileName=f'{UploadConfig.UPLOAD_PREFIX}/{relative_path.as_posix()}/{filename}',
                 newFileName=filename,
-                originalFilename=file.filename,
-                url=f'{request.url.scheme}://{request.url.netloc}{UploadConfig.UPLOAD_PREFIX}/{relative_path}/{filename}',
+                originalFilename=original_filename,
+                url=(
+                    f'{request.url.scheme}://{request.url.netloc}'
+                    f'{UploadConfig.UPLOAD_PREFIX}/{relative_path.as_posix()}/{filename}'
+                ),
             ),
             message='上传成功',
         )
@@ -88,15 +95,24 @@ class CommonService:
         :param resource: 下载的文件名称
         :return: 上传结果
         """
-        filepath = os.path.join(resource.replace(UploadConfig.UPLOAD_PREFIX, UploadConfig.UPLOAD_PATH))
-        filename = resource.rsplit('/', 1)[-1]
-        if (
-            '..' in filename
-            or not UploadUtil.check_file_timestamp(filename)
-            or not UploadUtil.check_file_machine(filename)
-            or not UploadUtil.check_file_random_code(filename)
-        ):
+        prefix = UploadConfig.UPLOAD_PREFIX.rstrip('/')
+        if not resource.startswith(f'{prefix}/'):
             raise ServiceException(message='文件名称不合法')
+        relative_resource = resource[len(prefix) :].lstrip('/\\')
+        upload_root = Path(UploadConfig.UPLOAD_PATH).resolve()  # noqa: ASYNC240
+        filepath = (upload_root / relative_resource).resolve()
+        cls._ensure_path_within_root(filepath, upload_root)
         if not UploadUtil.check_file_exists(filepath):
             raise ServiceException(message='文件不存在')
-        return CrudResponseModel(is_success=True, result=UploadUtil.generate_file(filepath), message='下载成功')
+        return CrudResponseModel(
+            is_success=True,
+            result=UploadUtil.generate_file(str(filepath)),
+            message='下载成功',
+        )
+
+    @staticmethod
+    def _ensure_path_within_root(path: Path, root: Path) -> None:
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ServiceException(message='文件名称不合法') from exc

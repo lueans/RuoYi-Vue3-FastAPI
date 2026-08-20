@@ -29,10 +29,14 @@ export function getTemplateDetail(templateId) {
 }
 
 // 使用模板创建脑图
-export function useTemplate(templateId) {
+export function useTemplate(templateId, idempotencyKey) {
   return request({
     url: '/mindmap/template/use/' + templateId,
-    method: 'post'
+    method: 'post',
+    headers: {
+      'Idempotency-Key': idempotencyKey,
+      repeatSubmit: false,
+    },
   })
 }
 

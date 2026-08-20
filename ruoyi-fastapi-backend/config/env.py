@@ -54,6 +54,9 @@ class DataBaseSettings(BaseSettings):
     db_password: str = 'mysqlroot'
     db_database: str = 'ruoyi-fastapi'
     db_echo: bool = True
+    # Production must use reviewed migrations; ORM create_all is an explicit
+    # development convenience only.
+    db_auto_create_tables: bool = False
     db_max_overflow: int = 10
     db_pool_size: int = 50
     db_pool_recycle: int = 3600
@@ -114,6 +117,7 @@ class LogSettings(BaseSettings):
     loguru_json: bool = False
     loguru_level: str = 'INFO'
     loguru_stdout: bool = True
+    loguru_enqueue: bool = True
     log_file_enabled: bool = True
     log_file_base_dir: str = 'logs'
     loguru_rotation: str = '50MB'

@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="主题">
+  <Sidebar ref="sidebarRef" title="主题" open-on-mount>
     <div class="themeGroupList" :class="{ isDark: isDark }">
       <el-tabs v-model="activeName" class="tabBox">
         <el-tab-pane
@@ -10,18 +10,22 @@
         ></el-tab-pane>
       </el-tabs>
       <div class="themeListTheme customScrollbar">
-        <div
+        <button
           class="themeItem"
           v-for="item in currentList"
           :key="item.value"
+          type="button"
+          :aria-label="`使用主题：${item.name}`"
+          :aria-pressed="item.value === currentTheme"
+          :disabled="themeChangePending || isReadonly"
           @click="useTheme(item)"
           :class="{ active: item.value === currentTheme }"
         >
           <div class="imgBox">
-            <img :src="item.img || themeImgMap[item.value]" alt="" />
+            <img :src="item.img || themeImgMap[item.value]" :alt="`${item.name}主题预览`" />
           </div>
           <div class="name">{{ item.name }}</div>
-        </div>
+        </button>
       </div>
     </div>
   </Sidebar>
@@ -29,7 +33,6 @@
 
 <script setup>
 import Sidebar from './Sidebar.vue'
-import bus from './useEventBus'
 import { store, actions } from './useStore'
 import { ElMessageBox } from 'element-plus'
 
@@ -43,11 +46,17 @@ const props = defineProps({
   data: { type: [Object, null], default: null },
   mindMap: { type: Object, default: null }
 })
+const emit = defineEmits(['document-meta-change'])
 
 const sidebarRef = ref(null)
 const currentTheme = ref('default')
 const activeName = ref('')
 const isDark = computed(() => store.localConfig.isDark)
+const isReadonly = computed(() => store.isReadonly)
+const themeChangePending = ref(false)
+let boundMindMap = null
+let themeOperationId = 0
+let componentAlive = true
 
 const allThemes = ref([
   { name: '默认主题', value: 'default', dark: false },
@@ -100,63 +109,81 @@ function handleDark() {
   }
 }
 
-function useTheme(theme) {
-  if (!props.mindMap) return
+async function useTheme(theme) {
+  if (!props.mindMap || themeChangePending.value || isReadonly.value) return
   if (theme.value === currentTheme.value) return
-  currentTheme.value = theme.value
-  handleDark()
-  const customThemeConfig = props.mindMap.getCustomThemeConfig()
+  const activeMindMap = props.mindMap
+  const operationId = ++themeOperationId
+  const isCurrentOperation = () => (
+    componentAlive
+    && operationId === themeOperationId
+    && activeMindMap === props.mindMap
+    && store.activeSidebar === 'theme'
+    && !isReadonly.value
+  )
+  const customThemeConfig = activeMindMap.getCustomThemeConfig() || {}
   const hasCustomThemeConfig = Object.keys(customThemeConfig).length > 0
   if (hasCustomThemeConfig) {
-    ElMessageBox.confirm(
-      '你当前自定义过基础样式，是否覆盖？',
-      '提示',
-      {
-        confirmButtonText: '覆盖',
-        cancelButtonText: '保留',
-        type: 'warning',
-        distinguishCancelAndClose: true,
+    themeChangePending.value = true
+    try {
+      let config = {}
+      try {
+        await ElMessageBox.confirm(
+          '你当前自定义过基础样式，是否覆盖？',
+          '提示',
+          {
+            confirmButtonText: '覆盖',
+            cancelButtonText: '保留',
+            type: 'warning',
+            distinguishCancelAndClose: true,
+          }
+        )
+      } catch (action) {
+        if (action !== 'cancel') return
+        config = customThemeConfig
       }
-    ).then(() => {
-      // Confirm = cover
-      props.mindMap.setThemeConfig({}, true)
-      if (props.data && props.data.theme) {
-        props.data.theme.config = {}
-      }
-      changeTheme(theme, {})
-    }).catch((action) => {
-      if (action === 'cancel') {
-        // Cancel = reserve
-        changeTheme(theme, customThemeConfig)
-      }
-    })
+      if (!isCurrentOperation()) return
+      changeTheme(theme, config, activeMindMap)
+    } finally {
+      if (operationId === themeOperationId) themeChangePending.value = false
+    }
   } else {
-    changeTheme(theme, customThemeConfig)
+    if (!isCurrentOperation()) return
+    changeTheme(theme, customThemeConfig, activeMindMap)
   }
 }
 
-function changeTheme(theme, config) {
-  props.mindMap.setThemeConfig(config, true)
-  props.mindMap.setTheme(theme.value)
-  actions.storeData({
+function changeTheme(theme, config, targetMindMap = props.mindMap) {
+  if (!targetMindMap || targetMindMap !== props.mindMap || isReadonly.value) return
+  targetMindMap.setThemeConfig(config, true)
+  targetMindMap.setTheme(theme.value)
+  emit('document-meta-change', {
     theme: {
       template: theme.value,
       config
     }
   })
+  currentTheme.value = theme.value
+  handleDark()
 }
 
-// Initialize theme from mindMap
-if (props.mindMap) {
-  currentTheme.value = props.mindMap.getTheme()
-  props.mindMap.on('view_theme_change', handleViewThemeChange)
+function bindMindMap(nextMindMap) {
+  if (boundMindMap === nextMindMap) return
+  boundMindMap?.off('view_theme_change', handleViewThemeChange)
+  boundMindMap = nextMindMap || null
+  if (boundMindMap) {
+    boundMindMap.on('view_theme_change', handleViewThemeChange)
+    handleViewThemeChange()
+  }
 }
 
 onBeforeUnmount(() => {
-  if (props.mindMap) {
-    props.mindMap.off('view_theme_change', handleViewThemeChange)
-  }
+  componentAlive = false
+  themeOperationId += 1
+  bindMindMap(null)
 })
+
+watch(() => props.mindMap, bindMindMap, { immediate: true })
 
 watch(() => store.activeSidebar, (val) => {
   if (val === 'theme') {
@@ -165,7 +192,7 @@ watch(() => store.activeSidebar, (val) => {
   } else {
     sidebarRef.value?.close()
   }
-})
+}, { immediate: true })
 </script>
 
 <style lang="less" scoped>
@@ -198,6 +225,11 @@ watch(() => store.activeSidebar, (val) => {
     .themeItem {
       width: 100%;
       cursor: pointer;
+      display: block;
+      appearance: none;
+      background: transparent;
+      color: inherit;
+      font: inherit;
       border-bottom: 1px solid #e9e9e9;
       margin-bottom: 20px;
       padding-bottom: 20px;
@@ -205,6 +237,16 @@ watch(() => store.activeSidebar, (val) => {
       border: 3px solid transparent;
       border-radius: 5px;
       overflow: hidden;
+
+      &:disabled {
+        cursor: wait;
+        opacity: 0.65;
+      }
+
+      &:focus-visible {
+        outline: 3px solid #409eff;
+        outline-offset: 2px;
+      }
 
       &:last-of-type {
         border: none;

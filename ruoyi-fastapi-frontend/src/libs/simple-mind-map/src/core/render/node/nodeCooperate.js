@@ -5,8 +5,8 @@ import { generateColorByContent } from '../../../utils/index'
 
 // 创建容器
 function createUserListNode() {
-  // 如果没有注册协作插件，那么需要创建
-  if (!this.mindMap.cooperate) return
+  // 内置 Cooperate 插件和外部 WebSocket awareness 都可启用节点协作者标记。
+  if (!this.mindMap.cooperate && !this.mindMap.opt.enableNodeAwareness) return
   this._userListGroup = new G()
   this.group.add(this._userListGroup)
 }

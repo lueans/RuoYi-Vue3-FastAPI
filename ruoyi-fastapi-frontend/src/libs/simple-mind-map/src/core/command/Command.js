@@ -1,12 +1,28 @@
 import {
   copyRenderTree,
-  simpleDeepClone,
   throttle,
   isSameObject,
-  transformTreeDataToObject
+  transformTreeDataToObject,
+  materializeObjectSubtree,
+  stringifyJsonValueIterative
 } from '../../utils'
 import { ERROR_TYPES } from '../../constants/constant'
 import pkg from '../../../package.json'
+import { trimHistoryEntries } from '../../utils/historyBuffer'
+
+// Readonly is a data-integrity boundary, not only a history switch. Commands in
+// this list change navigation/selection state only, or control the expanded
+// presentation needed to browse and demonstrate a document.
+const READONLY_COMMANDS = new Set([
+  'SET_NODE_ACTIVE',
+  'CLEAR_ACTIVE_NODE',
+  'GO_TARGET_NODE',
+  'SELECT_ALL',
+  'SET_NODE_EXPAND',
+  'EXPAND_ALL',
+  'UNEXPAND_ALL',
+  'UNEXPAND_TO_LEVEL',
+])
 
 //  命令类
 class Command {
@@ -58,6 +74,10 @@ class Command {
 
   //  执行命令
   exec(name, ...args) {
+    if (this.mindMap.opt.readonly && !READONLY_COMMANDS.has(name)) {
+      this.mindMap.emit('readonly_command_rejected', name)
+      return
+    }
     if (this.commands[name]) {
       this.commands[name].forEach(fn => {
         fn(...args)
@@ -110,7 +130,7 @@ class Command {
     const lastDataStr =
       this.history.length > 0 ? this.history[this.activeHistoryIndex] : null
     const data = this.getCopyData()
-    const dataStr = JSON.stringify(data)
+    const dataStr = stringifyJsonValueIterative(data)
     // 此次数据和上次一样则不重复添加
     if (lastDataStr && lastDataStr === dataStr) {
       return
@@ -119,10 +139,11 @@ class Command {
     // 删除当前历史指针后面的数据
     this.history = this.history.slice(0, this.activeHistoryIndex + 1)
     this.history.push(dataStr)
-    // 历史记录数超过最大数量
-    if (this.history.length > this.mindMap.opt.maxHistoryCount) {
-      this.history.shift()
-    }
+    trimHistoryEntries(
+      this.history,
+      this.mindMap.opt.maxHistoryCount,
+      this.mindMap.opt.maxHistoryMemoryBytes
+    )
     this.activeHistoryIndex = this.history.length - 1
     this.mindMap.emit('data_change', data)
     this.mindMap.emit(
@@ -181,21 +202,6 @@ class Command {
     return res
   }
 
-  // 移除节点数据中的uid
-  removeDataUid(data) {
-    data = simpleDeepClone(data)
-    let walk = root => {
-      delete root.data.uid
-      if (root.children && root.children.length > 0) {
-        root.children.forEach(item => {
-          walk(item)
-        })
-      }
-    }
-    walk(data)
-    return data
-  }
-
   // 派发思维导图更新明细事件
   emitDataUpdatesEvent(lastDataStr, dataStr) {
     try {
@@ -205,34 +211,22 @@ class Command {
       if (count > 0 && lastDataStr && dataStr) {
         const lastData = JSON.parse(lastDataStr)
         const data = JSON.parse(dataStr)
-        const lastDataObj = simpleDeepClone(transformTreeDataToObject(lastData))
-        const dataObj = simpleDeepClone(transformTreeDataToObject(data))
+        const lastDataObj = transformTreeDataToObject(lastData)
+        const dataObj = transformTreeDataToObject(data)
         const res = []
-        const walkReplace = (root, obj) => {
-          if (root.children && root.children.length > 0) {
-            root.children.forEach((childUid, index) => {
-              root.children[index] =
-                typeof childUid === 'string'
-                  ? obj[childUid]
-                  : obj[childUid.data.uid]
-              walkReplace(root.children[index], obj)
-            })
-          }
-          return root
-        }
         // 找出新增的或修改的
         Object.keys(dataObj).forEach(uid => {
           // 新增的或已经存在的，如果数据发生了改变
           if (!lastDataObj[uid]) {
             res.push({
               action: 'create',
-              data: walkReplace(dataObj[uid], dataObj)
+              data: materializeObjectSubtree(dataObj, uid)
             })
           } else if (!isSameObject(lastDataObj[uid], dataObj[uid])) {
             res.push({
               action: 'update',
-              oldData: walkReplace(lastDataObj[uid], lastDataObj),
-              data: walkReplace(dataObj[uid], dataObj)
+              oldData: materializeObjectSubtree(lastDataObj, uid),
+              data: materializeObjectSubtree(dataObj, uid)
             })
           }
         })
@@ -241,7 +235,7 @@ class Command {
           if (!dataObj[uid]) {
             res.push({
               action: 'delete',
-              data: walkReplace(lastDataObj[uid], lastDataObj)
+              data: materializeObjectSubtree(lastDataObj, uid)
             })
           }
         })

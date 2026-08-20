@@ -16,6 +16,13 @@ export function getTagFieldDetail(fieldId) {
   })
 }
 
+export function getTagFieldImpact(fieldId) {
+  return request({
+    url: '/mindmap/tag-field/' + fieldId + '/impact',
+    method: 'get'
+  })
+}
+
 export function addTagField(data) {
   return request({
     url: '/mindmap/tag-field',
@@ -91,11 +98,11 @@ export function listTagCategories() {
   })
 }
 
-export function addTagCategory(name, sortOrder) {
+export function addTagCategory(name, sortOrder, ownerScope = 'mine') {
   return request({
     url: '/mindmap/tag/category',
     method: 'post',
-    params: { categoryName: name, sortOrder: sortOrder || 0 }
+    params: { categoryName: name, sortOrder: sortOrder ?? 0, ownerScope }
   })
 }
 
@@ -103,7 +110,7 @@ export function updateTagCategory(categoryId, name, sortOrder) {
   return request({
     url: '/mindmap/tag/category',
     method: 'put',
-    params: { categoryId, categoryName: name, sortOrder: sortOrder || 0 }
+    params: { categoryId, categoryName: name, sortOrder: sortOrder ?? 0 }
   })
 }
 
@@ -129,6 +136,36 @@ export function getTag(tagId) {
   })
 }
 
+export function getTagImpact(tagId) {
+  return request({
+    url: '/mindmap/tag/' + tagId + '/impact',
+    method: 'get'
+  })
+}
+
+export function getTagUsages(tagId, query) {
+  return request({
+    url: '/mindmap/tag/' + tagId + '/usages',
+    method: 'get',
+    params: query
+  })
+}
+
+export function disableTag(tagId) {
+  return request({
+    url: '/mindmap/tag/' + tagId + '/disable',
+    method: 'post'
+  })
+}
+
+export function replaceTag(tagId, targetTagId) {
+  return request({
+    url: '/mindmap/tag/' + tagId + '/replace',
+    method: 'post',
+    data: { targetTagId }
+  })
+}
+
 export function addTag(data) {
   return request({
     url: '/mindmap/tag',
@@ -145,10 +182,11 @@ export function updateTag(data) {
   })
 }
 
-export function deleteTags(tagIds) {
+export function deleteTags(tagIds, unbind = false) {
   return request({
     url: '/mindmap/tag/' + tagIds,
-    method: 'delete'
+    method: 'delete',
+    params: { unbind }
   })
 }
 

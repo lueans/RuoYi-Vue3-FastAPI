@@ -1,111 +1,22 @@
 <template>
-  <div class="toolbarContainer" :class="{ isDark: isDark }">
-    <div class="toolbar" ref="toolbarRef">
+  <div ref="toolbarContainerRef" class="toolbarContainer" :class="{ isDark: isDark }">
+    <div class="toolbar" ref="toolbarRef" role="toolbar" aria-label="脑图编辑操作">
       <!-- Node operation buttons -->
-      <div class="toolbarBlock">
+      <div class="toolbarBlock" role="group" aria-label="节点操作">
         <div class="toolbarNodeBtnList">
           <template v-for="item in horizontalList" :key="item">
-            <!-- Back -->
-            <el-tooltip v-if="item === 'back'" :content="btnLabels.back" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: isReadonly || backEnd }" @click="exec('BACK')">
-                <span class="icon iconfont iconhoutui-shi"></span>
-                <span class="text">回退</span>
-              </div>
-            </el-tooltip>
-            <!-- Forward -->
-            <el-tooltip v-if="item === 'forward'" :content="btnLabels.forward" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: isReadonly || forwardEnd }" @click="exec('FORWARD')">
-                <span class="icon iconfont iconqianjin1"></span>
-                <span class="text">前进</span>
-              </div>
-            </el-tooltip>
-            <!-- Painter -->
-            <el-tooltip v-if="item === 'painter'" :content="btnLabels.painter" placement="bottom" :show-after="300">
-              <div
+            <el-tooltip :content="btnLabels[item]" placement="bottom" :show-after="300">
+              <button
+                type="button"
                 class="toolbarBtn"
-                :class="{ disabled: noActive || hasGeneralization, active: isInPainter }"
-                @click="bus.emit('startPainter')"
+                :class="{ disabled: isButtonDisabled(item), active: isButtonActive(item) }"
+                :disabled="isButtonDisabled(item)"
+                :aria-pressed="item === 'painter' ? isInPainter : undefined"
+                @click="executeToolbarItem(item)"
               >
-                <span class="icon iconfont iconjiedian"></span>
-                <span class="text">格式刷</span>
-              </div>
-            </el-tooltip>
-            <!-- Sibling Node -->
-            <el-tooltip v-if="item === 'siblingNode'" :content="btnLabels.siblingNode" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('INSERT_NODE')">
-                <span class="icon iconfont iconjiedian"></span>
-                <span class="text">同级节点</span>
-              </div>
-            </el-tooltip>
-            <!-- Child Node -->
-            <el-tooltip v-if="item === 'childNode'" :content="btnLabels.childNode" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('INSERT_CHILD_NODE')">
-                <span class="icon iconfont icontianjiazijiedian"></span>
-                <span class="text">子节点</span>
-              </div>
-            </el-tooltip>
-            <!-- Delete Node -->
-            <el-tooltip v-if="item === 'deleteNode'" :content="btnLabels.deleteNode" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="exec('REMOVE_NODE')">
-                <span class="icon iconfont iconshanchu"></span>
-                <span class="text">删除节点</span>
-              </div>
-            </el-tooltip>
-            <!-- Image -->
-            <el-tooltip v-if="item === 'image'" :content="btnLabels.image" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeImage')">
-                <span class="icon iconfont iconimage"></span>
-                <span class="text">图片</span>
-              </div>
-            </el-tooltip>
-            <!-- Icon -->
-            <el-tooltip v-if="item === 'icon'" :content="btnLabels.icon" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="showNodeIcon">
-                <span class="icon iconfont iconxiaolian"></span>
-                <span class="text">图标</span>
-              </div>
-            </el-tooltip>
-            <!-- Link -->
-            <el-tooltip v-if="item === 'link'" :content="btnLabels.link" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeLink')">
-                <span class="icon iconfont iconchaolianjie"></span>
-                <span class="text">超链接</span>
-              </div>
-            </el-tooltip>
-            <!-- Note -->
-            <el-tooltip v-if="item === 'note'" :content="btnLabels.note" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeNote')">
-                <span class="icon iconfont iconflow-Mark"></span>
-                <span class="text">备注</span>
-              </div>
-            </el-tooltip>
-            <!-- Tag -->
-            <el-tooltip v-if="item === 'tag'" :content="btnLabels.tag" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeTag')">
-                <span class="icon iconfont iconbiaoqian"></span>
-                <span class="text">标签</span>
-              </div>
-            </el-tooltip>
-            <!-- Summary -->
-            <el-tooltip v-if="item === 'summary'" :content="btnLabels.summary" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('ADD_GENERALIZATION')">
-                <span class="icon iconfont icongaikuozonglan"></span>
-                <span class="text">概要</span>
-              </div>
-            </el-tooltip>
-            <!-- Associative Line -->
-            <el-tooltip v-if="item === 'associativeLine'" :content="btnLabels.associativeLine" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="bus.emit('createAssociativeLine')">
-                <span class="icon iconfont iconlianjiexian"></span>
-                <span class="text">关联线</span>
-              </div>
-            </el-tooltip>
-            <!-- Outer Frame -->
-            <el-tooltip v-if="item === 'outerFrame'" :content="btnLabels.outerFrame" placement="bottom" :show-after="300">
-              <div class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('ADD_OUTER_FRAME')">
-                <span class="icon iconfont iconwaikuang"></span>
-                <span class="text">外框</span>
-              </div>
+                <span :class="['icon', 'iconfont', toolbarItemDefinitions[item].icon]" />
+                <span class="text">{{ btnLabels[item] }}</span>
+              </button>
             </el-tooltip>
           </template>
         </div>
@@ -114,100 +25,84 @@
           v-model:visible="popoverShow"
           placement="bottom-end"
           :width="120"
-          trigger="hover"
+          trigger="click"
           v-if="showMoreBtn"
           :style="{ marginLeft: horizontalList.length > 0 ? '20px' : 0 }"
         >
           <template #reference>
-            <div class="toolbarBtn">
-              <span class="icon iconfont icongongshi"></span>
+            <button
+              class="toolbarBtn"
+              type="button"
+              aria-label="更多节点操作"
+              aria-controls="mindmap-toolbar-overflow"
+              :aria-expanded="popoverShow"
+            >
+              <span class="icon"><el-icon><MoreFilled /></el-icon></span>
               <span class="text">更多</span>
-            </div>
+            </button>
           </template>
-          <div class="toolbarNodeBtnList v" @click="popoverShow = false">
+          <div
+            id="mindmap-toolbar-overflow"
+            class="toolbarNodeBtnList v"
+            role="group"
+            aria-label="更多节点操作"
+            @click="popoverShow = false"
+          >
             <template v-for="item in verticalList" :key="item">
-              <div v-if="item === 'back'" class="toolbarBtn" :class="{ disabled: isReadonly || backEnd }" @click="exec('BACK')">
-                <span class="icon iconfont iconhoutui-shi"></span><span class="text">回退</span>
-              </div>
-              <div v-if="item === 'forward'" class="toolbarBtn" :class="{ disabled: isReadonly || forwardEnd }" @click="exec('FORWARD')">
-                <span class="icon iconfont iconqianjin1"></span><span class="text">前进</span>
-              </div>
-              <div v-if="item === 'painter'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization, active: isInPainter }" @click="bus.emit('startPainter')">
-                <span class="icon iconfont iconjiedian"></span><span class="text">格式刷</span>
-              </div>
-              <div v-if="item === 'siblingNode'" class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('INSERT_NODE')">
-                <span class="icon iconfont iconjiedian"></span><span class="text">同级节点</span>
-              </div>
-              <div v-if="item === 'childNode'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('INSERT_CHILD_NODE')">
-                <span class="icon iconfont icontianjiazijiedian"></span><span class="text">子节点</span>
-              </div>
-              <div v-if="item === 'deleteNode'" class="toolbarBtn" :class="{ disabled: noActive }" @click="exec('REMOVE_NODE')">
-                <span class="icon iconfont iconshanchu"></span><span class="text">删除节点</span>
-              </div>
-              <div v-if="item === 'image'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeImage')">
-                <span class="icon iconfont iconimage"></span><span class="text">图片</span>
-              </div>
-              <div v-if="item === 'icon'" class="toolbarBtn" :class="{ disabled: noActive }" @click="showNodeIcon">
-                <span class="icon iconfont iconxiaolian"></span><span class="text">图标</span>
-              </div>
-              <div v-if="item === 'link'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeLink')">
-                <span class="icon iconfont iconchaolianjie"></span><span class="text">超链接</span>
-              </div>
-              <div v-if="item === 'note'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeNote')">
-                <span class="icon iconfont iconflow-Mark"></span><span class="text">备注</span>
-              </div>
-              <div v-if="item === 'tag'" class="toolbarBtn" :class="{ disabled: noActive }" @click="bus.emit('showNodeTag')">
-                <span class="icon iconfont iconbiaoqian"></span><span class="text">标签</span>
-              </div>
-              <div v-if="item === 'summary'" class="toolbarBtn" :class="{ disabled: noActive || hasRoot || hasGeneralization }" @click="exec('ADD_GENERALIZATION')">
-                <span class="icon iconfont icongaikuozonglan"></span><span class="text">概要</span>
-              </div>
-              <div v-if="item === 'associativeLine'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="bus.emit('createAssociativeLine')">
-                <span class="icon iconfont iconlianjiexian"></span><span class="text">关联线</span>
-              </div>
-              <div v-if="item === 'outerFrame'" class="toolbarBtn" :class="{ disabled: noActive || hasGeneralization }" @click="exec('ADD_OUTER_FRAME')">
-                <span class="icon iconfont iconwaikuang"></span><span class="text">外框</span>
-              </div>
+              <button
+                type="button"
+                class="toolbarBtn"
+                :class="{ disabled: isButtonDisabled(item), active: isButtonActive(item) }"
+                :disabled="isButtonDisabled(item)"
+                :aria-pressed="item === 'painter' ? isInPainter : undefined"
+                @click="executeToolbarItem(item)"
+              >
+                <span :class="['icon', 'iconfont', toolbarItemDefinitions[item].icon]" />
+                <span class="text">{{ btnLabels[item] }}</span>
+              </button>
             </template>
           </div>
         </el-popover>
       </div>
       <!-- File operations block -->
-      <div class="toolbarBlock">
+      <div class="toolbarBlock" role="group" aria-label="文件操作">
         <el-tooltip :content="btnLabels.import" placement="bottom" :show-after="300">
-          <div class="toolbarBtn" @click="bus.emit('showImport')">
+          <button type="button" class="toolbarBtn" :disabled="isReadonly" @click="bus.emit('showImport')">
             <span class="icon iconfont icondaoru"></span>
             <span class="text">导入</span>
-          </div>
+          </button>
         </el-tooltip>
         <el-tooltip :content="btnLabels.export" placement="bottom" :show-after="300">
-          <div class="toolbarBtn" @click="bus.emit('showExport')" style="margin-right: 0;">
+          <button type="button" class="toolbarBtn" @click="bus.emit('showExport')" style="margin-right: 0;">
             <span class="icon iconfont iconexport"></span>
             <span class="text">导出</span>
-          </div>
+          </button>
         </el-tooltip>
       </div>
     </div>
-    <NodeImage />
-    <NodeHyperlink />
-    <NodeIcon />
-    <NodeNote />
-    <NodeTag />
+    <NodeImage :readonly="isReadonly" />
+    <NodeHyperlink :readonly="isReadonly" />
+    <NodeNote :readonly="isReadonly" />
+    <NodeTag :readonly="isReadonly" />
     <ExportDialog />
-    <ImportDialog ref="importRef" />
+    <ImportDialog ref="importRef" :readonly="isReadonly" />
   </div>
 </template>
 
 <script setup>
+import { MoreFilled } from '@element-plus/icons-vue'
 import bus from './useEventBus'
-import { store, actions } from './useStore'
+import { store } from './useStore'
 import NodeImage from './NodeImage.vue'
 import NodeHyperlink from './NodeHyperlink.vue'
-import NodeIcon from './NodeIconSidebar.vue'
 import NodeNote from './NodeNote.vue'
 import NodeTag from './NodeTag.vue'
 import ExportDialog from './Export.vue'
 import ImportDialog from './Import.vue'
+import { useMindMapActiveNodes } from './useMindMapActiveNodes'
+import { createLatestRequestTracker } from '@/utils/mindmap-async'
+import { isCurrentMindmapEventSource } from '@/utils/mindmap-event'
+import { selectLargestFittingToolbarCount } from '@/utils/mindmap-toolbar-layout'
 
 const btnLabels = {
   back: '回退',
@@ -219,6 +114,7 @@ const btnLabels = {
   image: '图片',
   icon: '图标',
   link: '超链接',
+  attachment: '附件',
   note: '备注',
   tag: '标签',
   summary: '概要',
@@ -227,6 +123,24 @@ const btnLabels = {
   import: '导入',
   export: '导出',
 }
+
+const toolbarItemDefinitions = Object.freeze({
+  back: { icon: 'iconhoutui-shi', command: 'BACK' },
+  forward: { icon: 'iconqianjin1', command: 'FORWARD' },
+  painter: { icon: 'iconjiedian', event: 'startPainter' },
+  siblingNode: { icon: 'iconjiedian', command: 'INSERT_NODE' },
+  childNode: { icon: 'icontianjiazijiedian', command: 'INSERT_CHILD_NODE' },
+  deleteNode: { icon: 'iconshanchu', command: 'REMOVE_NODE' },
+  image: { icon: 'iconimage', event: 'showNodeImage' },
+  icon: { icon: 'iconxiaolian', event: 'openSidebar', args: ['nodeIconSidebar'] },
+  link: { icon: 'iconchaolianjie', event: 'showNodeLink' },
+  attachment: { icon: 'iconfujian', event: 'showNodeAttachment' },
+  note: { icon: 'iconflow-Mark', event: 'showNodeNote' },
+  tag: { icon: 'iconbiaoqian', event: 'showNodeTag' },
+  summary: { icon: 'icongaikuozonglan', command: 'ADD_GENERALIZATION' },
+  associativeLine: { icon: 'iconlianjiexian', event: 'createAssociativeLine' },
+  outerFrame: { icon: 'iconwaikuang', command: 'ADD_OUTER_FRAME' },
+})
 
 const defaultBtnList = [
   'back',
@@ -238,6 +152,7 @@ const defaultBtnList = [
   'image',
   'icon',
   'link',
+  'attachment',
   'note',
   'tag',
   'summary',
@@ -245,19 +160,27 @@ const defaultBtnList = [
   'outerFrame',
 ]
 
+const toolbarContainerRef = ref(null)
 const toolbarRef = ref(null)
 const importRef = ref(null)
-const activeNodes = ref([])
+const { activeNodes } = useMindMapActiveNodes({
+  onMindMapChange: resetToolbarMindMapState,
+})
 const backEnd = ref(true)
 const forwardEnd = ref(true)
-const isReadonly = ref(false)
 const isInPainter = ref(false)
 const horizontalList = ref([])
 const verticalList = ref([])
 const showMoreBtn = ref(true)
 const popoverShow = ref(false)
+const toolbarLayoutRequests = createLatestRequestTracker()
+
+let componentAlive = true
+let computeThrottleTimer = null
+let toolbarResizeObserver = null
 
 const isDark = computed(() => store.localConfig.isDark)
+const isReadonly = computed(() => store.isReadonly)
 
 const noActive = computed(() => activeNodes.value.length <= 0)
 const hasRoot = computed(() => activeNodes.value.some(n => n.isRoot))
@@ -271,96 +194,160 @@ function exec(...args) {
   bus.emit('execCommand', ...args)
 }
 
-function showNodeIcon() {
-  bus.emit('close_node_icon_toolbar')
-  actions.setActiveSidebar('nodeIconSidebar')
+function isButtonDisabled(item) {
+  if (isReadonly.value) return true
+  if (item === 'back') return backEnd.value
+  if (item === 'forward') return forwardEnd.value
+  if (['painter', 'childNode', 'associativeLine', 'outerFrame'].includes(item)) {
+    return noActive.value || hasGeneralization.value
+  }
+  if (['siblingNode', 'summary'].includes(item)) {
+    return noActive.value || hasRoot.value || hasGeneralization.value
+  }
+  return ['deleteNode', 'image', 'icon', 'link', 'attachment', 'note', 'tag'].includes(item)
+    ? noActive.value
+    : false
 }
 
-// Compute how many buttons fit horizontally
-function computeToolbarShow() {
-  if (!toolbarRef.value) return
-  const containerWidth = toolbarRef.value.parentElement?.getBoundingClientRect().width || window.innerWidth - 40
+function isButtonActive(item) {
+  return item === 'painter' && isInPainter.value
+}
+
+function executeToolbarItem(item) {
+  if (isButtonDisabled(item)) return
+  const definition = toolbarItemDefinitions[item]
+  if (!definition) return
+  if (definition.command) {
+    exec(definition.command)
+  } else if (definition.event) {
+    bus.emit(definition.event, ...(definition.args || []))
+  }
+}
+
+function isToolbarLayoutCurrent(requestId, toolbar) {
+  return componentAlive
+    && toolbarLayoutRequests.isCurrent(requestId)
+    && toolbarRef.value === toolbar
+}
+
+function readCssPixel(value) {
+  const number = Number.parseFloat(value)
+  return Number.isFinite(number) ? number : 0
+}
+
+function measureToolbarWidth(toolbar) {
+  return Array.from(toolbar.children).reduce((total, child) => {
+    const style = window.getComputedStyle(child)
+    return total
+      + child.getBoundingClientRect().width
+      + readCssPixel(style.marginLeft)
+      + readCssPixel(style.marginRight)
+  }, 0)
+}
+
+function getToolbarContainerWidth() {
+  const measuredWidth = toolbarContainerRef.value?.getBoundingClientRect?.().width
+  if (Number.isFinite(measuredWidth)) return Math.max(0, measuredWidth)
+  return Math.max(0, window.innerWidth - 40)
+}
+
+// Measure every real candidate, including the overflow button when it is needed.
+async function computeToolbarShow() {
+  const toolbar = toolbarRef.value
+  if (!componentAlive || !toolbar) return false
+
+  const requestId = toolbarLayoutRequests.begin()
+  const containerWidth = getToolbarContainerWidth()
   const all = [...btnList.value]
-  let index = 1
+  const candidateWidths = []
 
-  const done = () => {
-    verticalList.value = all.slice(index)
-    showMoreBtn.value = verticalList.value.length > 0
+  popoverShow.value = false
+  for (let candidateCount = 0; candidateCount <= all.length; candidateCount += 1) {
+    if (!isToolbarLayoutCurrent(requestId, toolbar)) return false
+
+    horizontalList.value = all.slice(0, candidateCount)
+    verticalList.value = all.slice(candidateCount)
+    showMoreBtn.value = candidateCount < all.length
+    await nextTick()
+
+    if (!isToolbarLayoutCurrent(requestId, toolbar)) return false
+    candidateWidths.push(measureToolbarWidth(toolbar))
   }
 
-  const loopCheck = () => {
-    if (index > all.length) return done()
-    horizontalList.value = all.slice(0, index)
-    nextTick(() => {
-      if (!toolbarRef.value) return done()
-      const width = toolbarRef.value.getBoundingClientRect().width
-      if (width < containerWidth) {
-        index++
-        loopCheck()
-      } else if (index > 0 && width > containerWidth) {
-        index--
-        horizontalList.value = all.slice(0, index)
-        done()
-      }
-    })
-  }
-  loopCheck()
+  if (!isToolbarLayoutCurrent(requestId, toolbar)) return false
+  const fittingCount = selectLargestFittingToolbarCount(candidateWidths, containerWidth)
+  horizontalList.value = all.slice(0, fittingCount)
+  verticalList.value = all.slice(fittingCount)
+  showMoreBtn.value = fittingCount < all.length
+  return true
 }
 
-let computeThrottleTimer = null
-function computeToolbarShowThrottle() {
+function scheduleToolbarLayout() {
+  if (!componentAlive) return
   clearTimeout(computeThrottleTimer)
-  computeThrottleTimer = setTimeout(computeToolbarShow, 300)
+  computeThrottleTimer = setTimeout(() => {
+    computeThrottleTimer = null
+    void computeToolbarShow()
+  }, 80)
 }
 
-// Bus event handlers
-function onNodeActive(_node, list) {
-  activeNodes.value = list ? [...list] : []
+function resetToolbarMindMapState() {
+  backEnd.value = true
+  forwardEnd.value = true
+  isInPainter.value = false
+  popoverShow.value = false
 }
 
-function onBackForward(index, len) {
+function onBackForward(index, len, sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, store.mindMap)) return
   backEnd.value = index <= 0
   forwardEnd.value = index >= len - 1
 }
 
-function onModeChange(mode) {
-  isReadonly.value = mode === 'readonly'
-}
-
-function onPainterStart() {
+function onPainterStart(sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, store.mindMap)) return
   isInPainter.value = true
 }
 
-function onPainterEnd() {
+function onPainterEnd(sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, store.mindMap)) return
   isInPainter.value = false
 }
 
-function onNodeNoteDblclick(node, e) {
+function onNodeNoteDblclick(node, e, _noteElement, sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, store.mindMap)) return
+  if (node?.mindMap && node.mindMap !== store.mindMap) return
+  if (isReadonly.value) return
   e?.stopPropagation?.()
   bus.emit('showNodeNote', node)
 }
 
 watch(btnList, () => {
-  computeToolbarShow()
+  scheduleToolbarLayout()
 }, { deep: true })
 
 onMounted(() => {
-  computeToolbarShow()
-  window.addEventListener('resize', computeToolbarShowThrottle)
-  bus.on('node_active', onNodeActive)
+  void computeToolbarShow()
+  if (typeof ResizeObserver !== 'undefined' && toolbarContainerRef.value) {
+    toolbarResizeObserver = new ResizeObserver(scheduleToolbarLayout)
+    toolbarResizeObserver.observe(toolbarContainerRef.value)
+  } else {
+    window.addEventListener('resize', scheduleToolbarLayout)
+  }
   bus.on('back_forward', onBackForward)
-  bus.on('mode_change', onModeChange)
   bus.on('painter_start', onPainterStart)
   bus.on('painter_end', onPainterEnd)
   bus.on('node_note_dblclick', onNodeNoteDblclick)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', computeToolbarShowThrottle)
+  componentAlive = false
+  toolbarLayoutRequests.invalidate()
+  toolbarResizeObserver?.disconnect()
+  toolbarResizeObserver = null
+  window.removeEventListener('resize', scheduleToolbarLayout)
   clearTimeout(computeThrottleTimer)
-  bus.off('node_active', onNodeActive)
   bus.off('back_forward', onBackForward)
-  bus.off('mode_change', onModeChange)
   bus.off('painter_start', onPainterStart)
   bus.off('painter_end', onPainterEnd)
   bus.off('node_note_dblclick', onNodeNoteDblclick)
@@ -399,7 +386,8 @@ onBeforeUnmount(() => {
           }
         }
 
-        &.disabled {
+        &.disabled,
+        &:disabled {
           color: #54595f;
         }
       }
@@ -433,6 +421,11 @@ onBeforeUnmount(() => {
     }
 
     .toolbarBtn {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
       display: flex;
       justify-content: center;
       flex-direction: column;
@@ -451,13 +444,20 @@ onBeforeUnmount(() => {
         }
       }
 
+      &:focus-visible {
+        outline: 2px solid #3370ff;
+        outline-offset: 3px;
+        border-radius: 5px;
+      }
+
       &.active {
         .icon {
           background: #f5f5f5;
         }
       }
 
-      &.disabled {
+      &.disabled,
+      &:disabled {
         color: #bcbcbc;
         cursor: not-allowed;
         pointer-events: none;

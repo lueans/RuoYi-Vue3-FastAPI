@@ -43,6 +43,14 @@ export function deleteFolder(folderId) {
   })
 }
 
+// 删除前获取子目录和脑图影响范围
+export function getFolderDeleteImpact(folderId) {
+  return request({
+    url: '/mindmap/folder/' + folderId + '/impact',
+    method: 'get'
+  })
+}
+
 // 移动脑图到文件夹
 export function moveMindmaps(data) {
   return request({

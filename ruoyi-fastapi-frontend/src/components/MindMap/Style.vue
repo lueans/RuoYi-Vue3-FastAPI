@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="节点样式">
+  <Sidebar ref="sidebarRef" title="节点样式" open-on-mount>
     <div
       class="styleBox"
       :class="{ isDark: isDark }"
@@ -128,10 +128,7 @@
             <span class="name">颜色</span>
             <el-popover placement="bottom" trigger="click" :width="260">
               <template #reference>
-                <span
-                  class="block"
-                  :style="{ width: '80px', backgroundColor: style.borderColor }"
-                ></span>
+                <ColorTrigger :color="style.borderColor" label="选择节点边框颜色" :width="80" />
               </template>
               <Color
                 :color="style.borderColor"
@@ -216,10 +213,7 @@
             <span class="name">颜色</span>
             <el-popover placement="bottom" trigger="click" :width="260">
               <template #reference>
-                <span
-                  class="block"
-                  :style="{ backgroundColor: style.fillColor }"
-                ></span>
+                <ColorTrigger :color="style.fillColor" label="选择节点背景颜色" />
               </template>
               <Color
                 :color="style.fillColor"
@@ -238,10 +232,7 @@
             <span class="name">起始</span>
             <el-popover placement="bottom" trigger="click" :width="260">
               <template #reference>
-                <span
-                  class="block"
-                  :style="{ backgroundColor: style.startColor }"
-                ></span>
+                <ColorTrigger :color="style.startColor" label="选择渐变起始颜色" />
               </template>
               <Color
                 :color="style.startColor"
@@ -253,10 +244,7 @@
             <span class="name">结束</span>
             <el-popover placement="bottom" trigger="click" :width="260">
               <template #reference>
-                <span
-                  class="block"
-                  :style="{ backgroundColor: style.endColor }"
-                ></span>
+                <ColorTrigger :color="style.endColor" label="选择渐变结束颜色" />
               </template>
               <Color
                 :color="style.endColor"
@@ -324,10 +312,7 @@
             <span class="name">颜色</span>
             <el-popover placement="bottom" trigger="click" :width="260">
               <template #reference>
-                <span
-                  class="block"
-                  :style="{ width: '80px', backgroundColor: style.lineColor }"
-                ></span>
+                <ColorTrigger :color="style.lineColor" label="选择节点线条颜色" :width="80" />
               </template>
               <Color
                 :color="style.lineColor"
@@ -467,8 +452,9 @@
 <script setup>
 import Sidebar from './Sidebar.vue'
 import Color from './Color.vue'
-import bus from './useEventBus'
+import ColorTrigger from './ColorTrigger.vue'
 import { store } from './useStore'
+import { useMindMapActiveNodes } from './useMindMapActiveNodes'
 import {
   fontFamilyList,
   fontSizeList,
@@ -486,7 +472,9 @@ const props = defineProps({
 })
 
 const sidebarRef = ref(null)
-const activeNodes = ref([])
+const { activeNodes, syncActiveNodes } = useMindMapActiveNodes({
+  resolveMindMap: () => props.mindMap,
+})
 const isDark = computed(() => store.localConfig.isDark)
 
 const style = reactive({
@@ -543,14 +531,6 @@ const shapeListMapData = computed(() => {
   return { ...shapeListMap, ...map2 }
 })
 
-// Listen for node activation
-function onNodeActive(...args) {
-  nextTick(() => {
-    activeNodes.value = [...args[1]]
-    initNodeStyle()
-  })
-}
-
 function initNodeStyle() {
   if (activeNodes.value.length <= 0) return
   Object.keys(style).forEach(item => {
@@ -577,6 +557,7 @@ function initLinearGradientDir() {
 }
 
 function update(prop) {
+  if (store.isReadonly) return
   if (prop === 'linearGradientDir') {
     const target = linearGradientDirList.find(item => {
       return item.value === style.linearGradientDir
@@ -597,58 +578,69 @@ function update(prop) {
 }
 
 function toggleFontWeight() {
+  if (store.isReadonly) return
   style.fontWeight = style.fontWeight === 'bold' ? 'normal' : 'bold'
   update('fontWeight')
 }
 
 function toggleFontStyle() {
+  if (store.isReadonly) return
   style.fontStyle = style.fontStyle === 'italic' ? 'normal' : 'italic'
   update('fontStyle')
 }
 
 function changeFontColor(color) {
+  if (store.isReadonly) return
   style.color = color
   update('color')
 }
 
 function changeBorderColor(color) {
+  if (store.isReadonly) return
   style.borderColor = color
   update('borderColor')
 }
 
 function changeLineColor(color) {
+  if (store.isReadonly) return
   style.lineColor = color
   update('lineColor')
 }
 
 function changeFillColor(color) {
+  if (store.isReadonly) return
   style.fillColor = color
   update('fillColor')
 }
 
 function changeStartColor(color) {
+  if (store.isReadonly) return
   style.startColor = color
   update('startColor')
 }
 
 function changeEndColor(color) {
+  if (store.isReadonly) return
   style.endColor = color
   update('endColor')
 }
 
-bus.on('node_active', onNodeActive)
-
-onBeforeUnmount(() => {
-  bus.off('node_active', onNodeActive)
-})
+watch(activeNodes, (nodes) => {
+  if (nodes.length <= 0) return
+  const activeMindMap = props.mindMap
+  nextTick(() => {
+    if (activeMindMap === props.mindMap && activeNodes.value === nodes) initNodeStyle()
+  })
+}, { flush: 'sync' })
 
 watch(() => store.activeSidebar, (val) => {
   if (val === 'nodeStyle') {
+    syncActiveNodes()
     sidebarRef.value?.open()
   } else {
     sidebarRef.value?.close()
   }
-})
+}, { immediate: true })
 </script>
 
 <style lang="less" scoped>
@@ -742,21 +734,6 @@ watch(() => store.activeSidebar, (val) => {
         margin-right: 10px;
       }
 
-      .block {
-        display: inline-block;
-        width: 30px;
-        height: 30px;
-        border: 1px solid #dcdfe6;
-        border-radius: 4px;
-        cursor: pointer;
-
-        &.disabled {
-          background-color: #f5f7fa !important;
-          border-color: #e4e7ed !important;
-          color: #c0c4cc !important;
-          cursor: not-allowed !important;
-        }
-      }
     }
 
     .styleBtn {

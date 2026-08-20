@@ -2,8 +2,10 @@ import {
   walk,
   getNodeTreeBoundingRect,
   fullscrrenEvent,
-  fullScreen,
   exitFullScreen,
+  getFullscreenElement,
+  isFullscreenSupported,
+  requestFullscreenAndWait,
   formatGetNodeGeneralization
 } from '../utils/index'
 import { keyMap } from '../core/command/keyMap'
@@ -43,6 +45,12 @@ class Demonstrate {
       this.mindMap.opt.demonstrateConfig || {}
     )
     this.needRestorePerformanceMode = false
+    this.isEntering = false
+    this.fullscreenEventBound = false
+    this.keyboardEventBound = false
+    this.enterRenderEndHandler = null
+    this.enterRequestId = 0
+    this.isDestroyed = false
     this.onConfigUpdate = this.onConfigUpdate.bind(this)
     this.mindMap.on('after_update_config', this.onConfigUpdate)
   }
@@ -59,19 +67,57 @@ class Demonstrate {
 
   // 进入演示模式
   enter() {
+    if (this.isDestroyed) return Promise.resolve(false)
+    if (this.isInDemonstrate || this.isEntering) return Promise.resolve(false)
+    if (!isFullscreenSupported(this.mindMap.el) || !fullscrrenEvent) {
+      const error = new Error('当前浏览器不支持演示所需的全屏模式')
+      this.mindMap.emit('demonstrate_enter_failed', error)
+      return Promise.reject(error)
+    }
+    const requestId = ++this.enterRequestId
+    this.isEntering = true
     // 全屏
     this.bindFullscreenEvent()
     // 如果已经全屏了
-    if (document.fullscreenElement === this.mindMap.el) {
-      this._enter()
+    if (getFullscreenElement() === this.mindMap.el) {
+      return Promise.resolve(this._enter(requestId))
     } else {
       // 否则申请全屏
-      fullScreen(this.mindMap.el)
+      return requestFullscreenAndWait(this.mindMap.el).then(() => {
+        if (!this.isEnterRequestCurrent(requestId)) {
+          this.releaseOwnedFullscreen()
+          return false
+        }
+        const entered = getFullscreenElement() === this.mindMap.el
+        if (!entered) throw new Error('浏览器未允许进入全屏演示模式')
+        if (!this.isInDemonstrate) this._enter(requestId)
+        return this.isInDemonstrate
+      }).catch(error => {
+        if (!this.isEnterRequestCurrent(requestId)) return false
+        this.isEntering = false
+        this.unBindEvent()
+        this.mindMap.emit('demonstrate_enter_failed', error)
+        throw error
+      })
     }
   }
 
-  _enter() {
+  isEnterRequestCurrent(requestId) {
+    return !this.isDestroyed && requestId === this.enterRequestId
+  }
+
+  releaseOwnedFullscreen() {
+    if (getFullscreenElement() === this.mindMap.el) {
+      void exitFullScreen().catch(() => {})
+    }
+  }
+
+  _enter(requestId = this.enterRequestId) {
+    if (!this.isEnterRequestCurrent(requestId) || !this.isEntering) return false
+    if (this.isInDemonstrate) return true
+    this.isEntering = false
     this.isInDemonstrate = true
+    this.mindMap.emit('enter_demonstrate')
     // 如果开启了性能模式，那么需要暂停
     this.pausePerformanceMode()
     // 添加演示用的临时的样式
@@ -95,29 +141,51 @@ class Demonstrate {
     }
     this.mindMap.execCommand('UNEXPAND_ALL', false)
     const onRenderEnd = () => {
+      if (!this.isInDemonstrate) {
+        this.mindMap.off('node_tree_render_end', onRenderEnd)
+        this.enterRenderEndHandler = null
+        return
+      }
       if (wait) {
         wait = false
         return
       }
       this.mindMap.off('node_tree_render_end', onRenderEnd)
+      this.enterRenderEndHandler = null
       // 聚焦到第一步
       this.jump(this.currentStepIndex)
       this.bindEvent()
     }
+    this.enterRenderEndHandler = onRenderEnd
     this.mindMap.on('node_tree_render_end', onRenderEnd)
+    return true
   }
 
   // 退出演示模式
   exit() {
-    exitFullScreen(this.mindMap.el)
-    this.mindMap.updateData(this.renderTree)
-    this.mindMap.view.setTransformData(this.transformState)
+    this.enterRequestId++
+    if (!this.isInDemonstrate) {
+      this.isEntering = false
+      this.unBindEvent()
+      this.releaseOwnedFullscreen()
+      return
+    }
+    this.isInDemonstrate = false
+    if (getFullscreenElement() === this.mindMap.el) {
+      void exitFullScreen().catch(() => {})
+    }
+    if (this.renderTree) this.mindMap.updateData(this.renderTree)
+    if (this.transformState) this.mindMap.view.setTransformData(this.transformState)
     this.renderTree = null
     this.transformState = null
     this.stepList = []
     this.currentStepIndex = 0
     this.currentStepNode = null
     this.currentUnderlineTextData = null
+    if (this.enterRenderEndHandler) {
+      this.mindMap.off('node_tree_render_end', this.enterRenderEndHandler)
+      this.enterRenderEndHandler = null
+    }
     this.unBindEvent()
     this.removeTmpStyles()
     this.removeHighlightEl()
@@ -125,7 +193,6 @@ class Demonstrate {
     this.mindMap.keyCommand.recovery()
     this.restorePerformanceMode()
     this.mindMap.emit('exit_demonstrate')
-    this.isInDemonstrate = false
   }
 
   // 暂停性能模式
@@ -143,6 +210,7 @@ class Demonstrate {
     if (!this.needRestorePerformanceMode) return
     this.mindMap.opt.openPerformance = true
     this.mindMap.renderer.forceLoadNode()
+    this.needRestorePerformanceMode = false
   }
 
   // 添加临时的样式
@@ -176,7 +244,8 @@ class Demonstrate {
 
   // 移除临时的样式
   removeTmpStyles() {
-    if (this.tmpStyleEl) document.head.removeChild(this.tmpStyleEl)
+    if (this.tmpStyleEl?.parentNode) this.tmpStyleEl.parentNode.removeChild(this.tmpStyleEl)
+    this.tmpStyleEl = null
   }
 
   // 创建高亮元素
@@ -199,52 +268,70 @@ class Demonstrate {
   // 移除高亮元素
   removeHighlightEl() {
     if (this.highlightEl) {
-      this.mindMap.el.removeChild(this.highlightEl)
+      if (this.highlightEl.parentNode) this.highlightEl.parentNode.removeChild(this.highlightEl)
       this.highlightEl = null
     }
   }
 
   // 更新高亮元素的位置和大小
   updateHighlightEl({ left, top, width, height }) {
+    if (!this.isInDemonstrate || !this.highlightEl) return
     const padding = this.config.padding
-    if (left) {
+    if (left !== undefined) {
       this.highlightEl.style.left = left - padding + 'px'
     }
-    if (top) {
+    if (top !== undefined) {
       this.highlightEl.style.top = top - padding + 'px'
     }
-    if (width) {
+    if (width !== undefined) {
       this.highlightEl.style.width = width + padding * 2 + 'px'
     }
-    if (height) {
+    if (height !== undefined) {
       this.highlightEl.style.height = height + padding * 2 + 'px'
     }
   }
 
   // 绑定事件
   bindEvent() {
+    if (this.keyboardEventBound) return
     this.onKeydown = this.onKeydown.bind(this)
     window.addEventListener('keydown', this.onKeydown)
+    this.keyboardEventBound = true
   }
 
   // 绑定全屏事件
   bindFullscreenEvent() {
+    if (!fullscrrenEvent || this.fullscreenEventBound) return
     this.onFullscreenChange = this.onFullscreenChange.bind(this)
     document.addEventListener(fullscrrenEvent, this.onFullscreenChange)
+    this.fullscreenEventBound = true
   }
 
   // 解绑事件
   unBindEvent() {
-    window.removeEventListener('keydown', this.onKeydown)
-    document.removeEventListener(fullscrrenEvent, this.onFullscreenChange)
+    if (this.onKeydown && this.keyboardEventBound) {
+      window.removeEventListener('keydown', this.onKeydown)
+    }
+    this.keyboardEventBound = false
+    if (fullscrrenEvent && this.fullscreenEventBound && this.onFullscreenChange) {
+      document.removeEventListener(fullscrrenEvent, this.onFullscreenChange)
+    }
+    this.fullscreenEventBound = false
   }
 
   // 全屏状态改变
   onFullscreenChange() {
-    if (!document.fullscreenElement) {
-      this.exit()
-    } else if (document.fullscreenElement === this.mindMap.el) {
-      this._enter()
+    const fullscreenElement = getFullscreenElement()
+    if (!fullscreenElement) {
+      if (this.isInDemonstrate) {
+        this.exit()
+      } else if (this.isEntering) {
+        this.enterRequestId++
+        this.isEntering = false
+        this.unBindEvent()
+      }
+    } else if (fullscreenElement === this.mindMap.el) {
+      this._enter(this.enterRequestId)
     }
   }
 
@@ -297,6 +384,12 @@ class Demonstrate {
 
   // 跳转到某一张
   jump(index) {
+    if (
+      !this.isInDemonstrate ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= this.stepList.length
+    ) return
     // 移除该当前下划线元素设置的样式
     if (this.currentUnderlineTextData) {
       this.currentUnderlineTextData.list.forEach(item => {
@@ -321,6 +414,7 @@ class Demonstrate {
     // 如果该节点实例不存在，那么先展开到该节点
     if (!node) {
       this.mindMap.renderer.expandToNodeUid(uid, () => {
+        if (!this.isInDemonstrate) return
         const node = this.mindMap.renderer.findNodeByUid(uid)
         // 展开后还是没找到，那么就别进入了，否则会死循环
         if (node) {
@@ -360,11 +454,13 @@ class Demonstrate {
       // 2.聚焦到某个节点的所有子节点
       // 聚焦该节点的所有子节点
       const task = () => {
+        if (!this.isInDemonstrate) return
         // 先收起该节点所有子节点的子节点
         nodeData.children.forEach(item => {
           item.data.expand = false
         })
         this.mindMap.render(() => {
+          if (!this.isInDemonstrate) return
           // 适应画布大小
           this.mindMap.view.fit(
             () => {
@@ -387,6 +483,7 @@ class Demonstrate {
         this.mindMap.execCommand('SET_NODE_EXPAND', node, true)
         const onRenderEnd = () => {
           this.mindMap.off('node_tree_render_end', onRenderEnd)
+          if (!this.isInDemonstrate) return
           task()
         }
         this.mindMap.on('node_tree_render_end', onRenderEnd)
@@ -399,6 +496,7 @@ class Demonstrate {
 
   // 深度度优先遍历所有节点，返回步骤列表
   getStepList() {
+    this.stepList = []
     walk(this.mindMap.renderer.renderTree, null, node => {
       this.stepList.push({
         type: 'node',
@@ -428,12 +526,16 @@ class Demonstrate {
 
   // 插件被移除前做的事情
   beforePluginRemove() {
+    this.isDestroyed = true
+    this.exit()
     this.unBindEvent()
     this.mindMap.off('after_update_config', this.onConfigUpdate)
   }
 
   // 插件被卸载前做的事情
   beforePluginDestroy() {
+    this.isDestroyed = true
+    this.exit()
     this.unBindEvent()
     this.mindMap.off('after_update_config', this.onConfigUpdate)
   }

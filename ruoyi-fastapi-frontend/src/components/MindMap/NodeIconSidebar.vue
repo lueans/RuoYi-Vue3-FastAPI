@@ -1,15 +1,19 @@
 <template>
-  <Sidebar ref="sidebarRef" title="图标">
-    <div class="node-icon-sidebar">
+  <Sidebar ref="sidebarRef" title="图标" open-on-mount>
+    <div class="node-icon-sidebar" :class="{ isDark }">
       <div v-for="group in iconList" :key="group.type" class="icon-group">
         <div class="group-title">{{ group.name }}</div>
-        <div class="icon-grid">
-          <div v-for="item in group.list" :key="item.name"
+        <div class="icon-grid" role="group" :aria-label="group.name">
+          <button v-for="item in group.list" :key="item.name"
+            type="button"
             class="icon-item" :class="{ selected: isSelected(group.type, item.name) }"
+            :disabled="isReadonly"
             @click="setIcon(group.type, item.name)"
             v-html="item.icon"
+            :aria-label="`${group.name}：${item.name}`"
+            :aria-pressed="isSelected(group.type, item.name)"
             :title="item.name">
-          </div>
+          </button>
         </div>
       </div>
     </div>
@@ -18,70 +22,87 @@
 
 <script setup>
 import Sidebar from './Sidebar.vue'
-import bus from './useEventBus'
-import { store } from './useStore'
+import { store, actions } from './useStore'
+import { useMindMapActiveNodes } from './useMindMapActiveNodes'
 import { nodeIconList } from '@mind-map/src/svg/icons'
+import {
+  getCommonNodeIcons,
+  toggleNodeIconAcrossLists,
+} from '@/utils/mindmap-node-icon'
+
+const props = defineProps({
+  mindMap: { type: Object, default: null },
+})
 
 const sidebarRef = ref(null)
-const activeNodes = ref([])
+const { activeNodes, syncActiveNodes } = useMindMapActiveNodes({
+  resolveMindMap: () => props.mindMap,
+})
 const currentIcons = ref([])
 
 const iconList = nodeIconList
+const isDark = computed(() => store.localConfig.isDark)
+const isReadonly = computed(() => store.isReadonly)
 
 function isSelected(type, name) {
   return currentIcons.value.includes(type + '_' + name)
 }
 
 function setIcon(type, name) {
-  const key = type + '_' + name
-  activeNodes.value.forEach(node => {
-    const icons = node.getData('icon') || []
-    const newIcons = [...icons]
-    const existingIndex = newIcons.findIndex(i => i === key)
-    const sameTypeIndex = newIcons.findIndex(i => i.startsWith(type + '_'))
-
-    if (existingIndex !== -1) {
-      newIcons.splice(existingIndex, 1)
-    } else if (sameTypeIndex !== -1) {
-      newIcons[sameTypeIndex] = key
-    } else {
-      newIcons.push(key)
-    }
-    node.setIcon(newIcons)
+  if (isReadonly.value) return
+  const nodes = activeNodes.value
+  const { lists } = toggleNodeIconAcrossLists(
+    nodes.map(node => node.getData('icon')),
+    type,
+    name,
+  )
+  nodes.forEach((node, index) => {
+    node.setIcon(lists[index])
   })
   readIcons()
 }
 
 function readIcons() {
-  const node = activeNodes.value[0]
-  currentIcons.value = node ? (node.getData('icon') || []) : []
+  currentIcons.value = getCommonNodeIcons(
+    activeNodes.value.map(node => node.getData('icon')),
+  )
 }
 
-function onNodeActive(_, list) {
-  activeNodes.value = list ? [...list] : []
-  if (list?.length > 0) readIcons()
-}
-
-onMounted(() => {
-  bus.on('node_active', onNodeActive)
-})
-onBeforeUnmount(() => {
-  bus.off('node_active', onNodeActive)
-})
+watch(activeNodes, () => {
+  readIcons()
+  if (activeNodes.value.length === 0 && store.activeSidebar === 'nodeIconSidebar') {
+    actions.setActiveSidebar(null)
+  }
+}, { flush: 'sync' })
 
 watch(() => store.activeSidebar, (val) => {
   if (val === 'nodeIconSidebar') {
-    readIcons()
+    syncActiveNodes()
     sidebarRef.value?.open()
   } else {
     sidebarRef.value?.close()
   }
-})
+}, { immediate: true })
 </script>
 
 <style lang="less" scoped>
 .node-icon-sidebar {
   padding-top: 6px;
+
+  &.isDark {
+    .group-title {
+      color: #f5f7fa;
+    }
+
+    .icon-item {
+      border-radius: 4px;
+
+      &:hover {
+        background: #34383f;
+        opacity: 1;
+      }
+    }
+  }
 
   .icon-group {
     margin-bottom: 20px;
@@ -98,36 +119,44 @@ watch(() => store.activeSidebar, (val) => {
     flex-wrap: wrap;
   }
   .icon-item {
-    width: 24px;
-    height: 24px;
+    width: 32px;
+    height: 32px;
+    padding: 4px;
+    border: 0;
+    background: transparent;
     margin-right: 10px;
     margin-bottom: 10px;
     cursor: pointer;
     position: relative;
 
-    img {
+    :deep(img) {
       width: 100%;
       height: 100%;
+      display: block;
     }
 
-    svg {
+    :deep(svg) {
       width: 100%;
       height: 100%;
+      display: block;
     }
 
     &:hover { opacity: 0.7; }
+
+    &:focus-visible {
+      outline: 2px solid #409eff;
+      outline-offset: 3px;
+      border-radius: 3px;
+    }
 
     &.selected {
       &::after {
         content: '';
         position: absolute;
-        left: -4px;
-        top: -4px;
-        width: 28px;
-        height: 28px;
-        border-radius: 50%;
+        inset: 0;
+        border-radius: 6px;
         border: 2px solid #409eff;
-        box-sizing: content-box;
+        box-sizing: border-box;
       }
     }
   }

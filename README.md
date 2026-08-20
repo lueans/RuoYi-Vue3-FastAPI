@@ -249,6 +249,8 @@ cd ruoyi-fastapi-backend
 pip3 install -r requirements.txt
 # 如果使用的是PostgreSQL数据库，请执行以下命令安装项目依赖环境
 pip3 install -r requirements-pg.txt
+# 如需运行后端测试，请安装测试运行器与异步插件
+pip3 install -r requirements-dev.txt
 
 # 配置环境
 在.env.dev文件中配置开发环境的数据库和redis
@@ -259,6 +261,9 @@ pip3 install -r requirements-pg.txt
 
 # 运行后端
 ruoyi app run --env=dev
+
+# 运行后端测试
+pytest -q
 ```
 
 后端 CLI 使用说明请参考：[ruoyi-fastapi-backend/docs/cli_usage.md](./ruoyi-fastapi-backend/docs/cli_usage.md)
@@ -306,7 +311,50 @@ ruoyi app run --env=prod
 docker compose -f docker-compose.my.yml up -d --build
 ```
 
+脑图模块发布前必须先执行只读 Schema 门禁。检查服务属于 `release-check` profile，常规 `up` 不会启动，也不会自动执行 DDL/DML：
+
+```bash
+# 迁移前：输出缺失对象、迁移顺序和 SQL SHA-256；NOT_READY 会返回退出码 1
+docker compose -f docker-compose.my.yml --profile release-check run --rm \
+  ruoyi-mindmap-schema-check \
+  python -m scripts.plan_mindmap_schema_migrations --env=dockermy
+
+# 由运维评审并受控执行计划中的 SQL 后，验证必须返回 READY/退出码 0
+docker compose -f docker-compose.my.yml --profile release-check run --rm \
+  ruoyi-mindmap-schema-check
+```
+
+非 Docker 部署在 `ruoyi-fastapi-backend` 目录使用对应环境执行同一门禁：
+
+```bash
+python -m scripts.plan_mindmap_schema_migrations --env=prod
+python -m scripts.verify_mindmap_schema --env=prod
+```
+
+权限命名空间迁移涉及业务权限数据，不在结构元数据自动判断范围内，必须按计划输出的 `manualReview` 单独核对。任何 `NOT_READY`、未知迁移、文件缺失或定义不一致都应阻断切流。
+
+生产配置必须保持 `DB_AUTO_CREATE_TABLES=false`，禁止应用启动绕过迁移流程自动执行 DDL。脑图创建幂等记录和增量变更日志使用默认只读的保留计划器维护：
+
+```bash
+# 只统计候选数量，不读取正文、不删除记录
+python -m scripts.cleanup_mindmap_retention --env=prod
+
+# 评审计划后显式执行一批；hasMoreCandidates=true 时按批重复调度
+python -m scripts.cleanup_mindmap_retention --env=prod --execute
+```
+
+默认策略为创建幂等记录保留 30 天、增量变更保留 90 天，并为每个脑图至少保留最近 1,000 个 revision；命令行不允许低于 7 天、30 天和 100 个 revision 的安全下限。建议先保存只读计划结果，再以单实例定时任务分批执行并监控删除数量。
+
 #### PostgreSQL版本
+
+全新 Docker 数据库会在基础脚本后自动执行 PostgreSQL 脑图迁移。已有数据库升级时，必须先备份并显式执行兼容迁移：
+
+```bash
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
+  -f ruoyi-fastapi-backend/migrations/20260820_mindmap_postgresql.sql
+```
+
+迁移成功后继续保持 `DB_AUTO_CREATE_TABLES=false`，再启动服务：
 
 ```bash
 docker compose -f docker-compose.pg.yml up -d --build

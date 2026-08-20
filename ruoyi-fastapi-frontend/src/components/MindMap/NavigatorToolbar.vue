@@ -2,11 +2,13 @@
   <div class="navigatorContainer customScrollbar" :class="{ isDark: isDark }">
     <div class="item">
       <el-tooltip effect="dark" content="回到根节点" placement="top">
-        <div class="btn iconfont icondingwei" @click="backToRoot"></div>
+        <button class="btn iconfont icondingwei" type="button" aria-label="回到根节点" @click="backToRoot"></button>
       </el-tooltip>
     </div>
     <div class="item">
-      <div class="btn iconfont iconsousuo" @click="showSearch"></div>
+      <el-tooltip effect="dark" content="搜索节点" placement="top">
+        <button class="btn iconfont iconsousuo" type="button" aria-label="搜索节点" @click="showSearch"></button>
+      </el-tooltip>
     </div>
     <div class="item">
       <MouseAction :isDark="isDark" :mindMap="mindMap" />
@@ -17,56 +19,70 @@
         :content="openMiniMap ? '关闭小地图' : '开启小地图'"
         placement="top"
       >
-        <div class="btn iconfont icondaohang1" @click="toggleMiniMap"></div>
+        <button
+          class="btn iconfont icondaohang1"
+          type="button"
+          :aria-label="openMiniMap ? '关闭小地图' : '开启小地图'"
+          :aria-pressed="openMiniMap"
+          @click="toggleMiniMap"
+        ></button>
       </el-tooltip>
     </div>
-    <div class="item">
+    <div v-if="!lockedReadonly" class="item">
       <el-tooltip
         effect="dark"
         :content="isReadonly ? '切换为编辑模式' : '切换为只读模式'"
         placement="top"
       >
-        <div
+        <button
           class="btn iconfont"
+          type="button"
+          :aria-label="isReadonly ? '切换为编辑模式' : '切换为只读模式'"
+          :aria-pressed="isReadonly"
           :class="[isReadonly ? 'iconyanjing' : 'iconbianji1']"
           @click="readonlyChange"
-        ></div>
+        ></button>
       </el-tooltip>
     </div>
     <div class="item">
       <Fullscreen :isDark="isDark" :mindMap="mindMap" />
     </div>
-    <div class="item">
+    <div class="item groupBreak">
       <Scale :isDark="isDark" :mindMap="mindMap" />
     </div>
     <div class="item">
-      <div
-        class="btn iconfont"
-        :class="[isDark ? 'iconmoon_line' : 'iconlieri']"
-        @click="toggleDark"
-      ></div>
+      <el-tooltip effect="dark" :content="isDark ? '切换浅色画布' : '切换深色画布'" placement="top">
+        <button
+          class="btn iconfont"
+          type="button"
+          :aria-label="isDark ? '切换浅色画布' : '切换深色画布'"
+          :aria-pressed="isDark"
+          :class="[isDark ? 'iconmoon_line' : 'iconlieri']"
+          @click="toggleDark"
+        ></button>
+      </el-tooltip>
     </div>
     <div class="item">
       <Demonstrate :isDark="isDark" :mindMap="mindMap" />
     </div>
     <div class="item">
       <el-dropdown @command="handleCommand">
-        <div class="btn el-icon-more">
+        <button class="btn el-icon-more" type="button" aria-label="更多编辑器操作">
           <el-icon><MoreFilled /></el-icon>
-        </div>
+        </button>
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="shortcutKey">
               <span class="iconfont iconjianpan"></span>
               快捷键
             </el-dropdown-item>
-            <el-dropdown-item command="github">
-              <span class="iconfont icongithub"></span>
-              Github
+            <el-dropdown-item command="setting">
+              <span class="iconfont iconshezhi"></span>
+              编辑器设置
             </el-dropdown-item>
-            <el-dropdown-item command="site">
-              <span class="iconfont iconwangzhan"></span>
-              官方网站
+            <el-dropdown-item command="fitCanvas" :disabled="lockedReadonly">
+              <span class="iconfont iconzhengli"></span>
+              一键整理布局
             </el-dropdown-item>
             <el-dropdown-item disabled>
               当前：v{{ version }}
@@ -88,7 +104,8 @@ import bus from './useEventBus'
 import { store, actions } from './useStore'
 
 const props = defineProps({
-  mindMap: { type: Object, default: null }
+  mindMap: { type: Object, default: null },
+  lockedReadonly: { type: Boolean, default: false }
 })
 
 const isDark = computed(() => store.localConfig.isDark)
@@ -130,24 +147,17 @@ function toggleDark() {
 function handleCommand(command) {
   if (command === 'shortcutKey') {
     actions.setActiveSidebar('shortcutKey')
+    nextTick(() => bus.emit('focusActiveSidebar'))
     return
   }
-  let url = ''
-  switch (command) {
-    case 'github':
-      url = 'https://github.com/wanglin2/mind-map'
-      break
-    case 'site':
-      url = 'https://wanglin2.github.io/mind-map-docs/'
-      break
-    default:
-      break
+  if (command === 'setting') {
+    actions.setActiveSidebar('setting')
+    nextTick(() => bus.emit('focusActiveSidebar'))
+    return
   }
-  if (url) {
-    const a = document.createElement('a')
-    a.href = url
-    a.target = '_blank'
-    a.click()
+  if (command === 'fitCanvas') {
+    if (props.lockedReadonly) return
+    bus.emit('execCommand', 'RESET_LAYOUT')
   }
 }
 
@@ -158,16 +168,16 @@ function backToRoot() {
 
 <style lang="less" scoped>
 .navigatorContainer {
-  padding: 0 8px;
+  padding: 0 7px;
   position: fixed;
   left: 16px;
   bottom: 16px;
   z-index: 2000;
   background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.06);
-  border: 1px solid #dee0e3;
-  height: 40px;
+  border-radius: 11px;
+  box-shadow: 0 8px 24px rgba(31, 35, 41, 0.1), 0 1px 3px rgba(31, 35, 41, 0.06);
+  border: 1px solid #e2e5ea;
+  height: 42px;
   font-size: 12px;
   display: flex;
   align-items: center;
@@ -190,9 +200,24 @@ function backToRoot() {
   }
 
   .item {
-    margin-right: 4px;
+    margin-right: 2px;
     &:last-of-type {
       margin-right: 0;
+    }
+
+    &.groupBreak {
+      position: relative;
+      margin-left: 7px;
+
+      &::before {
+        content: '';
+        position: absolute;
+        left: -5px;
+        top: 7px;
+        width: 1px;
+        height: 18px;
+        background: #e4e7eb;
+      }
     }
 
     a {
@@ -203,6 +228,10 @@ function backToRoot() {
     }
 
     .btn {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      font-family: inherit;
       cursor: pointer;
       font-size: 18px;
       width: 28px;
@@ -210,12 +239,16 @@ function backToRoot() {
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 6px;
+      border-radius: 7px;
       transition: all 0.15s;
       color: #646a73;
       &:hover {
         background: #f5f6f7;
         color: #1f2329;
+      }
+      &:focus-visible {
+        outline: 2px solid #3370ff;
+        outline-offset: 1px;
       }
       &:active {
         background: #edf4ff;

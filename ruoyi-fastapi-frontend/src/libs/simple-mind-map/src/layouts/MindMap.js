@@ -1,6 +1,7 @@
 import Base from './Base'
 import { walk, asyncRun, getNodeIndexInNodeList } from '../utils'
 import { CONSTANTS } from '../constants/constant'
+import { walkLayoutAncestorChain } from './layoutTree'
 
 //  思维导图
 class MindMap extends Base {
@@ -170,12 +171,13 @@ class MindMap extends Base {
 
   //  更新兄弟节点的top
   updateBrothers(node, leftAddHeight, rightAddHeight) {
-    if (node.parent) {
+    walkLayoutAncestorChain(node, current => {
       // 过滤出和自己同方向的节点
-      let childrenList = node.parent.children.filter(item => {
-        return item.dir === node.dir
+      let childrenList = current.parent.children.filter(item => {
+        return item.dir === current.dir
       })
-      let index = getNodeIndexInNodeList(node, childrenList)
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         if (item.hasCustomPosition()) {
           // 适配自定义位置
@@ -199,9 +201,7 @@ class MindMap extends Base {
           this.updateChildren(item.children, 'top', _offset)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothers(node.parent, leftAddHeight, rightAddHeight)
-    }
+    })
   }
 
   //  绘制连线，连接该节点到其子节点

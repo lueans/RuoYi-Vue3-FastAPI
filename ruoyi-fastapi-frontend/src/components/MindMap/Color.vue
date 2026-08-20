@@ -1,20 +1,25 @@
 <template>
   <div class="colorContainer" :class="{ isDark: isDark }">
     <div class="colorList">
-      <span
+      <button
+        type="button"
         class="colorItem iconfont"
         v-for="item in colorList"
         :key="item"
         :style="{ backgroundColor: item }"
         :class="{ icontouming: item === 'transparent' }"
+        :aria-label="item === 'transparent' ? '选择透明色' : `选择颜色 ${item}`"
+        :aria-pressed="isSelected(item)"
+        :title="item === 'transparent' ? '透明色' : item"
         @click="clickColorItem(item)"
-      ></span>
+      ></button>
     </div>
     <div class="moreColor">
       <span>更多颜色</span>
       <el-color-picker
         size="small"
         show-alpha
+        aria-label="选择自定义颜色"
         v-model="selectColor"
         @change="changeColor"
       />
@@ -46,6 +51,10 @@ function clickColorItem(color) {
   emit('change', color)
 }
 
+function isSelected(color) {
+  return String(props.color || '').toLowerCase() === String(color).toLowerCase()
+}
+
 function changeColor() {
   emit('change', selectColor.value)
 }
@@ -69,13 +78,23 @@ function changeColor() {
     display: flex;
     justify-content: center;
     align-items: center;
-    width: 15px;
-    height: 15px;
-    margin-right: 5px;
-    margin-bottom: 5px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    margin-right: 6px;
+    margin-bottom: 6px;
     cursor: pointer;
     border: 1px solid #e8e8e8;
     border-radius: 2px;
+
+    &:focus-visible {
+      outline: 2px solid #409eff;
+      outline-offset: 2px;
+    }
+
+    &[aria-pressed='true'] {
+      box-shadow: 0 0 0 2px #409eff;
+    }
 
     &:hover {
       transform: scale(1.2);

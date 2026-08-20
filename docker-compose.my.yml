@@ -32,6 +32,21 @@ services:
     networks:
       - ruoyi-network
 
+  # 脑图发布前 Schema 门禁（只读、按需执行，不随常规 up 启动）
+  ruoyi-mindmap-schema-check:
+    profiles: ["release-check"]
+    build:
+      context: ./ruoyi-fastapi-backend
+      dockerfile: Dockerfile.my
+    image: ruoyi-backend-my:latest
+    command: ["python", "-m", "scripts.verify_mindmap_schema", "--env=dockermy"]
+    restart: "no"
+    depends_on:
+      ruoyi-mysql:
+        condition: service_healthy
+    networks:
+      - ruoyi-network
+
   # MySQL服务
   ruoyi-mysql:
     image: mysql:8.0

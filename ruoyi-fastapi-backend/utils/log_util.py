@@ -415,6 +415,7 @@ class LoggerInitializer:
         self.service_name = LogConfig.log_service_name or AppConfig.app_name
         self._log_file_enabled = LogConfig.log_file_enabled
         self._log_base_dir = LogConfig.log_file_base_dir
+        self._enqueue = LogConfig.loguru_enqueue
         self._ensure_log_directory_exists()
 
     def _ensure_log_directory_exists(self) -> None:
@@ -609,7 +610,7 @@ class LoggerInitializer:
                 configured_logger.add(
                     sys.stdout,
                     level=LogConfig.loguru_level,
-                    enqueue=True,
+                    enqueue=self._enqueue,
                     filter=self._filter,
                     format=self._json_log_formatter,
                 )
@@ -617,7 +618,7 @@ class LoggerInitializer:
                 configured_logger.add(
                     sys.stdout,
                     level=LogConfig.loguru_level,
-                    enqueue=True,
+                    enqueue=self._enqueue,
                     filter=self._filter,
                     format=self._plain_log_formatter,
                 )
@@ -629,7 +630,7 @@ class LoggerInitializer:
                     rotation=LogConfig.loguru_rotation,
                     retention=LogConfig.loguru_retention,
                     compression=LogConfig.loguru_compression,
-                    enqueue=True,
+                    enqueue=self._enqueue,
                     filter=self._info_file_filter,
                     serialize=False,
                     format=self._json_log_formatter,
@@ -640,7 +641,7 @@ class LoggerInitializer:
                     rotation=LogConfig.loguru_rotation,
                     retention=LogConfig.loguru_retention,
                     compression=LogConfig.loguru_compression,
-                    enqueue=True,
+                    enqueue=self._enqueue,
                     filter=self._error_file_filter,
                     serialize=False,
                     format=self._json_log_formatter,
@@ -652,7 +653,7 @@ class LoggerInitializer:
                     rotation=LogConfig.loguru_rotation,
                     retention=LogConfig.loguru_retention,
                     compression=LogConfig.loguru_compression,
-                    enqueue=True,
+                    enqueue=self._enqueue,
                     filter=self._info_file_filter,
                     format=self._plain_log_formatter,
                 )
@@ -662,7 +663,7 @@ class LoggerInitializer:
                     rotation=LogConfig.loguru_rotation,
                     retention=LogConfig.loguru_retention,
                     compression=LogConfig.loguru_compression,
-                    enqueue=True,
+                    enqueue=self._enqueue,
                     filter=self._error_file_filter,
                     format=self._plain_log_formatter,
                 )

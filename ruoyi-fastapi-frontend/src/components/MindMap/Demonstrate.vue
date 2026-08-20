@@ -1,10 +1,20 @@
 <template>
   <div class="demonstrateContainer" :class="{ isDark: isDark }">
-    <el-tooltip effect="dark" content="进入演示模式" placement="top">
-      <div class="btn iconfont iconyanshibofang" @click="enterDemoMode"></div>
+    <el-tooltip v-if="!isEnterDemonstrate" effect="dark" content="进入演示模式" placement="top">
+      <button
+        ref="enterDemonstrateBtnRef"
+        class="btn iconfont iconyanshibofang"
+        type="button"
+        aria-label="进入演示模式"
+        :aria-busy="isEntering"
+        :disabled="isEntering"
+        @click="enterDemoMode"
+      ></button>
     </el-tooltip>
-    <div
+    <button
       class="exitDemonstrateBtn"
+      type="button"
+      aria-label="退出演示模式"
       @click="exit"
       ref="exitDemonstrateBtnRef"
       v-if="isEnterDemonstrate"
@@ -13,35 +23,45 @@
       @mouseup.stop
     >
       <span class="icon iconfont iconguanbi"></span>
-    </div>
+    </button>
     <div
       class="stepBox"
       ref="stepBoxRef"
       v-if="isEnterDemonstrate"
+      role="toolbar"
+      aria-label="演示控制"
       @mousedown.stop
       @mousemove.stop
       @mouseup.stop
     >
-      <div class="jump" @click="prev" :class="{ disabled: curStepIndex <= 0 }">
+      <button class="jump" type="button" aria-label="上一页" :disabled="curStepIndex <= 0" @click="prev">
         <span class="icon el-icon-back">
           <el-icon><ArrowLeft /></el-icon>
         </span>
-      </div>
-      <div class="step">{{ curStepIndex + 1 }} / {{ totalStep }}</div>
-      <div
+      </button>
+      <div class="step" aria-live="polite">第 {{ curStepIndex + 1 }} / {{ totalStep }} 页</div>
+      <button
         class="jump"
+        type="button"
+        aria-label="下一页"
+        :disabled="curStepIndex >= totalStep - 1"
         @click="next"
-        :class="{ disabled: curStepIndex >= totalStep - 1 }"
       >
         <span class="icon el-icon-right">
           <el-icon><ArrowRight /></el-icon>
         </span>
-      </div>
+      </button>
       <div class="input">
         <input
-          type="text"
+          type="number"
+          inputmode="numeric"
+          min="1"
+          :max="totalStep"
+          step="1"
+          aria-label="跳转到演示页码"
           v-model="inputStep"
-          @keyup.enter.stop="onEnter"
+          @keyup.enter.stop="jumpToInputStep"
+          @blur="normalizeInputStep"
           @keydown.stop
         />
       </div>
@@ -51,7 +71,9 @@
 
 <script setup>
 import { ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import bus from './useEventBus'
+import { isCurrentMindmapEventSource } from '@/utils/mindmap-event'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
@@ -59,16 +81,21 @@ const props = defineProps({
 })
 
 const isEnterDemonstrate = ref(false)
+const isEntering = ref(false)
 const curStepIndex = ref(0)
 const totalStep = ref(0)
 const inputStep = ref('')
 const exitDemonstrateBtnRef = ref(null)
 const stepBoxRef = ref(null)
+const enterDemonstrateBtnRef = ref(null)
+let componentAlive = true
+let enterRequestId = 0
 
-function enterDemoMode() {
-  isEnterDemonstrate.value = true
+function mountControlsIntoCanvas() {
+  const mindMap = props.mindMap
   nextTick(() => {
-    const el = document.querySelector('#mindMapContainer')
+    if (!componentAlive || props.mindMap !== mindMap) return
+    const el = mindMap?.el
     if (el) {
       if (exitDemonstrateBtnRef.value) {
         el.appendChild(exitDemonstrateBtnRef.value)
@@ -76,24 +103,66 @@ function enterDemoMode() {
       if (stepBoxRef.value) {
         el.appendChild(stepBoxRef.value)
       }
+      exitDemonstrateBtnRef.value?.focus()
     }
   })
-  props.mindMap?.demonstrate?.enter()
+}
+
+async function enterDemoMode() {
+  if (isEntering.value || isEnterDemonstrate.value) return
+  const mindMap = props.mindMap
+  if (!mindMap?.demonstrate?.enter) {
+    ElMessage.warning('演示组件尚未就绪')
+    return
+  }
+  const requestId = ++enterRequestId
+  isEntering.value = true
+  try {
+    await mindMap.demonstrate.enter()
+  } catch (error) {
+    if (!isCurrentEnterRequest(requestId, mindMap)) return
+    ElMessage.warning(error?.message || '无法进入演示模式')
+  } finally {
+    if (isCurrentEnterRequest(requestId, mindMap) && !isEnterDemonstrate.value) {
+      isEntering.value = false
+    }
+  }
+}
+
+function isCurrentEnterRequest(requestId, mindMap) {
+  return componentAlive
+    && requestId === enterRequestId
+    && props.mindMap === mindMap
 }
 
 function exit() {
   props.mindMap?.demonstrate?.exit()
 }
 
-function onExit() {
+function onExit(sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, props.mindMap)) return
   isEnterDemonstrate.value = false
+  isEntering.value = false
   curStepIndex.value = 0
   totalStep.value = 0
+  inputStep.value = ''
+  nextTick(() => enterDemonstrateBtnRef.value?.focus())
 }
 
-function onJump(index, total) {
+function onEnterDemonstrate(sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, props.mindMap)) return
+  if (!props.mindMap?.demonstrate?.isInDemonstrate) return
+  isEnterDemonstrate.value = true
+  isEntering.value = false
+  mountControlsIntoCanvas()
+}
+
+function onJump(index, total, sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, props.mindMap)) return
+  if (!props.mindMap?.demonstrate?.isInDemonstrate) return
   curStepIndex.value = index
   totalStep.value = total
+  inputStep.value = String(index + 1)
 }
 
 function prev() {
@@ -104,21 +173,32 @@ function next() {
   props.mindMap?.demonstrate?.next()
 }
 
-function onEnter() {
+function jumpToInputStep() {
   const num = Number(inputStep.value)
-  if (Number.isNaN(num)) {
-    inputStep.value = ''
-  } else if (num >= 1 && num <= totalStep.value) {
+  if (Number.isInteger(num) && num >= 1 && num <= totalStep.value) {
     props.mindMap?.demonstrate?.jump(num - 1)
+  } else {
+    normalizeInputStep()
   }
 }
 
+function normalizeInputStep() {
+  inputStep.value = totalStep.value ? String(curStepIndex.value + 1) : ''
+}
+
 onMounted(() => {
+  bus.on('enter_demonstrate', onEnterDemonstrate)
   bus.on('demonstrate_jump', onJump)
   bus.on('exit_demonstrate', onExit)
 })
 
 onBeforeUnmount(() => {
+  componentAlive = false
+  enterRequestId++
+  if (isEnterDemonstrate.value || isEntering.value) {
+    props.mindMap?.demonstrate?.exit?.()
+  }
+  bus.off('enter_demonstrate', onEnterDemonstrate)
   bus.off('demonstrate_jump', onJump)
   bus.off('exit_demonstrate', onExit)
 })
@@ -144,8 +224,24 @@ onBeforeUnmount(() => {
   }
 
   .btn {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
     cursor: pointer;
     font-size: 24px;
+
+    &:disabled {
+      cursor: progress;
+      opacity: 0.45;
+    }
+
+    &:focus-visible {
+      outline: 2px solid #3370ff;
+      outline-offset: 4px;
+      border-radius: 3px;
+    }
   }
 }
 
@@ -156,6 +252,15 @@ onBeforeUnmount(() => {
   cursor: pointer;
   z-index: 10001;
   pointer-events: all;
+  padding: 0;
+  border: 0;
+  background: transparent;
+
+  &:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 4px;
+    border-radius: 3px;
+  }
 
   .icon {
     font-size: 28px;
@@ -179,11 +284,21 @@ onBeforeUnmount(() => {
 
   .jump {
     color: #fff;
+    display: inline-flex;
+    padding: 0;
+    border: 0;
+    background: transparent;
     cursor: pointer;
 
-    &.disabled {
+    &:disabled {
       cursor: not-allowed;
       color: #999;
+    }
+
+    &:focus-visible {
+      outline: 2px solid #fff;
+      outline-offset: 4px;
+      border-radius: 3px;
     }
   }
 

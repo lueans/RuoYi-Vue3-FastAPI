@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timedelta
 from typing import Annotated
+from urllib.parse import quote
 
 import jwt
 from fastapi import Depends, Request, Response
@@ -15,16 +16,35 @@ from common.constant import ApiGroup, ApiNamespace
 from common.enums import BusinessType, RedisInitKeyConfig
 from common.router import APIRouterPro
 from common.vo import CrudResponseModel, DataResponseModel, DynamicResponseModel, ResponseBaseModel
-from config.env import AppConfig, JwtConfig, FeishuConfig
-from module_admin.entity.vo.login_vo import LoginToken, RouterModel, Token, UserLogin, UserRegister, FeishuLoginCode
+from config.env import AppConfig, FeishuConfig, JwtConfig
+from module_admin.entity.vo.login_vo import FeishuLoginCode, LoginToken, RouterModel, Token, UserLogin, UserRegister
 from module_admin.entity.vo.user_vo import CurrentUserModel, EditUserModel
-from module_admin.service.login_service import CustomOAuth2PasswordRequestForm, LoginService, oauth2_scheme
+from module_admin.service.login_service import CustomOAuth2PasswordRequestForm, LoginService, optional_oauth2_scheme
 from module_admin.service.user_service import UserService
 from utils.log_util import logger
 from utils.response_util import ResponseUtil
-from urllib.parse import quote
 
 login_controller = APIRouterPro(order_num=1, tags=['登录模块'])
+
+
+def _get_logout_token_id(token: str | None) -> str | None:
+    """Return the Redis session key encoded by a valid token.
+
+    Logout is intentionally idempotent: a client may still hold a malformed,
+    expired, or legacy cookie while recovering from a rejected session. Such a
+    cookie must not turn logout into a server error.
+    """
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(
+            token, JwtConfig.jwt_secret_key, algorithms=[JwtConfig.jwt_algorithm], options={'verify_exp': False}
+        )
+    except jwt.InvalidTokenError:
+        return None
+
+    token_id = payload.get('session_id') if AppConfig.app_same_time_login else payload.get('user_id')
+    return str(token_id) if token_id else None
 
 
 @login_controller.post(
@@ -238,15 +258,12 @@ async def register_user(
     response_model=ResponseBaseModel,
 )
 @ApiCacheEvict(namespaces=ApiGroup.LOGOUT_MUTATION)
-async def logout(request: Request, token: Annotated[str | None, Depends(oauth2_scheme)]) -> Response:
-    payload = jwt.decode(
-        token, JwtConfig.jwt_secret_key, algorithms=[JwtConfig.jwt_algorithm], options={'verify_exp': False}
-    )
-    if AppConfig.app_same_time_login:
-        token_id: str = payload.get('session_id')
+async def logout(request: Request, token: Annotated[str | None, Depends(optional_oauth2_scheme)]) -> Response:
+    token_id = _get_logout_token_id(token)
+    if token_id:
+        await LoginService.logout_services(request, token_id)
     else:
-        token_id: str = payload.get('user_id')
-    await LoginService.logout_services(request, token_id)
+        logger.info('退出时客户端令牌无效，按幂等退出处理')
     logger.info('退出成功')
 
     return ResponseUtil.success(msg='退出成功')

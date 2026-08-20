@@ -14,8 +14,10 @@ CREATE TABLE IF NOT EXISTS mindmap_folder (
   create_time DATETIME     DEFAULT CURRENT_TIMESTAMP   COMMENT '创建时间',
   update_by   VARCHAR(64)  DEFAULT ''                  COMMENT '更新者',
   update_time DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  active_name VARCHAR(100) GENERATED ALWAYS AS (CASE WHEN del_flag = '0' THEN name ELSE NULL END) STORED COMMENT '活动目录唯一名称',
   INDEX idx_folder_owner (owner_id, del_flag),
-  INDEX idx_folder_parent (parent_id)
+  INDEX idx_folder_parent (parent_id),
+  UNIQUE INDEX uq_mindmap_folder_active_sibling (owner_id, parent_id, active_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='脑图文件夹表';
 
 -- 2. mindmap 表增加 folder_id 字段（幂等：先判断列是否存在）
@@ -24,6 +26,15 @@ SET @col_exists = (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
 SET @sql = IF(@col_exists = 0,
   'ALTER TABLE mindmap ADD COLUMN folder_id BIGINT DEFAULT NULL COMMENT ''所属文件夹ID（NULL=根目录）'' AFTER owner_id',
   'SELECT ''folder_id column already exists''');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @owner_folder_idx_exists = (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mindmap' AND INDEX_NAME = 'idx_mindmap_owner_folder');
+SET @sql = IF(@owner_folder_idx_exists = 0,
+  'ALTER TABLE mindmap ADD INDEX idx_mindmap_owner_folder (owner_id, folder_id, del_flag, is_template)',
+  'SELECT ''owner folder index already exists''');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;

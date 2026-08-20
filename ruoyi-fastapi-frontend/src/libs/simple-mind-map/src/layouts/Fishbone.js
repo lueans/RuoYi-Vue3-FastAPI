@@ -4,6 +4,10 @@ import { CONSTANTS } from '../constants/constant'
 import utils from './fishboneUtils'
 import { SVG } from '@svgdotjs/svg.js'
 import { shapeStyleProps } from '../core/render/node/Style'
+import {
+  calculateNodeAreaHeight,
+  walkLayoutAncestorChain
+} from './layoutTree'
 
 //  鱼骨图
 class Fishbone extends Base {
@@ -296,21 +300,11 @@ class Fishbone extends Base {
 
   //  递归计算节点的宽度
   getNodeAreaHeight(node) {
-    let totalHeight = 0
-    let loop = node => {
-      let marginY = this.getMarginY(node.layerIndex)
-      totalHeight +=
-        node.height +
-        (this.getNodeActChildrenLength(node) > 0 ? node.expandBtnSize : 0) +
-        marginY
-      if (node.children.length) {
-        node.children.forEach(item => {
-          loop(item)
-        })
-      }
-    }
-    loop(node)
-    return totalHeight
+    return calculateNodeAreaHeight(
+      node,
+      current => this.getNodeActChildrenLength(current),
+      layerIndex => this.getMarginY(layerIndex)
+    )
   }
 
   //  调整兄弟节点的left
@@ -333,9 +327,11 @@ class Fishbone extends Base {
 
   //  调整兄弟节点的top
   updateBrothersTop(node, addHeight) {
-    if (node.parent && !node.parent.isRoot) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    let currentAddHeight = addHeight
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         if (item.hasCustomPosition()) {
           // 适配自定义位置
@@ -344,7 +340,7 @@ class Fishbone extends Base {
         let _offset = 0
         // 下面的节点往下移
         if (_index > index) {
-          _offset = addHeight
+          _offset = currentAddHeight
         }
         item.top += _offset
         // 同步更新子节点的位置
@@ -352,16 +348,10 @@ class Fishbone extends Base {
           this.updateChildren(item.children, 'top', _offset)
         }
       })
-      // 更新父节点的位置
-      if (this.checkIsTop(node)) {
-        this.updateBrothersTop(node.parent, addHeight)
-      } else {
-        this.updateBrothersTop(
-          node.parent,
-          node.layerIndex === 3 ? 0 : addHeight
-        )
+      if (!this.checkIsTop(current) && current.layerIndex === 3) {
+        currentAddHeight = 0
       }
-    }
+    }, current => Boolean(current.parent && !current.parent.isRoot))
   }
 
   // 检查节点是否是上方节点

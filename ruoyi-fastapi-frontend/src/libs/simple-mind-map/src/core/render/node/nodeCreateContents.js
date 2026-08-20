@@ -12,6 +12,10 @@ import {
 import { Image as SVGImage, SVG, A, G, Rect, Text } from '@svgdotjs/svg.js'
 import iconsSvg from '../../../svg/icons'
 import { noneRichTextNodeLineHeight } from '../../../constants/constant'
+import { getSafeMindMapHyperlink } from '../../../utils/hyperlink'
+import { addSafeSvgTitle } from '../../../utils/svg'
+import { getSafeMindMapAttachmentUrl } from '../../../utils/attachment'
+import { getSafeMindMapImageUrl } from '../../../utils/image'
 
 // 测量svg文本宽高
 const measureText = (text, style) => {
@@ -36,16 +40,17 @@ const defaultTagStyle = {
 // 因为如果注册了NodeBase64ImageStorage插件，那么节点图片字段保存的实际是一个id，所以如果要获取图片真实的url可以通过该方法
 function getImageUrl() {
   const img = this.getData('image')
-  return (this.mindMap.renderer.renderTree.data.imgMap || {})[img] || img
+  const imageUrl =
+    (this.mindMap.renderer.renderTree.data.imgMap || {})[img] || img
+  return getSafeMindMapImageUrl(imageUrl)
 }
 
 //  创建图片节点
 function createImgNode() {
-  let img = this.getImageUrl()
+  const img = this.getImageUrl()
   if (!img) {
     return
   }
-  img = (this.mindMap.renderer.renderTree.data.imgMap || {})[img] || img
   const imgSize = this.getImgShowSize()
   const node = new SVGImage().load(img).size(...imgSize)
   // 如果指定了加载失败显示的图片，那么加载一下图片检测是否失败
@@ -138,6 +143,9 @@ function createRichTextNode(specifyText) {
   const hasCustomWidth = this.hasCustomWidth()
   let text =
     typeof specifyText === 'string' ? specifyText : this.getData('text')
+  // 空富文本节点是合法状态。若直接拼入 DOM，undefined/null 会变成
+  // 可见文本，并可能在结束编辑时被反写进节点数据。
+  if (isUndef(text)) text = ''
   let { textAutoWrapWidth, emptyTextMeasureHeightText } = this.mindMap.opt
   textAutoWrapWidth = hasCustomWidth ? this.customTextWidth : textAutoWrapWidth
   const g = new G()
@@ -324,7 +332,8 @@ function createTextNode(specifyText) {
 //  创建超链接节点
 function createHyperlinkNode() {
   const { hyperlink, hyperlinkTitle } = this.getData()
-  if (!hyperlink) {
+  const safeHyperlink = getSafeMindMapHyperlink(hyperlink)
+  if (!safeHyperlink) {
     return
   }
   const { customHyperlinkJump, hyperlinkIcon } = this.mindMap.opt
@@ -332,15 +341,16 @@ function createHyperlinkNode() {
   const iconSize = this.getNodeIconSize('hyperlinkIcon')
   const node = new SVG().size(iconSize, iconSize)
   // 超链接节点
-  const a = new A().to(hyperlink).target('_blank')
+  const a = new A().to(safeHyperlink).target('_blank')
+  a.attr({ rel: 'noopener noreferrer', referrerpolicy: 'no-referrer' })
   a.node.addEventListener('click', e => {
     if (typeof customHyperlinkJump === 'function') {
       e.preventDefault()
-      customHyperlinkJump(hyperlink, this)
+      customHyperlinkJump(safeHyperlink, this)
     }
   })
   if (hyperlinkTitle) {
-    node.add(SVG(`<title>${hyperlinkTitle}</title>`))
+    addSafeSvgTitle(node, hyperlinkTitle)
   }
   // 添加一个透明的层，作为鼠标区域
   a.rect(iconSize, iconSize).fill({ color: 'transparent' })
@@ -506,14 +516,15 @@ function createNoteNode() {
 //  创建附件节点
 function createAttachmentNode() {
   const { attachmentUrl, attachmentName } = this.getData()
-  if (!attachmentUrl) {
+  const safeAttachmentUrl = getSafeMindMapAttachmentUrl(attachmentUrl)
+  if (!safeAttachmentUrl) {
     return
   }
   const iconSize = this.getNodeIconSize('attachmentIcon')
   const { icon, style } = this.mindMap.opt.attachmentIcon
   const node = new SVG().attr('cursor', 'pointer').size(iconSize, iconSize)
   if (attachmentName) {
-    node.add(SVG(`<title>${attachmentName}</title>`))
+    addSafeSvgTitle(node, attachmentName)
   }
   // 透明的层，用来作为鼠标区域
   node.add(new Rect().size(iconSize, iconSize).fill({ color: 'transparent' }))

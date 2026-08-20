@@ -14,6 +14,11 @@ import {
   resetTransportRequestConfig,
   shouldRetryTransportWithFreshKey
 } from '@/utils/transportCrypto'
+import {
+  createRepeatSubmitRecord,
+  isDuplicateRepeatSubmit,
+  isRepeatSubmitMethod
+} from '@/utils/requestDedupe'
 
 let downloadLoadingInstance;
 // 是否显示重新登录
@@ -45,32 +50,21 @@ service.interceptors.request.use(async config => {
   if (getToken() && !isToken) {
     config.headers['Authorization'] = 'Bearer ' + getToken() // 让每个请求携带自定义token 请根据实际情况自行修改
   }
-  if (!isRepeatSubmit && (config.method === 'post' || config.method === 'put')) {
-    const requestObj = {
-      url: config.url,
-      data: typeof config.data === 'object' ? JSON.stringify(config.data) : config.data,
-      time: new Date().getTime()
-    }
-    const requestSize = Object.keys(JSON.stringify(requestObj)).length; // 请求数据大小
-    const limitSize = 5 * 1024 * 1024; // 限制存放数据5M
-    if (requestSize >= limitSize) {
-      console.warn(`[${config.url}]: ` + '请求数据大小超出允许的5M限制，无法进行防重复提交验证。')
-      return config;
-    }
-    const sessionObj = cache.session.getJSON('sessionObj')
-    if (sessionObj === undefined || sessionObj === null || sessionObj === '') {
-      cache.session.setJSON('sessionObj', requestObj)
-    } else {
-      const s_url = sessionObj.url;                // 请求地址
-      const s_data = sessionObj.data;              // 请求数据
-      const s_time = sessionObj.time;              // 请求时间
-      if (s_data === requestObj.data && requestObj.time - s_time < interval && s_url === requestObj.url) {
-        const message = '数据正在处理，请勿重复提交';
-        console.warn(`[${s_url}]: ` + message)
-        return Promise.reject(new Error(message))
-      } else {
-        cache.session.setJSON('sessionObj', requestObj)
+  if (!isRepeatSubmit && isRepeatSubmitMethod(config.method)) {
+    try {
+      const requestRecord = await createRepeatSubmitRecord(config)
+      if (requestRecord) {
+        const sessionRecord = cache.session.getJSON('sessionObj')
+        if (isDuplicateRepeatSubmit(sessionRecord, requestRecord, interval)) {
+          const message = '数据正在处理，请勿重复提交'
+          console.warn(`[${requestRecord.url}]: ${message}`)
+          return Promise.reject(new Error(message))
+        }
+        cache.session.setJSON('sessionObj', requestRecord)
       }
+    } catch (error) {
+      // 指纹或浏览器存储不可用时只降级防重能力，不得跳过后续传输加密与请求发送。
+      console.warn(`[${config.url}]: 无法进行防重复提交验证。`, error)
     }
   }
   // 在参数拼接前完成传输层加密，避免明文查询串提前写入 URL。
@@ -100,6 +94,7 @@ service.interceptors.response.use(async res => {
     res = await decryptTransportResponse(res)
     // 未设置状态码则默认成功状态
     const code = res.data.code || 200;
+    const silentError = res.config?.silentError === true
     // 获取错误信息
     const msg = errorCode[code] || res.data.msg || errorCode['default']
     // 二进制数据则直接返回
@@ -120,19 +115,30 @@ service.interceptors.response.use(async res => {
     }
       return Promise.reject('无效的会话，或者会话已过期，请重新登录。')
     } else if (code === 500) {
-      ElMessage({ message: msg, type: 'error' })
-      return Promise.reject(new Error(msg))
+      if (!silentError) ElMessage({ message: msg, type: 'error' })
+      const businessError = new Error(msg)
+      businessError.data = res.data.data
+      businessError.code = code
+      return Promise.reject(businessError)
     } else if (code === 601) {
-      ElMessage({ message: msg, type: 'warning' })
-      return Promise.reject(new Error(msg))
+      if (!silentError) ElMessage({ message: msg, type: 'warning' })
+      const businessError = new Error(msg)
+      businessError.data = res.data.data
+      businessError.code = code
+      return Promise.reject(businessError)
     } else if (code !== 200) {
-      ElNotification.error({ title: msg })
+      if (!silentError) ElNotification.error({ title: msg })
       return Promise.reject('error')
     } else {
       return  Promise.resolve(res.data)
     }
   },
   async error => {
+    // 主动取消属于调用方生命周期控制，不是网络或业务错误。直接透传，避免
+    // 快速切换页面、文件或搜索条件时弹出误导性的 “canceled” 错误消息。
+    if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') {
+      return Promise.reject(error)
+    }
     // 错误响应也可能是加密信封，先尝试解密再进入统一错误提示流程。
     error = await decryptTransportErrorResponse(error)
     // 若后端提示密钥失效，则清空本地公钥缓存并基于原始请求重试一次。
@@ -149,9 +155,15 @@ service.interceptors.response.use(async res => {
     const responseStatus = response?.status
     const responseCode = response?.data?.code
     const responseMsg = response?.data?.msg
+    // 后台轮询可自行聚合普通错误，但认证失效必须继续进入全局可见处理，
+    // 不能因为调用方要求静默而让用户停留在已经失效的会话中。
+    const silentError = (
+      error.config?.silentError === true
+      || response?.config?.silentError === true
+    ) && responseStatus !== 401 && responseCode !== 401
     if (responseMsg) {
       const messageType = responseStatus === 429 || responseCode === 429 ? 'warning' : 'error'
-      ElMessage({ message: responseMsg, type: messageType, duration: 5 * 1000 })
+      if (!silentError) ElMessage({ message: responseMsg, type: messageType, duration: 5 * 1000 })
       return Promise.reject(new Error(responseMsg))
     }
     let { message } = error;
@@ -162,7 +174,7 @@ service.interceptors.response.use(async res => {
     } else if (message.includes("Request failed with status code")) {
       message = "系统接口" + message.slice(-3) + "异常";
     }
-    ElMessage({ message: message, type: 'error', duration: 5 * 1000 })
+    if (!silentError) ElMessage({ message: message, type: 'error', duration: 5 * 1000 })
     return Promise.reject(error)
   }
 )

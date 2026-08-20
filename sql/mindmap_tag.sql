@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS mindmap_tag_category (
     sort_order INT DEFAULT 0 COMMENT '排序',
     created_by VARCHAR(64) DEFAULT NULL COMMENT '创建人',
     created_time DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-    INDEX idx_tag_cat_owner (owner_id)
+    INDEX idx_tag_cat_owner (owner_id),
+    UNIQUE INDEX uq_mindmap_tag_category_owner_name (owner_id, name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='脑图标签分类表';
 
 -- ============================================================
@@ -31,5 +32,8 @@ CREATE TABLE IF NOT EXISTS mindmap_tag (
     updated_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     UNIQUE INDEX idx_tag_uuid (uuid),
     UNIQUE INDEX idx_tag_owner_key (owner_id, tag_key),
-    INDEX idx_tag_category (category_id)
+    INDEX idx_tag_category (category_id),
+    CONSTRAINT fk_mindmap_tag_category
+        FOREIGN KEY (category_id) REFERENCES mindmap_tag_category (id)
+        ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='脑图标签表';

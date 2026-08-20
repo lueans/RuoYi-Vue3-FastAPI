@@ -97,6 +97,8 @@ export const defaultOpt = {
   isEndNodeTextEditOnClickOuter: true,
   // 最大历史记录数
   maxHistoryCount: 500,
+  // 历史快照最大估算内存，避免大图保留数百份完整文档耗尽页面内存
+  maxHistoryMemoryBytes: 64 * 1024 * 1024,
   // 是否一直显示节点的展开收起按钮，默认为鼠标移上去和激活时才显示
   alwaysShowExpandBtn: false,
   // 不显示展开收起按钮，优先级比alwaysShowExpandBtn配置高

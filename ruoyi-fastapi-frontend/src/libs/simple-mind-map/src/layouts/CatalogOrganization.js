@@ -1,5 +1,6 @@
 import Base from './Base'
 import { walk, asyncRun, getNodeIndexInNodeList } from '../utils'
+import { walkLayoutAncestorChain } from './layoutTree'
 
 //  目录组织图
 class CatalogOrganization extends Base {
@@ -153,9 +154,10 @@ class CatalogOrganization extends Base {
 
   //  调整兄弟节点的left
   updateBrothersLeft(node, addWidth) {
-    if (node.parent) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         if (item.hasCustomPosition() || _index <= index) {
           // 适配自定义位置
@@ -167,16 +169,15 @@ class CatalogOrganization extends Base {
           this.updateChildren(item.children, 'left', addWidth)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothersLeft(node.parent, addWidth)
-    }
+    })
   }
 
   //  调整兄弟节点的top
   updateBrothersTop(node, addHeight) {
-    if (node.parent && !node.parent.isRoot) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         if (item.hasCustomPosition()) {
           // 适配自定义位置
@@ -193,9 +194,7 @@ class CatalogOrganization extends Base {
           this.updateChildren(item.children, 'top', _offset)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothersTop(node.parent, addHeight)
-    }
+    }, current => Boolean(current.parent && !current.parent.isRoot))
   }
 
   //  绘制连线，连接该节点到其子节点

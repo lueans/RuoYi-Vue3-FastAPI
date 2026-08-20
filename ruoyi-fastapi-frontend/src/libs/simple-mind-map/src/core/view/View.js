@@ -1,4 +1,12 @@
 import { CONSTANTS } from '../../constants/constant'
+import { resolveWheelZoomDirection } from '../../utils/wheel'
+import {
+  calculateViewFit,
+  calculateViewScaleAroundPoint,
+  normalizeViewCoordinate,
+  normalizeViewScale,
+  normalizeViewTransformData
+} from '../../utils/viewState'
 
 //  视图操作类
 class View {
@@ -112,19 +120,15 @@ class View {
             return ![CONSTANTS.DIR.LEFT, CONSTANTS.DIR.RIGHT].includes(dir)
           })
         }
-        switch (true) {
-          // 鼠标滚轮，向上和向左，都是缩小
-          case dirs.includes(CONSTANTS.DIR.UP || CONSTANTS.DIR.LEFT):
-            mousewheelZoomActionReverse
-              ? this.enlarge(cx, cy, isTouchPad)
-              : this.narrow(cx, cy, isTouchPad)
-            break
-          // 鼠标滚轮，向下和向右，都是放大
-          case dirs.includes(CONSTANTS.DIR.DOWN || CONSTANTS.DIR.RIGHT):
-            mousewheelZoomActionReverse
-              ? this.narrow(cx, cy, isTouchPad)
-              : this.enlarge(cx, cy, isTouchPad)
-            break
+        const direction = resolveWheelZoomDirection(dirs)
+        if (direction < 0) {
+          mousewheelZoomActionReverse
+            ? this.enlarge(cx, cy, isTouchPad)
+            : this.narrow(cx, cy, isTouchPad)
+        } else if (direction > 0) {
+          mousewheelZoomActionReverse
+            ? this.narrow(cx, cy, isTouchPad)
+            : this.enlarge(cx, cy, isTouchPad)
         }
       } else {
         // 2.鼠标滚轮事件控制画布移动
@@ -195,17 +199,23 @@ class View {
 
   //  动态设置变换状态数据
   setTransformData(viewData) {
-    if (viewData) {
-      Object.keys(viewData.state).forEach(prop => {
-        this[prop] = viewData.state[prop]
-      })
-      this.mindMap.draw.transform({
-        ...viewData.transform
-      })
-      this.mindMap.emit('view_data_change', this.getTransformData())
-      this.emitEvent('scale')
-      this.emitEvent('translate')
-    }
+    const normalized = normalizeViewTransformData(viewData, this)
+    if (!normalized) return false
+
+    const { scale, x, y, sx, sy } = normalized.state
+    this.scale = scale
+    this.x = x
+    this.y = y
+    this.sx = sx
+    this.sy = sy
+    this.mindMap.draw.transform(normalized.transform)
+    this._appliedX = x
+    this._appliedY = y
+    this._appliedScale = scale
+    this.mindMap.emit('view_data_change', this.getTransformData())
+    this.emitEvent('scale')
+    this.emitEvent('translate')
+    return true
   }
 
   //  平移x,y方向
@@ -347,36 +357,52 @@ class View {
 
   // 基于指定中心进行缩放，cx，cy 可不指定，此时会使用画布中心点
   scaleInCenter(scale, cx, cy) {
-    if (cx === undefined || cy === undefined) {
-      cx = this.mindMap.width / 2
-      cy = this.mindMap.height / 2
-    }
-    const prevScale = this.scale
-    // 除零保护：防止 prevScale 为 0 或无效值
-    if (prevScale === 0 || !Number.isFinite(prevScale)) {
-      if (process.env.NODE_ENV === 'development') {
-        console.warn('[MindMap] scaleInCenter: invalid prevScale', prevScale)
-      }
-      this.scale = scale
-      return
-    }
-    const ratio = 1 - scale / prevScale
-    const dx = (cx - this.x) * ratio
-    const dy = (cy - this.y) * ratio
-    this.x += dx
-    this.y += dy
-    this.scale = scale
+    const nextScale = normalizeViewScale(scale)
+    if (nextScale === null) return false
+    const defaultCenterX = normalizeViewCoordinate(this.mindMap.width) / 2
+    const defaultCenterY = normalizeViewCoordinate(this.mindMap.height) / 2
+    const centerX = Number.isFinite(Number(cx))
+      ? Number(cx)
+      : defaultCenterX
+    const centerY = Number.isFinite(Number(cy))
+      ? Number(cy)
+      : defaultCenterY
+    const nextState = calculateViewScaleAroundPoint(
+      this,
+      nextScale,
+      { x: centerX, y: centerY }
+    )
+    if (!nextState) return false
+    this.x = nextState.x
+    this.y = nextState.y
+    this.scale = nextState.scale
+    return true
   }
 
   //  设置缩放
   setScale(scale, cx, cy) {
+    const nextScale = normalizeViewScale(scale)
+    if (nextScale === null) return false
+    const previousScale = this.scale
+    const previousX = this.x
+    const previousY = this.y
+    this.x = normalizeViewCoordinate(this.x)
+    this.y = normalizeViewCoordinate(this.y)
     if (cx !== undefined && cy !== undefined) {
-      this.scaleInCenter(scale, cx, cy)
+      if (!this.scaleInCenter(nextScale, cx, cy)) return false
     } else {
-      this.scale = scale
+      this.scale = nextScale
+    }
+    if (
+      this.scale === previousScale
+      && this.x === previousX
+      && this.y === previousY
+    ) {
+      return false
     }
     this.transform()
     this.emitEvent('scale')
+    return true
   }
 
   // 适应画布大小
@@ -384,52 +410,27 @@ class View {
     fitPadding =
       fitPadding === undefined ? this.mindMap.opt.fitPadding : fitPadding
     const draw = this.mindMap.draw
-    const origTransform = draw.transform()
-    const rect = getRbox() || draw.rbox()
-    const drawWidth = rect.width / origTransform.scaleX
-    const drawHeight = rect.height / origTransform.scaleY
-    const drawRatio = drawWidth / drawHeight
-    let { width: elWidth, height: elHeight } = this.mindMap.elRect
-    elWidth = elWidth - fitPadding * 2
-    elHeight = elHeight - fitPadding * 2
-    const elRatio = elWidth / elHeight
-    let newScale = 0
-    let flag = ''
-    if (drawWidth <= elWidth && drawHeight <= elHeight && !enlarge) {
-      newScale = 1
-      flag = 1
-    } else {
-      let newWidth = 0
-      let newHeight = 0
-      if (drawRatio > elRatio) {
-        newWidth = elWidth
-        newHeight = elWidth / drawRatio
-        flag = 2
-      } else {
-        newHeight = elHeight
-        newWidth = elHeight * drawRatio
-        flag = 3
-      }
-      newScale = newWidth / drawWidth
+    let rect = null
+    let transform = null
+    try {
+      transform = draw.transform()
+      rect = getRbox() || draw.rbox()
+    } catch {
+      return false
     }
-    this.setScale(newScale)
-    const newRect = getRbox() || draw.rbox()
-    // 需要考虑画布容器距浏览器窗口左上角的距离
-    newRect.x -= this.mindMap.elRect.left
-    newRect.y -= this.mindMap.elRect.top
-    let newX = 0
-    let newY = 0
-    if (flag === 1) {
-      newX = -newRect.x + fitPadding + (elWidth - newRect.width) / 2
-      newY = -newRect.y + fitPadding + (elHeight - newRect.height) / 2
-    } else if (flag === 2) {
-      newX = -newRect.x + fitPadding
-      newY = -newRect.y + fitPadding + (elHeight - newRect.height) / 2
-    } else if (flag === 3) {
-      newX = -newRect.x + fitPadding + (elWidth - newRect.width) / 2
-      newY = -newRect.y + fitPadding
-    }
-    this.translateXY(newX, newY)
+    const fit = calculateViewFit({
+      contentRect: rect,
+      viewportRect: this.mindMap.elRect,
+      transform,
+      state: this,
+      padding: fitPadding,
+      enlarge
+    })
+    if (!fit) return false
+
+    this.setScale(fit.scale)
+    this.translateXY(fit.offsetX, fit.offsetY)
+    return true
   }
 
   // 判断是否需要将思维导图限制在画布内

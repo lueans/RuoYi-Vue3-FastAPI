@@ -49,7 +49,20 @@
     }
 
     #imgUploadInput {
-      display: none;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+
+      &:focus-visible + .imgUploadInputArea {
+        outline: 2px solid #409eff;
+        outline-offset: 3px;
+      }
     }
 
     .uploadInfoBox {
@@ -74,6 +87,14 @@
         width: 20px;
         height: 20px;
         background-color: #fff;
+        border: 0;
+        padding: 0;
+        color: #606266;
+
+        &:focus-visible {
+          outline: 2px solid #409eff;
+          outline-offset: 2px;
+        }
       }
     }
   }

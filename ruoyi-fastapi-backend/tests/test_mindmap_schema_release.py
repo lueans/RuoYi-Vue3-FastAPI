@@ -1,0 +1,194 @@
+"""脑图 Schema 只读发布计划测试。"""
+
+import tempfile
+import unittest
+from hashlib import sha256
+from pathlib import Path
+
+from module_mindmap.service.mindmap_schema_release import (
+    MINDMAP_SCHEMA_MIGRATIONS,
+    build_mindmap_migration_plan,
+)
+from module_mindmap.service.mindmap_schema_verifier import (
+    REQUIRED_COLUMNS,
+    REQUIRED_FOREIGN_KEYS,
+    REQUIRED_INDEXES,
+    REQUIRED_TABLES,
+    MindmapSchemaIssue,
+)
+
+
+class MindmapSchemaReleaseTest(unittest.TestCase):
+    MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / 'migrations'
+
+    def test_catalog_covers_every_schema_verifier_migration(self) -> None:
+        referenced = (
+            set(REQUIRED_TABLES.values())
+            | set(REQUIRED_COLUMNS.values())
+            | set(REQUIRED_INDEXES.values())
+            | set(REQUIRED_FOREIGN_KEYS.values())
+        )
+
+        self.assertEqual(
+            referenced - {item.filename for item in MINDMAP_SCHEMA_MIGRATIONS},
+            set(),
+        )
+
+    def test_groups_issues_in_dependency_order_with_checksum(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            migration_dir = Path(directory)
+            contents: dict[str, bytes] = {}
+            for definition in MINDMAP_SCHEMA_MIGRATIONS:
+                content = f'-- {definition.filename}\nSELECT 1;\n'.encode()
+                contents[definition.filename] = content
+                (migration_dir / definition.filename).write_bytes(content)
+            issues = [
+                MindmapSchemaIssue(
+                    'index',
+                    'mindmap.idx_mindmap_template_market',
+                    '20260818_mindmap_template_workflow.sql',
+                ),
+                MindmapSchemaIssue(
+                    'column',
+                    'mindmap_folder.active_name',
+                    '20260818_mindmap_folder_lifecycle.sql',
+                ),
+                MindmapSchemaIssue(
+                    'index',
+                    'mindmap.idx_mindmap_owner_folder',
+                    '20260818_mindmap_folder_lifecycle.sql',
+                ),
+            ]
+
+            plan = build_mindmap_migration_plan(issues, migration_dir)
+
+            self.assertEqual(
+                [item.migration for item in plan],
+                [
+                    '20260818_mindmap_folder_lifecycle.sql',
+                    '20260818_mindmap_template_workflow.sql',
+                ],
+            )
+            self.assertEqual(plan[0].sha256, sha256(contents[plan[0].migration]).hexdigest())
+            self.assertEqual(len(plan[0].missing_objects), 2)
+            self.assertIn('missingObjects', plan[0].to_dict())
+            self.assertNotIn('missing_objects', plan[0].to_dict())
+
+    def test_unknown_migration_fails_closed(self) -> None:
+        issue = MindmapSchemaIssue('table', 'unknown', 'unknown.sql')
+
+        with self.assertRaisesRegex(ValueError, '缺少迁移目录定义'):
+            build_mindmap_migration_plan([issue], Path('.'))
+
+    def test_missing_migration_file_fails_closed(self) -> None:
+        issue = MindmapSchemaIssue(
+            'index',
+            'mindmap.idx_mindmap_owner_status',
+            '20260818_mindmap_archive_lifecycle.sql',
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaisesRegex(ValueError, '迁移文件不存在'),
+        ):
+            build_mindmap_migration_plan([issue], Path(directory))
+
+    def test_definition_checked_objects_can_be_repaired_by_their_migrations(self) -> None:
+        contracts = {
+            '20260817_mindmap_structured_content.sql': (
+                'ensure_index_definition',
+                'DROP INDEX',
+            ),
+            '20260818_mindmap_archive_lifecycle.sql': (
+                'owner_id,status,del_flag,is_template,update_time',
+                'DROP INDEX idx_mindmap_owner_status',
+            ),
+            '20260818_mindmap_folder_lifecycle.sql': (
+                'owner_id,parent_id,active_name',
+                'DROP INDEX uq_mindmap_folder_active_sibling',
+                'owner_id,folder_id,del_flag,is_template',
+                'DROP INDEX idx_mindmap_owner_folder',
+            ),
+            '20260818_mindmap_template_workflow.sql': (
+                'DROP INDEX uq_mindmap_template_category_name',
+                'is_template,del_flag,template_category_id,create_time',
+                'DROP INDEX idx_mindmap_template_market',
+                'DROP FOREIGN KEY fk_mindmap_template_category',
+            ),
+            '20260819_mindmap_retention_indexes.sql': (
+                'completed_time',
+                'created_time',
+                'DROP INDEX `idx_mindmap_creation_retention`',
+                'DROP INDEX `idx_mindmap_change_retention`',
+            ),
+            '20260819_mindmap_tag_category_integrity.sql': (
+                'owner_id,name',
+                'DROP INDEX uq_mindmap_tag_category_owner_name',
+                'DROP FOREIGN KEY fk_mindmap_tag_category',
+                'REFERENCES mindmap_tag_category (id) ON DELETE RESTRICT',
+            ),
+            '20260820_mindmap_node_tag_integrity.sql': (
+                'fk_mindmap_node_tag_field',
+                'fk_mindmap_node_tag_option',
+                'DROP FOREIGN KEY',
+                'ON DELETE RESTRICT',
+            ),
+        }
+
+        for filename, markers in contracts.items():
+            sql = (self.MIGRATIONS_DIR / filename).read_text(encoding='utf-8')
+            with self.subTest(migration=filename):
+                for marker in markers:
+                    self.assertIn(marker, sql)
+
+    def test_template_data_normalization_commits_before_non_temporary_ddl(self) -> None:
+        sql = (self.MIGRATIONS_DIR / '20260818_mindmap_template_workflow.sql').read_text(
+            encoding='utf-8'
+        )
+
+        self.assertLess(sql.index('COMMIT;'), sql.index('ALTER TABLE mindmap_template_category'))
+
+    def test_tag_category_data_convergence_commits_before_constraints(self) -> None:
+        sql = (
+            self.MIGRATIONS_DIR / '20260819_mindmap_tag_category_integrity.sql'
+        ).read_text(encoding='utf-8')
+
+        self.assertLess(sql.index('COMMIT;'), sql.index('ALTER TABLE mindmap_tag_category'))
+        self.assertLess(sql.index('SET tag.category_id = canonical.keep_id'), sql.index('DELETE category'))
+
+    def test_mysql_compose_exposes_opt_in_readonly_release_gate(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        compose_source = (project_root / 'docker-compose.my.yml').read_text(encoding='utf-8')
+        readme_source = (project_root / 'README.md').read_text(encoding='utf-8')
+
+        self.assertIn('ruoyi-mindmap-schema-check:', compose_source)
+        self.assertIn('profiles: ["release-check"]', compose_source)
+        self.assertIn('scripts.verify_mindmap_schema', compose_source)
+        self.assertIn('condition: service_healthy', compose_source)
+        backend_block = compose_source.split('ruoyi-backend-my:', 1)[1].split(
+            'ruoyi-mindmap-schema-check:',
+            1,
+        )[0]
+        self.assertNotIn('ruoyi-mindmap-schema-check', backend_block)
+        self.assertIn('scripts.plan_mindmap_schema_migrations --env=dockermy', readme_source)
+        self.assertIn('scripts.verify_mindmap_schema --env=prod', readme_source)
+        self.assertIn('manualReview', readme_source)
+
+    def test_postgresql_compose_runs_complete_mindmap_migration_after_baseline(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        compose_source = (project_root / 'docker-compose.pg.yml').read_text(encoding='utf-8')
+        migration_source = (
+            self.MIGRATIONS_DIR / '20260820_mindmap_postgresql.sql'
+        ).read_text(encoding='utf-8')
+
+        self.assertIn('zz-mindmap-postgresql.sql', compose_source)
+        for table in REQUIRED_TABLES:
+            self.assertIn(f'CREATE TABLE IF NOT EXISTS {table}', migration_source)
+        self.assertIn('fk_mindmap_node_tag_field', migration_source)
+        self.assertIn('fk_mindmap_node_tag_option', migration_source)
+        self.assertNotIn('DELIMITER', migration_source)
+        self.assertNotIn('AUTO_INCREMENT', migration_source)
+        self.assertNotIn('`', migration_source)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Test runner used by tests/test_log_sanitize_util.py and compatible with unittest suites.
+pytest>=8.4,<10
+pytest-asyncio>=0.24,<2

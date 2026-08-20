@@ -13,6 +13,7 @@ from common.router import APIRouterPro
 from common.vo import ResponseBaseModel
 from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_mindmap.entity.vo.mindmap_share_vo import MindmapShareCreateModel
+from module_mindmap.permissions import mindmap_permissions
 from module_mindmap.service.mindmap_share_service import MindmapShareService
 from utils.log_util import logger
 from utils.response_util import ResponseUtil
@@ -34,7 +35,7 @@ mindmap_share_controller = APIRouterPro(
     summary='创建分享链接',
     description='为脑图创建一个新的分享链接',
     response_model=ResponseBaseModel,
-    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:edit')],
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
 )
 @Log(title='脑图分享', business_type=BusinessType.INSERT)
 async def create_share_link(
@@ -56,7 +57,7 @@ async def create_share_link(
     '/link/{mindmap_id}',
     summary='获取分享链接列表',
     description='获取脑图的所有分享链接',
-    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:query')],
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('query'))],
 )
 async def get_share_link_list(
     request: Request,
@@ -77,7 +78,7 @@ async def get_share_link_list(
     summary='禁用分享链接',
     description='禁用指定的分享链接',
     response_model=ResponseBaseModel,
-    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:edit')],
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
 )
 @Log(title='脑图分享', business_type=BusinessType.DELETE)
 async def delete_share_link(

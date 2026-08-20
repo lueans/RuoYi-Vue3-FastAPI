@@ -311,7 +311,8 @@ class RichText {
       this.textEditNode.innerHTML = this.cacheEditingText || html
     } else {
       // 已经是富文本
-      this.textEditNode.innerHTML = this.cacheEditingText || nodeText
+      this.textEditNode.innerHTML =
+        this.cacheEditingText || (isUndef(nodeText) ? '' : nodeText)
     }
     this.initQuillEditor()
     this.setQuillContainerMinHeight(originHeight)
@@ -853,26 +854,26 @@ class RichText {
     // 短期处理，为了兼容老数据，长期会去除
     const isOldRichTextVersion =
       !data.smmVersion || compareVersion(data.smmVersion, '0.13.0') === '<'
-    const walk = root => {
-      if (root.data && (!root.data.richText || isOldRichTextVersion)) {
-        this.handleDataToRichText(root.data)
-      }
-      // 概要
-      if (root.data) {
-        const generalizationList = formatGetNodeGeneralization(root.data)
-        generalizationList.forEach(item => {
-          if (!item.richText || isOldRichTextVersion) {
-            this.handleDataToRichText(item)
-          }
-        })
-      }
-      if (root.children && root.children.length > 0) {
-        Array.from(root.children).forEach(item => {
-          walk(item)
-        })
-      }
-    }
-    walk(data)
+    walk(
+      data,
+      null,
+      node => {
+        if (node.data && (!node.data.richText || isOldRichTextVersion)) {
+          this.handleDataToRichText(node.data)
+        }
+        // 概要
+        if (node.data) {
+          const generalizationList = formatGetNodeGeneralization(node.data)
+          generalizationList.forEach(item => {
+            if (!item.richText || isOldRichTextVersion) {
+              this.handleDataToRichText(item)
+            }
+          })
+        }
+      },
+      null,
+      true
+    )
     return data
   }
 

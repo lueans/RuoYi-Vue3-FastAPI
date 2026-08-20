@@ -14,6 +14,7 @@
 <script setup>
 import bus from './useEventBus'
 import { store } from './useStore'
+import { isCurrentMindmapEventSource } from '@/utils/mindmap-event'
 
 const props = defineProps({
   mindMap: { type: Object, default: null }
@@ -26,24 +27,34 @@ const num = ref(0)
 let textStr = ''
 const countEl = document.createElement('div')
 
-function onDataChange(data) {
-  textStr = ''
+function updateCount(data) {
+  const textParts = []
   words.value = 0
   num.value = 0
-  walk(data)
+  if (data && typeof data === 'object') {
+    const pending = [data]
+    const visited = new WeakSet()
+    while (pending.length > 0) {
+      const node = pending.pop()
+      if (!node || typeof node !== 'object' || visited.has(node)) continue
+      visited.add(node)
+      num.value += 1
+      textParts.push(String(node.data?.text ?? ''))
+      if (Array.isArray(node.children)) {
+        for (let index = node.children.length - 1; index >= 0; index -= 1) {
+          pending.push(node.children[index])
+        }
+      }
+    }
+  }
+  textStr = textParts.join('')
   countEl.textContent = textStr.replace(/<[^>]*>/g, '')
   words.value = countEl.textContent.length
 }
 
-function walk(data) {
-  if (!data) return
-  num.value++
-  textStr += String(data.data?.text) || ''
-  if (data.children && data.children.length > 0) {
-    data.children.forEach(item => {
-      walk(item)
-    })
-  }
+function onDataChange(data, sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, props.mindMap)) return
+  updateCount(data)
 }
 
 onMounted(() => {

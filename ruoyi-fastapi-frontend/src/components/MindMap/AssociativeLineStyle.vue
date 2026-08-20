@@ -5,11 +5,11 @@
       <div class="style-row">
         <div class="style-section flex1">
           <div class="style-label">颜色</div>
-          <el-color-picker v-model="style.associativeLineColor" size="small" @change="updateStyle('associativeLineColor')" />
+          <el-color-picker v-model="style.associativeLineColor" size="small" :disabled="isReadonly" @change="updateStyle('associativeLineColor')" />
         </div>
         <div class="style-section flex1">
           <div class="style-label">宽度</div>
-          <el-select v-model="style.associativeLineWidth" size="small" @change="updateStyle('associativeLineWidth')">
+          <el-select v-model="style.associativeLineWidth" size="small" :disabled="isReadonly" @change="updateStyle('associativeLineWidth')">
             <el-option v-for="w in lineWidthList" :key="w" :label="w + 'px'" :value="w" />
           </el-select>
         </div>
@@ -17,11 +17,11 @@
       <div class="style-row">
         <div class="style-section flex1">
           <div class="style-label">激活颜色</div>
-          <el-color-picker v-model="style.associativeLineActiveColor" size="small" @change="updateStyle('associativeLineActiveColor')" />
+          <el-color-picker v-model="style.associativeLineActiveColor" size="small" :disabled="isReadonly" @change="updateStyle('associativeLineActiveColor')" />
         </div>
         <div class="style-section flex1">
           <div class="style-label">激活宽度</div>
-          <el-select v-model="style.associativeLineActiveWidth" size="small" @change="updateStyle('associativeLineActiveWidth')">
+          <el-select v-model="style.associativeLineActiveWidth" size="small" :disabled="isReadonly" @change="updateStyle('associativeLineActiveWidth')">
             <el-option v-for="w in lineWidthList" :key="w" :label="w + 'px'" :value="w" />
           </el-select>
         </div>
@@ -29,13 +29,13 @@
       <div class="section-title">文字样式</div>
       <div class="style-section">
         <div class="style-label">字号</div>
-        <el-select v-model="style.associativeLineTextFontSize" size="small" @change="updateStyle('associativeLineTextFontSize')">
+        <el-select v-model="style.associativeLineTextFontSize" size="small" :disabled="isReadonly" @change="updateStyle('associativeLineTextFontSize')">
           <el-option v-for="s in fontSizeList" :key="s" :label="s + 'px'" :value="s" />
         </el-select>
       </div>
       <div class="style-section">
         <div class="style-label">颜色</div>
-        <el-color-picker v-model="style.associativeLineTextColor" size="small" @change="updateStyle('associativeLineTextColor')" />
+        <el-color-picker v-model="style.associativeLineTextColor" size="small" :disabled="isReadonly" @change="updateStyle('associativeLineTextColor')" />
       </div>
     </template>
     <div v-else class="empty-tip">请点击一条关联线</div>
@@ -53,6 +53,7 @@ const props = defineProps({
 
 const sidebarRef = ref(null)
 const hasActiveLine = ref(false)
+const isReadonly = computed(() => store.isReadonly)
 let activeLineNode = null
 let activeLineToNode = null
 
@@ -66,6 +67,15 @@ const style = reactive({
 })
 
 function onLineClick(a, b, node, toNode) {
+  const activeMindMap = props.mindMap
+  if (
+    isReadonly.value
+    || !activeMindMap
+    || !node
+    || !toNode
+    || (node.mindMap && node.mindMap !== activeMindMap)
+    || (toNode.mindMap && toNode.mindMap !== activeMindMap)
+  ) return
   activeLineNode = node
   activeLineToNode = toNode
   hasActiveLine.value = true
@@ -86,25 +96,33 @@ function onLineDeactivate() {
 }
 
 function updateStyle(prop) {
-  if (!activeLineNode || !activeLineToNode || !props.mindMap) return
+  const activeMindMap = props.mindMap
+  if (
+    isReadonly.value
+    || !activeMindMap
+    || !activeLineNode
+    || !activeLineToNode
+    || activeLineNode.mindMap !== activeMindMap
+    || activeLineToNode.mindMap !== activeMindMap
+  ) return
   const uid = activeLineToNode.getData('uid')
-  const existingStyle = activeLineNode.getData('associativeLineStyle') || {}
-  existingStyle[uid] = existingStyle[uid] || {}
-  existingStyle[uid][prop] = style[prop]
-  activeLineNode.setData({ associativeLineStyle: { ...existingStyle } })
-  props.mindMap.associativeLine?.updateActiveLineStyle?.()
+  if (!uid) return
+  const existingStyle = { ...(activeLineNode.getData('associativeLineStyle') || {}) }
+  existingStyle[uid] = {
+    ...(existingStyle[uid] || {}),
+    [prop]: style[prop],
+  }
+  activeLineNode.setData({ associativeLineStyle: existingStyle })
+  activeMindMap.associativeLine?.updateActiveLineStyle?.()
 }
 
 watch(() => props.mindMap, (mm, oldMm) => {
-  if (oldMm) {
-    oldMm.off('associative_line_click', onLineClick)
-    oldMm.off('associative_line_deactivate', onLineDeactivate)
-  }
-  if (mm) {
-    mm.on('associative_line_click', onLineClick)
-    mm.on('associative_line_deactivate', onLineDeactivate)
-  }
-})
+  oldMm?.off?.('associative_line_click', onLineClick)
+  oldMm?.off?.('associative_line_deactivate', onLineDeactivate)
+  if (mm !== oldMm) onLineDeactivate()
+  mm?.on?.('associative_line_click', onLineClick)
+  mm?.on?.('associative_line_deactivate', onLineDeactivate)
+}, { immediate: true })
 
 watch(() => store.activeSidebar, (val) => {
   if (val === 'associativeLineStyle') {
@@ -114,7 +132,12 @@ watch(() => store.activeSidebar, (val) => {
   }
 })
 
+watch(isReadonly, (readonly) => {
+  if (readonly && hasActiveLine.value) onLineDeactivate()
+})
+
 onBeforeUnmount(() => {
+  onLineDeactivate()
   props.mindMap?.off?.('associative_line_click', onLineClick)
   props.mindMap?.off?.('associative_line_deactivate', onLineDeactivate)
 })

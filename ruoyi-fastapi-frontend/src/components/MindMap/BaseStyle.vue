@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="基础样式">
+  <Sidebar ref="sidebarRef" title="基础样式" open-on-mount>
     <div
       class="sidebarContent customScrollbar"
       :class="{ isDark: isDark }"
@@ -85,10 +85,7 @@
           <span class="name">颜色</span>
           <el-popover placement="bottom" trigger="click" :width="260">
             <template #reference>
-              <span
-                class="block"
-                :style="{ backgroundColor: style.lineColor }"
-              ></span>
+              <ColorTrigger :color="style.lineColor" label="选择连线颜色" />
             </template>
             <Color
               :color="style.lineColor"
@@ -225,15 +222,19 @@
           >
             <template #default>
               <div class="rainbowLinesOptionsBox" :class="{ isDark: isDark }">
-                <div
+                <button
+                  type="button"
                   class="optionItem"
                   v-for="item in rainbowLinesOptions"
                   :key="item.value"
+                  :aria-label="item.list ? `使用彩虹线方案 ${item.value}` : '不使用彩虹线条'"
+                  :aria-pressed="isRainbowOptionSelected(item)"
+                  @click="updateRainbowLinesConfig(item)"
                 >
                   <div
                     class="colorsBar"
                     v-if="item.list"
-                    @click="updateRainbowLinesConfig(item)"
+                    aria-hidden="true"
                   >
                     <span
                       class="colorItem"
@@ -242,12 +243,17 @@
                       :style="{ backgroundColor: color }"
                     ></span>
                   </div>
-                  <span v-else @click="updateRainbowLinesConfig(item)">不使用彩虹线条</span>
-                </div>
+                  <span v-else>不使用彩虹线条</span>
+                </button>
               </div>
             </template>
             <template #reference>
-              <div class="curRainbowLine">
+              <button
+                type="button"
+                class="curRainbowLine"
+                aria-label="选择彩虹线方案"
+                :aria-expanded="rainbowLinesPopoverVisible"
+              >
                 <div class="colorsBar" v-if="curRainbowLineColorList">
                   <span
                     class="colorItem"
@@ -257,7 +263,7 @@
                   ></span>
                 </div>
                 <span v-else>不使用彩虹线条</span>
-              </div>
+              </button>
             </template>
           </el-popover>
         </div>
@@ -269,10 +275,7 @@
           <span class="name">颜色</span>
           <el-popover placement="bottom" trigger="click" :width="260">
             <template #reference>
-              <span
-                class="block"
-                :style="{ backgroundColor: style.generalizationLineColor }"
-              ></span>
+              <ColorTrigger :color="style.generalizationLineColor" label="选择概要连线颜色" />
             </template>
             <Color
               :color="style.generalizationLineColor"
@@ -312,10 +315,7 @@
           <span class="name">颜色</span>
           <el-popover placement="bottom" trigger="click" :width="260">
             <template #reference>
-              <span
-                class="block"
-                :style="{ backgroundColor: style.associativeLineColor }"
-              ></span>
+              <ColorTrigger :color="style.associativeLineColor" label="选择关联线颜色" />
             </template>
             <Color
               :color="style.associativeLineColor"
@@ -353,10 +353,7 @@
           <span class="name">激活颜色</span>
           <el-popover placement="bottom" trigger="click" :width="260">
             <template #reference>
-              <span
-                class="block"
-                :style="{ backgroundColor: style.associativeLineActiveColor }"
-              ></span>
+              <ColorTrigger :color="style.associativeLineActiveColor" label="选择关联线激活颜色" />
             </template>
             <Color
               :color="style.associativeLineActiveColor"
@@ -443,10 +440,7 @@
           <span class="name">颜色</span>
           <el-popover placement="bottom" trigger="click" :width="260">
             <template #reference>
-              <span
-                class="block"
-                :style="{ backgroundColor: style.associativeLineTextColor }"
-              ></span>
+              <ColorTrigger :color="style.associativeLineTextColor" label="选择关联线文字颜色" />
             </template>
             <Color
               :color="style.associativeLineTextColor"
@@ -607,6 +601,7 @@
 import Sidebar from './Sidebar.vue'
 import ImgUpload from './ImgUpload/index.vue'
 import Color from './Color.vue'
+import ColorTrigger from './ColorTrigger.vue'
 import bus from './useEventBus'
 import { store, actions } from './useStore'
 import {
@@ -632,6 +627,7 @@ const props = defineProps({
   configData: { type: Object, default: () => ({}) },
   mindMap: { type: Object, default: null }
 })
+const emit = defineEmits(['document-meta-change'])
 
 const sidebarRef = ref(null)
 const isDark = computed(() => store.localConfig.isDark)
@@ -757,16 +753,16 @@ function initMarginStyle() {
 }
 
 function update(key, value) {
-  if (!props.mindMap) return
+  if (!props.mindMap || store.isReadonly) return
   if (key === 'backgroundImage' && value === 'none') {
     style[key] = ''
   } else {
     style[key] = value
   }
-  const currentConfig = props.mindMap.getCustomThemeConfig() || {}
+  const currentConfig = { ...(props.mindMap.getCustomThemeConfig() || {}) }
   currentConfig[key] = value
   props.mindMap.setThemeConfig(currentConfig)
-  actions.storeData({
+  emit('document-meta-change', {
     theme: {
       template: props.mindMap.getTheme(),
       config: currentConfig
@@ -775,6 +771,7 @@ function update(key, value) {
 }
 
 function updateRainbowLinesConfig(item) {
+  if (store.isReadonly) return
   rainbowLinesPopoverVisible.value = false
   curRainbowLineColorList.value = item.list || null
   let newConfig = null
@@ -789,7 +786,16 @@ function updateRainbowLinesConfig(item) {
   actions.storeConfig({ rainbowLinesConfig: newConfig })
 }
 
+function isRainbowOptionSelected(item) {
+  const current = curRainbowLineColorList.value
+  if (!item.list) return !current
+  return Array.isArray(current)
+    && current.length === item.list.length
+    && current.every((color, index) => color === item.list[index])
+}
+
 function updateOuterFramePadding(prop, value) {
+  if (store.isReadonly) return
   outerFramePadding[prop] = value
   if (props.mindMap) {
     props.mindMap.updateConfig({ [prop]: value })
@@ -799,15 +805,15 @@ function updateOuterFramePadding(prop, value) {
 }
 
 function updateMargin(type, value) {
-  if (!props.mindMap) return
+  if (!props.mindMap || store.isReadonly) return
   style[type] = value
-  const currentConfig = props.mindMap.getCustomThemeConfig() || {}
-  if (!currentConfig[marginActiveTab.value]) {
-    currentConfig[marginActiveTab.value] = {}
+  const currentConfig = { ...(props.mindMap.getCustomThemeConfig() || {}) }
+  currentConfig[marginActiveTab.value] = {
+    ...(currentConfig[marginActiveTab.value] || {}),
+    [type]: value
   }
-  currentConfig[marginActiveTab.value][type] = value
   props.mindMap.setThemeConfig(currentConfig)
-  actions.storeData({
+  emit('document-meta-change', {
     theme: {
       template: props.mindMap.getTheme(),
       config: currentConfig
@@ -838,7 +844,7 @@ watch(() => store.activeSidebar, (val) => {
   } else {
     sidebarRef.value?.close()
   }
-})
+}, { immediate: true })
 </script>
 
 <style lang="less" scoped>
@@ -916,15 +922,6 @@ watch(() => store.activeSidebar, (val) => {
         white-space: nowrap;
       }
 
-      .block {
-        display: inline-block;
-        width: 30px;
-        height: 30px;
-        border: 1px solid #dcdfe6;
-        border-radius: 4px;
-        cursor: pointer;
-      }
-
       .curRainbowLine {
         height: 24px;
         border: 1px solid #dcdfe6;
@@ -934,6 +931,14 @@ watch(() => store.activeSidebar, (val) => {
         align-items: center;
         justify-content: center;
         cursor: pointer;
+        padding: 0;
+        background: transparent;
+        color: inherit;
+
+        &:focus-visible {
+          outline: 2px solid #409eff;
+          outline-offset: 2px;
+        }
       }
 
       .iconBtn {
@@ -1034,12 +1039,26 @@ watch(() => store.activeSidebar, (val) => {
     width: 100%;
     height: 30px;
     cursor: pointer;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
     display: flex;
     align-items: center;
     justify-content: center;
 
     &:hover {
       background-color: #f5f7fa;
+    }
+
+    &:focus-visible {
+      outline: 2px solid #409eff;
+      outline-offset: -2px;
+    }
+
+    &[aria-pressed='true'] {
+      box-shadow: inset 0 0 0 2px #409eff;
     }
   }
 }

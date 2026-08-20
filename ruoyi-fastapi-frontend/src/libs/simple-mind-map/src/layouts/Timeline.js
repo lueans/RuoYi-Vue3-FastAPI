@@ -1,6 +1,10 @@
 import Base from './Base'
 import { walk, asyncRun, getNodeIndexInNodeList } from '../utils'
 import { CONSTANTS } from '../constants/constant'
+import {
+  calculateNodeAreaHeight,
+  walkLayoutAncestorChain
+} from './layoutTree'
 
 //  时间轴
 class Timeline extends Base {
@@ -165,20 +169,11 @@ class Timeline extends Base {
 
   //  递归计算节点的宽度
   getNodeAreaHeight(node) {
-    let totalHeight = 0
-    let loop = node => {
-      totalHeight +=
-        node.height +
-        (this.getNodeActChildrenLength(node) > 0 ? node.expandBtnSize : 0) +
-        this.getMarginY(node.layerIndex)
-      if (node.children.length) {
-        node.children.forEach(item => {
-          loop(item)
-        })
-      }
-    }
-    loop(node)
-    return totalHeight
+    return calculateNodeAreaHeight(
+      node,
+      current => this.getNodeActChildrenLength(current),
+      layerIndex => this.getMarginY(layerIndex)
+    )
   }
 
   //  调整兄弟节点的left
@@ -202,9 +197,10 @@ class Timeline extends Base {
 
   //  调整兄弟节点的top
   updateBrothersTop(node, addHeight) {
-    if (node.parent && !node.parent.isRoot) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         if (item.hasCustomPosition()) {
           // 适配自定义位置
@@ -221,9 +217,7 @@ class Timeline extends Base {
           this.updateChildren(item.children, 'top', _offset)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothersTop(node.parent, addHeight)
-    }
+    }, current => Boolean(current.parent && !current.parent.isRoot))
   }
 
   //  绘制连线，连接该节点到其子节点

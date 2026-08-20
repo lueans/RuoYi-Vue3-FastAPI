@@ -35,10 +35,10 @@ export function removeCollaborator(collabId) {
 }
 
 // 搜索用户（用于添加协作者时搜索）
-export function searchUsers(keyword) {
+export function searchUsers(mindmapId, keyword) {
   return request({
     url: '/mindmap/collaborator/search-users',
     method: 'get',
-    params: { keyword }
+    params: { mindmapId, keyword }
   })
 }

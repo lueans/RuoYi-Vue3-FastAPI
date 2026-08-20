@@ -5,13 +5,13 @@ import {
   removeHTMLEntities,
   resizeImgSize,
   handleSelfCloseTags,
-  addXmlns
+  addXmlns,
+  addSafeSvgTitle,
+  stringifyJsonValueIterative
 } from '../utils'
 import { SVG } from '@svgdotjs/svg.js'
 import drawBackgroundImageToCanvas from '../utils/simulateCSSBackgroundInCanvas'
-import { transformToMarkdown } from '../parse/toMarkdown'
 import { ERROR_TYPES } from '../constants/constant'
-import { transformToTxt } from '../parse/toTxt'
 
 //  导出插件
 class Export {
@@ -403,7 +403,7 @@ class Export {
   async svg(name) {
     this.mindMap.renderer.textEdit.hideEditTextBox()
     const { node } = await this.getSvgData()
-    node.first().before(SVG(`<title>${name}</title>`))
+    addSafeSvgTitle(node, name, { prepend: true })
     await this.drawBackgroundToSvg(node)
     const str = node.svg()
     const res = await this.fixSvgStrAndToBlob(str)
@@ -427,7 +427,7 @@ class Export {
   //  导出为json
   async json(name, withConfig = true) {
     const data = this.mindMap.getData(withConfig)
-    const str = JSON.stringify(data)
+    const str = stringifyJsonValueIterative(data)
     return new Blob([str], { type: 'application/json' })
   }
 
@@ -439,6 +439,7 @@ class Export {
   // markdown文件
   async md() {
     const data = this.mindMap.getData()
+    const { transformToMarkdown } = await import('../parse/toMarkdown')
     const content = transformToMarkdown(data)
     return new Blob([content], { type: 'text/markdown' })
   }
@@ -446,6 +447,7 @@ class Export {
   // txt文件
   async txt() {
     const data = this.mindMap.getData()
+    const { transformToTxt } = await import('../parse/toTxt')
     const content = transformToTxt(data)
     return new Blob([content], { type: 'text/plain' })
   }

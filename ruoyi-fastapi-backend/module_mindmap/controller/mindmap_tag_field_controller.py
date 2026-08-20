@@ -16,6 +16,11 @@ from module_mindmap.entity.vo.mindmap_tag_field_vo import (
     TagFieldModel,
     TagFieldOptionModel,
     TagFieldOptionSortModel,
+    TagFieldSuggestionQueryModel,
+)
+from module_mindmap.entity.vo.mindmap_tag_vo import (
+    MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH,
+    MINDMAP_TAG_SEARCH_KEYWORD_PATTERN,
 )
 from module_mindmap.service.mindmap_tag_field_service import MindmapTagFieldService
 from utils.log_util import logger
@@ -54,12 +59,38 @@ async def get_tag_fields(
 )
 async def get_tag_field_suggestions(
     request: Request,
-    keyword: Annotated[str | None, Query(description='搜索关键词')] = None,
+    keyword: Annotated[
+        str | None,
+        Query(
+            description='搜索字段或选项',
+            max_length=MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH,
+            pattern=MINDMAP_TAG_SEARCH_KEYWORD_PATTERN,
+        ),
+    ] = None,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
+    query = TagFieldSuggestionQueryModel(keyword=keyword)
     result = await MindmapTagFieldService.get_suggestions(
-        query_db, current_user.user.user_id, keyword,
+        query_db, current_user.user.user_id, query.keyword,
+    )
+    return ResponseUtil.success(data=result)
+
+
+@mindmap_tag_field_controller.get(
+    '/{field_id}/impact',
+    summary='获取字段影响范围',
+    description='返回字段默认样式或选择模式修改会影响的文件、节点及单选冲突数量',
+    dependencies=[UserInterfaceAuthDependency('mindmap:tag:query')],
+)
+async def get_tag_field_impact(
+    request: Request,
+    field_id: Annotated[int, Path(description='字段ID')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapTagFieldService.get_field_impact(
+        query_db, field_id, current_user.user.user_id,
     )
     return ResponseUtil.success(data=result)
 
@@ -100,7 +131,7 @@ async def add_tag_field(
         query_db, model, current_user.user.user_id, current_user.user.user_name,
     )
     logger.info(result.message)
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)
 
 
 @mindmap_tag_field_controller.put(
@@ -165,7 +196,7 @@ async def add_tag_field_option(
         query_db, model, current_user.user.user_id,
     )
     logger.info(result.message)
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)
 
 
 @mindmap_tag_field_controller.put(

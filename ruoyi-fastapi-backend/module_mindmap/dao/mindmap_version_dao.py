@@ -1,9 +1,10 @@
 """脑图版本历史 DAO"""
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import String, cast, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.vo import PageModel
+from module_admin.entity.do.user_do import SysUser
 from module_mindmap.entity.do.mindmap_version_do import MindmapVersion
 from utils.page_util import PageUtil
 
@@ -25,8 +26,17 @@ class MindmapVersionDao:
                 MindmapVersion.version_type,
                 MindmapVersion.name,
                 MindmapVersion.layout,
-                MindmapVersion.created_by,
+                MindmapVersion.snapshot_schema_version,
+                func.coalesce(
+                    SysUser.nick_name,
+                    SysUser.user_name,
+                    MindmapVersion.created_by,
+                ).label('created_by'),
                 MindmapVersion.created_time,
+            )
+            .outerjoin(
+                SysUser,
+                cast(SysUser.user_id, String(64)) == MindmapVersion.created_by,
             )
             .where(MindmapVersion.mindmap_id == mindmap_id)
         )
@@ -45,6 +55,15 @@ class MindmapVersionDao:
             select(MindmapVersion).where(MindmapVersion.id == version_id)
         )).scalars().first()
         return result
+
+    @classmethod
+    async def get_version_for_update(cls, db: AsyncSession, version_id: int) -> MindmapVersion | None:
+        """锁定版本记录，防止并发删除重复扣减文件版本计数。"""
+        return (await db.execute(
+            select(MindmapVersion)
+            .where(MindmapVersion.id == version_id)
+            .with_for_update()
+        )).scalars().first()
 
     @classmethod
     async def add_version(cls, db: AsyncSession, data: dict) -> MindmapVersion:
@@ -73,6 +92,19 @@ class MindmapVersionDao:
             )
         )).scalar_one()
         return result
+
+    @classmethod
+    async def get_latest_draft(cls, db: AsyncSession, mindmap_id: int) -> MindmapVersion | None:
+        """获取最近一次自动草稿。"""
+        return (await db.execute(
+            select(MindmapVersion)
+            .where(
+                MindmapVersion.mindmap_id == mindmap_id,
+                MindmapVersion.version_type == 0,
+            )
+            .order_by(MindmapVersion.created_time.desc())
+            .limit(1)
+        )).scalars().first()
 
     @classmethod
     async def delete_old_drafts(

@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="快捷键">
+  <Sidebar ref="sidebarRef" title="快捷键" open-on-mount>
     <div class="box" :class="{ isDark: isDark }">
       <div v-for="item in shortcutKeyList" :key="item.type">
         <div class="title">{{ item.type }}</div>
@@ -33,7 +33,7 @@ watch(() => store.activeSidebar, (val) => {
   } else {
     sidebarRef.value?.close()
   }
-})
+}, { immediate: true })
 </script>
 
 <style lang="less" scoped>

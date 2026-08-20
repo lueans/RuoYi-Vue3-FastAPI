@@ -1,0 +1,278 @@
+"""脑图增量保存请求契约测试。"""
+import unittest
+from types import SimpleNamespace, TracebackType
+from unittest.mock import AsyncMock, Mock, patch
+
+from pydantic import ValidationError
+
+from module_mindmap.entity.vo.mindmap_vo import (
+    MindmapContentBatchModel,
+    MindmapContentOperationModel,
+    MindmapModel,
+)
+from module_mindmap.service.mindmap_service import MindmapService
+
+
+class AsyncSavepoint:
+    def __init__(self) -> None:
+        self.entered = False
+        self.exited = False
+        self.exception_type: type[BaseException] | None = None
+
+    async def __aenter__(self) -> 'AsyncSavepoint':
+        self.entered = True
+        return self
+
+    async def __aexit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        self.exited = True
+        self.exception_type = exception_type
+        return False
+
+
+class MindmapContentOperationContractTest(unittest.TestCase):
+    def test_unknown_operation_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            MindmapContentOperationModel(type='plugin.future.write')
+
+        self.assertIn('不支持的脑图内容操作', str(context.exception))
+
+    def test_node_and_entity_operations_require_identity_payload(self) -> None:
+        invalid_operations = (
+            {'type': 'node.update', 'payload': {}},
+            {'type': 'node.update', 'nodeUid': 'node-1'},
+            {'type': 'node.tag.bind', 'nodeUid': 'node-1'},
+            {'type': 'relation.upsert'},
+        )
+        for operation in invalid_operations:
+            with self.subTest(operation=operation), self.assertRaises(ValidationError):
+                MindmapContentOperationModel(**operation)
+
+    def test_delete_operation_only_requires_node_identity(self) -> None:
+        operation = MindmapContentOperationModel(type='node.delete', nodeUid='node-1')
+
+        self.assertEqual(operation.node_uid, 'node-1')
+        self.assertIsNone(operation.payload)
+
+    def test_file_operations_require_corresponding_batch_values(self) -> None:
+        base = {
+            'baseRevision': 1,
+            'clientMutationId': 'mutation-1',
+            'nodeTree': {'data': {'uid': 'root', 'text': 'root'}, 'children': []},
+        }
+        for operation_type in (
+            'file.layout.update', 'file.theme.update', 'file.document_data.update',
+        ):
+            with self.subTest(operation_type=operation_type), self.assertRaises(ValidationError):
+                MindmapContentBatchModel(
+                    **base,
+                    operations=[{'type': operation_type}],
+                )
+
+    def test_view_reset_can_explicitly_use_null(self) -> None:
+        request = MindmapContentBatchModel(
+            baseRevision=1,
+            clientMutationId='mutation-1',
+            operations=[{'type': 'file.view.update'}],
+            nodeTree={'data': {'uid': 'root', 'text': 'root'}, 'children': []},
+            viewData=None,
+        )
+
+        self.assertIsNone(request.view_data)
+
+    def test_document_data_update_has_an_independent_file_conflict_domain(self) -> None:
+        request = MindmapContentBatchModel(
+            baseRevision=1,
+            clientMutationId='mutation-document-config',
+            operations=[{'type': 'file.document_data.update'}],
+            nodeTree={'data': {'uid': 'root', 'text': 'root'}, 'children': []},
+            documentData={'simpleMindMap': {'config': {'imgTextMargin': 8}}},
+        )
+
+        self.assertEqual(request.document_data['simpleMindMap']['config']['imgTextMargin'], 8)
+
+    def test_document_data_rejects_oversized_deep_and_excessive_json(self) -> None:
+        invalid_values = [
+            {'payload': 'x' * (128 * 1024)},
+            {'value': []},
+            {'items': list(range(5_001))},
+            {'invalidNumber': float('nan')},
+        ]
+        nested = invalid_values[1]['value']
+        for _ in range(21):
+            child = []
+            nested.append(child)
+            nested = child
+
+        for document_data in invalid_values:
+            with self.subTest(kind=next(iter(document_data))), self.assertRaises(ValidationError):
+                MindmapModel(name='配置边界', documentData=document_data)
+
+
+class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_idempotent_replay_returns_before_revision_checks_or_writes(self) -> None:
+        request = MindmapContentBatchModel(
+            baseRevision=1,
+            clientMutationId='replayed-mutation',
+            operations=[{'type': 'file.view.update'}],
+            nodeTree={'data': {'uid': 'root', 'text': 'root'}, 'children': []},
+            viewData={'scale': 1},
+        )
+        mindmap = SimpleNamespace(content_revision=99)
+        previous = SimpleNamespace(result_data={
+            'contentRevision': 2,
+            'clientMutationId': 'replayed-mutation',
+            'concurrentMerge': False,
+        })
+        db = SimpleNamespace(rollback=AsyncMock(), commit=AsyncMock(), add=Mock())
+        update_content = AsyncMock()
+
+        with (
+            patch.object(MindmapService, 'check_mindmap_access', new=AsyncMock()),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.get_mindmap_for_update',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapContentDao.get_change_by_mutation',
+                new=AsyncMock(return_value=previous),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.update_content_dao',
+                new=update_content,
+            ),
+        ):
+            result = await MindmapService.update_content_batch_services(
+                db,
+                mindmap_id=8,
+                page_object=request,
+                user_id=3,
+                user_name='alice',
+            )
+
+        self.assertEqual(result['contentRevision'], 2)
+        self.assertEqual(result['clientMutationId'], 'replayed-mutation')
+        self.assertTrue(result['idempotentReplay'])
+        db.rollback.assert_awaited_once()
+        db.commit.assert_not_awaited()
+        update_content.assert_not_awaited()
+
+    async def test_document_data_operation_persists_without_rewriting_tree(self) -> None:
+        current_document_data = {'plugin': {'version': 1}}
+        next_document_data = {
+            'plugin': {'version': 1},
+            'simpleMindMap': {'config': {'imgTextMargin': 12}},
+        }
+        mindmap = SimpleNamespace(
+            id=8,
+            owner_id=3,
+            content_revision=4,
+            root_node_id=10,
+            node_count=2,
+            schema_version=2,
+            engine_name='simple-mind-map',
+            engine_version='test',
+            layout='logicalStructure',
+            theme={'template': 'default'},
+            view_data=None,
+            document_data=current_document_data,
+        )
+        request = MindmapContentBatchModel(
+            baseRevision=4,
+            clientMutationId='document-config-save',
+            operations=[{'type': 'file.document_data.update'}],
+            nodeTree={'data': {'uid': 'root', 'text': 'root'}, 'children': []},
+            documentData=next_document_data,
+        )
+        savepoint = AsyncSavepoint()
+        db = SimpleNamespace(
+            add=Mock(),
+            begin_nested=Mock(return_value=savepoint),
+            commit=AsyncMock(),
+            rollback=AsyncMock(),
+        )
+        update_content = AsyncMock()
+        create_draft = AsyncMock()
+
+        with (
+            patch.object(MindmapService, 'check_mindmap_access', new=AsyncMock()),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.get_mindmap_for_update',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.update_content_dao',
+                new=update_content,
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapContentDao.get_change_by_mutation',
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapContentDao.get_node_revisions',
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_version_service.MindmapVersionService.create_draft_version',
+                new=create_draft,
+            ),
+            patch(
+                'module_mindmap.websocket.room_manager.room_manager.broadcast',
+                new=AsyncMock(),
+            ),
+        ):
+            result = await MindmapService.update_content_batch_services(
+                db,
+                8,
+                request,
+                user_id=3,
+                user_name='alice',
+            )
+
+        persisted = update_content.await_args.args[2]
+        self.assertEqual(persisted['document_data'], next_document_data)
+        self.assertEqual(persisted['update_by'], 'alice')
+        self.assertNotIn('node_tree', persisted)
+        self.assertEqual(result['documentData'], next_document_data)
+        self.assertEqual(result['contentRevision'], 5)
+        self.assertEqual(db.add.call_args.args[0].created_by, 'alice')
+        self.assertEqual(create_draft.await_args.kwargs['created_by'], 'alice')
+        self.assertTrue(savepoint.entered)
+        self.assertTrue(savepoint.exited)
+        db.commit.assert_awaited_once()
+
+    async def test_draft_failure_rolls_back_savepoint_without_blocking_outer_commit(self) -> None:
+        savepoint = AsyncSavepoint()
+        db = SimpleNamespace(
+            begin_nested=Mock(return_value=savepoint),
+            commit=AsyncMock(),
+        )
+        create_draft = AsyncMock(side_effect=RuntimeError('draft flush failed'))
+
+        with patch(
+            'module_mindmap.service.mindmap_version_service.MindmapVersionService.create_draft_version',
+            new=create_draft,
+        ):
+            await MindmapService._create_draft_version_safely(
+                db,
+                8,
+                node_tree={'data': {'uid': 'root'}, 'children': []},
+                view_data=None,
+                layout='logicalStructure',
+                theme=None,
+                created_by='alice',
+            )
+            await db.commit()
+
+        self.assertTrue(savepoint.entered)
+        self.assertTrue(savepoint.exited)
+        self.assertIs(savepoint.exception_type, RuntimeError)
+        db.commit.assert_awaited_once()
+
+
+if __name__ == '__main__':
+    unittest.main()

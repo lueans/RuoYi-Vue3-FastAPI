@@ -6,13 +6,15 @@ import {
   createUid
 } from './index'
 import { formatGetNodeGeneralization } from '../utils/index'
+import { findFirstXmindElementByName } from '../parse/xmindTree'
 
 // 解析出新xmind的概要文本
 export const getSummaryText = (node, topicId) => {
-  if (node.children.summary && node.children.summary.length > 0) {
-    for (let i = 0; i < node.children.summary.length; i++) {
-      const cur = node.children.summary[i]
-      if (cur.id === topicId) {
+  const summary = node?.children?.summary
+  if (Array.isArray(summary)) {
+    for (let i = 0; i < summary.length; i++) {
+      const cur = summary[i]
+      if (cur?.id === topicId) {
         return cur.title
       }
     }
@@ -21,17 +23,12 @@ export const getSummaryText = (node, topicId) => {
 
 // 解析出旧xmind的概要文本
 export const getSummaryText2 = (item, topicId) => {
-  const summaryElements = getElementsByType(item.elements, 'summary')
-  if (summaryElements && summaryElements && summaryElements.length > 0) {
+  const summaryElements = getElementsByType(item?.elements, 'summary')
+  if (summaryElements.length > 0) {
     for (let i = 0; i < summaryElements.length; i++) {
       const cur = summaryElements[i]
-      if (cur.attributes.id === topicId) {
-        return cur.elements &&
-          cur.elements[0] &&
-          cur.elements[0].elements &&
-          cur.elements[0].elements[0]
-          ? cur.elements[0].elements[0].text
-          : ''
+      if (cur?.attributes?.id === topicId) {
+        return cur?.elements?.[0]?.elements?.[0]?.text || ''
       }
     }
   }
@@ -40,35 +37,22 @@ export const getSummaryText2 = (item, topicId) => {
 
 // 解析旧版xmind数据时，找出根节点
 export const getRoot = list => {
-  let root = null
-  const walk = arr => {
-    if (!arr) return
-    for (let i = 0; i < arr.length; i++) {
-      if (!root && arr[i].name === 'topic') {
-        root = arr[i]
-        return
-      }
-    }
-    arr.forEach(item => {
-      walk(item.elements)
-    })
-  }
-  walk(list)
-  return root
+  return findFirstXmindElementByName(list, 'topic')
 }
 
 // 解析旧版xmind数据，从一个数组中根据name找出该项
 export const getItemByName = (arr, name) => {
+  if (!Array.isArray(arr)) return undefined
   return arr.find(item => {
-    return item.name === name
+    return item?.name === name
   })
 }
 
 // 解析旧版xmind数据，从一个数组中根据attributes.type找出该项
 export const getElementsByType = (arr, type) => {
-  return arr.find(el => {
-    return el.attributes.type === type
-  }).elements
+  if (!Array.isArray(arr)) return []
+  const item = arr.find(el => el?.attributes?.type === type)
+  return Array.isArray(item?.elements) ? item.elements : []
 }
 
 // 解析xmind数据，将概要转换为smm支持的结构
@@ -79,7 +63,9 @@ export const addSummaryData = (selfList, childrenList, getText, range) => {
     text: getText(),
     range: null
   }
-  const match = range.match(/\((\d+),(\d+)\)/)
+  const match = typeof range === 'string'
+    ? range.match(/\((\d+),(\d+)\)/)
+    : null
   if (match) {
     const startIndex = Number(match[1])
     const endIndex = Number(match[2])

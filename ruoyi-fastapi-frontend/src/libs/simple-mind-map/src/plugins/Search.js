@@ -7,6 +7,7 @@ import {
 } from '../utils/index'
 import MindMapNode from '../core/render/node/MindMapNode'
 import { CONSTANTS } from '../constants/constant'
+import { replaceAllLiteralText } from '../utils/literalText'
 
 // 搜索插件
 class Search {
@@ -121,9 +122,11 @@ class Search {
       let { richText, text, generalization } = isOnlySearchCurrentRenderNodes
         ? node.getData()
         : node.data
+      text = String(text ?? '')
       if (richText) {
         text = getTextFromHtml(text)
       }
+      text = String(text ?? '')
       if (text.includes(this.searchText)) {
         matchList.push(node)
       }
@@ -139,9 +142,11 @@ class Search {
         ) {
           return
         }
+        text = String(text ?? '')
         if (richText) {
           text = getTextFromHtml(text)
         }
+        text = String(text ?? '')
         if (text.includes(this.searchText)) {
           matchList.push({
             data: gNode
@@ -223,6 +228,7 @@ class Search {
 
   // 替换当前节点
   replace(replaceText, jumpNext = false) {
+    if (this.rejectReadonlyReplace('SEARCH_REPLACE')) return
     if (
       replaceText === null ||
       replaceText === undefined ||
@@ -258,6 +264,7 @@ class Search {
 
   // 替换所有
   replaceAll(replaceText) {
+    if (this.rejectReadonlyReplace('SEARCH_REPLACE_ALL')) return
     if (
       replaceText === null ||
       replaceText === undefined ||
@@ -294,11 +301,18 @@ class Search {
     let { richText, text } = this.isNodeInstance(node)
       ? node.getData()
       : node.data
+    text = String(text ?? '')
     if (richText) {
       return replaceHtmlText(text, searchText, replaceText)
     } else {
-      return text.replace(new RegExp(searchText, 'g'), replaceText)
+      return replaceAllLiteralText(text, searchText, replaceText)
     }
+  }
+
+  rejectReadonlyReplace(action) {
+    if (!this.mindMap.opt.readonly) return false
+    this.mindMap.emit('readonly_command_rejected', action)
+    return true
   }
 
   // 发送事件

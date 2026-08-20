@@ -9,11 +9,14 @@
       "
       placement="top"
     >
-      <div
+      <button
+        type="button"
         class="btn iconfont"
         :class="[useLeftKeySelectionRightKeyDrag ? 'iconmouseR' : 'iconmouseL']"
+        :aria-label="actionLabel"
+        :aria-pressed="useLeftKeySelectionRightKeyDrag"
         @click="toggleAction"
-      ></div>
+      ></button>
     </el-tooltip>
   </div>
 </template>
@@ -29,6 +32,9 @@ const props = defineProps({
 const useLeftKeySelectionRightKeyDrag = computed(
   () => store.localConfig.useLeftKeySelectionRightKeyDrag
 )
+const actionLabel = computed(() => useLeftKeySelectionRightKeyDrag.value
+  ? '切换为左键拖动画布、右键框选节点'
+  : '切换为左键框选节点、右键拖动画布')
 
 function toggleAction() {
   const val = !useLeftKeySelectionRightKeyDrag.value
@@ -61,8 +67,20 @@ function toggleAction() {
   }
 
   .btn {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
     cursor: pointer;
     font-size: 18px;
+
+    &:focus-visible {
+      outline: 2px solid #3370ff;
+      outline-offset: 1px;
+    }
   }
 }
 </style>

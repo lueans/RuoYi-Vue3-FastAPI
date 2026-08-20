@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS mindmap_version (
     view_data JSON COMMENT '视图状态快照',
     layout VARCHAR(50) COMMENT '布局类型',
     theme JSON COMMENT '主题配置',
+    snapshot_schema_version INT NOT NULL DEFAULT 1 COMMENT '版本快照结构版本',
+    tag_snapshots JSON COMMENT '版本创建时引用标签的不可变定义快照',
     created_by VARCHAR(64) NOT NULL COMMENT '创建者',
     created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_version_mindmap (mindmap_id, version_type),

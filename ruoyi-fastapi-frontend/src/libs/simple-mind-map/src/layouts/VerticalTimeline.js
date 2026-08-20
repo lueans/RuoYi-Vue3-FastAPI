@@ -1,6 +1,7 @@
 import Base from './Base'
 import { walk, asyncRun, getNodeIndexInNodeList } from '../utils'
 import { CONSTANTS } from '../constants/constant'
+import { walkLayoutAncestorChain } from './layoutTree'
 
 //  竖向时间轴
 class VerticalTimeline extends Base {
@@ -162,17 +163,18 @@ class VerticalTimeline extends Base {
 
   //  更新兄弟节点的top
   updateBrothers(node, addHeight) {
-    if (node.parent) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         // 自定义节点位置
         if (item.hasCustomPosition()) return
         // 三级或三级以下节点自身位置不需要动
-        if (!node.parent.isRoot && item.uid === node.uid) return
+        if (!current.parent.isRoot && item.uid === current.uid) return
         let _offset = 0
         // 二级节点上面的兄弟节点不需要移动，自身需要往下移动
-        if (node.parent.isRoot) {
+        if (current.parent.isRoot) {
           // 上面的节点不用移
           if (_index < index) {
             _offset = 0
@@ -199,16 +201,15 @@ class VerticalTimeline extends Base {
           this.updateChildren(item.children, 'top', _offset)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothers(node.parent, addHeight)
-    }
+    })
   }
 
   //  调整兄弟节点的top
   updateBrothersTop(node, addHeight) {
-    if (node.parent && !node.parent.isRoot) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         if (item.hasCustomPosition()) {
           // 适配自定义位置
@@ -225,9 +226,7 @@ class VerticalTimeline extends Base {
           this.updateChildren(item.children, 'top', _offset)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothersTop(node.parent, addHeight)
-    }
+    }, current => Boolean(current.parent && !current.parent.isRoot))
   }
 
   //  绘制连线，连接该节点到其子节点

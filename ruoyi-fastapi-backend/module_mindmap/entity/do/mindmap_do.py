@@ -16,6 +16,8 @@ class Mindmap(Base):
     __tablename__ = 'mindmap'
     __table_args__ = (
         Index('idx_mindmap_owner', 'owner_id', 'del_flag'),
+        Index('idx_mindmap_owner_folder', 'owner_id', 'folder_id', 'del_flag', 'is_template'),
+        Index('idx_mindmap_owner_status', 'owner_id', 'status', 'del_flag', 'is_template', 'update_time'),
         Index('idx_mindmap_name', 'name'),
         {'comment': '思维导图主表'},
     )
@@ -41,6 +43,16 @@ class Mindmap(Base):
     node_tree = Column(
         mysql.LONGTEXT if DataBaseConfig.db_type == 'mysql' else Text,
         nullable=False, comment='完整节点树JSON',
+    )
+    root_node_id = Column(BigInteger, nullable=True, comment='结构化根节点ID')
+    content_revision = Column(BigInteger, nullable=False, server_default='1', comment='内容修订号')
+    node_count = Column(Integer, nullable=False, server_default='0', comment='有效节点数量')
+    schema_version = Column(Integer, nullable=False, server_default='1', comment='内容模型版本')
+    engine_name = Column(String(50), nullable=False, server_default='simple-mind-map', comment='脑图引擎')
+    engine_version = Column(String(100), nullable=True, comment='脑图引擎版本')
+    document_data = Column(
+        mysql.JSON if DataBaseConfig.db_type == 'mysql' else postgresql.JSONB,
+        nullable=True, comment='文档级扩展配置',
     )
     view_data = Column(
         mysql.JSON if DataBaseConfig.db_type == 'mysql' else postgresql.JSONB,

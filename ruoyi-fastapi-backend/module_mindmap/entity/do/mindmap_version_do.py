@@ -42,5 +42,11 @@ class MindmapVersion(Base):
         nullable=True,
         comment='主题配置',
     )
+    snapshot_schema_version = Column(Integer, nullable=False, server_default='1', comment='版本快照结构版本')
+    tag_snapshots = Column(
+        mysql.JSON if DataBaseConfig.db_type == 'mysql' else postgresql.JSONB,
+        nullable=True,
+        comment='版本创建时引用标签的不可变定义快照',
+    )
     created_by = Column(String(64), nullable=False, comment='创建者')
     created_time = Column(DateTime, nullable=True, default=datetime.now, comment='创建时间')

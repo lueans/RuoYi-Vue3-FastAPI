@@ -16,8 +16,12 @@ export const bus = {
     }
   },
   emit(event, ...args) {
-    if (!listeners[event]) return
-    listeners[event].forEach(fn => fn(...args))
+    const eventListeners = listeners[event]
+    if (!eventListeners?.length) return false
+    // Dispatch a snapshot so a listener can safely remove itself or another
+    // listener without skipping the next callback in the current emission.
+    eventListeners.slice().forEach(fn => fn(...args))
+    return true
   }
 }
 

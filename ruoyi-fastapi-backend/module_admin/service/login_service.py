@@ -39,6 +39,7 @@ from utils.message_util import message_service
 from utils.pwd_util import PwdUtil
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='login')
+optional_oauth2_scheme = OAuth2PasswordBearer(tokenUrl='login', auto_error=False)
 
 
 class CustomOAuth2PasswordRequestForm(OAuth2PasswordRequestForm):

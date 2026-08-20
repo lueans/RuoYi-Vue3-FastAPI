@@ -2,6 +2,12 @@ import MindMapNode from '../core/render/node/MindMapNode'
 import { CONSTANTS, initRootNodePositionMap } from '../constants/constant'
 import Lru from '../utils/Lru'
 import { createUid } from '../utils/index'
+import { stringifyJsonValueIterative } from '../utils/jsonClone'
+import {
+  calculateNodeAreaWidth,
+  calculateNodeBoundaries,
+  updateDescendantNodes
+} from './layoutTree'
 
 //  布局基类
 class Base {
@@ -73,12 +79,12 @@ class Base {
       lastData = typeof lastData === 'string' ? JSON.parse(lastData) : lastData
       lastData.isActive = curData.isActive
       lastData.expand = curData.expand
-      lastData = JSON.stringify(lastData)
+      lastData = stringifyJsonValueIterative(lastData)
     } else {
       // 只在都有数据时才进行对比
       return false
     }
-    return lastData !== JSON.stringify(curData)
+    return lastData !== stringifyJsonValueIterative(curData)
   }
 
   // 检查库前置或后置内容是否改变了
@@ -193,7 +199,7 @@ class Base {
       // 也可以直接复用
       newNode = this.lru.get(uid) || this.renderer.lastNodeCache[uid]
       // 保存该节点上一次的数据
-      const lastData = JSON.stringify(newNode.getData())
+      const lastData = stringifyJsonValueIterative(newNode.getData())
       // 节点层级改变了
       const isLayerTypeChange = this.checkIsLayerTypeChange(
         newNode.layerIndex,
@@ -288,7 +294,9 @@ class Base {
         const newData = generalizationList[index]
         if (
           isResizeSource ||
-          (newData && JSON.stringify(oldData) !== JSON.stringify(newData))
+          (newData
+            && stringifyJsonValueIterative(oldData)
+              !== stringifyJsonValueIterative(newData))
         ) {
           if (newData) {
             gNode.nodeData.data = newData
@@ -378,48 +386,24 @@ class Base {
 
   //  更新子节点属性
   updateChildren(children, prop, offset) {
-    children.forEach(item => {
+    updateDescendantNodes(children, item => {
       item[prop] += offset
-      if (item.children && item.children.length && !item.hasCustomPosition()) {
-        // 适配自定义位置
-        this.updateChildren(item.children, prop, offset)
-      }
-    })
+    }, item => !item.hasCustomPosition())
   }
 
   //  更新子节点多个属性
   updateChildrenPro(children, props) {
-    children.forEach(item => {
-      Object.keys(props).forEach(prop => {
+    const propKeys = Object.keys(props)
+    updateDescendantNodes(children, item => {
+      propKeys.forEach(prop => {
         item[prop] += props[prop]
       })
-      if (item.children && item.children.length && !item.hasCustomPosition()) {
-        // 适配自定义位置
-        this.updateChildrenPro(item.children, props)
-      }
-    })
+    }, item => !item.hasCustomPosition())
   }
 
   //  递归计算节点的宽度
   getNodeAreaWidth(node, withGeneralization = false) {
-    let widthArr = []
-    let totalGeneralizationNodeWidth = 0
-    let loop = (node, width) => {
-      if (withGeneralization && node.checkHasGeneralization()) {
-        totalGeneralizationNodeWidth += node._generalizationNodeWidth
-      }
-      if (node.children.length) {
-        width += node.width / 2
-        node.children.forEach(item => {
-          loop(item, width)
-        })
-      } else {
-        width += node.width
-        widthArr.push(width)
-      }
-    }
-    loop(node, 0)
-    return Math.max(...widthArr) + totalGeneralizationNodeWidth
+    return calculateNodeAreaWidth(node, withGeneralization)
   }
 
   //  二次贝塞尔曲线
@@ -557,52 +541,11 @@ class Base {
   getNodeBoundaries(node, dir) {
     let { generalizationLineMargin, generalizationNodeMargin } =
       this.mindMap.themeConfig
-    let walk = root => {
-      let _left = Infinity
-      let _right = -Infinity
-      let _top = Infinity
-      let _bottom = -Infinity
-      if (root.children && root.children.length > 0) {
-        root.children.forEach(child => {
-          let { left, right, top, bottom } = walk(child)
-          // 概要内容的宽度
-          let generalizationWidth =
-            child.checkHasGeneralization() && child.getData('expand')
-              ? child._generalizationNodeWidth + generalizationNodeMargin
-              : 0
-          // 概要内容的高度
-          let generalizationHeight =
-            child.checkHasGeneralization() && child.getData('expand')
-              ? child._generalizationNodeHeight + generalizationNodeMargin
-              : 0
-          if (left - (dir === 'h' ? generalizationWidth : 0) < _left) {
-            _left = left - (dir === 'h' ? generalizationWidth : 0)
-          }
-          if (right + (dir === 'h' ? generalizationWidth : 0) > _right) {
-            _right = right + (dir === 'h' ? generalizationWidth : 0)
-          }
-          if (top < _top) {
-            _top = top
-          }
-          if (bottom + (dir === 'v' ? generalizationHeight : 0) > _bottom) {
-            _bottom = bottom + (dir === 'v' ? generalizationHeight : 0)
-          }
-        })
-      }
-      let cur = {
-        left: root.left,
-        right: root.left + root.width,
-        top: root.top,
-        bottom: root.top + root.height
-      }
-      return {
-        left: cur.left < _left ? cur.left : _left,
-        right: cur.right > _right ? cur.right : _right,
-        top: cur.top < _top ? cur.top : _top,
-        bottom: cur.bottom > _bottom ? cur.bottom : _bottom
-      }
-    }
-    let { left, right, top, bottom } = walk(node)
+    const { left, right, top, bottom } = calculateNodeBoundaries(
+      node,
+      dir,
+      generalizationNodeMargin
+    )
     return {
       left,
       right,

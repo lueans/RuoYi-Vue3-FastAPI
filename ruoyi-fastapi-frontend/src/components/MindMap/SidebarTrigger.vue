@@ -5,50 +5,83 @@
     :class="{ hasActive: show && activeSidebar, show: show, isDark: isDark }"
     :style="{ maxHeight: maxHeight + 'px' }"
   >
-    <div class="toggleShowBtn" :class="{ hide: !show }" @click="show = !show">
+    <button
+      class="toggleShowBtn"
+      :class="{ hide: !show }"
+      type="button"
+      :aria-label="show ? '收起侧边工具栏' : '展开侧边工具栏'"
+      :aria-expanded="show"
+      @click="show = !show"
+    >
       <span class="iconfont iconjiantouyou"></span>
-    </div>
+    </button>
     <div class="trigger customScrollbar">
-      <div
+      <button
         class="triggerItem"
         v-for="item in triggerList"
         :key="item.value"
+        type="button"
         :class="{ active: activeSidebar === item.value }"
+        :aria-label="item.name"
+        :aria-pressed="activeSidebar === item.value"
+        :ref="el => setTriggerRef(item.value, el)"
         @click="triggerClick(item)"
       >
         <div class="triggerIcon iconfont" :class="[item.icon]"></div>
         <div class="triggerName">{{ item.name }}</div>
-      </div>
+      </button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { store, actions } from './useStore'
+import {
+  store,
+  actions,
+  isMindmapSidebarReadonlySafe,
+} from './useStore'
 import { sidebarTriggerList } from './config'
+import bus from './useEventBus'
 
 const show = ref(true)
 const maxHeight = ref(0)
 const isDark = computed(() => store.localConfig.isDark)
 const activeSidebar = computed(() => store.activeSidebar)
 const isReadonly = computed(() => store.isReadonly)
+const canManageCollaborators = computed(() => store.canManageCollaborators)
+const triggerRefs = new Map()
 
 const triggerList = computed(() => {
   let list = [...sidebarTriggerList]
+  if (!canManageCollaborators.value) {
+    list = list.filter(item => item.value !== 'collaboratorManager')
+  }
   if (isReadonly.value) {
-    list = list.filter(item => {
-      return ['outline', 'shortcutKey', 'ai', 'versionHistory', 'collaboratorManager'].includes(item.value)
-    })
+    list = list.filter(item => isMindmapSidebarReadonlySafe(item.value))
   }
   return list
 })
 
 function triggerClick(item) {
+  if (isReadonly.value && !isMindmapSidebarReadonlySafe(item?.value)) return
   if (activeSidebar.value === item.value) {
     actions.setActiveSidebar(null)
   } else {
     actions.setActiveSidebar(item.value)
+    nextTick(() => bus.emit('focusActiveSidebar'))
   }
+}
+
+function setTriggerRef(name, element) {
+  if (element) {
+    triggerRefs.set(name, element)
+  } else {
+    triggerRefs.delete(name)
+  }
+}
+
+function focusTrigger(name) {
+  triggerRefs.get(name)?.focus()
 }
 
 function updateSize() {
@@ -61,28 +94,34 @@ function onResize() {
   updateSize()
 }
 
-watch(isReadonly, (val) => {
-  if (val) {
+watch([isReadonly, canManageCollaborators], ([readonly, canManage]) => {
+  if (
+    (readonly && !isMindmapSidebarReadonlySafe(activeSidebar.value))
+    || (!canManage && activeSidebar.value === 'collaboratorManager')
+  ) {
     actions.setActiveSidebar(null)
   }
 })
 
 onMounted(() => {
   window.addEventListener('resize', onResize)
+  bus.on('focusSidebarTrigger', focusTrigger)
   updateSize()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  bus.off('focusSidebarTrigger', focusTrigger)
+  triggerRefs.clear()
 })
 </script>
 
 <style lang="less" scoped>
 .sidebarTriggerContainer {
   position: fixed;
-  top: 60px;
-  bottom: 60px;
-  right: -60px;
+  top: calc(var(--mindmap-shell-top, 60px) + 12px);
+  bottom: 18px;
+  right: -72px;
   z-index: 2000;
   transition: all 0.3s ease;
   display: flex;
@@ -115,30 +154,31 @@ onBeforeUnmount(() => {
   }
 
   &.show {
-    right: 0;
+    right: 12px;
   }
 
   &.hasActive {
-    right: 305px;
+    right: 332px;
   }
 
   .toggleShowBtn {
     position: absolute;
     left: -6px;
-    width: 32px;
-    height: 56px;
+    width: 30px;
+    height: 52px;
     background: #3370ff;
     top: 50%;
     transform: translateY(-50%);
     cursor: pointer;
     transition: left 0.15s ease;
     z-index: 0;
-    border-top-left-radius: 8px;
-    border-bottom-left-radius: 8px;
+    border-top-left-radius: 10px;
+    border-bottom-left-radius: 10px;
     display: flex;
     align-items: center;
     padding-left: 4px;
     box-shadow: -2px 0 8px rgba(51, 112, 255, 0.2);
+    border: 0;
 
     &.hide {
       left: -8px;
@@ -152,6 +192,11 @@ onBeforeUnmount(() => {
       left: -16px;
     }
 
+    &:focus-visible {
+      outline: 2px solid #245bdb;
+      outline-offset: 2px;
+    }
+
     span {
       color: #fff;
       font-size: 14px;
@@ -161,11 +206,11 @@ onBeforeUnmount(() => {
 
   .trigger {
     position: relative;
-    width: 56px;
-    border: 1px solid #dee0e3;
-    background-color: #fff;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-    border-radius: 8px;
+    width: 62px;
+    border: 1px solid #e2e5ea;
+    background-color: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 8px 24px rgba(31, 35, 41, 0.09), 0 1px 3px rgba(31, 35, 41, 0.06);
+    border-radius: 12px;
     max-height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
@@ -179,7 +224,12 @@ onBeforeUnmount(() => {
     }
 
     .triggerItem {
-      height: 56px;
+      width: 100%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      font: inherit;
+      height: 52px;
       display: flex;
       flex-direction: column;
       justify-content: center;
@@ -189,25 +239,42 @@ onBeforeUnmount(() => {
       user-select: none;
       white-space: nowrap;
       transition: all 0.15s ease;
+      position: relative;
 
       &:hover {
         background-color: #f5f6f7;
         color: #1f2329;
       }
 
+      &:focus-visible {
+        outline: 2px solid #3370ff;
+        outline-offset: -3px;
+      }
+
       &.active {
         color: #3370ff;
-        font-weight: 500;
-        background-color: #edf4ff;
+        font-weight: 600;
+        background: linear-gradient(90deg, #edf4ff 0%, #f4f7ff 100%);
+
+        &::before {
+          content: '';
+          position: absolute;
+          left: 0;
+          top: 12px;
+          bottom: 12px;
+          width: 3px;
+          border-radius: 0 3px 3px 0;
+          background: #3370ff;
+        }
       }
 
       .triggerIcon {
-        font-size: 18px;
-        margin-bottom: 4px;
+        font-size: 17px;
+        margin-bottom: 3px;
       }
 
       .triggerName {
-        font-size: 11px;
+        font-size: 10px;
         line-height: 1;
       }
     }

@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="结构">
+  <Sidebar ref="sidebarRef" title="结构" open-on-mount>
     <div class="layoutGroupList" :class="{ isDark: isDark }">
       <div
         class="laytouGroup"
@@ -8,15 +8,19 @@
       >
         <div class="groupName">{{ group.name }}</div>
         <div class="layoutList">
-          <div
+          <button
             class="layoutItem"
             v-for="item in group.list"
             :key="item"
+            type="button"
+            :aria-label="`使用结构：${layoutNameMap[item] || item}`"
+            :aria-pressed="item === currentLayout"
+            :disabled="isReadonly"
             @click="useLayout(item)"
             :class="{ active: item === currentLayout }"
           >
-            <img :src="layoutImgMap[item]" alt="" />
-          </div>
+            <img :src="layoutImgMap[item]" :alt="`${layoutNameMap[item] || item}结构预览`" />
+          </button>
         </div>
       </div>
     </div>
@@ -25,16 +29,19 @@
 
 <script setup>
 import Sidebar from './Sidebar.vue'
-import { store, actions } from './useStore'
-import { layoutImgMap, layoutGroupList } from './config'
+import { store } from './useStore'
+import { layoutImgMap, layoutGroupList, layoutList } from './config'
 
 const props = defineProps({
   mindMap: { type: Object, default: null }
 })
+const emit = defineEmits(['document-meta-change'])
 
 const sidebarRef = ref(null)
 const currentLayout = ref('')
 const isDark = computed(() => store.localConfig.isDark)
+const isReadonly = computed(() => store.isReadonly)
+const layoutNameMap = Object.fromEntries(layoutList.map(item => [item.value, item.name]))
 
 const layoutGroupListData = computed(() => {
   return layoutGroupList.map(group => {
@@ -49,10 +56,10 @@ const layoutGroupListData = computed(() => {
 })
 
 function useLayout(layout) {
-  if (!props.mindMap) return
+  if (!props.mindMap || isReadonly.value) return
   currentLayout.value = layout
   props.mindMap.setLayout(layout)
-  actions.storeData({ layout })
+  emit('document-meta-change', { layout })
 }
 
 watch(() => store.activeSidebar, (val) => {
@@ -62,7 +69,7 @@ watch(() => store.activeSidebar, (val) => {
   } else {
     sidebarRef.value?.close()
   }
-})
+}, { immediate: true })
 </script>
 
 <style lang="less" scoped>
@@ -99,12 +106,19 @@ watch(() => store.activeSidebar, (val) => {
         width: 120px;
         height: 70px;
         cursor: pointer;
+        appearance: none;
+        background: transparent;
         border: 1px solid #e9e9e9;
         transition: all 0.2s;
         overflow: hidden;
         margin-bottom: 12px;
         padding: 5px;
         border-radius: 5px;
+
+        &:focus-visible {
+          outline: 3px solid #409eff;
+          outline-offset: 2px;
+        }
 
         &:hover {
           box-shadow: 0 1px 2px -2px rgba(0, 0, 0, 0.16),

@@ -12,6 +12,12 @@ import quickCreateChildBtnMethods from './quickCreateChildBtn'
 import nodeLayoutMethods from './nodeLayout'
 import { CONSTANTS } from '../../../constants/constant'
 import { copyNodeTree, createUid, addXmlns } from '../../../utils/index'
+import {
+  renderRuntimeTreeSync,
+  visitRuntimeSubtree
+} from '../../../utils/runtimeTree'
+import { createAsyncRenderSession } from '../../../utils/asyncRenderSession'
+import { stringifyJsonValueIterative } from '../../../utils/jsonClone'
 
 //  节点类
 class MindMapNode {
@@ -538,7 +544,7 @@ class MindMapNode {
       this._snapshotPending = true
       Promise.resolve().then(() => {
         this._snapshotPending = false
-        this.nodeDataSnapshot = JSON.stringify(this.getData())
+        this.nodeDataSnapshot = stringifyJsonValueIterative(this.getData())
       })
     }
     // 节点位置变化才更新，因为即使值没有变化属性设置操作也是耗时的
@@ -606,10 +612,8 @@ class MindMapNode {
     }
   }
 
-  // 递归渲染
-  // forceRender：强制渲染，无论是否处于画布可视区域
-  // async：异步渲染
-  render(callback = () => {}, forceRender = false, async = false) {
+  // 渲染当前节点，不处理子树
+  renderSelf(forceRender = false) {
     // 节点
     // 重新渲染连线
     this.renderLine()
@@ -647,43 +651,75 @@ class MindMapNode {
     } else if (openPerformance && performanceConfig.removeNodeWhenOutCanvas) {
       this.removeSelf()
     }
+  }
+
+  // 处理当前节点渲染完成后的插入态
+  finishRender() {
+    // 手动插入的节点立即获得焦点并且开启编辑模式
+    if (this.nodeData.inserting) {
+      delete this.nodeData.inserting
+      this.active()
+      this.mindMap.emit('node_dblclick', this, null, true)
+    }
+  }
+
+  // forceRender：强制渲染，无论是否处于画布可视区域
+  // async：异步性能模式按层让出事件循环；同步模式使用显式栈
+  render(
+    callback = () => {},
+    forceRender = false,
+    async = false,
+    renderSession = null
+  ) {
+    if (!async) {
+      renderRuntimeTreeSync(
+        this,
+        node => node.renderSelf(forceRender),
+        node => node.finishRender(),
+        callback
+      )
+      return
+    }
+
+    const session = renderSession || createAsyncRenderSession()
+    if (!session.isActive()) return
+    // 损坏数据中的循环或共享运行时节点只渲染首次可达位置；重复边仍需
+    // 回调，使父节点的异步完成计数能够正常收敛。
+    if (!session.claim(this)) {
+      callback()
+      return
+    }
+    this.renderSelf(forceRender)
+    if (!session.isActive()) return
     // 子节点
     if (
       this.children &&
       this.children.length &&
       this.getData('expand') !== false
     ) {
+      // 固定本轮子节点集合，避免异步期间数组变化导致完成计数永远无法收敛。
+      const children = [...this.children]
       let index = 0
-      this.children.forEach(item => {
+      children.forEach(item => {
         const renderChild = () => {
           item.render(
             () => {
               index++
-              if (index >= this.children.length) {
+              if (index >= children.length) {
                 callback()
               }
             },
             forceRender,
-            async
+            async,
+            session
           )
         }
-        if (async) {
-          setTimeout(renderChild, 0)
-        } else {
-          renderChild()
-        }
+        session.schedule(renderChild)
       })
     } else {
       callback()
     }
-    // 手动插入的节点立即获得焦点并且开启编辑模式
-    if (this.nodeData.inserting) {
-      delete this.nodeData.inserting
-      this.active()
-      // setTimeout(() => {
-      this.mindMap.emit('node_dblclick', this, null, true)
-      // }, 0)
-    }
+    if (session.isActive()) this.finishRender()
   }
 
   // 删除自身，只是从画布删除，节点容器还在，后续还可以重新插回画布
@@ -693,18 +729,15 @@ class MindMapNode {
     this.removeGeneralization()
   }
 
-  //  递归删除，只是从画布删除，节点容器还在，后续还可以重新插回画布
+  // 删除子树，只是从画布删除，节点容器还在，后续还可以重新插回画布
   remove() {
-    if (!this.group) return
-    this.group.remove()
-    this.removeGeneralization()
-    this.removeLine()
-    // 子节点
-    if (this.children && this.children.length) {
-      this.children.forEach(item => {
-        item.remove()
-      })
-    }
+    visitRuntimeSubtree(this, node => {
+      if (!node.group) return false
+      node.group.remove()
+      node.removeGeneralization()
+      node.removeLine()
+      return true
+    })
   }
 
   // 销毁节点，不但会从画布删除，而且原节点直接置空，后续无法再插回画布

@@ -41,6 +41,7 @@ import { shapeList } from './node/Shape'
 import { lineStyleProps } from '../../theme/default'
 import { CONSTANTS, ERROR_TYPES } from '../../constants/constant'
 import { Polygon } from '@svgdotjs/svg.js'
+import { createAsyncRenderSession } from '../../utils/asyncRenderSession'
 
 // 布局列表
 const layouts = {
@@ -99,6 +100,10 @@ class Render {
     // 防抖定时器
     this.emitNodeActiveEventTimer = null
     this.renderTimer = null
+    // 性能模式每次视图渲染都有独立会话，后续渲染可取消旧任务
+    this.performanceRenderSession = null
+    this.performanceRenderEventActive = false
+    this.destroyed = false
     // 根节点
     this.root = null
     // 文本编辑框，需要再bindEvent之前实例化，否则单击事件只能触发隐藏文本编辑框，而无法保存文本修改
@@ -136,7 +141,81 @@ class Render {
 
   // 重新设置思维导图数据
   setData(data) {
+    this.cancelPerformanceRender()
     this.renderTree = data || null
+  }
+
+  // 取消仍在分帧执行的性能模式渲染，并闭合对应的渲染事件。
+  cancelPerformanceRender(emitEnd = true) {
+    if (this.performanceRenderSession) {
+      this.performanceRenderSession.cancel()
+      this.performanceRenderSession = null
+    }
+    if (this.performanceRenderEventActive) {
+      this.performanceRenderEventActive = false
+      if (emitEnd) this.mindMap.emit('node_tree_render_end')
+    }
+  }
+
+  // 为本次视图变化创建新会话，确保旧会话不会继续写入 SVG。
+  startPerformanceRender() {
+    if (
+      this.destroyed ||
+      this.isRendering ||
+      !this.renderTree ||
+      !this.root
+    ) {
+      return
+    }
+    this.cancelPerformanceRender()
+    const session = createAsyncRenderSession()
+    this.performanceRenderSession = session
+    this.performanceRenderEventActive = true
+    this.mindMap.emit('node_tree_render_start')
+    // start 事件监听器可能同步销毁实例或触发另一轮渲染。
+    if (
+      this.destroyed ||
+      this.performanceRenderSession !== session ||
+      !session.isActive()
+    ) {
+      return
+    }
+    this.root.render(
+      () => {
+        if (
+          this.destroyed ||
+          this.performanceRenderSession !== session ||
+          !session.isActive()
+        ) {
+          return
+        }
+        this.performanceRenderSession = null
+        this.performanceRenderEventActive = false
+        this.mindMap.emit('node_tree_render_end')
+      },
+      false,
+      true,
+      session
+    )
+  }
+
+  // 清理渲染器持有的延迟任务和事件监听，避免实例销毁后继续回调。
+  destroy() {
+    if (this.destroyed) return
+    this.destroyed = true
+    this.cancelPerformanceRender()
+    this.onViewDataChange?.cancel()
+    this.onNodeTextEditChange?.cancel()
+    this.mindMap.off('view_data_change', this.onViewDataChange)
+    this.mindMap.off('node_text_edit_change', this.onNodeTextEditChange)
+    this.mindMap.off('after_update_config', this.onAfterUpdateConfig)
+    this.mindMap.off('beforeDestroy', this.onBeforeDestroy)
+    if (this.renderTimer) {
+      cancelAnimationFrame(this.renderTimer)
+      this.renderTimer = null
+    }
+    clearTimeout(this.emitNodeActiveEventTimer)
+    this.emitNodeActiveEventTimer = null
   }
 
   //   绑定事件
@@ -160,23 +239,12 @@ class Render {
       this.setRootNodeCenter()
     })
     // 性能模式
-    const onViewDataChange = throttle(() => {
-      if (!this.renderTree) {
-        return
-      }
-      if (this.root) {
-        this.mindMap.emit('node_tree_render_start')
-        this.root.render(
-          () => {
-            this.mindMap.emit('node_tree_render_end')
-          },
-          false,
-          true
-        )
-      }
-    }, performanceConfig.time)
+    this.onViewDataChange = throttle(
+      () => this.startPerformanceRender(),
+      performanceConfig.time
+    )
     if (openPerformance) {
-      this.mindMap.on('view_data_change', onViewDataChange)
+      this.mindMap.on('view_data_change', this.onViewDataChange)
     }
     // 文本编辑时实时更新节点大小
     this.onNodeTextEditChange = debounce(this.onNodeTextEditChange, 100, this)
@@ -184,13 +252,17 @@ class Render {
       this.mindMap.on('node_text_edit_change', this.onNodeTextEditChange)
     }
     // 监听配置改变事件
-    this.mindMap.on('after_update_config', (opt, lastOpt) => {
+    this.onAfterUpdateConfig = (opt, lastOpt) => {
       // 更新openPerformance配置
       if (opt.openPerformance !== lastOpt.openPerformance) {
         this.mindMap[opt.openPerformance ? 'on' : 'off'](
           'view_data_change',
-          onViewDataChange
+          this.onViewDataChange
         )
+        if (!opt.openPerformance) {
+          this.onViewDataChange.cancel()
+          this.cancelPerformanceRender()
+        }
         this.forceLoadNode()
       }
       // 更新openRealtimeRenderOnNodeTextEdit配置
@@ -202,8 +274,14 @@ class Render {
           'node_text_edit_change',
           this.onNodeTextEditChange
         )
+        if (!opt.openRealtimeRenderOnNodeTextEdit) {
+          this.onNodeTextEditChange.cancel()
+        }
       }
-    })
+    }
+    this.mindMap.on('after_update_config', this.onAfterUpdateConfig)
+    this.onBeforeDestroy = () => this.destroy()
+    this.mindMap.on('beforeDestroy', this.onBeforeDestroy)
     // 处理非https下的复制黏贴问题
     // 暂时不启用，因为给页面的其他输入框（比如节点文本编辑框）粘贴内容也会触发，冲突问题暂时没有想到好的解决方法，不可能要求所有输入框都阻止冒泡
     // if (!checkClipboardReadEnable()) {
@@ -229,6 +307,8 @@ class Render {
 
   // 强制渲染节点，不考虑是否在画布可视区域内
   forceLoadNode(node) {
+    if (this.destroyed) return
+    this.cancelPerformanceRender()
     node = node || this.root
     if (node) {
       this.mindMap.emit('node_tree_render_start')
@@ -551,6 +631,7 @@ class Render {
 
   // 渲染
   render(callback, source) {
+    if (this.destroyed) return
     this.addRenderParams(callback, source)
     if (this.renderTimer) {
       cancelAnimationFrame(this.renderTimer)
@@ -563,6 +644,8 @@ class Render {
 
   // 真正的渲染
   _render() {
+    if (this.destroyed) return
+    this.cancelPerformanceRender()
     // 切换主题时，被收起的节点需要添加样式复位的标注
     if (this.checkHasRenderSource(CONSTANTS.CHANGE_THEME)) {
       this.resetUnExpandNodeStyle()

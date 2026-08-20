@@ -5,15 +5,15 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">边框宽度</span>
-          <el-select size="small" style="width: 70px" v-model="frameStyle.strokeWidth" @change="val => updateFrame('strokeWidth', val)">
+          <el-select size="small" style="width: 70px" v-model="frameStyle.strokeWidth" :disabled="isReadonly" @change="val => updateFrame('strokeWidth', val)">
             <el-option v-for="w in lineWidthList" :key="w" :label="w" :value="w" />
           </el-select>
         </div>
         <div class="rowItem">
           <span class="name">颜色</span>
-          <el-popover placement="bottom" trigger="click" :width="270">
+          <el-popover placement="bottom" trigger="click" :disabled="isReadonly" :width="270">
             <template #reference>
-              <span class="block" :style="{ backgroundColor: frameStyle.strokeColor }"></span>
+              <ColorTrigger :color="frameStyle.strokeColor" label="选择外框边框颜色" :disabled="isReadonly" :height="24" />
             </template>
             <Color :color="frameStyle.strokeColor" @change="color => updateFrame('strokeColor', color)" />
           </el-popover>
@@ -22,29 +22,29 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">圆角</span>
-          <el-select size="small" style="width: 70px" v-model="frameStyle.radius" @change="val => updateFrame('radius', val)">
+          <el-select size="small" style="width: 70px" v-model="frameStyle.radius" :disabled="isReadonly" @change="val => updateFrame('radius', val)">
             <el-option v-for="r in borderRadiusList" :key="r" :label="r" :value="r" />
           </el-select>
         </div>
         <div class="rowItem">
           <span class="name">填充</span>
-          <el-popover placement="bottom" trigger="click" :width="270">
+          <el-popover placement="bottom" trigger="click" :disabled="isReadonly" :width="270">
             <template #reference>
-              <span class="block" :style="{ backgroundColor: frameStyle.fill }"></span>
+              <ColorTrigger :color="frameStyle.fill" label="选择外框填充颜色" :disabled="isReadonly" :height="24" />
             </template>
             <Color :color="frameStyle.fill" @change="color => updateFrame('fill', color)" />
           </el-popover>
         </div>
       </div>
       <div class="row">
-        <el-button size="small" type="danger" @click="removeFrame">删除外框</el-button>
+        <el-button size="small" type="danger" :disabled="isReadonly" @click="removeFrame">删除外框</el-button>
       </div>
 
       <div class="title">外框文字</div>
       <div class="row">
         <div class="rowItem" style="width: 100%">
           <span class="name">字号</span>
-          <el-select size="small" style="width: 70px" v-model="frameStyle.textFontSize" @change="val => updateFrame('textFontSize', val)">
+          <el-select size="small" style="width: 70px" v-model="frameStyle.textFontSize" :disabled="isReadonly" @change="val => updateFrame('textFontSize', val)">
             <el-option v-for="s in fontSizeList" :key="s" :label="s" :value="s" />
           </el-select>
         </div>
@@ -52,16 +52,16 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
-          <el-popover placement="bottom" trigger="click" :width="270">
+          <el-popover placement="bottom" trigger="click" :disabled="isReadonly" :width="270">
             <template #reference>
-              <span class="block" :style="{ backgroundColor: frameStyle.textColor }"></span>
+              <ColorTrigger :color="frameStyle.textColor" label="选择外框文字颜色" :disabled="isReadonly" :height="24" />
             </template>
             <Color :color="frameStyle.textColor" @change="color => updateFrame('textColor', color)" />
           </el-popover>
         </div>
       </div>
       <div class="row">
-        <el-button size="small" @click="removeFrameText">删除文字</el-button>
+        <el-button size="small" :disabled="isReadonly" @click="removeFrameText">删除文字</el-button>
       </div>
     </div>
     <div v-else class="emptyTip">请点击一个外框</div>
@@ -71,6 +71,7 @@
 <script setup>
 import Sidebar from './Sidebar.vue'
 import Color from './Color.vue'
+import ColorTrigger from './ColorTrigger.vue'
 import { store, actions } from './useStore'
 import { lineWidthList, fontSizeList, borderRadiusList } from './config'
 
@@ -80,7 +81,9 @@ const props = defineProps({
 
 const sidebarRef = ref(null)
 const isDark = computed(() => store.localConfig.isDark)
+const isReadonly = computed(() => store.isReadonly)
 const hasActiveFrame = ref(false)
+let currentMindMap = null
 
 const frameStyle = reactive({
   strokeWidth: 2,
@@ -92,6 +95,13 @@ const frameStyle = reactive({
 })
 
 function onFrameActive(el, parentNode, range) {
+  const activeMindMap = props.mindMap
+  if (
+    isReadonly.value
+    || !activeMindMap
+    || (parentNode?.mindMap && parentNode.mindMap !== activeMindMap)
+  ) return
+  currentMindMap = activeMindMap
   hasActiveFrame.value = true
   if (parentNode && range) {
     const node = parentNode.children?.[range[0]]
@@ -111,36 +121,37 @@ function onFrameActive(el, parentNode, range) {
 
 function onFrameDeactivate() {
   hasActiveFrame.value = false
+  currentMindMap = null
   if (store.activeSidebar === 'nodeOuterFrameStyle') {
     actions.setActiveSidebar(null)
   }
 }
 
 function updateFrame(key, val) {
+  if (isReadonly.value || !currentMindMap || currentMindMap !== props.mindMap) return
   frameStyle[key] = val
-  props.mindMap?.outerFrame?.updateActiveOuterFrame?.({ [key]: val })
+  currentMindMap.outerFrame?.updateActiveOuterFrame?.({ [key]: val })
 }
 
 function removeFrame() {
-  props.mindMap?.outerFrame?.removeActiveOuterFrame?.()
-  hasActiveFrame.value = false
+  if (isReadonly.value || !currentMindMap || currentMindMap !== props.mindMap) return
+  currentMindMap.outerFrame?.removeActiveOuterFrame?.()
+  onFrameDeactivate()
 }
 
 function removeFrameText() {
-  props.mindMap?.outerFrame?.removeActiveOuterFrameText?.()
+  if (isReadonly.value || !currentMindMap || currentMindMap !== props.mindMap) return
+  currentMindMap.outerFrame?.removeActiveOuterFrameText?.()
 }
 
 watch(() => props.mindMap, (mm, oldMm) => {
-  if (oldMm) {
-    oldMm.off('outer_frame_active', onFrameActive)
-    oldMm.off('outer_frame_delete', onFrameDeactivate)
-    oldMm.off('outer_frame_deactivate', onFrameDeactivate)
-  }
-  if (mm) {
-    mm.on('outer_frame_active', onFrameActive)
-    mm.on('outer_frame_delete', onFrameDeactivate)
-    mm.on('outer_frame_deactivate', onFrameDeactivate)
-  }
+  oldMm?.off?.('outer_frame_active', onFrameActive)
+  oldMm?.off?.('outer_frame_delete', onFrameDeactivate)
+  oldMm?.off?.('outer_frame_deactivate', onFrameDeactivate)
+  if (mm !== oldMm) onFrameDeactivate()
+  mm?.on?.('outer_frame_active', onFrameActive)
+  mm?.on?.('outer_frame_delete', onFrameDeactivate)
+  mm?.on?.('outer_frame_deactivate', onFrameDeactivate)
 }, { immediate: true })
 
 watch(() => store.activeSidebar, (val) => {
@@ -151,10 +162,15 @@ watch(() => store.activeSidebar, (val) => {
   }
 })
 
+watch(isReadonly, (readonly) => {
+  if (readonly && hasActiveFrame.value) onFrameDeactivate()
+})
+
 onBeforeUnmount(() => {
-  props.mindMap?.off('outer_frame_active', onFrameActive)
-  props.mindMap?.off('outer_frame_delete', onFrameDeactivate)
-  props.mindMap?.off('outer_frame_deactivate', onFrameDeactivate)
+  onFrameDeactivate()
+  props.mindMap?.off?.('outer_frame_active', onFrameActive)
+  props.mindMap?.off?.('outer_frame_delete', onFrameDeactivate)
+  props.mindMap?.off?.('outer_frame_deactivate', onFrameDeactivate)
 })
 </script>
 
@@ -188,14 +204,6 @@ onBeforeUnmount(() => {
         font-size: 12px;
         margin-right: 8px;
         white-space: nowrap;
-      }
-      .block {
-        display: inline-block;
-        width: 30px;
-        height: 22px;
-        border: 1px solid #dcdfe6;
-        border-radius: 4px;
-        cursor: pointer;
       }
     }
   }

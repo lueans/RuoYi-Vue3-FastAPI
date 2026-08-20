@@ -27,7 +27,7 @@ class MindmapCollaboratorAddModel(BaseModel):
 
     mindmap_id: int = Field(description='脑图ID')
     user_id: int = Field(description='协作用户ID')
-    permission: int = Field(default=0, description='0=查看 1=编辑')
+    permission: int = Field(default=0, ge=0, le=1, description='0=查看 1=编辑')
 
 
 class MindmapCollaboratorUpdateModel(BaseModel):
@@ -35,4 +35,4 @@ class MindmapCollaboratorUpdateModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel)
 
     id: int = Field(description='协作者记录ID')
-    permission: int = Field(description='0=查看 1=编辑')
+    permission: int = Field(ge=0, le=1, description='0=查看 1=编辑')

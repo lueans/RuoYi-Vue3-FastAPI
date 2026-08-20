@@ -20,6 +20,8 @@ class MindmapVersionModel(BaseModel):
     view_data: dict[str, Any] | None = Field(default=None, description='视图状态')
     layout: str | None = Field(default=None, description='布局类型')
     theme: dict[str, Any] | None = Field(default=None, description='主题配置')
+    snapshot_schema_version: int = Field(default=1, description='版本快照结构版本')
+    tag_snapshots: dict[str, Any] | None = Field(default=None, description='历史标签定义快照')
     created_by: str | None = Field(default=None, description='创建者')
     created_time: datetime | None = Field(default=None, description='创建时间')
 
@@ -35,6 +37,7 @@ class MindmapVersionListModel(BaseModel):
     version_type: int | None = Field(default=0, description='版本类型')
     name: str | None = Field(default=None, description='版本名称')
     layout: str | None = Field(default=None, description='布局类型')
+    snapshot_schema_version: int = Field(default=1, description='版本快照结构版本')
     created_by: str | None = Field(default=None, description='创建者')
     created_time: datetime | None = Field(default=None, description='创建时间')
 

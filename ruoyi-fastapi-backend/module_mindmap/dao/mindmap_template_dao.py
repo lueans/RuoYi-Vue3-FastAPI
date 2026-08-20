@@ -1,5 +1,5 @@
 """脑图模板 DAO"""
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.vo import PageModel
@@ -29,6 +29,33 @@ class MindmapTemplateDao:
         db.add(cat)
         await db.flush()
         return cat
+
+    @classmethod
+    async def get_category_by_id(
+        cls, db: AsyncSession, category_id: int, *, for_update: bool = False,
+    ) -> MindmapTemplateCategory | None:
+        query = select(MindmapTemplateCategory).where(MindmapTemplateCategory.id == category_id)
+        if for_update:
+            query = query.with_for_update()
+        return (await db.execute(query)).scalars().first()
+
+    @classmethod
+    async def get_category_by_name(
+        cls, db: AsyncSession, name: str,
+    ) -> MindmapTemplateCategory | None:
+        return (await db.execute(
+            select(MindmapTemplateCategory).where(MindmapTemplateCategory.name == name)
+        )).scalars().first()
+
+    @classmethod
+    async def count_templates_in_category(cls, db: AsyncSession, category_id: int) -> int:
+        return int((await db.execute(
+            select(func.count(Mindmap.id)).where(
+                Mindmap.template_category_id == category_id,
+                Mindmap.is_template == 1,
+                Mindmap.del_flag == '0',
+            )
+        )).scalar_one())
 
     @classmethod
     async def delete_category(cls, db: AsyncSession, category_id: int) -> None:

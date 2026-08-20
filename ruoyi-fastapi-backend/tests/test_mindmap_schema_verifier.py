@@ -1,0 +1,192 @@
+"""脑图数据库 Schema 预检测试。"""
+
+import unittest
+
+from module_mindmap.service.mindmap_schema_verifier import (
+    REQUIRED_COLUMNS,
+    REQUIRED_FOREIGN_KEY_DEFINITIONS,
+    REQUIRED_FOREIGN_KEYS,
+    REQUIRED_INDEX_DEFINITIONS,
+    REQUIRED_INDEXES,
+    REQUIRED_TABLES,
+    find_mindmap_schema_issues,
+)
+
+
+def complete_snapshot() -> dict[str, object]:
+    tables = (
+        set(REQUIRED_TABLES)
+        | {table for table, _ in REQUIRED_COLUMNS}
+        | {table for table, _ in REQUIRED_INDEXES}
+        | {table for table, _ in REQUIRED_FOREIGN_KEYS}
+    )
+    return {
+        'tables': tables,
+        'columns': {
+            table: {column for target, column in REQUIRED_COLUMNS if target == table}
+            for table in tables
+        },
+        'indexes': {
+            table: {index for target, index in REQUIRED_INDEXES if target == table}
+            for table in tables
+        },
+        'indexDefinitions': {
+            table: {
+                index: {'columns': definition[0], 'unique': definition[1]}
+                for (target, index), definition in REQUIRED_INDEX_DEFINITIONS.items()
+                if target == table
+            }
+            for table in tables
+        },
+        'foreignKeys': {
+            table: {key for target, key in REQUIRED_FOREIGN_KEYS if target == table}
+            for table in tables
+        },
+        'foreignKeyDefinitions': {
+            table: {
+                key: {
+                    'columns': definition[0],
+                    'referredTable': definition[1],
+                    'referredColumns': definition[2],
+                }
+                for (target, key), definition in REQUIRED_FOREIGN_KEY_DEFINITIONS.items()
+                if target == table
+            }
+            for table in tables
+        },
+    }
+
+
+class MindmapSchemaVerifierTest(unittest.TestCase):
+    def test_complete_schema_is_ready(self) -> None:
+        self.assertEqual(find_mindmap_schema_issues(complete_snapshot()), [])
+
+    def test_missing_artifacts_report_exact_migration_without_business_data(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['tables'].remove('mindmap_change_log')
+        snapshot['columns']['mindmap_folder'].remove('active_name')
+        snapshot['indexes']['mindmap'].remove('idx_mindmap_owner_status')
+        snapshot['foreignKeys']['mindmap'].remove('fk_mindmap_template_category')
+
+        issues = find_mindmap_schema_issues(snapshot)
+        issue_data = [item.to_dict() for item in issues]
+
+        self.assertEqual(len(issue_data), 4)
+        self.assertIn({
+            'kind': 'column',
+            'object_name': 'mindmap_folder.active_name',
+            'migration': '20260818_mindmap_folder_lifecycle.sql',
+        }, issue_data)
+        self.assertTrue(all(set(item) == {'kind', 'object_name', 'migration'} for item in issue_data))
+
+    def test_missing_creation_idempotency_table_names_exact_migration(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['tables'].remove('mindmap_creation_request')
+
+        self.assertIn(
+            {
+                'kind': 'table',
+                'object_name': 'mindmap_creation_request',
+                'migration': '20260819_mindmap_creation_idempotency.sql',
+            },
+            [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
+        )
+
+    def test_creation_idempotency_unique_key_must_remain_unique(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['indexDefinitions']['mindmap_creation_request'][
+            'uk_mindmap_creation_owner_request'
+        ]['unique'] = False
+
+        self.assertIn(
+            {
+                'kind': 'index_definition',
+                'object_name': (
+                    'mindmap_creation_request.uk_mindmap_creation_owner_request'
+                ),
+                'migration': '20260819_mindmap_creation_idempotency.sql',
+            },
+            [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
+        )
+
+    def test_retention_index_column_order_is_release_blocking(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['indexDefinitions']['mindmap_change_log'][
+            'idx_mindmap_change_retention'
+        ]['columns'] = ('id', 'created_time')
+
+        self.assertIn(
+            {
+                'kind': 'index_definition',
+                'object_name': 'mindmap_change_log.idx_mindmap_change_retention',
+                'migration': '20260819_mindmap_retention_indexes.sql',
+            },
+            [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
+        )
+
+    def test_same_name_with_wrong_index_definition_is_not_ready(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['indexDefinitions']['mindmap']['idx_mindmap_owner_status'] = {
+            'columns': ('owner_id', 'status'),
+            'unique': False,
+        }
+
+        issues = find_mindmap_schema_issues(snapshot)
+
+        self.assertIn(
+            {
+                'kind': 'index_definition',
+                'object_name': 'mindmap.idx_mindmap_owner_status',
+                'migration': '20260818_mindmap_archive_lifecycle.sql',
+            },
+            [item.to_dict() for item in issues],
+        )
+
+    def test_same_name_with_wrong_foreign_key_target_is_not_ready(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['foreignKeyDefinitions']['mindmap']['fk_mindmap_template_category'][
+            'referredTable'
+        ] = 'wrong_category'
+
+        issues = find_mindmap_schema_issues(snapshot)
+
+        self.assertIn(
+            {
+                'kind': 'foreign_key_definition',
+                'object_name': 'mindmap.fk_mindmap_template_category',
+                'migration': '20260818_mindmap_template_workflow.sql',
+            },
+            [item.to_dict() for item in issues],
+        )
+
+    def test_tag_category_integrity_definitions_are_release_blocking(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['indexDefinitions']['mindmap_tag_category'][
+            'uq_mindmap_tag_category_owner_name'
+        ]['unique'] = False
+        snapshot['foreignKeyDefinitions']['mindmap_tag']['fk_mindmap_tag_category'][
+            'referredTable'
+        ] = 'wrong_category'
+
+        issues = [item.to_dict() for item in find_mindmap_schema_issues(snapshot)]
+
+        self.assertIn(
+            {
+                'kind': 'index_definition',
+                'object_name': 'mindmap_tag_category.uq_mindmap_tag_category_owner_name',
+                'migration': '20260819_mindmap_tag_category_integrity.sql',
+            },
+            issues,
+        )
+        self.assertIn(
+            {
+                'kind': 'foreign_key_definition',
+                'object_name': 'mindmap_tag.fk_mindmap_tag_category',
+                'migration': '20260819_mindmap_tag_category_integrity.sql',
+            },
+            issues,
+        )
+
+
+if __name__ == '__main__':
+    unittest.main()

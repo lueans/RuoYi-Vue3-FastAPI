@@ -26,10 +26,11 @@ export function deleteShareLink(shareId) {
 }
 
 // 通过分享 token 查看脑图（公开接口，不需要 token）
-export function viewByShareToken(shareToken) {
+export function viewByShareToken(shareToken, { signal } = {}) {
   return request({
-    url: '/mindmap/share/view/' + shareToken,
+    url: '/mindmap/share/view/' + encodeURIComponent(String(shareToken)),
     method: 'get',
-    headers: { isToken: false }
+    headers: { isToken: false },
+    signal,
   })
 }

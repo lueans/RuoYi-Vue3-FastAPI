@@ -8,6 +8,10 @@ import {
   shouldEncryptResponse
 } from '@/utils/transportCryptoPolicy'
 import cache from '@/plugins/cache'
+import {
+  cloneRequestPayload,
+  stringifyRequestPayload
+} from '@/utils/requestPayload'
 
 const TRANSPORT_BASE_URL = import.meta.env.VITE_APP_BASE_API
 const TRANSPORT_ENABLE_HEADER = 'X-Transport-Encrypt'
@@ -211,49 +215,6 @@ function buildResponseAad(config) {
 }
 
 /**
- * 将空值载荷规范化为可序列化对象。
- *
- * @param {*} payload 原始载荷
- * @returns {*} 规范化后的载荷
- */
-function normalizePlainPayload(payload) {
-  if (payload === undefined || payload === null) {
-    return {}
-  }
-  return payload
-}
-
-/**
- * 将请求载荷序列化为 JSON 文本。
- *
- * @param {*} payload 原始载荷
- * @returns {string} JSON 文本
- */
-function stringifyPayload(payload) {
-  const normalizedPayload = normalizePlainPayload(payload)
-  return JSON.stringify(normalizedPayload)
-}
-
-/**
- * 克隆请求配置中的可变字段，避免重试时互相污染。
- *
- * @param {*} value 待克隆值
- * @returns {*} 克隆结果
- */
-function cloneRequestValue(value) {
-  if (value === undefined || value === null) {
-    return value
-  }
-  if (typeof globalThis.structuredClone === 'function') {
-    return globalThis.structuredClone(value)
-  }
-  if (typeof value === 'object') {
-    return JSON.parse(JSON.stringify(value))
-  }
-  return value
-}
-
-/**
  * 将信封字段转换为适合表单提交的字符串。
  *
  * @param {*} value 字段值
@@ -375,8 +336,8 @@ function rememberOriginalRequestSnapshot(config) {
   }
   config.__transportOriginalSnapshot = {
     url: config.url,
-    params: cloneRequestValue(config.params),
-    data: cloneRequestValue(config.data),
+    params: cloneRequestPayload(config.params),
+    data: cloneRequestPayload(config.data),
     contentType: getHeaderValue(config.headers, 'Content-Type')
   }
 }
@@ -616,7 +577,7 @@ export async function encryptTransportRequest(config) {
   if (shouldEncryptQuery(config, transportPolicy) && (config.params || method === 'get' || method === 'delete')) {
     const queryEnvelope = await encryptPayloadText(
       transportContext,
-      JSON.stringify(normalizePlainPayload(config.params)),
+      stringifyRequestPayload(config.params),
       requestAad
     )
     config.params = { __enc: encodeQueryEnvelope(queryEnvelope) }
@@ -626,7 +587,7 @@ export async function encryptTransportRequest(config) {
   }
 
   if (method === 'post' || method === 'put' || method === 'patch' || method === 'delete') {
-    const plainText = stringifyPayload(config.data)
+    const plainText = stringifyRequestPayload(config.data)
     const bodyEnvelope = await encryptPayloadText(transportContext, plainText, requestAad)
     if (contentType.includes('application/x-www-form-urlencoded')) {
       config.data = encodeFormEnvelope(bodyEnvelope)
@@ -667,8 +628,8 @@ export function resetTransportRequestConfig(config) {
   }
 
   config.url = originalSnapshot.url
-  config.params = cloneRequestValue(originalSnapshot.params)
-  config.data = cloneRequestValue(originalSnapshot.data)
+  config.params = cloneRequestPayload(originalSnapshot.params)
+  config.data = cloneRequestPayload(originalSnapshot.data)
   if (originalSnapshot.contentType) {
     setHeaderValue(config.headers, 'Content-Type', originalSnapshot.contentType)
   }

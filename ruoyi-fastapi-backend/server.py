@@ -13,6 +13,7 @@ from config.get_scheduler import SchedulerUtil
 from exceptions.handle import handle_exception
 from middlewares.handle import handle_middleware
 from module_admin.service.log_service import LogAggregatorService
+from module_mindmap.websocket.room_manager import room_manager
 from sub_applications.handle import handle_sub_applications
 from utils.common_util import worship
 from utils.log_util import logger
@@ -27,6 +28,7 @@ async def _start_background_tasks(app: FastAPI) -> None:
     :param app: FastAPI对象
     :return: None
     """
+    await room_manager.start(app.state.redis)
     await SchedulerUtil.init_system_scheduler(app.state.redis)
     app.state.log_aggregator_task = asyncio.create_task(LogAggregatorService.consume_stream(app.state.redis))
 
@@ -38,6 +40,7 @@ async def _stop_background_tasks(app: FastAPI) -> None:
     :param app: FastAPI对象
     :return: None
     """
+    await room_manager.stop()
     log_task = getattr(app.state, 'log_aggregator_task', None)
     if log_task:
         log_task.cancel()

@@ -5,16 +5,27 @@
     v-show="showToolbar"
     ref="toolbarRef"
     :style="{ left: left + 'px', top: top + 'px' }"
+    role="toolbar"
+    aria-label="节点图片位置"
     @click.stop
     @mousedown.stop
   >
     <el-tooltip v-for="item in placements" :key="item.value" :content="item.name" placement="top">
-      <div
-        class="btn iconfont icontupianweizhi"
+      <button
+        type="button"
+        class="btn"
         :class="{ active: currentPlacement === item.value }"
-        :style="{ transform: item.rotate }"
+        :aria-label="`将图片放在节点${item.name}`"
+        :aria-pressed="currentPlacement === item.value"
+        :disabled="isReadonly"
         @click="setPlacement(item.value)"
-      ></div>
+      >
+        <span
+          class="placementIcon iconfont icontupianweizhi"
+          :style="{ transform: item.rotate }"
+          aria-hidden="true"
+        ></span>
+      </button>
     </el-tooltip>
   </div>
 </template>
@@ -27,6 +38,7 @@ const props = defineProps({
 })
 
 const isDark = computed(() => store.localConfig.isDark)
+const isReadonly = computed(() => store.isReadonly)
 const showToolbar = ref(false)
 const toolbarRef = ref(null)
 const left = ref(0)
@@ -34,6 +46,7 @@ const top = ref(0)
 const currentPlacement = ref('right')
 let currentNode = null
 let imgNode = null
+let currentMindMap = null
 
 const placements = [
   { name: '上方', value: 'top', rotate: 'rotate(0deg)' },
@@ -43,15 +56,23 @@ const placements = [
 ]
 
 function showAt(node, imgEl) {
+  const activeMindMap = props.mindMap
+  if (
+    isReadonly.value
+    || !activeMindMap
+    || !node
+    || (node.mindMap && node.mindMap !== activeMindMap)
+  ) return
   currentNode = node
   imgNode = imgEl
+  currentMindMap = activeMindMap
   currentPlacement.value = node.getStyle('imgPlacement') || 'right'
   positionToolbar()
   showToolbar.value = true
 }
 
 function positionToolbar() {
-  if (!imgNode) return
+  if (!imgNode || !currentMindMap || currentMindMap !== props.mindMap) return
   const rect = typeof imgNode.rbox === 'function' ? imgNode.rbox() : null
   if (!rect) return
   left.value = rect.x + rect.width / 2 - 60
@@ -62,10 +83,17 @@ function close() {
   showToolbar.value = false
   currentNode = null
   imgNode = null
+  currentMindMap = null
 }
 
 function setPlacement(val) {
-  if (!currentNode) return
+  if (
+    isReadonly.value
+    || !currentNode
+    || !currentMindMap
+    || currentMindMap !== props.mindMap
+    || currentNode.mindMap !== currentMindMap
+  ) return
   currentNode.setStyle('imgPlacement', val)
   currentPlacement.value = val
 }
@@ -82,38 +110,40 @@ function onScale() {
 }
 
 watch(() => props.mindMap, (mm, oldMm) => {
-  if (oldMm) {
-    oldMm.off('node_img_click', showAt)
-    oldMm.off('draw_click', close)
-    oldMm.off('svg_mousedown', close)
-    oldMm.off('node_dblclick', close)
-    oldMm.off('translate', close)
-    oldMm.off('node_active', onNodeActive)
-    oldMm.off('scale', onScale)
-  }
-  if (mm) {
-    mm.on('node_img_click', showAt)
-    mm.on('draw_click', close)
-    mm.on('svg_mousedown', close)
-    mm.on('node_dblclick', close)
-    mm.on('translate', close)
-    mm.on('node_active', onNodeActive)
-    mm.on('scale', onScale)
-  }
+  oldMm?.off?.('node_img_click', showAt)
+  oldMm?.off?.('draw_click', close)
+  oldMm?.off?.('svg_mousedown', close)
+  oldMm?.off?.('node_dblclick', close)
+  oldMm?.off?.('translate', close)
+  oldMm?.off?.('node_active', onNodeActive)
+  oldMm?.off?.('scale', onScale)
+  if (mm !== oldMm) close()
+  mm?.on?.('node_img_click', showAt)
+  mm?.on?.('draw_click', close)
+  mm?.on?.('svg_mousedown', close)
+  mm?.on?.('node_dblclick', close)
+  mm?.on?.('translate', close)
+  mm?.on?.('node_active', onNodeActive)
+  mm?.on?.('scale', onScale)
 }, { immediate: true })
+
+watch(isReadonly, (readonly) => {
+  if (readonly) close()
+})
 
 onMounted(() => {
   if (toolbarRef.value) document.body.appendChild(toolbarRef.value)
 })
 
 onBeforeUnmount(() => {
-  props.mindMap?.off('node_img_click', showAt)
-  props.mindMap?.off('draw_click', close)
-  props.mindMap?.off('svg_mousedown', close)
-  props.mindMap?.off('node_dblclick', close)
-  props.mindMap?.off('translate', close)
-  props.mindMap?.off('node_active', onNodeActive)
-  props.mindMap?.off('scale', onScale)
+  close()
+  props.mindMap?.off?.('node_img_click', showAt)
+  props.mindMap?.off?.('draw_click', close)
+  props.mindMap?.off?.('svg_mousedown', close)
+  props.mindMap?.off?.('node_dblclick', close)
+  props.mindMap?.off?.('translate', close)
+  props.mindMap?.off?.('node_active', onNodeActive)
+  props.mindMap?.off?.('scale', onScale)
   if (toolbarRef.value?.parentNode === document.body) {
     document.body.removeChild(toolbarRef.value)
   }
@@ -143,11 +173,18 @@ onBeforeUnmount(() => {
     justify-content: center;
     align-items: center;
     cursor: pointer;
+    border: 0;
     border-radius: 4px;
+    background: transparent;
     font-size: 16px;
 
     &:hover { background: #f0f0f0; }
+    &:focus-visible { outline: 2px solid #409eff; outline-offset: -2px; }
     &.active { color: #409eff; background: #ecf5ff; }
+  }
+
+  .placementIcon {
+    display: inline-flex;
   }
 }
 </style>

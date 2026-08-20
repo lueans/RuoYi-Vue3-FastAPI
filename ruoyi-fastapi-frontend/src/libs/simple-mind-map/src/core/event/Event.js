@@ -1,5 +1,6 @@
 import EventEmitter from 'eventemitter3'
 import { CONSTANTS } from '../../constants/constant'
+import { isLikelyTouchpadWheel } from '../../utils/wheel'
 
 //  事件类
 class Event extends EventEmitter {
@@ -182,15 +183,11 @@ class Event extends EventEmitter {
     if (e.deltaX > 0) dirs.push(CONSTANTS.DIR.RIGHT)
     // 判断是否是触控板
     let isTouchPad = false
-    // mac、windows
-    // if (e.wheelDeltaY === e.deltaY * -3 || Math.abs(e.wheelDeltaY) <= 10) {
-    //   isTouchPad = true
-    // }
     const { customCheckIsTouchPad } = this.mindMap.opt
     if (typeof customCheckIsTouchPad === 'function') {
-      isTouchPad = customCheckIsTouchPad(e)
+      isTouchPad = Boolean(customCheckIsTouchPad(e))
     } else {
-      isTouchPad = Math.abs(e.deltaY) <= 10
+      isTouchPad = isLikelyTouchpadWheel(e)
     }
     this.emit('mousewheel', e, dirs, this, isTouchPad)
   }

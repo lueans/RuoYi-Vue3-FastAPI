@@ -82,6 +82,7 @@ import { encrypt, decrypt } from "@/utils/jsencrypt";
 import useUserStore from '@/store/modules/user'
 import defaultSettings from '@/settings'
 import { feishuAuthorize } from "@/api/login";
+import { resolvePostLoginLocation } from '@/utils/login-redirect'
 
 const title = import.meta.env.VITE_APP_TITLE;
 const footerContent = defaultSettings.footerContent
@@ -110,11 +111,6 @@ const loading = ref(false);
 const captchaEnabled = ref(true);
 // 注册开关
 const register = ref(false);
-const redirect = ref(undefined);
-
-watch(route, (newRoute) => {
-    redirect.value = newRoute.query && newRoute.query.redirect;
-}, { immediate: true });
 
 function handleLogin() {
   proxy.$refs.loginRef.validate(valid => {
@@ -133,14 +129,7 @@ function handleLogin() {
       }
       // 调用action的登录方法
       userStore.login(loginForm.value).then(() => {
-        const query = route.query;
-        const otherQueryParams = Object.keys(query).reduce((acc, cur) => {
-          if (cur !== "redirect") {
-            acc[cur] = query[cur];
-          }
-          return acc;
-        }, {});
-        router.push({ path: redirect.value || "/", query: otherQueryParams });
+        router.push(resolvePostLoginLocation(route.query));
       }).catch(() => {
         loading.value = false;
         // 重新获取验证码

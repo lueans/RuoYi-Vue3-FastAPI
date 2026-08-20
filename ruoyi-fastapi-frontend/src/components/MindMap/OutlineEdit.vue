@@ -14,16 +14,18 @@
         node-key="uid"
         :default-expand-all="true"
         :props="{ label: 'label', children: 'children' }"
-        draggable
+        :draggable="!isReadonly"
+        :allow-drag="allowDrag"
+        :allow-drop="allowDrop"
         @node-drop="onNodeDrop"
       >
         <template #default="{ node, data }">
           <span
             class="nodeEdit"
-            contenteditable="true"
+            :contenteditable="!isReadonly"
             @blur="onNodeBlur($event, data)"
             @keydown="onNodeKeydown($event, node, data)"
-            @paste.prevent="onNodePaste($event, data)"
+            @paste.prevent="onNodePaste($event)"
             v-text="data.label"
           ></span>
         </template>
@@ -34,19 +36,26 @@
 
 <script setup>
 import bus from './useEventBus'
-import { store, actions } from './useStore'
-import { simpleDeepClone, createUid } from '@mind-map/src/utils'
+import { store } from './useStore'
+import { createUid } from '@mind-map/src/utils'
+import {
+  createNewOutlineNode,
+  createOutlineTreeNode,
+} from '@/utils/mindmap-outline-edit'
+import { insertMindmapPlainTextAtSelection } from '@/utils/mindmap-dom-edit'
 
 const props = defineProps({
   mindMap: { type: Object, default: null }
 })
 
 const isDark = computed(() => store.localConfig.isDark)
+const isReadonly = computed(() => store.isReadonly)
 const isOutlineEdit = ref(false)
 const treeData = ref([])
 const containerRef = ref(null)
 
 function openOutlineEdit() {
+  if (isOutlineEdit.value || isReadonly.value) return
   isOutlineEdit.value = true
   refresh()
   nextTick(() => {
@@ -57,83 +66,135 @@ function openOutlineEdit() {
 }
 
 function close() {
-  const data = convertTreeToMindMapData()
-  if (data) {
-    bus.emit('setData', { root: data })
-  }
+  blurActiveOutlineEditor()
   isOutlineEdit.value = false
   if (containerRef.value?.parentNode === document.body) {
     document.body.removeChild(containerRef.value)
   }
 }
 
+function blurActiveOutlineEditor() {
+  const activeElement = document.activeElement
+  if (activeElement && containerRef.value?.contains(activeElement)) {
+    activeElement.blur()
+  }
+}
+
 function refresh() {
   if (!props.mindMap) return
   const data = props.mindMap.getData()
-  treeData.value = [convertToTreeNode(data)]
-}
-
-function convertToTreeNode(node) {
-  const text = node.data?.text || ''
-  const label = text.replace(/<[^>]*>/g, '')
-  return {
-    label,
-    uid: node.data?.uid || createUid(),
-    originalData: node.data,
-    children: (node.children || []).map(c => convertToTreeNode(c))
-  }
-}
-
-function convertTreeToMindMapData() {
-  if (!treeData.value[0]) return null
-  function walk(treeNode) {
-    const data = { ...treeNode.originalData, text: treeNode.label }
-    return {
-      data,
-      children: (treeNode.children || []).map(c => walk(c))
-    }
-  }
-  return walk(treeData.value[0])
+  treeData.value = [createOutlineTreeNode(data, createUid)]
 }
 
 function onNodeBlur(e, data) {
-  data.label = e.target.textContent || ''
+  updateNodeLabel(e.currentTarget, data)
+}
+
+function updateNodeLabel(target, data) {
+  if (isReadonly.value) return
+  const nextLabel = target?.textContent || ''
+  if (nextLabel === data.label) return
+  const runtimeNode = findRuntimeNode(data.uid)
+  if (!runtimeNode) {
+    recoverFromStaleOutline('该节点已被其他协作者删除，大纲已重新加载')
+    return
+  }
+  data.label = nextLabel
+  data.originalLabel = nextLabel
+  data.originalData = {
+    ...data.originalData,
+    text: nextLabel,
+    richText: false,
+  }
+  props.mindMap.execCommand('SET_NODE_TEXT', runtimeNode, nextLabel, false, true)
 }
 
 function onNodeKeydown(e, node, data) {
+  if (isReadonly.value) return
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
+    updateNodeLabel(e.currentTarget, data)
+    if (node.level <= 1) {
+      ElMessage.info('根节点不能创建同级节点，请使用 Tab 创建子节点')
+      return
+    }
     const parent = node.parent
     if (!parent) return
     const siblings = parent.data.children || parent.data
     const index = Array.isArray(siblings) ? siblings.indexOf(data) : -1
     if (index >= 0) {
-      const newNode = { label: '新节点', uid: createUid(), originalData: { text: '新节点', uid: createUid() }, children: [] }
+      const newNode = createNewOutlineNode(createUid)
+      const runtimeNode = findRuntimeNode(data.uid)
+      if (!runtimeNode) {
+        recoverFromStaleOutline('目标节点已变化，大纲已重新加载')
+        return
+      }
       siblings.splice(index + 1, 0, newNode)
       treeData.value = [...treeData.value]
+      props.mindMap.execCommand('INSERT_NODE', false, [runtimeNode], {
+        ...newNode.originalData,
+        richText: false,
+      })
     }
   } else if (e.key === 'Tab') {
     e.preventDefault()
     if (e.shiftKey) return
+    updateNodeLabel(e.currentTarget, data)
+    const runtimeNode = findRuntimeNode(data.uid)
+    if (!runtimeNode) {
+      recoverFromStaleOutline('目标节点已变化，大纲已重新加载')
+      return
+    }
     if (!data.children) data.children = []
-    const newChild = { label: '新节点', uid: createUid(), originalData: { text: '新节点', uid: createUid() }, children: [] }
+    const newChild = createNewOutlineNode(createUid)
     data.children.push(newChild)
     treeData.value = [...treeData.value]
+    props.mindMap.execCommand('INSERT_CHILD_NODE', false, [runtimeNode], {
+      ...newChild.originalData,
+      richText: false,
+    })
   }
 }
 
-function onNodePaste(e, data) {
+function onNodePaste(e) {
+  if (isReadonly.value) return
   const text = e.clipboardData?.getData('text/plain') || ''
-  document.execCommand('insertText', false, text)
+  if (!insertMindmapPlainTextAtSelection(text, e.currentTarget)) {
+    ElMessage.warning('浏览器无法在当前位置粘贴纯文本')
+  }
 }
 
-function onNodeDrop() {
-  // el-tree handles drag internally, treeData is updated
+function findRuntimeNode(uid) {
+  return uid ? props.mindMap?.renderer?.findNodeByUid?.(uid) : null
 }
 
-function onKeydown(e) {
-  if ((e.key === 'Delete' || e.key === 'Backspace') && !e.target.closest('.nodeEdit')) {
-    // Could implement node deletion here
+function recoverFromStaleOutline(message) {
+  ElMessage.warning(message)
+  refresh()
+}
+
+function allowDrag(node) {
+  return !isReadonly.value && node.level > 1
+}
+
+function allowDrop(_, dropNode, type) {
+  return !isReadonly.value && (dropNode.level > 1 || type === 'inner')
+}
+
+function onNodeDrop(draggingNode, dropNode, dropType) {
+  if (isReadonly.value) return
+  const runtimeNode = findRuntimeNode(draggingNode.data?.uid)
+  const targetNode = findRuntimeNode(dropNode.data?.uid)
+  if (!runtimeNode || !targetNode) {
+    recoverFromStaleOutline('拖拽期间脑图结构已变化，大纲已重新加载')
+    return
+  }
+  if (dropType === 'inner') {
+    props.mindMap.execCommand('MOVE_NODE_TO', runtimeNode, targetNode)
+  } else if (dropType === 'before') {
+    props.mindMap.execCommand('INSERT_BEFORE', runtimeNode, targetNode)
+  } else if (dropType === 'after') {
+    props.mindMap.execCommand('INSERT_AFTER', runtimeNode, targetNode)
   }
 }
 
@@ -141,14 +202,19 @@ watch(() => store.localConfig.isOutlineEdit, (val) => {
   if (val) openOutlineEdit()
 })
 
+watch(isReadonly, (readonly) => {
+  if (readonly && isOutlineEdit.value) close()
+})
+
 onMounted(() => {
   bus.on('openOutlineEdit', openOutlineEdit)
-  document.addEventListener('keydown', onKeydown)
+  bus.on('closeOutlineEdit', close)
 })
 
 onBeforeUnmount(() => {
+  blurActiveOutlineEditor()
   bus.off('openOutlineEdit', openOutlineEdit)
-  document.removeEventListener('keydown', onKeydown)
+  bus.off('closeOutlineEdit', close)
   if (containerRef.value?.parentNode === document.body) {
     document.body.removeChild(containerRef.value)
   }

@@ -5,6 +5,8 @@
     :class="{ isDark: isDark }"
     ref="navigatorBoxRef"
     :style="{ width: width + 'px' }"
+    role="region"
+    aria-label="脑图小地图"
     @mousedown="onMousedown"
     @mousemove="onMousemove"
   >
@@ -17,7 +19,7 @@
         top: svgBoxTop + 'px'
       }"
     >
-      <img :src="mindMapImg" @mousedown.prevent />
+      <img :src="mindMapImg" alt="" draggable="false" @mousedown.prevent />
     </div>
     <div
       class="windowBox"
@@ -32,6 +34,8 @@
 <script setup>
 import bus from './useEventBus'
 import { store } from './useStore'
+import { createScopedAsyncSession } from '@/utils/mindmap-async'
+import { isCurrentMindmapEventSource } from '@/utils/mindmap-event'
 
 const props = defineProps({
   mindMap: { type: Object, default: null }
@@ -59,10 +63,32 @@ const boxHeight = ref(0)
 
 let timer = null
 let setSizeTimer = null
+let componentAlive = true
+const miniMapSession = createScopedAsyncSession()
+
+function releaseMiniMapDrag(mindMap = props.mindMap) {
+  mindMap?.miniMap?.onMouseup?.()
+}
+
+function invalidateMiniMap({ clearImage = false } = {}) {
+  miniMapSession.invalidate()
+  clearTimeout(timer)
+  timer = null
+  if (clearImage) {
+    mindMapImg.value = ''
+  }
+}
 
 function toggleMiniMap(show) {
-  showMiniMap.value = show
+  const nextShow = Boolean(show)
+  showMiniMap.value = nextShow
+  if (!nextShow) {
+    releaseMiniMapDrag()
+    invalidateMiniMap({ clearImage: true })
+    return
+  }
   nextTick(() => {
+    if (!componentAlive || !showMiniMap.value) return
     if (navigatorBoxRef.value) {
       init()
     }
@@ -80,12 +106,28 @@ function dataChange() {
   }, 500)
 }
 
+function onDataChange(_data, sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, props.mindMap)) return
+  dataChange()
+}
+
+function onViewDataChange(_viewData, sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, props.mindMap)) return
+  dataChange()
+}
+
+function onNodeTreeRenderEnd(sourceMindMap = null) {
+  if (!isCurrentMindmapEventSource(sourceMindMap, props.mindMap)) return
+  dataChange()
+}
+
 function setSize() {
   clearTimeout(setSizeTimer)
   setSizeTimer = setTimeout(() => {
-    width.value = Math.min(window.innerWidth - 80, 370)
+    if (!componentAlive) return
+    width.value = Math.max(0, Math.min(window.innerWidth - 80, 370))
     nextTick(() => {
-      if (showMiniMap.value) {
+      if (componentAlive && showMiniMap.value) {
         init()
         drawMiniMap()
       }
@@ -100,17 +142,43 @@ function init() {
   boxHeight.value = rect.height
 }
 
-function drawMiniMap() {
-  if (!props.mindMap?.miniMap) return
-  const result = props.mindMap.miniMap.calculationMiniMap(boxWidth.value, boxHeight.value)
-  if (!result) return
-  result.getImgUrl(img => {
-    mindMapImg.value = img
-  })
-  viewBoxStyle.value = result.viewBoxStyle
-  svgBoxScale.value = result.miniMapBoxScale
-  svgBoxLeft.value = result.miniMapBoxLeft
-  svgBoxTop.value = result.miniMapBoxTop
+async function drawMiniMap() {
+  const activeMindMap = props.mindMap
+  if (
+    !componentAlive
+    || !showMiniMap.value
+    || !activeMindMap?.miniMap
+    || boxWidth.value <= 0
+    || boxHeight.value <= 0
+  ) return
+
+  const session = miniMapSession.activate(activeMindMap)
+  try {
+    const result = activeMindMap.miniMap.calculationMiniMap(
+      boxWidth.value,
+      boxHeight.value,
+    )
+    if (!result || !miniMapSession.isCurrent(session)) return
+
+    viewBoxStyle.value = result.viewBoxStyle
+    svgBoxScale.value = result.miniMapBoxScale
+    svgBoxLeft.value = result.miniMapBoxLeft
+    svgBoxTop.value = result.miniMapBoxTop
+
+    await result.getImgUrl(img => {
+      if (
+        !componentAlive
+        || !showMiniMap.value
+        || props.mindMap !== activeMindMap
+        || !miniMapSession.isCurrent(session)
+      ) return
+      mindMapImg.value = typeof img === 'string' ? img : ''
+    })
+  } catch {
+    if (miniMapSession.isCurrent(session)) {
+      mindMapImg.value = ''
+    }
+  }
 }
 
 function onMousedown(e) {
@@ -148,29 +216,40 @@ onMounted(() => {
   window.addEventListener('resize', setSize)
   window.addEventListener('mouseup', onMouseup)
   bus.on('toggle_mini_map', toggleMiniMap)
-  bus.on('data_change', dataChange)
-  bus.on('view_data_change', dataChange)
-  bus.on('node_tree_render_end', dataChange)
+  bus.on('data_change', onDataChange)
+  bus.on('view_data_change', onViewDataChange)
+  bus.on('node_tree_render_end', onNodeTreeRenderEnd)
 })
 
 watch(() => props.mindMap, (mm, oldMm) => {
   if (oldMm) {
-    oldMm.off('mini_map_view_box_position_change', onViewBoxPositionChange)
+    releaseMiniMapDrag(oldMm)
+    oldMm.off?.('mini_map_view_box_position_change', onViewBoxPositionChange)
   }
+  invalidateMiniMap({ clearImage: true })
   if (mm) {
-    mm.on('mini_map_view_box_position_change', onViewBoxPositionChange)
+    mm.on?.('mini_map_view_box_position_change', onViewBoxPositionChange)
   }
-})
+  if (mm && showMiniMap.value) {
+    nextTick(() => {
+      if (!componentAlive || !showMiniMap.value || props.mindMap !== mm) return
+      init()
+      drawMiniMap()
+    })
+  }
+}, { immediate: true })
 
 onBeforeUnmount(() => {
+  componentAlive = false
+  releaseMiniMapDrag()
+  invalidateMiniMap({ clearImage: true })
   window.removeEventListener('resize', setSize)
   window.removeEventListener('mouseup', onMouseup)
   bus.off('toggle_mini_map', toggleMiniMap)
-  bus.off('data_change', dataChange)
-  bus.off('view_data_change', dataChange)
-  bus.off('node_tree_render_end', dataChange)
+  bus.off('data_change', onDataChange)
+  bus.off('view_data_change', onViewDataChange)
+  bus.off('node_tree_render_end', onNodeTreeRenderEnd)
   props.mindMap?.off?.('mini_map_view_box_position_change', onViewBoxPositionChange)
-  clearTimeout(timer)
   clearTimeout(setSizeTimer)
 })
 </script>

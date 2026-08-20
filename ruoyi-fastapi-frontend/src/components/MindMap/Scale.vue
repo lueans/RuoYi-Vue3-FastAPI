@@ -1,14 +1,16 @@
 <template>
   <div class="scaleContainer" :class="{ isDark: isDark }">
     <el-tooltip effect="dark" content="缩小" placement="top">
-      <div class="btn el-icon-minus" @click="narrow">
+      <button class="btn el-icon-minus" type="button" aria-label="缩小画布" @click="narrow">
         <span class="iconfont">-</span>
-      </div>
+      </button>
     </el-tooltip>
     <div class="scaleInfo">
       <input
         ref="inputRef"
         type="text"
+        inputmode="numeric"
+        aria-label="画布缩放百分比"
         v-model="scaleNum"
         @input="onScaleNumInput"
         @change="onScaleNumChange"
@@ -18,14 +20,16 @@
       />%
     </div>
     <el-tooltip effect="dark" content="放大" placement="top">
-      <div class="btn el-icon-plus" @click="enlarge">
+      <button class="btn el-icon-plus" type="button" aria-label="放大画布" @click="enlarge">
         <span class="iconfont">+</span>
-      </div>
+      </button>
     </el-tooltip>
   </div>
 </template>
 
 <script setup>
+import { clampMindmapScale } from '@/utils/mindmap-zoom'
+
 const props = defineProps({
   mindMap: { type: Object, default: null },
   isDark: { type: Boolean, default: false }
@@ -57,12 +61,19 @@ function onScaleNumInput() {
 
 function onScaleNumChange() {
   const num = Number(scaleNum.value)
-  if (Number.isNaN(num) || num <= 0) {
+  const mindMap = props.mindMap
+  if (!mindMap || !Number.isFinite(num) || num <= 0) {
     scaleNum.value = cacheScaleNum.value
   } else {
-    const cx = props.mindMap.width / 2
-    const cy = props.mindMap.height / 2
-    props.mindMap.view.setScale(num / 100, cx, cy)
+    const boundedScale = clampMindmapScale(num / 100, mindMap.opt)
+    if (boundedScale === null) {
+      scaleNum.value = cacheScaleNum.value
+      return
+    }
+    scaleNum.value = toPer(boundedScale)
+    const cx = mindMap.width / 2
+    const cy = mindMap.height / 2
+    mindMap.view.setScale(boundedScale, cx, cy)
   }
 }
 
@@ -112,7 +123,18 @@ onBeforeUnmount(() => {
   }
 
   .btn {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
     cursor: pointer;
+
+    &:focus-visible {
+      outline: 2px solid #3370ff;
+      outline-offset: 4px;
+      border-radius: 3px;
+    }
   }
 
   .scaleInfo {

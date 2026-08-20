@@ -8,6 +8,7 @@ import { isRelogin } from '@/utils/request'
 import useUserStore from '@/store/modules/user'
 import useSettingsStore from '@/store/modules/settings'
 import usePermissionStore from '@/store/modules/permission'
+import { createLoginRedirectLocation } from '@/utils/login-redirect'
 
 NProgress.configure({ showSpinner: false })
 
@@ -58,7 +59,7 @@ router.beforeEach((to, from, next) => {
       // 在免登录白名单，直接进入
       next()
     } else {
-      next(`/login?redirect=${to.fullPath}`) // 否则全部重定向到登录页
+      next(createLoginRedirectLocation(to.fullPath)) // 保留目标路由的完整查询参数
       NProgress.done()
     }
   }

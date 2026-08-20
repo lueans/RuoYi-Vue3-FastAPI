@@ -1,16 +1,50 @@
 <template>
   <div class="top-right-btn" :style="style">
     <el-row>
-      <el-tooltip class="item" effect="dark" :content="showSearch ? '隐藏搜索' : '显示搜索'" placement="top" v-if="search">
-        <el-button circle icon="Search" @click="toggleSearch()" />
+      <el-tooltip v-if="search" class="item" effect="dark" :content="searchButtonLabel" placement="top">
+        <el-button
+          circle
+          icon="Search"
+          :aria-label="searchButtonLabel"
+          :aria-pressed="showSearch"
+          @click="toggleSearch"
+        />
       </el-tooltip>
-      <el-tooltip class="item" effect="dark" content="刷新" placement="top">
-        <el-button circle icon="Refresh" @click="refresh()" />
+      <el-tooltip class="item" effect="dark" content="刷新列表" placement="top">
+        <el-button
+          circle
+          icon="Refresh"
+          aria-label="刷新列表"
+          :aria-busy="loading"
+          :loading="loading"
+          :disabled="loading"
+          @click="refresh"
+        />
       </el-tooltip>
       <el-tooltip class="item" effect="dark" content="显隐列" placement="top" v-if="Object.keys(columns).length > 0">
-        <el-button circle icon="Menu" @click="showColumn()" v-if="showColumnsType == 'transfer'"/>
-        <el-dropdown trigger="click" :hide-on-click="false" style="padding-left: 12px" v-if="showColumnsType == 'checkbox'">
-          <el-button circle icon="Menu" />
+        <el-button
+          v-if="showColumnsType === 'transfer'"
+          circle
+          icon="Menu"
+          aria-label="设置显示列"
+          aria-haspopup="dialog"
+          :aria-expanded="open"
+          @click="showColumn"
+        />
+        <el-dropdown
+          v-if="showColumnsType === 'checkbox'"
+          trigger="click"
+          :hide-on-click="false"
+          style="padding-left: 12px"
+          @visible-change="columnMenuOpen = $event"
+        >
+          <el-button
+            circle
+            icon="Menu"
+            aria-label="设置显示列"
+            aria-haspopup="menu"
+            :aria-expanded="columnMenuOpen"
+          />
           <template #dropdown>
             <el-dropdown-menu>
               <!-- 全选/反选 按钮 -->
@@ -66,6 +100,11 @@ const props = defineProps({
     type: Number,
     default: 10
   },
+  /* 列表是否正在刷新 */
+  loading: {
+    type: Boolean,
+    default: false
+  },
 })
 
 const emits = defineEmits(['update:showSearch', 'queryTable'])
@@ -76,6 +115,10 @@ const value = ref([])
 const title = ref("显示/隐藏")
 // 是否显示弹出层
 const open = ref(false)
+// 复选框列菜单是否展开
+const columnMenuOpen = ref(false)
+
+const searchButtonLabel = computed(() => props.showSearch ? '隐藏搜索条件' : '显示搜索条件')
 
 const style = computed(() => {
   const ret = {}
@@ -122,7 +165,7 @@ function showColumn() {
   open.value = true
 }
 
-if (props.showColumnsType == "transfer") {
+if (props.showColumnsType === "transfer") {
   // transfer穿梭显隐列初始默认隐藏列
   if (Array.isArray(props.columns)) {
     for (let item in props.columns) {

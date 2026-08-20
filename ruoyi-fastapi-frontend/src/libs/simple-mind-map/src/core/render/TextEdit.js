@@ -178,13 +178,25 @@ export default class TextEdit {
     )
   }
 
+  // 提交当前编辑内容，并以编辑节点作为后续插入命令的明确目标
+  finishTextEditAndInsert(command) {
+    const currentNode = this.getCurrentEditNode()
+    this.hideEditTextBox()
+    if (currentNode) {
+      this.mindMap.execCommand(command, true, [currentNode])
+    }
+  }
+
   //  注册临时快捷键
   registerTmpShortcut() {
     this.mindMap.keyCommand.addShortcut('Enter', () => {
-      this.hideEditTextBox()
+      // 创建节点后会立即进入文字编辑。此时再次按 Enter 应提交当前
+      // 文本并继续创建同级节点，才能支持连续快速录入。
+      this.finishTextEditAndInsert('INSERT_NODE')
     })
     this.mindMap.keyCommand.addShortcut('Tab', () => {
-      this.hideEditTextBox()
+      // Tab 同样提交当前文本，并以当前节点为父节点连续向下创建。
+      this.finishTextEditAndInsert('INSERT_CHILD_NODE')
     })
   }
 

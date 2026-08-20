@@ -1,27 +1,100 @@
 // 全屏事件检测
 const getOnfullscreEnevt = () => {
-  if (document.documentElement.requestFullScreen) {
+  if ('onfullscreenchange' in document) {
     return 'onfullscreenchange'
-  } else if (document.documentElement.webkitRequestFullScreen) {
+  } else if ('onwebkitfullscreenchange' in document) {
     return 'onwebkitfullscreenchange'
-  } else if (document.documentElement.mozRequestFullScreen) {
+  } else if ('onmozfullscreenchange' in document) {
     return 'onmozfullscreenchange'
-  } else if (document.documentElement.msRequestFullscreen) {
+  } else if ('onMSFullscreenChange' in document) {
     return 'onmsfullscreenchange'
   }
 }
 
 export const fullscrrenEvent = getOnfullscreEnevt()
 
-// 全屏
+export const getFullscreenElement = () => (
+  document.fullscreenElement ||
+  document.webkitFullscreenElement ||
+  document.mozFullScreenElement ||
+  document.msFullscreenElement ||
+  null
+)
+
+export const isFullscreenSupported = element => Boolean(
+  element?.requestFullscreen ||
+  element?.webkitRequestFullscreen ||
+  element?.webkitRequestFullScreen ||
+  element?.mozRequestFullScreen ||
+  element?.msRequestFullscreen
+)
+
+// 全屏。统一返回 Promise，调用方可以处理浏览器拒绝或能力缺失。
 export const fullScreen = element => {
-  if (element.requestFullScreen) {
-    element.requestFullScreen()
-  } else if (element.webkitRequestFullScreen) {
-    element.webkitRequestFullScreen()
-  } else if (element.mozRequestFullScreen) {
-    element.mozRequestFullScreen()
+  const request = element?.requestFullscreen ||
+    element?.webkitRequestFullscreen ||
+    element?.webkitRequestFullScreen ||
+    element?.mozRequestFullScreen ||
+    element?.msRequestFullscreen
+  if (!request) {
+    return Promise.reject(new Error('当前浏览器不支持全屏模式'))
   }
+  try {
+    return Promise.resolve(request.call(element))
+  } catch (error) {
+    return Promise.reject(error)
+  }
+}
+
+export const exitFullScreen = () => {
+  if (!getFullscreenElement()) return Promise.resolve()
+  const exit = document.exitFullscreen ||
+    document.webkitExitFullscreen ||
+    document.webkitCancelFullScreen ||
+    document.mozCancelFullScreen ||
+    document.msExitFullscreen
+  if (!exit) return Promise.reject(new Error('当前浏览器无法退出全屏模式'))
+  try {
+    return Promise.resolve(exit.call(document))
+  } catch (error) {
+    return Promise.reject(error)
+  }
+}
+
+export const waitForFullscreenElement = (expectedElement, timeoutMs = 750) => new Promise(resolve => {
+  const startedAt = Date.now()
+  const check = () => {
+    if (getFullscreenElement() === expectedElement) {
+      resolve(true)
+      return
+    }
+    if (Date.now() - startedAt >= timeoutMs) {
+      resolve(false)
+      return
+    }
+    setTimeout(check, 25)
+  }
+  check()
+})
+
+export const requestFullscreenAndWait = async (element, timeoutMs = 750) => {
+  let requestError = null
+  void fullScreen(element).catch(error => {
+    requestError = error
+  })
+  const entered = await waitForFullscreenElement(element, timeoutMs)
+  if (requestError) throw requestError
+  return entered
+}
+
+export const exitFullscreenAndWait = async (timeoutMs = 750) => {
+  let requestError = null
+  void exitFullScreen().catch(error => {
+    requestError = error
+  })
+  const exited = await waitForFullscreenElement(null, timeoutMs)
+  if (requestError) throw requestError
+  return exited
 }
 
 // 文件转buffer
@@ -33,18 +106,6 @@ export const fileToBuffer = file => {
     }
     reader.readAsArrayBuffer(file)
   })
-}
-
-// 复制文本到剪贴板
-export const copy = text => {
-  // 使用textarea可以保留换行
-  const input = document.createElement('textarea')
-  // input.setAttribute('value', text)
-  input.innerHTML = text
-  document.body.appendChild(input)
-  input.select()
-  document.execCommand('copy')
-  document.body.removeChild(input)
 }
 
 // 复制文本到剪贴板

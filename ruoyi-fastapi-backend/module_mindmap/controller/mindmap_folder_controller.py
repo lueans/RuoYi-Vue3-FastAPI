@@ -13,10 +13,12 @@ from common.router import APIRouterPro
 from common.vo import ResponseBaseModel
 from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_mindmap.entity.vo.mindmap_folder_vo import (
-    MindmapFolderModel,
+    MindmapFolderCreateModel,
     MindmapFolderSortModel,
+    MindmapFolderUpdateModel,
     MindmapMoveModel,
 )
+from module_mindmap.permissions import mindmap_permissions
 from module_mindmap.service.mindmap_folder_service import MindmapFolderService
 from utils.log_util import logger
 from utils.response_util import ResponseUtil
@@ -54,7 +56,7 @@ async def get_folder_tree(
 @Log(title='文件夹管理', business_type=BusinessType.INSERT)
 async def add_folder(
     request: Request,
-    model: MindmapFolderModel,
+    model: MindmapFolderCreateModel,
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
@@ -75,7 +77,7 @@ async def add_folder(
 @Log(title='文件夹管理', business_type=BusinessType.UPDATE)
 async def update_folder(
     request: Request,
-    model: MindmapFolderModel,
+    model: MindmapFolderUpdateModel,
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
@@ -83,7 +85,7 @@ async def update_folder(
         query_db, model, current_user.user.user_id, current_user.user.user_name,
     )
     logger.info(result.message)
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)
 
 
 @mindmap_folder_controller.put(
@@ -103,7 +105,7 @@ async def sort_folders(
         query_db, model, current_user.user.user_id,
     )
     logger.info(result.message)
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)
 
 
 @mindmap_folder_controller.delete(
@@ -116,7 +118,7 @@ async def sort_folders(
 @Log(title='文件夹管理', business_type=BusinessType.DELETE)
 async def delete_folder(
     request: Request,
-    folder_id: Annotated[int, Path(description='文件夹ID')],
+    folder_id: Annotated[int, Path(description='文件夹ID', gt=0)],
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
@@ -124,7 +126,27 @@ async def delete_folder(
         query_db, folder_id, current_user.user.user_id,
     )
     logger.info(result.message)
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)
+
+
+@mindmap_folder_controller.get(
+    '/{folder_id}/impact',
+    summary='获取删除文件夹影响',
+    description='返回将删除的目录数和移至根目录的脑图数',
+    dependencies=[UserInterfaceAuthDependency('mindmap:folder:remove')],
+)
+async def get_folder_delete_impact(
+    request: Request,
+    folder_id: Annotated[int, Path(description='文件夹ID', gt=0)],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapFolderService.get_delete_impact(
+        query_db,
+        folder_id,
+        current_user.user.user_id,
+    )
+    return ResponseUtil.success(data=result)
 
 
 # ──────────────────── 移动脑图 ────────────────────
@@ -143,7 +165,7 @@ mindmap_move_controller = APIRouterPro(
     summary='移动脑图到文件夹',
     description='批量将脑图移动到指定文件夹',
     response_model=ResponseBaseModel,
-    dependencies=[UserInterfaceAuthDependency('mindmap:mindmap:edit')],
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
 )
 @Log(title='脑图移动', business_type=BusinessType.UPDATE)
 async def move_mindmaps(
@@ -156,4 +178,4 @@ async def move_mindmaps(
         query_db, model, current_user.user.user_id,
     )
     logger.info(result.message)
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)

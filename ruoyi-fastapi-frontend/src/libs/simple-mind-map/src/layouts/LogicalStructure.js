@@ -1,6 +1,7 @@
 import Base from './Base'
 import { walk, asyncRun, getNodeIndexInNodeList } from '../utils'
 import { CONSTANTS } from '../constants/constant'
+import { walkLayoutAncestorChain } from './layoutTree'
 
 //  逻辑结构图
 class LogicalStructure extends Base {
@@ -130,11 +131,12 @@ class LogicalStructure extends Base {
 
   //  更新兄弟节点的top
   updateBrothers(node, addHeight) {
-    if (node.parent) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
-        if (item.uid === node.uid || item.hasCustomPosition()) {
+        if (item.uid === current.uid || item.hasCustomPosition()) {
           // 适配自定义位置
           return
         }
@@ -152,9 +154,7 @@ class LogicalStructure extends Base {
           this.updateChildren(item.children, 'top', _offset)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothers(node.parent, addHeight)
-    }
+    })
   }
 
   //  绘制连线，连接该节点到其子节点

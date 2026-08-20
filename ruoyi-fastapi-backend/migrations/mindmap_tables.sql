@@ -22,5 +22,6 @@ CREATE TABLE `mindmap` (
     `remark`          VARCHAR(500) DEFAULT NULL COMMENT '备注',
     PRIMARY KEY (`id`),
     INDEX `idx_mindmap_owner` (`owner_id`, `del_flag`),
+    INDEX `idx_mindmap_owner_status` (`owner_id`, `status`, `del_flag`, `is_template`, `update_time`),
     INDEX `idx_mindmap_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='思维导图主表';

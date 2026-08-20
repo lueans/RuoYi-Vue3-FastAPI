@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.vo import PageModel
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag, MindmapTagCategory
+from module_mindmap.entity.do.mindmap_tag_field_do import MindmapTagField, MindmapTagFieldOption
 from utils.page_util import PageUtil
 
 
@@ -28,10 +29,17 @@ class MindmapTagDao:
         return list(result)
 
     @classmethod
-    async def get_category_by_id(cls, db: AsyncSession, category_id: int) -> MindmapTagCategory | None:
-        result = (await db.execute(
-            select(MindmapTagCategory).where(MindmapTagCategory.id == category_id)
-        )).scalars().first()
+    async def get_category_by_id(
+        cls,
+        db: AsyncSession,
+        category_id: int,
+        *,
+        for_update: bool = False,
+    ) -> MindmapTagCategory | None:
+        query = select(MindmapTagCategory).where(MindmapTagCategory.id == category_id)
+        if for_update:
+            query = query.with_for_update()
+        result = (await db.execute(query)).scalars().first()
         return result
 
     @classmethod
@@ -40,6 +48,37 @@ class MindmapTagDao:
         db.add(cat)
         await db.flush()
         return cat
+
+    @classmethod
+    async def check_category_name_unique(
+        cls,
+        db: AsyncSession,
+        owner_id: int,
+        name: str,
+        exclude_id: int | None = None,
+    ) -> bool:
+        query = select(MindmapTagCategory.id).where(
+            MindmapTagCategory.owner_id == owner_id,
+            func.lower(MindmapTagCategory.name) == name.lower(),
+        )
+        if exclude_id is not None:
+            query = query.where(MindmapTagCategory.id != exclude_id)
+        return (await db.execute(query.limit(1))).scalar_one_or_none() is None
+
+    @classmethod
+    async def get_category_tag_counts(
+        cls,
+        db: AsyncSession,
+        category_ids: list[int],
+    ) -> dict[int, int]:
+        if not category_ids:
+            return {}
+        rows = (await db.execute(
+            select(MindmapTag.category_id, func.count(MindmapTag.id))
+            .where(MindmapTag.category_id.in_(category_ids))
+            .group_by(MindmapTag.category_id)
+        )).all()
+        return {int(category_id): int(count) for category_id, count in rows}
 
     @classmethod
     async def update_category(cls, db: AsyncSession, category_id: int, data: dict) -> None:
@@ -69,6 +108,8 @@ class MindmapTagDao:
     async def get_tag_list(
         cls, db: AsyncSession, user_id: int,
         category_id: int | None = None,
+        field_id: int | None = None,
+        status: int | None = None,
         keyword: str | None = None,
         owner_scope: str = 'all',
         page_num: int = 1, page_size: int = 20,
@@ -88,18 +129,53 @@ class MindmapTagDao:
 
         if category_id is not None:
             query = query.where(MindmapTag.category_id == category_id)
+        if field_id is not None:
+            query = query.where(select(MindmapTagFieldOption.id).where(
+                MindmapTagFieldOption.tag_id == MindmapTag.id,
+                MindmapTagFieldOption.field_id == field_id,
+            ).exists())
+        if status is not None:
+            query = query.where(MindmapTag.status == status)
 
         if keyword:
             escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             query = query.where(
                 or_(
-                    MindmapTag.name.like(f'%{escaped}%'),
-                    MindmapTag.tag_key.like(f'%{escaped}%'),
+                    MindmapTag.name.ilike(f'%{escaped}%', escape='\\'),
+                    MindmapTag.tag_key.ilike(f'%{escaped}%', escape='\\'),
+                    MindmapTag.description.ilike(f'%{escaped}%', escape='\\'),
                 )
             )
 
         query = query.order_by(MindmapTag.updated_time.desc())
         return await PageUtil.paginate(db, query, page_num, page_size, True)
+
+    @classmethod
+    async def get_tag_field_contexts(
+        cls, db: AsyncSession, tag_ids: set[int],
+    ) -> dict[int, list[dict]]:
+        """批量返回标签所属字段，供治理列表展示，避免逐标签查询。"""
+        if not tag_ids:
+            return {}
+        rows = (await db.execute(
+            select(
+                MindmapTagFieldOption.tag_id,
+                MindmapTagField.id,
+                MindmapTagField.field_key,
+                MindmapTagField.name,
+            )
+            .join(MindmapTagField, MindmapTagField.id == MindmapTagFieldOption.field_id)
+            .where(MindmapTagFieldOption.tag_id.in_(tag_ids))
+            .order_by(MindmapTagField.sort_order.asc(), MindmapTagField.id.asc())
+        )).all()
+        contexts: dict[int, list[dict]] = {}
+        for tag_id, field_id, field_key, field_name in rows:
+            contexts.setdefault(int(tag_id), []).append({
+                'id': field_id,
+                'fieldKey': field_key,
+                'name': field_name,
+            })
+        return contexts
 
     @classmethod
     async def get_tag_by_id(cls, db: AsyncSession, tag_id: int) -> MindmapTag | None:
@@ -147,15 +223,16 @@ class MindmapTagDao:
         query = (
             select(MindmapTag)
             .where(
-                or_(MindmapTag.owner_id == 0, MindmapTag.owner_id == user_id)
+                or_(MindmapTag.owner_id == 0, MindmapTag.owner_id == user_id),
+                MindmapTag.status == 0,
             )
         )
         if keyword:
             escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             query = query.where(
                 or_(
-                    MindmapTag.name.like(f'%{escaped}%'),
-                    MindmapTag.tag_key.like(f'%{escaped}%'),
+                    MindmapTag.name.ilike(f'%{escaped}%', escape='\\'),
+                    MindmapTag.tag_key.ilike(f'%{escaped}%', escape='\\'),
                 )
             )
         query = query.order_by(MindmapTag.name.asc()).limit(limit)

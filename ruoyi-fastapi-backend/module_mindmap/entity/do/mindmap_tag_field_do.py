@@ -45,6 +45,7 @@ class MindmapTagFieldOption(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True, comment='选项ID')
     field_id = Column(BigInteger, nullable=False, comment='所属字段ID')
+    tag_id = Column(BigInteger, nullable=True, comment='关联的统一标签ID')
     option_key = Column(String(100), nullable=False, comment='选项key(字段内唯一)')
     name = Column(String(200), nullable=False, comment='选项显示名称')
     fill = Column(String(20), nullable=True, comment='背景色')

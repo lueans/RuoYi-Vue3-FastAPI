@@ -1,5 +1,6 @@
 import Base from './Base'
 import { walk, asyncRun, getNodeIndexInNodeList } from '../utils'
+import { walkLayoutAncestorChain } from './layoutTree'
 
 //  组织结构图
 // 和逻辑结构图基本一样，只是方向变成向下生长，所以先计算节点的top，后计算节点的left、最后调整节点的left即可
@@ -126,9 +127,10 @@ class OrganizationStructure extends Base {
 
   //  更新兄弟节点的left
   updateBrothers(node, addWidth) {
-    if (node.parent) {
-      let childrenList = node.parent.children
-      let index = getNodeIndexInNodeList(node, childrenList)
+    walkLayoutAncestorChain(node, current => {
+      let childrenList = current.parent.children
+      let index = getNodeIndexInNodeList(current, childrenList)
+      if (index < 0) return false
       childrenList.forEach((item, _index) => {
         if (item.hasCustomPosition()) {
           // 适配自定义位置
@@ -148,9 +150,7 @@ class OrganizationStructure extends Base {
           this.updateChildren(item.children, 'left', _offset)
         }
       })
-      // 更新父节点的位置
-      this.updateBrothers(node.parent, addWidth)
-    }
+    })
   }
 
   //  绘制连线，连接该节点到其子节点

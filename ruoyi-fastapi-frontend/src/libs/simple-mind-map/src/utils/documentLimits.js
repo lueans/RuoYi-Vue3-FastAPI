@@ -1,0 +1,3 @@
+export const MAX_MINDMAP_NODE_COUNT = 20_000
+export const MAX_MINDMAP_TREE_DEPTH = 256
+export const MAX_MINDMAP_STABLE_UID_LENGTH = 64

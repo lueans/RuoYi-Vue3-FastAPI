@@ -5,17 +5,22 @@
     v-model="dialogVisible"
     :width="'800px'"
     :show-close="false"
+    :close-on-click-modal="!isExporting"
+    :close-on-press-escape="!isExporting"
     append-to-body
   >
     <div class="exportContainer" :class="{ isDark: isDark }">
       <div class="downloadTypeSelectBox">
         <!-- type list -->
         <div class="downloadTypeList customScrollbar">
-          <div
+          <button
             class="downloadTypeItem"
             v-for="item in filteredTypeList"
             :key="item.type"
             :class="{ active: exportType === item.type }"
+            type="button"
+            :aria-pressed="exportType === item.type"
+            :disabled="isExporting"
             @click="exportType = item.type"
           >
             <div class="typeIcon" :class="[item.type]"></div>
@@ -23,7 +28,7 @@
             <div class="icon checked el-icon-check" v-if="exportType === item.type">
               <el-icon><Check /></el-icon>
             </div>
-          </div>
+          </button>
         </div>
         <!-- type content -->
         <div class="downloadTypeContent">
@@ -35,12 +40,16 @@
                 style="max-width: 250px"
                 v-model="fileName"
                 size="small"
+                maxlength="125"
+                aria-label="导出文件名称"
+                :disabled="isExporting"
                 @keydown.stop
               />
+              <span v-if="fileNameError" class="fieldError" role="alert">{{ fileNameError }}</span>
             </div>
-            <span class="closeBtn" @click="cancel">
+            <button class="closeBtn" type="button" aria-label="关闭导出对话框" :disabled="isExporting" @click="cancel">
               <el-icon><Close /></el-icon>
-            </span>
+            </button>
           </div>
           <!-- config options -->
           <div class="contentBox customScrollbar">
@@ -64,7 +73,7 @@
                   class="valueItem"
                   v-show="['smm', 'json'].includes(exportType)"
                 >
-                  <el-checkbox v-model="widthConfig">是否包含主题、结构等配置数据</el-checkbox>
+                  <el-checkbox v-model="widthConfig" :disabled="isExporting">是否包含主题、结构等配置数据</el-checkbox>
                 </div>
                 <div
                   class="valueItem"
@@ -75,6 +84,11 @@
                     <el-input
                       style="width: 200px"
                       v-model="paddingX"
+                      type="number"
+                      min="0"
+                      max="200"
+                      step="1"
+                      :disabled="isExporting"
                       size="small"
                       @change="onPaddingChange"
                       @keydown.stop
@@ -85,6 +99,11 @@
                     <el-input
                       style="width: 200px"
                       v-model="paddingY"
+                      type="number"
+                      min="0"
+                      max="200"
+                      step="1"
+                      :disabled="isExporting"
                       size="small"
                       @change="onPaddingChange"
                       @keydown.stop
@@ -96,6 +115,7 @@
                       style="width: 200px"
                       v-model="extraText"
                       size="small"
+                      :disabled="isExporting"
                       placeholder="比如：来自simple-mind-map"
                       @keydown.stop
                     />
@@ -104,10 +124,11 @@
                     <el-checkbox
                       v-show="['png', 'pdf'].includes(exportType)"
                       v-model="isTransparent"
+                      :disabled="isExporting"
                     >背景是否透明</el-checkbox>
                   </div>
                   <div class="valueSubItem">
-                    <el-checkbox v-show="showFitBgOption" v-model="isFitBg">
+                    <el-checkbox v-show="showFitBgOption" v-model="isFitBg" :disabled="isExporting">
                       是否显示完整背景图片（使用了背景图片时生效）
                     </el-checkbox>
                   </div>
@@ -117,8 +138,15 @@
           </div>
           <!-- buttons -->
           <div class="btnList">
-            <el-button @click="cancel" size="small">取消</el-button>
-            <el-button type="primary" @click="confirm" size="small">导出</el-button>
+            <span class="exportStatus" role="status" aria-live="polite">{{ exportStatusText }}</span>
+            <el-button :disabled="isExporting" @click="cancel" size="small">取消</el-button>
+            <el-button
+              type="primary"
+              :loading="isExporting"
+              :disabled="Boolean(fileNameError)"
+              @click="confirm"
+              size="small"
+            >{{ isExporting ? '生成中' : '导出' }}</el-button>
           </div>
         </div>
       </div>
@@ -128,10 +156,14 @@
 
 <script setup>
 import { Close, Check } from '@element-plus/icons-vue'
-import { ElNotification } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import bus from './useEventBus'
 import { store } from './useStore'
 import { downTypeList } from './config'
+import {
+  normalizeMindmapExportPadding,
+  validateMindmapExportName,
+} from '@/utils/mindmap-export'
 
 const isDark = computed(() => store.localConfig.isDark)
 
@@ -144,7 +176,9 @@ const paddingX = ref(10)
 const paddingY = ref(10)
 const extraText = ref('')
 const isFitBg = ref(true)
-const imageFormat = ref('png')
+const isExporting = ref(false)
+const exportStatusText = ref('')
+let exportRequestId = 0
 
 const filteredTypeList = computed(() => {
   // Use local downTypeList from config (already Chinese)
@@ -169,46 +203,78 @@ const noOptions = computed(() => {
   return ['md', 'xmind', 'txt', 'xlsx', 'mm'].includes(exportType.value)
 })
 
+const normalizedFileName = computed(() => (
+  validateMindmapExportName(fileName.value, exportType.value)
+))
+const fileNameError = computed(() => normalizedFileName.value.error)
+
 function handleShowExport() {
+  exportStatusText.value = ''
   dialogVisible.value = true
 }
 
 function onPaddingChange() {
-  bus.emit('paddingChange', {
-    exportPaddingX: Number(paddingX.value),
-    exportPaddingY: Number(paddingY.value)
-  })
+  paddingX.value = normalizeMindmapExportPadding(paddingX.value)
+  paddingY.value = normalizeMindmapExportPadding(paddingY.value)
 }
 
 function cancel() {
+  if (isExporting.value) return
   dialogVisible.value = false
 }
 
-function confirm() {
-  const type = exportType.value
-  if (extraText.value) {
-    bus.emit('paddingChange', {
-      addContentToFooter: () => extraText.value
-    })
-  }
-  if (type === 'xmind') {
-    bus.emit('exportXmind', fileName.value)
-  } else if (type === 'svg') {
-    bus.emit('export', type, true, fileName.value, '* { margin: 0; padding: 0; box-sizing: border-box; }')
-  } else if (['smm', 'json'].includes(type)) {
-    bus.emit('export', type, true, fileName.value, widthConfig.value)
-  } else if (type === 'png') {
-    bus.emit('export', 'png', true, fileName.value, isTransparent.value, null, isFitBg.value)
-  } else if (type === 'pdf') {
-    bus.emit('export', type, true, fileName.value, isTransparent.value, isFitBg.value)
-  } else {
-    bus.emit('export', type, true, fileName.value)
-  }
-  ElNotification.info({
-    title: '消息',
-    message: '如果没有触发下载，请检查是否被浏览器拦截了'
+function requestExport(payload) {
+  return new Promise((resolve, reject) => {
+    const handled = bus.emit('exportRequest', { ...payload, resolve, reject })
+    if (!handled) reject(new Error('导出服务尚未就绪'))
   })
-  cancel()
+}
+
+function createExportArgs(type, name, footerText = '') {
+  const base = {
+    type,
+    name,
+    config: {
+      exportPaddingX: paddingX.value,
+      exportPaddingY: paddingY.value,
+      addContentToFooter: footerText ? () => footerText : null,
+    },
+  }
+  if (type === 'xmind') return { ...base, args: [] }
+  if (type === 'svg') {
+    return { ...base, args: ['* { margin: 0; padding: 0; box-sizing: border-box; }'] }
+  }
+  if (['smm', 'json'].includes(type)) return { ...base, args: [widthConfig.value] }
+  if (type === 'png') return { ...base, args: [isTransparent.value, null, isFitBg.value] }
+  if (type === 'pdf') return { ...base, args: [isTransparent.value, isFitBg.value] }
+  return { ...base, args: [] }
+}
+
+async function confirm() {
+  if (isExporting.value || fileNameError.value) return
+  const type = exportType.value
+  const name = normalizedFileName.value.name
+  const footerText = extraText.value
+  const requestId = ++exportRequestId
+  isExporting.value = true
+  exportStatusText.value = type === 'pdf' || type === 'xmind'
+    ? '正在加载导出组件并生成文件…'
+    : '正在生成文件…'
+  onPaddingChange()
+  try {
+    await requestExport(createExportArgs(type, name, footerText))
+    if (requestId !== exportRequestId) return
+    exportStatusText.value = '文件已生成并开始下载'
+    ElMessage.success('导出成功')
+    dialogVisible.value = false
+  } catch (error) {
+    if (requestId !== exportRequestId) return
+    console.error('导出失败:', error)
+    exportStatusText.value = error?.message || '导出失败，请重试'
+    ElMessage.error(exportStatusText.value)
+  } finally {
+    if (requestId === exportRequestId) isExporting.value = false
+  }
 }
 
 onMounted(() => {
@@ -216,6 +282,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  exportRequestId += 1
   bus.off('showExport', handleShowExport)
 })
 </script>
@@ -344,6 +411,11 @@ onBeforeUnmount(() => {
         padding: 16px 0;
 
         .downloadTypeItem {
+          appearance: none;
+          border: 0;
+          background: transparent;
+          text-align: left;
+          font: inherit;
           width: 100%;
           height: 52px;
           padding: 0 30px;
@@ -351,6 +423,16 @@ onBeforeUnmount(() => {
           display: flex;
           align-items: center;
           cursor: pointer;
+
+          &:disabled {
+            cursor: progress;
+            opacity: 0.65;
+          }
+
+          &:focus-visible {
+            outline: 2px solid #3370ff;
+            outline-offset: -3px;
+          }
 
           &.active {
             background-color: #fff;
@@ -404,12 +486,13 @@ onBeforeUnmount(() => {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          height: 67px;
+          min-height: 67px;
           flex-shrink: 0;
           border-bottom: 1px solid #f2f4f7;
           padding-left: 40px;
           padding-right: 20px;
           padding-top: 16px;
+          padding-bottom: 12px;
 
           .nameInput {
             display: flex;
@@ -429,6 +512,30 @@ onBeforeUnmount(() => {
           .closeBtn {
             font-size: 20px;
             cursor: pointer;
+            display: inline-flex;
+            padding: 4px;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: inherit;
+
+            &:disabled {
+              cursor: progress;
+              opacity: 0.5;
+            }
+
+            &:focus-visible {
+              outline: 2px solid #3370ff;
+              outline-offset: 2px;
+            }
+          }
+
+          .fieldError {
+            flex-basis: 100%;
+            margin-top: 4px;
+            color: var(--el-color-danger);
+            font-size: 12px;
+            font-weight: 400;
           }
         }
 
@@ -500,6 +607,12 @@ onBeforeUnmount(() => {
           height: 69px;
           flex-shrink: 0;
           border-top: 1px solid #f2f4f7;
+
+          .exportStatus {
+            margin-right: auto;
+            color: var(--el-text-color-secondary);
+            font-size: 13px;
+          }
         }
       }
     }

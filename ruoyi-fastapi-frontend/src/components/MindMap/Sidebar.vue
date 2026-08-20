@@ -4,11 +4,23 @@
     @click.stop
     :class="{ show: show, isDark: isDark }"
     :style="{ zIndex: zIndex }"
+    :inert="!show"
+    :aria-hidden="show ? undefined : 'true'"
+    :aria-labelledby="title ? titleId : undefined"
+    :aria-label="title ? undefined : '脑图侧栏'"
+    role="complementary"
+    @keydown.esc.stop="onEscape"
   >
-    <span class="closeBtn el-icon-close" @click="onCloseClick">
+    <button
+      ref="closeButtonRef"
+      class="closeBtn el-icon-close"
+      type="button"
+      :aria-label="`关闭${title || '侧栏'}`"
+      @click="onCloseClick"
+    >
       <el-icon><Close /></el-icon>
-    </span>
-    <div class="sidebarHeader" v-if="title">
+    </button>
+    <div class="sidebarHeader" :id="titleId" v-if="title" role="heading" aria-level="2">
       {{ title }}
     </div>
     <div class="sidebarContent customScrollbar" ref="bodyRef">
@@ -19,20 +31,24 @@
 
 <script setup>
 import { Close } from '@element-plus/icons-vue'
-import { actions } from './useStore'
-import { store } from './useStore'
+import { actions, store } from './useStore'
 import bus from './useEventBus'
 
-defineProps({
-  title: { type: String, default: '' }
+const props = defineProps({
+  title: { type: String, default: '' },
+  openOnMount: { type: Boolean, default: false },
 })
 
 const show = ref(false)
 const zIndex = ref(2001)
 const bodyRef = ref(null)
+const closeButtonRef = ref(null)
+const titleId = `mindmap-sidebar-title-${Math.random().toString(36).slice(2, 10)}`
 const isDark = computed(() => store.localConfig.isDark)
+let focusReturnTarget = null
 
 function open() {
+  if (!show.value) focusReturnTarget = document.activeElement
   show.value = true
   zIndex.value = actions.nextSidebarZIndex()
 }
@@ -42,12 +58,32 @@ function close() {
 }
 
 function onCloseClick() {
+  const sidebarName = store.activeSidebar
+  const returnTarget = focusReturnTarget
   show.value = false
   actions.setActiveSidebar(null)
+  nextTick(() => {
+    if (returnTarget?.isConnected && !returnTarget.closest?.('[inert]')) {
+      returnTarget.focus?.()
+    } else {
+      bus.emit('focusSidebarTrigger', sidebarName)
+    }
+  })
+}
+
+function onEscape() {
+  onCloseClick()
 }
 
 function handleCloseSidebar() {
+  if (show.value && store.activeSidebar) {
+    actions.setActiveSidebar(null)
+  }
   show.value = false
+}
+
+function focusWhenOpen() {
+  if (show.value) closeButtonRef.value?.focus()
 }
 
 function getEl() {
@@ -56,10 +92,13 @@ function getEl() {
 
 onMounted(() => {
   bus.on('closeSideBar', handleCloseSidebar)
+  bus.on('focusActiveSidebar', focusWhenOpen)
+  if (props.openOnMount) open()
 })
 
 onBeforeUnmount(() => {
   bus.off('closeSideBar', handleCloseSidebar)
+  bus.off('focusActiveSidebar', focusWhenOpen)
 })
 
 defineExpose({ show, open, close, bodyRef, getEl })
@@ -68,13 +107,13 @@ defineExpose({ show, open, close, bodyRef, getEl })
 <style lang="less" scoped>
 .sidebarContainer {
   position: fixed;
-  right: -300px;
-  top: 52px;
+  right: -320px;
+  top: var(--mindmap-shell-top, 60px);
   bottom: 0;
-  width: 300px;
+  width: 320px;
   background-color: #fff;
-  border-left: 1px solid #dee0e3;
-  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.04);
+  border-left: 1px solid #e2e5ea;
+  box-shadow: -10px 0 30px rgba(31, 35, 41, 0.07);
   display: flex;
   flex-direction: column;
   transition: right 0.25s ease;
@@ -111,8 +150,8 @@ defineExpose({ show, open, close, bodyRef, getEl })
 
   .closeBtn {
     position: absolute;
-    right: 12px;
-    top: 8px;
+    right: 14px;
+    top: 10px;
     width: 28px;
     height: 28px;
     display: flex;
@@ -121,6 +160,9 @@ defineExpose({ show, open, close, bodyRef, getEl })
     font-size: 16px;
     cursor: pointer;
     z-index: 1;
+    padding: 0;
+    border: 0;
+    background: transparent;
     color: #8f959e;
     border-radius: 6px;
     transition: all 0.15s;
@@ -128,19 +170,24 @@ defineExpose({ show, open, close, bodyRef, getEl })
       color: #1f2329;
       background: #f5f6f7;
     }
+    &:focus-visible {
+      outline: 2px solid #3370ff;
+      outline-offset: 2px;
+    }
   }
 
   .sidebarHeader {
     width: 100%;
-    height: 44px;
-    border-bottom: 1px solid #f0f1f3;
+    height: 50px;
+    border-bottom: 1px solid #eef0f3;
     display: flex;
-    justify-content: center;
+    justify-content: flex-start;
     align-items: center;
     flex-grow: 0;
     flex-shrink: 0;
+    padding: 0 52px 0 18px;
     font-size: 14px;
-    font-weight: 500;
+    font-weight: 600;
     color: #1f2329;
     letter-spacing: 0.2px;
   }

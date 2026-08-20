@@ -19,6 +19,7 @@ class MindmapWsState(Base):
         nullable=True,
         comment='Yjs文档二进制状态',
     )
+    content_revision = Column(BigInteger, nullable=True, comment='状态对应的文件内容修订号')
     updated_at = Column(
         DateTime, nullable=True, default=datetime.now, onupdate=datetime.now, comment='更新时间'
     )

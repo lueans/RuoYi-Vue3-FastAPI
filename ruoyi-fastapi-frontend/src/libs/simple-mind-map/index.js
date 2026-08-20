@@ -526,6 +526,7 @@ class MindMap {
       return result
     } catch (error) {
       this.opt.errorHandler(ERROR_TYPES.EXPORT_ERROR, error)
+      throw error
     }
   }
 

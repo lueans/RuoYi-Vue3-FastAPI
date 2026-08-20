@@ -72,7 +72,7 @@ export default class KeyCommand {
   recoveryCheckInSvg() {
     const { enableShortcutOnlyWhenMouseInSvg } = this.mindMap.opt
     if (!enableShortcutOnlyWhenMouseInSvg) return
-    this.isStopCheckInSvg = true
+    this.isStopCheckInSvg = false
   }
 
   //  绑定事件
@@ -99,7 +99,11 @@ export default class KeyCommand {
   // 根据事件目标判断是否响应快捷键事件
   defaultEnableCheck(e) {
     const target = e.target
-    if (target === document.body) return true
+    // 应用层可将画布容器设为可聚焦区域（tabindex="0"）以支持键盘访问。
+    // 点击 SVG 节点后浏览器会把焦点保留在该容器上，必须与 body 一样
+    // 接受快捷键；否则 Tab、Enter、缩放、撤销等命令会被统一拦截。
+    if (target === document.body || target === this.mindMap.el) return true
+    if (!target?.classList) return false
     for (let i = 0; i < this.mindMap.editNodeClassList.length; i++) {
       const cur = this.mindMap.editNodeClassList[i]
       if (target.classList.contains(cur)) {

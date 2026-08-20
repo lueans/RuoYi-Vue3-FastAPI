@@ -8,64 +8,45 @@ import MersenneTwister from './mersenneTwister'
 import { ForeignObject } from '@svgdotjs/svg.js'
 import merge from 'deepmerge'
 import { lineStyleProps } from '../theme/default'
+import { replaceAllLiteralText } from './literalText'
+import { walk } from './treeWalk'
+import {
+  transformObjectMapToTree,
+  transformTreeDataToObject as transformTreeDataToObjectValue
+} from './treeData'
+import { copyTreeIterative } from './treeCopy'
+import { isSameObject as isSameObjectValue } from './deepEqual'
+import { calculateNodeForestRect, walkNodeForest } from './nodeForest'
+import {
+  cloneJsonValueIterative,
+  stringifyJsonValueIterative
+} from './jsonClone'
+import {
+  applyStyleToDomTags,
+  removeDomElements,
+  replaceDomTextNodes
+} from './domTree'
 
-//  深度优先遍历树
-export const walk = (
-  root,
-  parent,
-  beforeCallback,
-  afterCallback,
-  isRoot,
-  layerIndex = 0,
-  index = 0,
-  ancestors = []
-) => {
-  let stop = false
-  if (beforeCallback) {
-    stop = beforeCallback(root, parent, isRoot, layerIndex, index, ancestors)
-  }
-  if (!stop && root.children && root.children.length > 0) {
-    let _layerIndex = layerIndex + 1
-    root.children.forEach((node, nodeIndex) => {
-      walk(
-        node,
-        root,
-        beforeCallback,
-        afterCallback,
-        false,
-        _layerIndex,
-        nodeIndex,
-        [...ancestors, root]
-      )
-    })
-  }
-  afterCallback &&
-    afterCallback(root, parent, isRoot, layerIndex, index, ancestors)
-}
+export { walk } from './treeWalk'
+export { bfsWalk } from './treeBfs'
+export { materializeObjectSubtree } from './treeData'
+export { walkNodeForest } from './nodeForest'
+export { stringifyJsonValueIterative } from './jsonClone'
+export { throttle, debounce } from './timing'
+export const isSameObject = isSameObjectValue
 
-//  广度优先遍历树
-export const bfsWalk = (root, callback) => {
-  let stack = [root]
-  let isStop = false
-  if (callback(root, null) === 'stop') {
-    isStop = true
-  }
-  while (stack.length) {
-    if (isStop) {
-      break
-    }
-    let cur = stack.shift()
-    if (cur.children && cur.children.length) {
-      cur.children.forEach(item => {
-        if (isStop) return
-        stack.push(item)
-        if (callback(item, cur) === 'stop') {
-          isStop = true
-        }
-      })
-    }
-  }
-}
+export {
+  MIND_MAP_HYPERLINK_MAX_LENGTH,
+  getSafeMindMapHyperlink,
+  normalizeMindMapHyperlink
+} from './hyperlink'
+export { addSafeSvgTitle } from './svg'
+export {
+  MIND_MAP_ATTACHMENT_MAX_DATA_BYTES,
+  getSafeMindMapAttachmentUrl,
+  inferMindMapAttachmentName,
+  normalizeMindMapAttachmentUrl
+} from './attachment'
 
 // 按原比例缩放图片
 export const resizeImgSizeByOriginRatio = (
@@ -151,36 +132,26 @@ export const getStrWithBrFromHtml = str => {
 
 //  极简的深拷贝
 export const simpleDeepClone = data => {
-  try {
-    return JSON.parse(JSON.stringify(data))
-  } catch (error) {
-    return null
-  }
+  return cloneJsonValueIterative(data)
 }
 
 //  复制渲染树数据
 export const copyRenderTree = (tree, root, removeActiveState = false) => {
-  tree.data = simpleDeepClone(root.data)
-  if (removeActiveState) {
-    tree.data.isActive = false
-    const generalizationList = formatGetNodeGeneralization(tree.data)
-    generalizationList.forEach(item => {
-      item.isActive = false
-    })
-  }
-  tree.children = []
-  if (root.children && root.children.length > 0) {
-    root.children.forEach((item, index) => {
-      tree.children[index] = copyRenderTree({}, item, removeActiveState)
-    })
-  }
-  // data、children外的其他字段
-  Object.keys(root).forEach(key => {
-    if (!['data', 'children'].includes(key) && !/^_/.test(key)) {
-      tree[key] = root[key]
+  return copyTreeIterative({
+    target: tree,
+    root,
+    cloneData: simpleDeepClone,
+    transformData: data => {
+      if (removeActiveState) {
+        data.isActive = false
+        const generalizationList = formatGetNodeGeneralization(data)
+        generalizationList.forEach(item => {
+          item.isActive = false
+        })
+      }
+      return data
     }
   })
-  return tree
 }
 
 //  复制节点树数据
@@ -190,39 +161,27 @@ export const copyNodeTree = (
   removeActiveState = false,
   removeId = true
 ) => {
-  const rootData = root.nodeData ? root.nodeData : root
-  tree.data = simpleDeepClone(rootData.data)
-  // 移除节点uid
-  if (removeId) {
-    delete tree.data.uid
-  } else if (!tree.data.uid) {
-    // 否则保留或生成
-    tree.data.uid = createUid()
-  }
-  if (removeActiveState) {
-    tree.data.isActive = false
-  }
-  tree.children = []
-  if (root.children && root.children.length > 0) {
-    root.children.forEach((item, index) => {
-      tree.children[index] = copyNodeTree({}, item, removeActiveState, removeId)
-    })
-  } else if (
-    root.nodeData &&
-    root.nodeData.children &&
-    root.nodeData.children.length > 0
-  ) {
-    root.nodeData.children.forEach((item, index) => {
-      tree.children[index] = copyNodeTree({}, item, removeActiveState, removeId)
-    })
-  }
-  // data、children外的其他字段
-  Object.keys(rootData).forEach(key => {
-    if (!['data', 'children'].includes(key) && !/^_/.test(key)) {
-      tree[key] = rootData[key]
+  return copyTreeIterative({
+    target: tree,
+    root,
+    cloneData: simpleDeepClone,
+    resolveNode: node => {
+      const dataSource = node.nodeData || node
+      const children = Array.isArray(node.children) && node.children.length > 0
+        ? node.children
+        : dataSource.children
+      return { dataSource, children }
+    },
+    transformData: data => {
+      if (removeId) {
+        delete data.uid
+      } else if (!data.uid) {
+        data.uid = createUid()
+      }
+      if (removeActiveState) data.isActive = false
+      return data
     }
   })
-  return tree
 }
 
 //  图片转成dataURL
@@ -299,33 +258,6 @@ export const downloadFile = (file, fileName) => {
   document.body.removeChild(a)
   if (revokeUrl) {
     setTimeout(() => URL.revokeObjectURL(revokeUrl), 100)
-  }
-}
-
-//  节流函数
-export const throttle = (fn, time = 300, ctx) => {
-  let timer = null
-  return (...args) => {
-    if (timer) {
-      return
-    }
-    timer = setTimeout(() => {
-      fn.call(ctx, ...args)
-      timer = null
-    }, time)
-  }
-}
-
-// 防抖函数
-export const debounce = (fn, wait = 300, ctx) => {
-  let timeout = null
-
-  return (...args) => {
-    if (timeout) clearTimeout(timeout)
-    timeout = setTimeout(() => {
-      timeout = null
-      fn.apply(ctx, args)
-    }, wait)
   }
 }
 
@@ -560,22 +492,8 @@ export const addHtmlStyle = (html, tag, style) => {
   if (!addHtmlStyleEl) {
     addHtmlStyleEl = document.createElement('div')
   }
-  const tags = Array.isArray(tag) ? tag : [tag]
   addHtmlStyleEl.innerHTML = html
-  let walk = root => {
-    let childNodes = root.childNodes
-    childNodes.forEach(node => {
-      if (node.nodeType === 1) {
-        // 元素节点
-        if (tags.includes(node.tagName.toLowerCase())) {
-          node.style.cssText = style
-        } else {
-          walk(node)
-        }
-      }
-    })
-  }
-  walk(addHtmlStyleEl)
+  applyStyleToDomTags(addHtmlStyleEl, tag, style)
   return addHtmlStyleEl.innerHTML
 }
 
@@ -599,24 +517,9 @@ export const replaceHtmlText = (html, searchText, replaceText) => {
     replaceHtmlTextEl = document.createElement('div')
   }
   replaceHtmlTextEl.innerHTML = html
-  let walk = root => {
-    let childNodes = root.childNodes
-    childNodes.forEach(node => {
-      if (node.nodeType === 1) {
-        // 元素节点
-        walk(node)
-      } else if (node.nodeType === 3) {
-        // 文本节点
-        root.replaceChild(
-          document.createTextNode(
-            node.nodeValue.replace(new RegExp(searchText, 'g'), replaceText)
-          ),
-          node
-        )
-      }
-    })
-  }
-  walk(replaceHtmlTextEl)
+  replaceDomTextNodes(replaceHtmlTextEl, value => (
+    replaceAllLiteralText(value, searchText, replaceText)
+  ))
   return replaceHtmlTextEl.innerHTML
 }
 
@@ -677,19 +580,7 @@ export const getVisibleColorFromTheme = themeConfig => {
 
 // 去掉DOM节点中的公式标签
 export const removeFormulaTags = node => {
-  const walk = root => {
-    const childNodes = root.childNodes
-    childNodes.forEach(node => {
-      if (node.nodeType === 1) {
-        if (node.classList.contains('ql-formula')) {
-          node.parentNode.removeChild(node)
-        } else {
-          walk(node)
-        }
-      }
-    })
-  }
-  walk(node)
+  removeDomElements(node, element => element.classList.contains('ql-formula'))
 }
 
 // 将<p><span></span><p>形式的节点富文本内容转换成\n换行的文本
@@ -819,7 +710,7 @@ export const getObjectChangedProps = (oldObject, newObject) => {
       return
     }
     if (getType(oldVal) === 'Object') {
-      if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
+      if (!isSameObjectValue(oldVal, newVal)) {
         res[prop] = newVal
         return
       }
@@ -1000,6 +891,26 @@ export const selectAllInput = el => {
 }
 
 // 给指定的节点列表树数据添加附加数据，会修改原数据
+const walkAppointNodeForest = (appointNodes, visit) => walkNodeForest(
+  appointNodes,
+  visit,
+  node => {
+    if (node.children === undefined || node.children === null) return []
+    if (!Array.isArray(node.children)) {
+      throw new Error('指定节点 children 必须是数组')
+    }
+    return node.children
+  },
+  {
+    onInvalidNode() {
+      throw new Error('指定节点必须是对象')
+    },
+    onDuplicateNode() {
+      throw new Error('指定节点包含循环或重复引用')
+    }
+  }
+)
+
 export const addDataToAppointNodes = (appointNodes, data = {}) => {
   data = { ...data }
   const alreadyIsRichText = data && data.richText
@@ -1007,18 +918,19 @@ export const addDataToAppointNodes = (appointNodes, data = {}) => {
   if (alreadyIsRichText && data.resetRichText) {
     delete data.resetRichText
   }
-  const walk = list => {
-    list.forEach(node => {
-      node.data = {
-        ...node.data,
-        ...data
-      }
-      if (node.children && node.children.length > 0) {
-        walk(node.children)
-      }
-    })
-  }
-  walk(appointNodes)
+  walkAppointNodeForest(appointNodes, node => {
+    if (
+      node.data !== undefined
+      && node.data !== null
+      && (typeof node.data !== 'object' || Array.isArray(node.data))
+    ) {
+      throw new Error('指定节点 data 必须是对象')
+    }
+    node.data = {
+      ...node.data,
+      ...data
+    }
+  })
   return appointNodes
 }
 
@@ -1030,29 +942,28 @@ export const createUidForAppointNodes = (
   handle = null,
   handleGeneralization = false
 ) => {
-  const walk = list => {
-    list.forEach(node => {
-      if (!node.data) {
-        node.data = {}
-      }
-      if (createNewId || isUndef(node.data.uid)) {
-        node.data.uid = createUid()
-      }
-      if (handleGeneralization) {
-        const generalizationList = formatGetNodeGeneralization(node.data)
-        generalizationList.forEach(gNode => {
-          if (createNewId || isUndef(gNode.uid)) {
-            gNode.uid = createUid()
-          }
-        })
-      }
-      handle && handle(node)
-      if (node.children && node.children.length > 0) {
-        walk(node.children)
-      }
-    })
-  }
-  walk(appointNodes)
+  walkAppointNodeForest(appointNodes, node => {
+    if (node.data === undefined || node.data === null) {
+      node.data = {}
+    } else if (typeof node.data !== 'object' || Array.isArray(node.data)) {
+      throw new Error('指定节点 data 必须是对象')
+    }
+    if (createNewId || isUndef(node.data.uid)) {
+      node.data.uid = createUid()
+    }
+    if (handleGeneralization) {
+      const generalizationList = formatGetNodeGeneralization(node.data)
+      generalizationList.forEach(gNode => {
+        if (!gNode || typeof gNode !== 'object' || Array.isArray(gNode)) {
+          throw new Error('指定节点概要必须是对象')
+        }
+        if (createNewId || isUndef(gNode.uid)) {
+          gNode.uid = createUid()
+        }
+      })
+    }
+    handle && handle(node)
+  })
   return appointNodes
 }
 
@@ -1104,52 +1015,6 @@ export const htmlEscape = str => {
   return str
 }
 
-// 判断两个对象是否相同，只处理对象或数组
-export const isSameObject = (a, b) => {
-  const type = getType(a)
-  // a、b类型不一致，那么肯定不相同
-  if (type !== getType(b)) return false
-  // 如果都是对象
-  if (type === 'Object') {
-    const keysa = Object.keys(a)
-    const keysb = Object.keys(b)
-    // 对象字段数量不一样，肯定不相同
-    if (keysa.length !== keysb.length) return false
-    // 字段数量一样，那么需要遍历字段进行判断
-    for (let i = 0; i < keysa.length; i++) {
-      const key = keysa[i]
-      // b没有a的一个字段，那么肯定不相同
-      if (!keysb.includes(key)) return false
-      // 字段名称一样，那么需要递归判断它们的值
-      const isSame = isSameObject(a[key], b[key])
-      if (!isSame) {
-        return false
-      }
-    }
-    return true
-  } else if (type === 'Array') {
-    // 如果都是数组
-    // 数组长度不一样，肯定不相同
-    if (a.length !== b.length) return false
-    // 长度一样，那么需要遍历进行判断
-    for (let i = 0; i < a.length; i++) {
-      const itema = a[i]
-      const itemb = b[i]
-      const typea = getType(itema)
-      const typeb = getType(itemb)
-      if (typea !== typeb) return false
-      const isSame = isSameObject(itema, itemb)
-      if (!isSame) {
-        return false
-      }
-    }
-    return true
-  } else {
-    // 其他类型，直接全等判断
-    return a === b
-  }
-}
-
 // 检查navigator.clipboard对象的读取是否可用
 export const checkClipboardReadEnable = () => {
   return navigator.clipboard && typeof navigator.clipboard.read === 'function'
@@ -1158,7 +1023,7 @@ export const checkClipboardReadEnable = () => {
 // 将数据设置到用户剪切板中
 export const setDataToClipboard = data => {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(JSON.stringify(data))
+    navigator.clipboard.writeText(stringifyJsonValueIterative(data))
   }
 }
 
@@ -1311,86 +1176,12 @@ export const handleInputPasteText = (e, text) => {
         }
     }
   */
-export const transformTreeDataToObject = data => {
-  const res = {}
-  const walk = (root, parent) => {
-    const uid = root.data.uid
-    if (parent) {
-      parent.children.push(uid)
-    }
-    res[uid] = {
-      isRoot: !parent,
-      data: {
-        ...root.data
-      },
-      children: []
-    }
-    if (root.children && root.children.length > 0) {
-      root.children.forEach(item => {
-        walk(item, res[uid])
-      })
-    }
-  }
-  walk(data, null)
-  return res
-}
+export const transformTreeDataToObject = transformTreeDataToObjectValue
 
 // 将平级对象转树结构
 // transformTreeDataToObject方法的反向操作
-// 找到父节点的uid
-const _findParentUid = (data, targetUid) => {
-  const uids = Object.keys(data)
-  let res = ''
-  uids.forEach(uid => {
-    const children = data[uid].children
-    const isParent =
-      children.findIndex(childUid => {
-        return childUid === targetUid
-      }) !== -1
-    if (isParent) {
-      res = uid
-    }
-  })
-  return res
-}
 export const transformObjectToTreeData = data => {
-  const uids = Object.keys(data)
-  if (uids.length <= 0) return null
-  const rootKey = uids.find(uid => {
-    return data[uid].isRoot
-  })
-  if (!rootKey || !data[rootKey]) return null
-  // 根节点
-  const res = {
-    data: simpleDeepClone(data[rootKey].data),
-    children: []
-  }
-  const map = {}
-  map[rootKey] = res
-  uids.forEach(uid => {
-    const parentUid = _findParentUid(data, uid)
-    const cur = data[uid]
-    const node = map[uid] || {
-      data: simpleDeepClone(cur.data),
-      children: []
-    }
-    if (!map[uid]) {
-      map[uid] = node
-    }
-    if (parentUid) {
-      const index = data[parentUid].children.findIndex(item => {
-        return item === uid
-      })
-      if (!map[parentUid]) {
-        map[parentUid] = {
-          data: simpleDeepClone(data[parentUid].data),
-          children: []
-        }
-      }
-      map[parentUid].children[index] = node
-    }
-  })
-  return res
+  return transformObjectMapToTree(data, simpleDeepClone)
 }
 
 // 计算两个点的直线距离
@@ -1484,53 +1275,57 @@ export const getNodeTreeBoundingRect = (
   excludeSelf = false,
   excludeGeneralization = false
 ) => {
-  let minX = Infinity
-  let maxX = -Infinity
-  let minY = Infinity
-  let maxY = -Infinity
-  const walk = (root, isRoot) => {
-    if (!(isRoot && excludeSelf) && root.group) {
-      try {
-        const { x, y, width, height } = root.group
-          .findOne('.smm-node-shape')
-          .rbox()
-        if (x < minX) {
-          minX = x
-        }
-        if (x + width > maxX) {
-          maxX = x + width
-        }
-        if (y < minY) {
-          minY = y
-        }
-        if (y + height > maxY) {
-          maxY = y + height
-        }
-      } catch (e) {}
-    }
-    if (!excludeGeneralization && root._generalizationList.length > 0) {
-      root._generalizationList.forEach(item => {
-        walk(item.generalizationNode)
-      })
-    }
-    if (root.children) {
-      root.children.forEach(item => {
-        walk(item)
-      })
-    }
-  }
-  walk(node, true)
+  return measureNodeTreeBoundingRect(
+    node,
+    x,
+    y,
+    paddingX,
+    paddingY,
+    excludeSelf,
+    excludeGeneralization
+  ) || { left: 0, top: 0, width: 0, height: 0 }
+}
 
-  minX = minX - x + paddingX
-  minY = minY - y + paddingY
-  maxX = maxX - x + paddingX
-  maxY = maxY - y + paddingY
-
+const measureNodeTreeBoundingRect = (
+  node,
+  x,
+  y,
+  paddingX,
+  paddingY,
+  excludeSelf,
+  excludeGeneralization
+) => {
+  const rect = calculateNodeForestRect({
+    roots: node,
+    excludeRoots: excludeSelf,
+    measureNode: current => current.group
+      ?.findOne('.smm-node-shape')
+      ?.rbox(),
+    getChildren: current => {
+      const relatedNodes = []
+      if (!excludeGeneralization && Array.isArray(current._generalizationList)) {
+        current._generalizationList.forEach(item => {
+          if (item?.generalizationNode) relatedNodes.push(item.generalizationNode)
+        })
+      }
+      if (Array.isArray(current.children)) relatedNodes.push(...current.children)
+      return relatedNodes
+    }
+  })
+  if (!rect) return null
+  const offsetX = Number(x)
+  const offsetY = Number(y)
+  const safePaddingX = Number(paddingX)
+  const safePaddingY = Number(paddingY)
   return {
-    left: minX,
-    top: minY,
-    width: maxX - minX,
-    height: maxY - minY
+    left: rect.left
+      - (Number.isFinite(offsetX) ? offsetX : 0)
+      + (Number.isFinite(safePaddingX) ? safePaddingX : 0),
+    top: rect.top
+      - (Number.isFinite(offsetY) ? offsetY : 0)
+      + (Number.isFinite(safePaddingY) ? safePaddingY : 0),
+    width: rect.width,
+    height: rect.height
   }
 }
 
@@ -1547,7 +1342,7 @@ export const getNodeListBoundingRect = (
   let minY = Infinity
   let maxY = -Infinity
   nodeList.forEach(node => {
-    const { left, top, width, height } = getNodeTreeBoundingRect(
+    const rect = measureNodeTreeBoundingRect(
       node,
       x,
       y,
@@ -1556,6 +1351,8 @@ export const getNodeListBoundingRect = (
       false,
       true
     )
+    if (!rect) return
+    const { left, top, width, height } = rect
     if (left < minX) {
       minX = left
     }
@@ -1569,6 +1366,9 @@ export const getNodeListBoundingRect = (
       maxY = top + height
     }
   })
+  if (!Number.isFinite(minX)) {
+    return { left: 0, top: 0, width: 0, height: 0 }
+  }
   return {
     left: minX,
     top: minY,
@@ -1579,39 +1379,101 @@ export const getNodeListBoundingRect = (
 
 // 全屏事件检测
 const getOnfullscreEnevt = () => {
-  if (document.documentElement.requestFullScreen) {
+  if ('onfullscreenchange' in document) {
     return 'fullscreenchange'
-  } else if (document.documentElement.webkitRequestFullScreen) {
+  } else if ('onwebkitfullscreenchange' in document) {
     return 'webkitfullscreenchange'
-  } else if (document.documentElement.mozRequestFullScreen) {
+  } else if ('onmozfullscreenchange' in document) {
     return 'mozfullscreenchange'
-  } else if (document.documentElement.msRequestFullscreen) {
+  } else if ('onMSFullscreenChange' in document) {
     return 'msfullscreenchange'
   }
 }
 export const fullscrrenEvent = getOnfullscreEnevt()
 
+export const getFullscreenElement = () =>
+  document.fullscreenElement ||
+  document.webkitFullscreenElement ||
+  document.mozFullScreenElement ||
+  document.msFullscreenElement ||
+  null
+
+export const isFullscreenSupported = element => Boolean(
+  element?.requestFullscreen ||
+  element?.webkitRequestFullscreen ||
+  element?.webkitRequestFullScreen ||
+  element?.mozRequestFullScreen ||
+  element?.msRequestFullscreen
+)
+
 // 全屏
 export const fullScreen = element => {
-  if (element.requestFullScreen) {
-    element.requestFullScreen()
-  } else if (element.webkitRequestFullScreen) {
-    element.webkitRequestFullScreen()
-  } else if (element.mozRequestFullScreen) {
-    element.mozRequestFullScreen()
+  const request = element?.requestFullscreen ||
+    element?.webkitRequestFullscreen ||
+    element?.webkitRequestFullScreen ||
+    element?.mozRequestFullScreen ||
+    element?.msRequestFullscreen
+  if (!request) {
+    return Promise.reject(new Error('Fullscreen API is not supported'))
+  }
+  try {
+    return Promise.resolve(request.call(element))
+  } catch (error) {
+    return Promise.reject(error)
   }
 }
 
 // 退出全屏
 export const exitFullScreen = () => {
-  if (!document.fullscreenElement) return
-  if (document.exitFullscreen) {
-    document.exitFullscreen()
-  } else if (document.webkitExitFullscreen) {
-    document.webkitExitFullscreen()
-  } else if (document.mozCancelFullScreen) {
-    document.mozCancelFullScreen()
+  if (!getFullscreenElement()) return Promise.resolve()
+  const exit = document.exitFullscreen ||
+    document.webkitExitFullscreen ||
+    document.webkitCancelFullScreen ||
+    document.mozCancelFullScreen ||
+    document.msExitFullscreen
+  if (!exit) return Promise.reject(new Error('Fullscreen exit is not supported'))
+  try {
+    return Promise.resolve(exit.call(document))
+  } catch (error) {
+    return Promise.reject(error)
   }
+}
+
+export const waitForFullscreenElement = (expectedElement, timeoutMs = 750) =>
+  new Promise(resolve => {
+    const startedAt = Date.now()
+    const check = () => {
+      if (getFullscreenElement() === expectedElement) {
+        resolve(true)
+        return
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        resolve(false)
+        return
+      }
+      setTimeout(check, 25)
+    }
+    check()
+  })
+
+export const requestFullscreenAndWait = async (element, timeoutMs = 750) => {
+  let requestError = null
+  void fullScreen(element).catch(error => {
+    requestError = error
+  })
+  const entered = await waitForFullscreenElement(element, timeoutMs)
+  if (requestError) throw requestError
+  return entered
+}
+
+export const exitFullscreenAndWait = async (timeoutMs = 750) => {
+  let requestError = null
+  void exitFullScreen().catch(error => {
+    requestError = error
+  })
+  const exited = await waitForFullscreenElement(null, timeoutMs)
+  if (requestError) throw requestError
+  return exited
 }
 
 // 创建foreignObject节点

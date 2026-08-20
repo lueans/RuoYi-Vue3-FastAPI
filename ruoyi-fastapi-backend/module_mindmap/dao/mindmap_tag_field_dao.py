@@ -2,6 +2,7 @@
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
 from module_mindmap.entity.do.mindmap_tag_field_do import MindmapTagField, MindmapTagFieldOption
 
 
@@ -150,50 +151,68 @@ class MindmapTagFieldDao:
     async def get_suggestions(
         cls, db: AsyncSession, user_id: int, keyword: str | None = None, limit: int = 30,
     ) -> list[tuple[MindmapTagField, list[MindmapTagFieldOption]]]:
-        """获取字段搜索建议（全局 + 私有），返回 (field, matched_options) 列表"""
-        # 先查字段
+        """批量返回可见字段及可新增绑定的选项。"""
+        active_option_condition = or_(
+            MindmapTagFieldOption.tag_id.is_(None),
+            MindmapTag.status == 0,
+        )
         field_query = select(MindmapTagField).where(
             or_(MindmapTagField.owner_id == 0, MindmapTagField.owner_id == user_id)
         )
         if keyword:
             escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            matching_option_exists = (
+                select(MindmapTagFieldOption.id)
+                .outerjoin(MindmapTag, MindmapTag.id == MindmapTagFieldOption.tag_id)
+                .where(
+                    MindmapTagFieldOption.field_id == MindmapTagField.id,
+                    active_option_condition,
+                    or_(
+                        MindmapTagFieldOption.name.ilike(f'%{escaped}%', escape='\\'),
+                        MindmapTagFieldOption.option_key.ilike(f'%{escaped}%', escape='\\'),
+                    ),
+                )
+                .exists()
+            )
             field_query = field_query.where(
                 or_(
-                    MindmapTagField.name.like(f'%{escaped}%'),
-                    MindmapTagField.field_key.like(f'%{escaped}%'),
+                    MindmapTagField.name.ilike(f'%{escaped}%', escape='\\'),
+                    MindmapTagField.field_key.ilike(f'%{escaped}%', escape='\\'),
+                    matching_option_exists,
                 )
             )
         field_query = field_query.order_by(MindmapTagField.sort_order.asc(), MindmapTagField.id.asc()).limit(limit)
-        fields = (await db.execute(field_query)).scalars().all()
+        fields = list((await db.execute(field_query)).scalars())
+        if not fields:
+            return []
 
+        options = list((await db.execute(
+            select(MindmapTagFieldOption)
+            .outerjoin(MindmapTag, MindmapTag.id == MindmapTagFieldOption.tag_id)
+            .where(
+                MindmapTagFieldOption.field_id.in_([field.id for field in fields]),
+                active_option_condition,
+            )
+            .order_by(
+                MindmapTagFieldOption.field_id.asc(),
+                MindmapTagFieldOption.sort_order.asc(),
+                MindmapTagFieldOption.id.asc(),
+            )
+        )).scalars())
+        options_by_field: dict[int, list[MindmapTagFieldOption]] = {}
+        for option in options:
+            options_by_field.setdefault(option.field_id, []).append(option)
+
+        normalized_keyword = keyword.casefold() if keyword else None
         results = []
         for field in fields:
-            # 查该字段下匹配的选项
-            opt_query = select(MindmapTagFieldOption).where(
-                MindmapTagFieldOption.field_id == field.id
-            )
-            if keyword:
-                escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-                opt_query = opt_query.where(
-                    or_(
-                        MindmapTagFieldOption.name.like(f'%{escaped}%'),
-                        MindmapTagFieldOption.option_key.like(f'%{escaped}%'),
-                    )
-                )
-            opt_query = opt_query.order_by(
-                MindmapTagFieldOption.sort_order.asc(), MindmapTagFieldOption.id.asc()
-            )
-            options = (await db.execute(opt_query)).scalars().all()
-
-            # 如果字段名匹配但没有选项匹配，返回全部选项
-            if not options:
-                all_options = (await db.execute(
-                    select(MindmapTagFieldOption)
-                    .where(MindmapTagFieldOption.field_id == field.id)
-                    .order_by(MindmapTagFieldOption.sort_order.asc(), MindmapTagFieldOption.id.asc())
-                )).scalars().all()
-                options = list(all_options)
-
-            results.append((field, list(options)))
-
+            field_options = options_by_field.get(field.id, [])
+            if normalized_keyword and normalized_keyword not in field.name.casefold() \
+                    and normalized_keyword not in field.field_key.casefold():
+                field_options = [
+                    option for option in field_options
+                    if normalized_keyword in option.name.casefold()
+                    or normalized_keyword in option.option_key.casefold()
+                ]
+            results.append((field, field_options))
         return results

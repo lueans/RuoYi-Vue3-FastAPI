@@ -1,595 +1,436 @@
 <template>
-  <div class="app-container">
-    <el-card shadow="never" class="governanceCard">
-      <template #header>
-        <div class="cardHeader">
-          <div>
-            <span>统一标签治理</span>
-            <span class="headerHint">名称和样式修改会同步到所有引用节点</span>
+  <div class="app-container tagManagementPage">
+    <div class="managementCard">
+      <div class="tagWorkspace">
+        <aside class="tagGroupPanel" aria-label="标签分组管理">
+          <div class="tagGroupPanelHeader">
+            <span>标签分组</span>
+            <el-button link type="primary" @click="openCategoryManager">管理</el-button>
           </div>
-          <div>
-            <el-button size="small" @click="openCategoryManager">管理分类</el-button>
-            <el-button v-if="canAddTag" size="small" type="primary" @click="handleCreateManagedTag">新建标签</el-button>
-            <el-button size="small" :loading="managedTagsLoading" @click="loadManagedTags">刷新</el-button>
+          <div v-if="categoryError" class="groupLoadError" role="alert">
+            <span>分组加载失败</span>
+            <el-button link type="primary" @click="loadCategories">重试</el-button>
           </div>
-        </div>
-      </template>
-      <div class="governanceToolbar" role="search" aria-label="标签筛选">
-        <el-input
-          v-model="managedTagQuery.keyword" clearable class="keywordInput"
-          placeholder="搜索名称、Key 或描述" :prefix-icon="Search"
-          :maxlength="MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH"
-          @keyup.enter="handleManagedTagSearch" @clear="handleManagedTagSearch"
-        />
-        <el-select v-model="managedTagQuery.ownerScope" class="filterSelect" @change="handleManagedTagSearch">
-          <el-option label="全部范围" value="all" />
-          <el-option label="我的标签" value="mine" />
-          <el-option label="全局标签" value="global" />
-        </el-select>
-        <el-select v-model="managedTagQuery.status" clearable class="filterSelect" placeholder="全部状态" @change="handleManagedTagSearch">
-          <el-option label="启用" :value="0" />
-          <el-option label="停用" :value="1" />
-          <el-option label="归档" :value="2" />
-        </el-select>
-        <el-select v-model="managedTagQuery.categoryId" clearable filterable class="filterSelect" placeholder="全部分类" @change="handleManagedTagSearch">
-          <el-option v-for="category in tagCategories" :key="category.id" :label="category.name" :value="category.id" />
-        </el-select>
-        <el-select v-model="managedTagQuery.fieldId" clearable filterable class="filterSelect" placeholder="全部字段" @change="handleManagedTagSearch">
-          <el-option v-for="field in fields" :key="field.id" :label="field.name" :value="field.id" />
-        </el-select>
-        <el-button type="primary" @click="handleManagedTagSearch">查询</el-button>
-        <el-button @click="resetManagedTagSearch">重置</el-button>
-      </div>
-      <div v-if="managedTagsError" class="loadError" role="alert">
-        <span>{{ managedTagsError }}</span>
-        <el-button link type="primary" @click="loadManagedTags">重新加载</el-button>
-      </div>
-      <div v-if="tagCategoriesError" class="loadError" role="alert">
-        <span>{{ tagCategoriesError }}，分类名称和筛选可能不完整</span>
-        <el-button link type="primary" :loading="tagCategoriesLoading" @click="loadTagCategories">重新加载分类</el-button>
-      </div>
-      <div v-if="managedTagSelection.length" class="governanceBatchBar" role="status" aria-live="polite">
-        <span>
-          已选择 {{ managedTagSelection.length }} 个可管理标签，预计影响
-          {{ selectedManagedTagNodeCount }} 个节点
-        </span>
-        <div class="governanceBatchActions">
-          <el-button
-            size="small" type="danger" plain
-            :loading="tagOperationKey === 'archive:batch'"
-            :disabled="Boolean(tagOperationKey)"
-            aria-label="批量解除绑定并归档所选标签"
-            @click="handleBatchArchiveTags"
-          >批量解绑并归档</el-button>
-          <el-button size="small" :disabled="Boolean(tagOperationKey)" @click="clearManagedTagSelection">
-            取消选择
-          </el-button>
-        </div>
-      </div>
-      <el-table
-        ref="managedTagTableRef"
-        :data="managedTags" size="small" v-loading="managedTagsLoading"
-        row-key="id" @selection-change="handleManagedTagSelectionChange"
-        :empty-text="managedTagsError ? '标签列表加载失败' : '暂无符合条件的标签'"
-      >
-        <el-table-column type="selection" width="46" fixed="left" :selectable="canSelectManagedTag" />
-        <el-table-column label="标签" min-width="180" fixed="left">
-          <template #default="{ row }">
-            <div class="managedTagCell">
-              <span class="managedTagPreview" :style="getManagedTagStyle(row)">{{ row.name }}</span>
-              <span v-if="row.description" class="managedTagDescription" :title="row.description">{{ row.description }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="Key" prop="tagKey" min-width="140" show-overflow-tooltip />
-        <el-table-column label="分类" min-width="110" show-overflow-tooltip>
-          <template #default="{ row }">{{ categoryName(row.categoryId) }}</template>
-        </el-table-column>
-        <el-table-column label="字段" min-width="120" show-overflow-tooltip>
-          <template #default="{ row }">{{ fieldNames(row) }}</template>
-        </el-table-column>
-        <el-table-column label="范围" width="80" align="center">
-          <template #default="{ row }">{{ row.ownerId === 0 ? '全局' : '私有' }}</template>
-        </el-table-column>
-        <el-table-column label="状态" width="90" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.status === 0 ? 'success' : row.status === 1 ? 'warning' : 'info'">
-              {{ row.status === 0 ? '启用' : row.status === 1 ? '停用' : '归档' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="使用节点" prop="usageNodeCount" width="90" align="center" />
-        <el-table-column label="使用文件" prop="usageFileCount" width="90" align="center" />
-        <el-table-column label="最近修改" min-width="150">
-          <template #default="{ row }">
-            <el-popover placement="top" trigger="hover" :width="240">
-              <template #reference><span class="auditTime">{{ formatDateTime(row.updatedTime || row.createdTime) }}</span></template>
-              <div class="auditDetail">
-                <div>修改人：{{ row.updateBy || row.createdBy || '—' }}</div>
-                <div>定义版本：{{ row.definitionRevision || 1 }}</div>
-                <div>创建时间：{{ formatDateTime(row.createdTime) }}</div>
-              </div>
-            </el-popover>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="150" align="right" fixed="right">
-          <template #default="{ row }">
-            <div class="managedTagActions">
-              <el-button
-                link type="primary" :loading="tagOperationKey === `impact:${row.id}`"
-                :disabled="Boolean(tagOperationKey)"
-                :aria-label="`查看标签 ${row.name} 的影响范围`"
-                @click="showTagImpact(row)"
-              >影响</el-button>
-              <el-dropdown
-                v-if="row.status !== 2 && (canEditManagedTag(row) || canArchiveManagedTag(row))"
-                trigger="click" :disabled="Boolean(tagOperationKey)"
-                @command="command => handleManagedTagCommand(command, row)"
-              >
-                <el-button
-                  link type="primary" :disabled="Boolean(tagOperationKey)"
-                  :aria-label="`管理标签 ${row.name}`"
-                >管理</el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item v-if="canEditManagedTag(row)" command="edit">编辑定义</el-dropdown-item>
-                    <el-dropdown-item v-if="row.status === 0 && canEditManagedTag(row)" command="disable">停用标签</el-dropdown-item>
-                    <el-dropdown-item v-if="canEditManagedTag(row)" command="replace">替换引用</el-dropdown-item>
-                    <el-dropdown-item v-if="canArchiveManagedTag(row)" command="archive" divided>解绑并归档</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
-      <div class="governancePager" v-if="managedTagTotal > 0">
-        <el-pagination
-          size="small" layout="total, sizes, prev, pager, next" :total="managedTagTotal"
-          :page-size="managedTagQuery.pageSize" v-model:current-page="managedTagQuery.pageNum"
-          :page-sizes="[10, 20, 50, 100]"
-          @current-change="loadManagedTags" @size-change="handleManagedTagPageSize"
-        />
-      </div>
-    </el-card>
-
-    <el-dialog v-model="replaceDialog.visible" title="替换统一标签" width="520px" destroy-on-close>
-      <el-alert
-        :title="`将替换 ${replaceDialog.nodeCount} 个节点中的「${replaceDialog.sourceName}」`"
-        type="warning" :closable="false" show-icon style="margin-bottom: 16px"
-      />
-      <el-form label-width="90px">
-        <el-form-item label="目标标签">
-          <el-select
-            v-model="replaceDialog.targetTagId" filterable remote clearable
-            :remote-method="searchReplacementTags" :loading="replacementLoading"
-            placeholder="输入名称或 Key 搜索启用标签" style="width: 100%"
-          >
-            <el-option
-              v-for="item in replacementOptions" :key="item.id"
-              :label="`${item.name}（${item.tagKey}）`" :value="item.id"
-            />
-          </el-select>
-          <div v-if="replacementError" class="fieldError" role="alert">
-            {{ replacementError }}
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="replaceDialog.visible = false">取消</el-button>
-        <el-button type="primary" :loading="replaceSubmitting" :disabled="!replaceDialog.targetTagId" @click="confirmReplaceTag">
-          确认替换
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="tagEditDialog.visible" :title="tagEditDialog.id ? '编辑统一标签' : '新建统一标签'" width="560px" destroy-on-close>
-      <el-form label-width="90px">
-        <el-form-item label="名称"><el-input v-model="tagEditDialog.name" :maxlength="MAX_MINDMAP_TAG_NAME_LENGTH" show-word-limit /></el-form-item>
-        <el-form-item label="Key"><el-input v-model="tagEditDialog.tagKey" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="Boolean(tagEditDialog.id) && !isAdmin" /></el-form-item>
-        <el-form-item v-if="isAdmin" label="范围">
-          <el-radio-group v-model="tagEditDialog.ownerScope">
-            <el-radio value="mine">私有</el-radio><el-radio value="global">全局</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="分类">
-          <el-select v-model="tagEditDialog.categoryId" clearable filterable placeholder="未分类" style="width: 100%">
-            <el-option v-for="category in editableTagCategories" :key="category.id" :label="category.name" :value="category.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="tagEditDialog.id" label="状态">
-          <el-radio-group v-model="tagEditDialog.status">
-            <el-radio :value="0">启用</el-radio><el-radio :value="1">停用</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="说明">
-          <el-input v-model="tagEditDialog.description" type="textarea" :rows="2" :maxlength="MAX_MINDMAP_TAG_DESCRIPTION_LENGTH" show-word-limit placeholder="说明标签的使用场景" />
-        </el-form-item>
-        <el-row :gutter="16">
-          <el-col :span="12"><el-form-item label="背景色"><el-color-picker v-model="tagEditDialog.fill" show-alpha /></el-form-item></el-col>
-          <el-col :span="12"><el-form-item label="文字色"><el-color-picker v-model="tagEditDialog.color" show-alpha /></el-form-item></el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="8"><el-form-item label="字号"><el-input-number v-model="tagEditDialog.fontSize" :min="10" :max="24" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="圆角"><el-input-number v-model="tagEditDialog.radius" :min="0" :max="20" /></el-form-item></el-col>
-          <el-col :span="8"><el-form-item label="内边距"><el-input-number v-model="tagEditDialog.paddingX" :min="0" :max="30" /></el-form-item></el-col>
-        </el-row>
-      </el-form>
-      <template #footer>
-        <el-button @click="tagEditDialog.visible = false">取消</el-button>
-        <el-button type="primary" :loading="tagEditSubmitting" @click="confirmEditManagedTag">
-          {{ tagEditDialog.id ? '保存并全局生效' : '创建标签' }}
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="categoryDialog.visible" title="标签分类管理" width="min(680px, calc(100vw - 32px))"
-      :close-on-click-modal="!categoryBusy" :close-on-press-escape="!categoryBusy"
-      :show-close="!categoryBusy"
-    >
-      <el-alert
-        title="分类用于整理标签，不会改变节点内容；仍有标签的分类不能删除。"
-        type="info" :closable="false" show-icon class="categoryHint"
-      />
-      <div v-if="categoryFormVisible" class="categoryEditor" role="group" :aria-label="categoryForm.id ? '编辑标签分类' : '新建标签分类'">
-        <el-input
-          v-model="categoryForm.name" aria-label="分类名称" placeholder="分类名称"
-          :maxlength="MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH" show-word-limit
-          @keyup.enter="saveCategory"
-        />
-        <el-input-number
-          v-model="categoryForm.sortOrder" aria-label="分类排序" :min="-MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER"
-          :max="MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER" :step="1" controls-position="right"
-        />
-        <el-select
-          v-if="!categoryForm.id && isAdmin" v-model="categoryForm.ownerScope"
-          aria-label="分类范围" class="categoryScope"
-        >
-          <el-option label="我的分类" value="mine" />
-          <el-option label="全局分类" value="global" />
-        </el-select>
-        <div class="categoryEditorActions">
-          <el-button :disabled="categorySubmitting" @click="cancelCategoryEdit">取消</el-button>
-          <el-button type="primary" :loading="categorySubmitting" @click="saveCategory">
-            {{ categoryForm.id ? '保存' : '创建' }}
-          </el-button>
-        </div>
-      </div>
-      <div v-else-if="canAddCategory" class="categoryCreateAction">
-        <el-button type="primary" :disabled="Boolean(categoryOperationKey)" @click="startCreateCategory">
-          新建分类
-        </el-button>
-      </div>
-      <div v-if="tagCategoriesError" class="loadError" role="alert">
-        <span>{{ tagCategoriesError }}</span>
-        <el-button link type="primary" :loading="tagCategoriesLoading" @click="loadTagCategories">重新加载</el-button>
-      </div>
-      <el-table
-        :data="tagCategories" size="small" v-loading="tagCategoriesLoading"
-        :empty-text="tagCategoriesError ? '分类加载失败' : '暂无分类'"
-      >
-        <el-table-column label="分类" min-width="160" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span>{{ row.name }}</span>
-            <el-tag v-if="Number(row.ownerId) === 0" size="small" type="info" effect="plain" class="categoryScopeTag">全局</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="标签数" prop="tagCount" width="90" align="center" />
-        <el-table-column label="排序" prop="sortOrder" width="90" align="center" />
-        <el-table-column label="操作" width="130" align="right">
-          <template #default="{ row }">
-            <el-button
-              v-if="canEditCategoryRow(row)" link type="primary"
-              :disabled="Boolean(categoryOperationKey) || categorySubmitting"
-              :aria-label="`编辑分类 ${row.name}`" @click="startEditCategory(row)"
-            >编辑</el-button>
-            <el-button
-              v-if="canRemoveCategoryRow(row)" link type="danger"
-              :loading="categoryOperationKey === `delete:${row.id}`"
-              :disabled="Boolean(categoryOperationKey) || categorySubmitting || Number(row.tagCount) > 0"
-              :aria-label="Number(row.tagCount) > 0 ? `分类 ${row.name} 仍有 ${row.tagCount} 个标签，不能删除` : `删除分类 ${row.name}`"
-              @click="removeCategory(row)"
-            >删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-      <template #footer>
-        <el-button :disabled="categoryBusy" @click="categoryDialog.visible = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
-    <el-row :gutter="16" class="fieldWorkspace">
-      <!-- 左侧：字段列表 -->
-      <el-col :xs="24" :sm="8" :lg="6">
-        <el-card shadow="never" v-loading="fieldsLoading">
-          <template #header>
-            <div class="cardHeader">
-              <span>标签字段</span>
-              <el-button
-                type="primary" size="small" aria-label="新建标签字段"
-                :disabled="fieldSubmitting || fieldDeleting || optionOperationKeys.size > 0"
-                @click="handleAddField"
-              >
-                <el-icon><Plus /></el-icon>
-              </el-button>
-            </div>
-          </template>
-          <div class="fieldList">
+          <nav v-loading="categoryLoading" class="tagGroupNav" aria-label="标签分组">
             <button
-              v-for="field in fields"
-              :key="field.id"
               type="button"
-              class="fieldItem"
-              :class="{ active: selectedFieldId === field.id }"
-              :aria-pressed="selectedFieldId === field.id"
-              :disabled="fieldSubmitting || fieldDeleting || optionOperationKeys.size > 0"
-              @click="selectField(field)"
+              class="tagGroupNavItem"
+              :class="{ active: query.categoryId === null }"
+              :aria-current="query.categoryId === null ? 'page' : undefined"
+              @click="selectCategory(null)"
             >
-              <div class="fieldInfo">
-                <span class="fieldName">{{ field.name }}</span>
-                <el-tag size="small" :type="field.selectMode === 'multi' ? 'warning' : 'info'" effect="plain">
-                  {{ field.selectMode === 'multi' ? '多选' : '单选' }}
-                </el-tag>
-              </div>
-              <span class="fieldBadge" v-if="field.ownerId === 0">全局</span>
+              <span>全部标签</span>
             </button>
-            <div v-if="fieldsError" class="loadError compact" role="alert">
-              <span>{{ fieldsError }}</span>
-              <el-button link type="primary" @click="loadFields">重试</el-button>
+            <button
+              v-for="category in categories"
+              :key="category.id"
+              type="button"
+              class="tagGroupNavItem"
+              :class="{ active: Number(query.categoryId) === Number(category.id) }"
+              :aria-current="Number(query.categoryId) === Number(category.id) ? 'page' : undefined"
+              @click="selectCategory(category.id)"
+            >
+              <span class="tagGroupNavName" :title="category.name">{{ category.name }}</span>
+              <span class="tagGroupNavCount">{{ category.tagCount || 0 }}</span>
+            </button>
+            <button
+              type="button"
+              class="tagGroupNavItem"
+              :class="{ active: query.categoryId === 0 }"
+              :aria-current="query.categoryId === 0 ? 'page' : undefined"
+              @click="selectCategory(0)"
+            >
+              <span>未分组</span>
+            </button>
+          </nav>
+        </aside>
+
+        <section class="tagListPanel" :aria-label="`${currentCategoryTitle}标签管理`">
+          <div class="tagListHeader">
+            <div>
+              <h3>{{ currentCategoryTitle }}</h3>
+              <p>当前视图共 {{ total }} 个符合条件的标签</p>
             </div>
-            <div v-else-if="!fieldsLoading && fields.length === 0" class="emptyTip">暂无字段，点击上方按钮创建</div>
-          </div>
-        </el-card>
-      </el-col>
-
-      <!-- 右侧：字段编辑 -->
-      <el-col :xs="24" :sm="16" :lg="18">
-        <el-card shadow="never" v-if="selectedField" v-loading="fieldDetailLoading">
-          <template #header>
-            <div class="cardHeader">
-              <span>编辑字段</span>
-              <div v-if="canManageSelectedField">
-                <el-button type="primary" :loading="fieldSubmitting" :disabled="fieldDeleting" @click="saveField">保存</el-button>
-                <el-button type="danger" plain :loading="fieldDeleting" :disabled="fieldSubmitting" @click="handleDeleteField">删除</el-button>
-              </div>
+            <div class="headerActions">
+              <el-button v-if="canAddTag" type="primary" @click="openCreateTag">新建标签</el-button>
+              <el-button :loading="loading" @click="loadTags">刷新</el-button>
             </div>
-          </template>
-
-          <el-alert
-            v-if="!canManageSelectedField"
-            title="该全局字段仅管理员可修改，当前为只读预览"
-            type="info" :closable="false" show-icon style="margin-bottom: 16px"
-          />
-          <div v-if="fieldDetailError" class="loadError" role="alert">
-            <span>{{ fieldDetailError }}</span>
-            <el-button link type="primary" @click="retrySelectedField">重新加载</el-button>
           </div>
 
-          <!-- 基本信息 -->
-          <div class="sectionTitle">基本信息</div>
-          <el-row :gutter="16">
-            <el-col :span="12">
-              <el-form-item label="字段Key">
-                <el-input v-model="fieldForm.fieldKey" placeholder="英文/数字/下划线" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="!!fieldForm.id || !canManageSelectedField" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item label="名称">
-                <el-input v-model="fieldForm.name" placeholder="字段显示名称" :maxlength="MAX_MINDMAP_TAG_FIELD_NAME_LENGTH" show-word-limit :disabled="!canManageSelectedField" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-row :gutter="16">
-            <el-col :span="12">
-              <el-form-item label="选择模式">
-                <el-radio-group v-model="fieldForm.selectMode" :disabled="!canManageSelectedField">
-                  <el-radio value="single">单选</el-radio>
-                  <el-radio value="multi">多选</el-radio>
-                </el-radio-group>
-              </el-form-item>
-            </el-col>
-            <el-col :span="12" v-if="isAdmin">
-              <el-form-item label="范围">
-                <el-radio-group v-model="fieldForm.ownerScope" :disabled="!canManageSelectedField">
-                  <el-radio value="mine">私有</el-radio>
-                  <el-radio value="global">全局</el-radio>
-                </el-radio-group>
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-form-item label="描述">
-            <el-input v-model="fieldForm.description" type="textarea" :rows="1" placeholder="字段描述（可选）" :maxlength="MAX_MINDMAP_TAG_DESCRIPTION_LENGTH" show-word-limit :disabled="!canManageSelectedField" />
-          </el-form-item>
-
-          <!-- 基础样式 -->
-          <div class="sectionTitle">基础样式</div>
-          <el-row :gutter="16">
-            <el-col :span="8">
-              <el-form-item label="字号">
-                <el-input-number v-model="styleForm.fontSize" :min="10" :max="24" :disabled="!canManageSelectedField" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="圆角">
-                <el-input-number v-model="styleForm.radius" :min="0" :max="20" :disabled="!canManageSelectedField" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="8">
-              <el-form-item label="内边距">
-                <el-input-number v-model="styleForm.paddingX" :min="0" :max="30" :disabled="!canManageSelectedField" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <el-row :gutter="16">
-            <el-col :span="12">
-              <el-form-item label="位置">
-                <el-select v-model="styleForm.placement" :disabled="!canManageSelectedField" style="width: 100%">
-                  <el-option label="右侧" value="right" />
-                  <el-option label="左侧" value="left" />
-                  <el-option label="顶部" value="top" />
-                  <el-option label="底部" value="bottom" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item label="对齐">
-                <el-select v-model="styleForm.align" :disabled="!canManageSelectedField" style="width: 100%">
-                  <el-option v-for="opt in alignOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-          </el-row>
-
-          <!-- 选项管理 -->
-          <div class="sectionTitle">
-            选项管理
-            <el-button v-if="canManageSelectedField" type="primary" size="small" style="margin-left: 12px" @click="addOption">
-              <el-icon><Plus /></el-icon> 添加选项
-            </el-button>
+          <div class="filterBar" role="search" aria-label="标签筛选">
+            <el-input
+              v-model="query.keyword"
+              clearable
+              class="keywordInput"
+              placeholder="搜索名称、Key 或描述"
+              :prefix-icon="Search"
+              :maxlength="MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH"
+              @keyup.enter="search"
+              @clear="search"
+            />
+            <el-select v-model="query.ownerScope" class="filterSelect" @change="search">
+              <el-option label="全部范围" value="all" />
+              <el-option label="我的标签" value="mine" />
+              <el-option label="全局标签" value="global" />
+            </el-select>
+            <el-select v-model="query.status" clearable class="filterSelect" placeholder="全部状态" @change="search">
+              <el-option label="启用" :value="0" />
+              <el-option label="停用" :value="1" />
+              <el-option label="归档" :value="2" />
+            </el-select>
+            <el-button type="primary" @click="search">查询</el-button>
+            <el-button @click="resetSearch">重置</el-button>
           </div>
-          <el-table :data="options" size="small" :header-cell-style="{ background: '#fafafa' }">
-            <el-table-column label="Key" width="140">
+
+          <div v-if="loadError" class="loadError" role="alert">
+            <span>{{ loadError }}</span>
+            <el-button link type="primary" @click="loadTags">重新加载</el-button>
+          </div>
+
+          <div v-if="selection.length" class="batchBar" role="status" aria-live="polite">
+            <span>已选择 {{ selection.length }} 个标签，预计影响 {{ selectedNodeCount }} 个节点</span>
+            <div>
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :loading="operationKey === 'archive:batch'"
+                :disabled="Boolean(operationKey)"
+                @click="archiveSelected"
+              >批量解绑并归档</el-button>
+              <el-button size="small" :disabled="Boolean(operationKey)" @click="clearSelection">取消选择</el-button>
+            </div>
+          </div>
+
+          <el-table
+            ref="tableRef"
+            v-loading="loading"
+            :data="tags"
+            row-key="id"
+            :empty-text="loadError ? '标签列表加载失败' : '当前分组暂无符合条件的标签'"
+            @selection-change="handleSelectionChange"
+          >
+            <el-table-column type="selection" width="46" fixed="left" :selectable="canSelectTag" />
+            <el-table-column label="标签" min-width="210" fixed="left">
               <template #default="{ row }">
-                <el-input v-model="row.optionKey" size="small" placeholder="option_key" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="!canManageSelectedField || isOptionBusy(row)"
-                  @blur="onOptionChange(row)" />
+                <div class="tagCell">
+                  <span class="tagPreview" :style="tagStyle(row)">{{ row.name }}</span>
+                  <span v-if="row.description" class="tagDescription" :title="row.description">{{ row.description }}</span>
+                </div>
               </template>
             </el-table-column>
-            <el-table-column label="名称" min-width="140">
+            <el-table-column label="Key" prop="tagKey" min-width="150" show-overflow-tooltip />
+            <el-table-column v-if="query.categoryId === null" label="分组" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ categoryName(row.categoryId) }}</template>
+            </el-table-column>
+            <el-table-column label="范围" width="80" align="center">
+              <template #default="{ row }">{{ Number(row.ownerId) === 0 ? '全局' : '私有' }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="90" align="center">
               <template #default="{ row }">
-                <el-input v-model="row.name" size="small" placeholder="显示名称" :maxlength="MAX_MINDMAP_TAG_NAME_LENGTH" :disabled="!canManageSelectedField || isOptionBusy(row)"
-                  @blur="onOptionChange(row)" />
+                <el-tag size="small" :type="statusType(row.status)">{{ statusText(row.status) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="背景色" width="100" align="center">
-              <template #default="{ row }">
-                <el-popover trigger="click" :disabled="!canManageSelectedField || isOptionBusy(row)" :width="230" placement="bottom-start">
-                  <template #reference>
-                    <ColorTrigger
-                      :color="row.fill || '#409eff'" label="选择选项背景色" :width="28" :height="28"
-                      :disabled="!canManageSelectedField || isOptionBusy(row)"
-                    />
-                  </template>
-                  <div class="colorGroupPanel">
-                    <div v-for="group in colorGroups" :key="group.label" class="colorGroup">
-                      <div class="colorGroupLabel">{{ group.label }}</div>
-                      <div class="colorGroupSwatches">
-                        <button v-for="c in group.colors" :key="c" type="button" class="colorDot"
-                          :class="{ active: row.fill === c, transparentDot: c === 'transparent', lightDot: isLightColor(c) }"
-                          :style="c === 'transparent' ? {} : { backgroundColor: c }"
-                          :aria-label="`背景色 ${describeColor(c)}`" :aria-pressed="row.fill === c"
-                          @click="row.fill = c; onOptionChange(row)" />
-                      </div>
-                    </div>
-                    <div class="customColorRow">
-                      <span class="colorGroupLabel">自定义</span>
-                      <el-color-picker
-                        :model-value="row.fill === 'transparent' ? '#ffffff' : row.fill"
-                        show-alpha
-                        size="small"
-                        :teleported="false" :disabled="!canManageSelectedField || isOptionBusy(row)"
-                        @change="(val) => applyFillColor(row, val)" />
-                    </div>
-                  </div>
-                </el-popover>
-              </template>
+            <el-table-column label="使用节点" prop="usageNodeCount" width="90" align="center" />
+            <el-table-column label="使用文件" prop="usageFileCount" width="90" align="center" />
+            <el-table-column label="最近修改" min-width="160">
+              <template #default="{ row }">{{ formatDateTime(row.updatedTime || row.createdTime) }}</template>
             </el-table-column>
-            <el-table-column label="文字色" width="100" align="center">
+            <el-table-column label="操作" width="176" align="right" fixed="right">
               <template #default="{ row }">
-                <el-popover trigger="click" :disabled="!canManageSelectedField || isOptionBusy(row)" :width="230" placement="bottom-start">
-                  <template #reference>
-                    <ColorTrigger
-                      :color="row.color || '#ffffff'" label="选择选项文字色" :width="28" :height="28"
-                      :disabled="!canManageSelectedField || isOptionBusy(row)"
-                    />
-                  </template>
-                  <div class="colorGroupPanel">
-                    <div v-for="group in colorGroups" :key="group.label" class="colorGroup">
-                      <div class="colorGroupLabel">{{ group.label }}</div>
-                      <div class="colorGroupSwatches">
-                        <button v-for="c in group.colors" :key="c" type="button" class="colorDot"
-                          :class="{ active: row.color === c, transparentDot: c === 'transparent', lightDot: isLightColor(c) }"
-                          :style="c === 'transparent' ? {} : { backgroundColor: c }"
-                          :aria-label="`文字色 ${describeColor(c)}`" :aria-pressed="row.color === c"
-                          @click="row.color = c; onOptionChange(row)" />
-                      </div>
-                    </div>
-                    <div class="customColorRow">
-                      <span class="colorGroupLabel">自定义</span>
-                      <el-color-picker
-                        :model-value="row.color === 'transparent' ? '#ffffff' : row.color"
-                        show-alpha
-                        size="small"
-                        :teleported="false" :disabled="!canManageSelectedField || isOptionBusy(row)"
-                        @change="(val) => applyTextColor(row, val)" />
-                    </div>
-                  </div>
-                </el-popover>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="60" align="center">
-              <template #default="{ row, $index }">
-                <el-button
-                  v-if="canManageSelectedField" link type="danger" size="small"
-                  :loading="isOptionBusy(row)" :disabled="isOptionBusy(row)"
-                  :aria-label="`删除选项${row.name ? `「${row.name}」` : ''}`"
-                  @click="removeOption($index, row)"
-                >
-                  <el-icon><Delete /></el-icon>
-                </el-button>
+                <div class="tagActionCell">
+                  <el-button link type="primary" :disabled="Boolean(operationKey)" @click="showImpact(row)">影响</el-button>
+                  <el-dropdown
+                    v-if="row.status !== 2 && (canEditManagedTag(row) || canArchiveManagedTag(row))"
+                    trigger="click"
+                    :disabled="Boolean(operationKey)"
+                    @command="command => handleCommand(command, row)"
+                  >
+                    <el-button link type="primary">管理</el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item v-if="canEditManagedTag(row)" command="edit">编辑定义</el-dropdown-item>
+                        <el-dropdown-item v-if="row.status === 0 && canEditManagedTag(row)" command="disable">停用标签</el-dropdown-item>
+                        <el-dropdown-item v-if="canEditManagedTag(row)" command="replace">替换引用</el-dropdown-item>
+                        <el-dropdown-item v-if="canArchiveManagedTag(row)" command="archive" divided>解绑并归档</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
+                </div>
               </template>
             </el-table-column>
           </el-table>
 
-          <!-- 预览 -->
-          <div class="sectionTitle" style="margin-top: 16px">预览</div>
-          <div class="previewBox">
-            <span v-for="opt in options" :key="opt.optionKey || opt._tempId"
-              class="tagBadge" :style="getOptionStyle(opt)">
-              {{ opt.name || '选项' }}
-            </span>
-            <span v-if="options.length === 0" class="emptyPreview">暂无选项</span>
+          <div v-if="total" class="pager">
+            <el-pagination
+              v-model:current-page="query.pageNum"
+              v-model:page-size="query.pageSize"
+              layout="total, sizes, prev, pager, next"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="total"
+              @current-change="loadTags"
+              @size-change="changePageSize"
+            />
           </div>
-        </el-card>
+        </section>
+      </div>
+    </div>
 
-        <el-card shadow="never" v-else>
-          <div class="emptyState">
-            <el-icon :size="48" color="#dcdfe6"><Document /></el-icon>
-            <p>选择左侧字段进行编辑，或创建新字段</p>
+    <el-dialog
+      v-model="editDialog.visible"
+      :title="editDialog.id ? '编辑标签' : '新建标签'"
+      class="tagDefinitionDialog"
+      width="min(560px, calc(100vw - 32px))"
+      destroy-on-close
+    >
+      <el-form label-width="88px">
+        <el-form-item label="名称"><el-input v-model="editDialog.name" :maxlength="MAX_MINDMAP_TAG_NAME_LENGTH" show-word-limit /></el-form-item>
+        <el-form-item label="Key"><el-input v-model="editDialog.tagKey" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="Boolean(editDialog.id) && !isAdmin" /></el-form-item>
+        <el-form-item v-if="isAdmin" label="范围">
+          <el-radio-group v-model="editDialog.ownerScope">
+            <el-radio value="mine">私有</el-radio>
+            <el-radio value="global">全局</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="分组">
+          <el-select v-model="editDialog.categoryId" clearable filterable placeholder="未分组" style="width: 100%">
+            <el-option v-for="category in editableCategories" :key="category.id" :label="category.name" :value="category.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="editDialog.id" label="状态">
+          <el-radio-group v-model="editDialog.status">
+            <el-radio :value="0">启用</el-radio>
+            <el-radio :value="1">停用</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input v-model="editDialog.description" type="textarea" :rows="2" :maxlength="MAX_MINDMAP_TAG_DESCRIPTION_LENGTH" show-word-limit />
+        </el-form-item>
+        <section class="tagStyleSection" aria-labelledby="tagStyleSectionTitle">
+          <div class="tagStyleSectionHeader">
+            <span id="tagStyleSectionTitle">标签样式</span>
+            <span>调整节点中标签的展示效果</span>
           </div>
-        </el-card>
-      </el-col>
-    </el-row>
+          <div class="tagStyleColorGrid">
+            <el-form-item label="背景色" label-width="56px">
+              <el-color-picker v-model="editDialog.fill" show-alpha />
+            </el-form-item>
+            <el-form-item label="文字色" label-width="56px">
+              <el-color-picker v-model="editDialog.color" show-alpha />
+            </el-form-item>
+          </div>
+          <div class="tagStyleNumberGrid">
+            <el-form-item label="字号" label-width="56px">
+              <el-input-number class="tagStyleNumber" v-model="editDialog.fontSize" :min="10" :max="24" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="圆角" label-width="56px">
+              <el-input-number class="tagStyleNumber" v-model="editDialog.radius" :min="0" :max="20" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="内边距" label-width="56px">
+              <el-input-number class="tagStyleNumber" v-model="editDialog.paddingX" :min="0" :max="30" controls-position="right" />
+            </el-form-item>
+          </div>
+          <div class="tagStyleLayoutGrid">
+            <el-form-item label="位置" label-width="56px">
+              <el-select v-model="editDialog.placement" style="width: 100%">
+                <el-option label="右侧" value="right" />
+                <el-option label="左侧" value="left" />
+                <el-option label="顶部" value="top" />
+                <el-option label="底部" value="bottom" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="对齐" label-width="56px">
+              <el-select v-model="editDialog.align" style="width: 100%">
+                <el-option
+                  v-for="option in tagAlignOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+            </el-form-item>
+          </div>
+        </section>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="editSubmitting" @click="saveTag">{{ editDialog.id ? '保存并全局生效' : '创建标签' }}</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="replaceDialog.visible" title="替换标签" width="520px" destroy-on-close>
+      <el-alert :title="`将替换 ${replaceDialog.nodeCount} 个节点中的「${replaceDialog.sourceName}」`" type="warning" :closable="false" show-icon />
+      <el-form label-width="88px" class="replaceForm">
+        <el-form-item label="目标标签">
+          <el-select
+            v-model="replaceDialog.targetTagId"
+            filterable
+            remote
+            clearable
+            :remote-method="searchReplacementTags"
+            :loading="replacementLoading"
+            placeholder="搜索启用标签"
+            style="width: 100%"
+          >
+            <el-option v-for="item in replacementOptions" :key="item.id" :label="`${item.name}（${item.tagKey}）`" :value="item.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="replaceDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="replaceSubmitting" :disabled="!replaceDialog.targetTagId" @click="confirmReplacement">确认替换</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="categoryDialog.visible" title="标签分组管理" width="min(760px, calc(100vw - 32px))">
+      <el-alert title="拖拽手柄可调整分组顺序；全局分组仅管理员可排序。仍有标签的分组不能删除。" type="info" :closable="false" show-icon />
+      <div class="categoryToolbar">
+        <el-button v-if="canAddCategory && !categoryEditing" type="primary" @click="startCreateCategory">新建分组</el-button>
+      </div>
+      <div v-if="categoryEditing" class="categoryEditor">
+        <div class="categoryEditorMain">
+          <el-input v-model="categoryForm.name" placeholder="分组名称" :maxlength="MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH" show-word-limit />
+          <span class="categoryEditorHint">类型：{{ categoryTypeText(categoryForm.categoryType) }}</span>
+        </div>
+        <el-select v-if="!categoryForm.id && isAdmin" v-model="categoryForm.ownerScope">
+          <el-option label="我的分组" value="mine" />
+          <el-option label="全局分组" value="global" />
+        </el-select>
+        <el-button @click="cancelCategoryEdit">取消</el-button>
+        <el-button type="primary" :loading="categorySubmitting" @click="saveCategory">保存</el-button>
+      </div>
+      <div v-loading="categoryLoading" class="categoryManagerBody">
+        <section v-if="globalCategoryRows.length" class="categoryScopeSection" aria-labelledby="globalCategoryTitle">
+          <div class="categoryScopeHeader">
+            <div>
+              <strong id="globalCategoryTitle">全局分组</strong>
+              <span>所有用户可见</span>
+            </div>
+            <span>{{ globalCategoryRows.length }} 个</span>
+          </div>
+          <Draggable
+            v-model="globalCategoryRows"
+            item-key="id"
+            tag="div"
+            class="categoryRows"
+            handle=".categoryDragHandle"
+            :animation="180"
+            :disabled="!canReorderCategoryScope('global') || Boolean(categoryReordering)"
+            ghost-class="categoryDragGhost"
+            chosen-class="categoryDragChosen"
+            @start="captureCategoryOrder('global')"
+            @end="finishCategoryReorder('global')"
+          >
+            <template #item="{ element: row }">
+              <div class="categoryRow">
+                <button
+                  type="button"
+                  class="categoryDragHandle"
+                  :disabled="!canReorderCategoryScope('global') || Boolean(categoryReordering)"
+                  :aria-label="`拖拽调整${row.name}的顺序`"
+                  title="按住拖拽排序"
+                ><span aria-hidden="true">⠿</span></button>
+                <div class="categoryRowMain">
+                  <div class="categoryRowName">
+                    <span>{{ row.name }}</span>
+                    <el-tag size="small" :type="categoryTypeTagType(row.categoryType)" effect="plain">{{ categoryTypeText(row.categoryType) }}</el-tag>
+                  </div>
+                  <span class="categoryRowMeta">排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
+                </div>
+                <div class="categoryRowActions">
+                  <el-button v-if="canEditCategoryRow(row)" link type="primary" @click="startEditCategory(row)">编辑</el-button>
+                  <el-button v-if="canRemoveCategoryRow(row)" link type="danger" :disabled="Number(row.tagCount) > 0" @click="removeCategory(row)">删除</el-button>
+                </div>
+              </div>
+            </template>
+          </Draggable>
+        </section>
+
+        <section class="categoryScopeSection" aria-labelledby="personalCategoryTitle">
+          <div class="categoryScopeHeader">
+            <div>
+              <strong id="personalCategoryTitle">我的分组</strong>
+              <span>仅当前用户可见</span>
+            </div>
+            <span>{{ personalCategoryRows.length }} 个</span>
+          </div>
+          <Draggable
+            v-if="personalCategoryRows.length"
+            v-model="personalCategoryRows"
+            item-key="id"
+            tag="div"
+            class="categoryRows"
+            handle=".categoryDragHandle"
+            :animation="180"
+            :disabled="!canReorderCategoryScope('mine') || Boolean(categoryReordering)"
+            ghost-class="categoryDragGhost"
+            chosen-class="categoryDragChosen"
+            @start="captureCategoryOrder('mine')"
+            @end="finishCategoryReorder('mine')"
+          >
+            <template #item="{ element: row }">
+              <div class="categoryRow">
+                <button
+                  type="button"
+                  class="categoryDragHandle"
+                  :disabled="!canReorderCategoryScope('mine') || Boolean(categoryReordering)"
+                  :aria-label="`拖拽调整${row.name}的顺序`"
+                  title="按住拖拽排序"
+                ><span aria-hidden="true">⠿</span></button>
+                <div class="categoryRowMain">
+                  <div class="categoryRowName">
+                    <span>{{ row.name }}</span>
+                    <el-tag size="small" :type="categoryTypeTagType(row.categoryType)" effect="plain">{{ categoryTypeText(row.categoryType) }}</el-tag>
+                  </div>
+                  <span class="categoryRowMeta">排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
+                </div>
+                <div class="categoryRowActions">
+                  <el-button v-if="canEditCategoryRow(row)" link type="primary" @click="startEditCategory(row)">编辑</el-button>
+                  <el-button v-if="canRemoveCategoryRow(row)" link type="danger" :disabled="Number(row.tagCount) > 0" @click="removeCategory(row)">删除</el-button>
+                </div>
+              </div>
+            </template>
+          </Draggable>
+          <div v-else class="categoryEmpty">暂无自定义分组</div>
+        </section>
+      </div>
+      <template #footer><el-button @click="categoryDialog.visible = false">关闭</el-button></template>
+    </el-dialog>
   </div>
 </template>
 
-<script setup name="TagFieldManagement">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { Plus, Delete, Document, Search } from '@element-plus/icons-vue'
+<script setup name="TagManagement">
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import Draggable from 'vuedraggable'
 import {
-  listTagFields, getTagFieldDetail, getTagFieldImpact, addTagField, updateTagField, deleteTagField,
-  addTagFieldOption, updateTagFieldOption, deleteTagFieldOption,
-  listTags, listTagCategories, addTagCategory, updateTagCategory, deleteTagCategory,
-  getTagImpact, disableTag, replaceTag, deleteTags, addTag, updateTag,
+  addTag,
+  addTagCategory,
+  deleteTagCategory,
+  deleteTags,
+  disableTag,
+  getTagImpact,
+  listTagCategories,
+  listTags,
+  replaceTag,
+  reorderTagCategories,
+  updateTag,
+  updateTagCategory,
 } from '@/api/mindmap/tag'
 import useUserStore from '@/store/modules/user'
-import ColorTrigger from '@/components/MindMap/ColorTrigger.vue'
 import { createLatestRequestTracker, isElementDialogDismissal } from '@/utils/mindmap-async'
 import {
-  getCreatedResourceId,
   isCompatibleTagReplacement,
   MAX_MINDMAP_TAG_BATCH_SIZE,
   MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
   MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER,
   MAX_MINDMAP_TAG_DESCRIPTION_LENGTH,
-  MAX_MINDMAP_TAG_FIELD_NAME_LENGTH,
   MAX_MINDMAP_TAG_KEY_LENGTH,
   MAX_MINDMAP_TAG_NAME_LENGTH,
   MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH,
-  validateMindmapTagDescription,
-  validateMindmapTagColor,
   validateMindmapTagCategorySortOrder,
+  validateMindmapTagDescription,
   validateMindmapTagDisplayName,
   validateMindmapTagIdentifier,
   validateMindmapTagSearchKeyword,
@@ -598,487 +439,397 @@ import {
 
 const userStore = useUserStore()
 const isAdmin = computed(() => Number(userStore.id) === 1)
-const hasPermission = permission => userStore.permissions.includes('*:*:*')
-  || userStore.permissions.includes(permission)
-const canAddCategory = computed(() => hasPermission('mindmap:tag:add'))
-const canEditCategory = computed(() => hasPermission('mindmap:tag:edit'))
-const canRemoveCategory = computed(() => hasPermission('mindmap:tag:remove'))
+const hasPermission = permission => userStore.permissions.includes('*:*:*') || userStore.permissions.includes(permission)
 const canAddTag = computed(() => hasPermission('mindmap:tag:add'))
 const canEditTag = computed(() => hasPermission('mindmap:tag:edit'))
 const canRemoveTag = computed(() => hasPermission('mindmap:tag:remove'))
-const canManageResource = ownerId => Number(ownerId) === Number(userStore.id)
-  || (Number(ownerId) === 0 && isAdmin.value)
+const canAddCategory = computed(() => hasPermission('mindmap:tag:add'))
+const canEditCategory = computed(() => hasPermission('mindmap:tag:edit'))
+const canRemoveCategory = computed(() => hasPermission('mindmap:tag:remove'))
+const canManage = ownerId => Number(ownerId) === Number(userStore.id) || (Number(ownerId) === 0 && isAdmin.value)
 
-// ── 统一标签治理 ──
-const managedTags = ref([])
-const managedTagsLoading = ref(false)
-const managedTagsError = ref('')
-const managedTagTotal = ref(0)
-const tagCategories = ref([])
-const tagCategoriesLoading = ref(false)
-const tagCategoriesError = ref('')
-const categoryDialog = reactive({ visible: false })
-const categoryFormVisible = ref(false)
-const categoryForm = reactive({ id: null, name: '', sortOrder: 0, ownerScope: 'mine' })
-const categorySubmitting = ref(false)
-const categoryOperationKey = ref('')
-const categoryBusy = computed(() => categorySubmitting.value || Boolean(categoryOperationKey.value))
-const managedTagRequests = createLatestRequestTracker()
-const tagCategoryRequests = createLatestRequestTracker()
+const tags = ref([])
+const categories = ref([])
+const total = ref(0)
+const loading = ref(false)
+const categoryLoading = ref(false)
+const loadError = ref('')
+const categoryError = ref('')
+const tableRef = ref(null)
+const selection = ref([])
+const operationKey = ref('')
+const tagRequests = createLatestRequestTracker()
+const categoryRequests = createLatestRequestTracker()
 const replacementRequests = createLatestRequestTracker()
-const fieldListRequests = createLatestRequestTracker()
-const fieldDetailRequests = createLatestRequestTracker()
 let componentActive = true
-const managedTagQuery = reactive({
-  pageNum: 1, pageSize: 10, keyword: '', ownerScope: 'all',
-  status: null, categoryId: null, fieldId: null,
+
+const query = reactive({
+  pageNum: 1,
+  pageSize: 10,
+  keyword: '',
+  ownerScope: 'all',
+  status: null,
+  categoryId: null,
 })
+const editDialog = reactive({
+  visible: false,
+  id: null,
+  name: '',
+  tagKey: '',
+  fill: '#409eff',
+  color: '#ffffff',
+  fontSize: 12,
+  radius: 3,
+  paddingX: 8,
+  placement: 'right',
+  align: 'center',
+  ownerScope: 'mine',
+  categoryId: null,
+  description: '',
+  status: 0,
+  source: null,
+  impact: null,
+})
+const editSubmitting = ref(false)
 const replaceDialog = reactive({
-  visible: false, sourceTagId: null, sourceName: '', sourceOwnerId: null,
-  targetTagId: null, nodeCount: 0,
+  visible: false,
+  sourceTagId: null,
+  sourceName: '',
+  sourceOwnerId: null,
+  targetTagId: null,
+  nodeCount: 0,
 })
 const replacementOptions = ref([])
 const replacementLoading = ref(false)
-const replacementError = ref('')
 const replaceSubmitting = ref(false)
-const tagOperationKey = ref('')
-const managedTagTableRef = ref(null)
-const managedTagSelection = ref([])
-const selectedManagedTagNodeCount = computed(() => managedTagSelection.value.reduce(
-  (total, row) => {
-    const count = Number(row?.usageNodeCount)
-    return total + (Number.isFinite(count) && count > 0 ? count : 0)
-  },
-  0,
-))
-const tagEditDialog = reactive({
-  visible: false, id: null, name: '', tagKey: '', fill: '#409eff', color: '#ffffff',
-  fontSize: 12, radius: 3, paddingX: 8, ownerScope: 'mine', categoryId: null,
-  description: '', status: 0, source: null, impact: null,
+const categoryDialog = reactive({ visible: false })
+const categoryEditing = ref(false)
+const categorySubmitting = ref(false)
+const categoryReordering = ref('')
+const globalCategoryRows = ref([])
+const personalCategoryRows = ref([])
+const categoryOrderSnapshot = reactive({ global: [], mine: [] })
+const categoryForm = reactive({ id: null, name: '', sortOrder: 0, ownerScope: 'mine', categoryType: 'custom' })
+
+const selectedNodeCount = computed(() => selection.value.reduce((sum, row) => sum + Math.max(0, Number(row.usageNodeCount) || 0), 0))
+const currentCategoryTitle = computed(() => {
+  if (query.categoryId === null) return '全部标签'
+  if (query.categoryId === 0) return '未分组'
+  return categories.value.find(item => Number(item.id) === Number(query.categoryId))?.name || '未知分组'
 })
-const tagEditSubmitting = ref(false)
-const editableTagCategories = computed(() => tagCategories.value.filter(category => (
+const editableCategories = computed(() => categories.value.filter(category => (
   Number(category.ownerId) === 0
-  || (tagEditDialog.ownerScope === 'mine' && Number(category.ownerId) === Number(userStore.id))
+  || (editDialog.ownerScope === 'mine' && Number(category.ownerId) === Number(userStore.id))
 )))
-
-function canEditCategoryRow(row) {
-  return canEditCategory.value && canManageResource(row?.ownerId)
-}
-
-function canRemoveCategoryRow(row) {
-  return canRemoveCategory.value && canManageResource(row?.ownerId)
-}
+const tagAlignOptions = computed(() => (
+  editDialog.placement === 'top' || editDialog.placement === 'bottom'
+    ? [
+        { label: '居中', value: 'center' },
+        { label: '靠左', value: 'left' },
+        { label: '靠右', value: 'right' },
+      ]
+    : [
+        { label: '居中', value: 'center' },
+        { label: '靠上', value: 'top' },
+        { label: '靠下', value: 'bottom' },
+      ]
+))
 
 function canEditManagedTag(row) {
-  return canEditTag.value && canManageResource(row?.ownerId)
+  return canEditTag.value && canManage(row?.ownerId)
 }
 
 function canArchiveManagedTag(row) {
-  return canRemoveTag.value && canManageResource(row?.ownerId)
+  return canRemoveTag.value && canManage(row?.ownerId)
 }
 
-function canSelectManagedTag(row) {
+function canSelectTag(row) {
   return row?.status !== 2 && canArchiveManagedTag(row)
 }
 
-function handleManagedTagSelectionChange(rows) {
-  managedTagSelection.value = (rows || []).filter(canSelectManagedTag)
+function canEditCategoryRow(row) {
+  return canEditCategory.value && canManage(row?.ownerId)
 }
 
-function clearManagedTagSelection() {
-  managedTagTableRef.value?.clearSelection()
-  managedTagSelection.value = []
+function canRemoveCategoryRow(row) {
+  return canRemoveCategory.value && canManage(row?.ownerId)
 }
 
-watch(() => tagEditDialog.ownerScope, () => {
-  if (
-    tagEditDialog.categoryId
-    && !editableTagCategories.value.some(item => Number(item.id) === Number(tagEditDialog.categoryId))
-  ) {
-    tagEditDialog.categoryId = null
+function categoryTypeText(categoryType) {
+  return categoryType === 'system' ? '系统' : '用户自定义'
+}
+
+function categoryTypeTagType(categoryType) {
+  return categoryType === 'system' ? 'info' : 'success'
+}
+
+function syncCategoryOrderRows(items = categories.value) {
+  globalCategoryRows.value = items.filter(item => Number(item.ownerId) === 0)
+  personalCategoryRows.value = items.filter(item => Number(item.ownerId) !== 0)
+}
+
+function syncCategoriesFromOrderRows() {
+  categories.value = [...globalCategoryRows.value, ...personalCategoryRows.value]
+}
+
+function categoryRowsForScope(scope) {
+  return scope === 'global' ? globalCategoryRows.value : personalCategoryRows.value
+}
+
+function canReorderCategoryScope(scope) {
+  if (!canEditCategory.value || categoryRowsForScope(scope).length < 2) return false
+  return scope === 'global' ? isAdmin.value : true
+}
+
+function captureCategoryOrder(scope) {
+  categoryOrderSnapshot[scope] = categoryRowsForScope(scope).map(item => Number(item.id))
+}
+
+async function finishCategoryReorder(scope) {
+  const rows = categoryRowsForScope(scope)
+  const categoryIds = rows.map(item => Number(item.id))
+  if (categoryIds.every((id, index) => id === categoryOrderSnapshot[scope][index])) return
+
+  categoryReordering.value = scope
+  syncCategoriesFromOrderRows()
+  try {
+    await reorderTagCategories(categoryIds)
+    rows.forEach((row, index) => { row.sortOrder = (index + 1) * 10 })
+    ElMessage.success('分组排序已更新')
+  } catch (error) {
+    ElMessage.error(error?.message || '分组排序失败')
+    await loadCategories()
+  } finally {
+    categoryReordering.value = ''
   }
-})
+}
 
-watch(() => replaceDialog.visible, visible => {
-  if (visible) return
-  replacementRequests.invalidate()
-  replacementLoading.value = false
-  replacementError.value = ''
-  replacementOptions.value = []
-})
-
-watch(() => categoryDialog.visible, visible => {
-  if (visible) return
-  categoryFormVisible.value = false
-  categoryOperationKey.value = ''
-  Object.assign(categoryForm, { id: null, name: '', sortOrder: 0, ownerScope: 'mine' })
-})
-
-async function loadManagedTags() {
-  clearManagedTagSelection()
-  const keyword = validateMindmapTagSearchKeyword(managedTagQuery.keyword)
+async function loadTags() {
+  clearSelection()
+  const keyword = validateMindmapTagSearchKeyword(query.keyword)
   if (!keyword.valid) {
-    managedTagRequests.invalidate()
-    managedTagsLoading.value = false
-    managedTagsError.value = keyword.message
-    return false
+    loadError.value = keyword.message
+    return
   }
-  managedTagQuery.keyword = keyword.value
-  const requestId = managedTagRequests.begin()
-  managedTagsLoading.value = true
-  managedTagsError.value = ''
+  const id = tagRequests.begin()
+  loading.value = true
+  loadError.value = ''
   try {
-    const res = await listTags({
-      ...managedTagQuery,
-      keyword: keyword.value || undefined,
-    })
-    if (!componentActive || !managedTagRequests.isCurrent(requestId)) return
-    managedTags.value = res.rows || []
-    managedTagTotal.value = res.total || 0
+    const response = await listTags({ ...query, keyword: keyword.value || undefined })
+    if (!componentActive || !tagRequests.isCurrent(id)) return
+    tags.value = response.rows || []
+    total.value = response.total || 0
   } catch (error) {
-    if (!componentActive || !managedTagRequests.isCurrent(requestId)) return
-    managedTagsError.value = error?.message || '标签列表加载失败，请重试'
+    if (componentActive && tagRequests.isCurrent(id)) loadError.value = error?.message || '标签列表加载失败'
   } finally {
-    if (componentActive && managedTagRequests.isCurrent(requestId)) {
-      managedTagsLoading.value = false
-    }
+    if (componentActive && tagRequests.isCurrent(id)) loading.value = false
   }
 }
 
-async function loadTagCategories() {
-  const requestId = tagCategoryRequests.begin()
-  tagCategoriesLoading.value = true
-  tagCategoriesError.value = ''
+async function loadCategories() {
+  const id = categoryRequests.begin()
+  categoryLoading.value = true
+  categoryError.value = ''
   try {
-    const res = await listTagCategories()
-    if (!componentActive || !tagCategoryRequests.isCurrent(requestId)) return
-    tagCategories.value = res.data || []
-    return true
-  } catch (e) {
-    if (!componentActive || !tagCategoryRequests.isCurrent(requestId)) return
-    tagCategoriesError.value = e?.message || '标签分类加载失败'
-    return false
-  } finally {
-    if (componentActive && tagCategoryRequests.isCurrent(requestId)) {
-      tagCategoriesLoading.value = false
-    }
-  }
-}
-
-async function openCategoryManager() {
-  categoryDialog.visible = true
-  categoryFormVisible.value = false
-  await loadTagCategories()
-}
-
-function startCreateCategory() {
-  if (!canAddCategory.value || categorySubmitting.value || categoryOperationKey.value) return
-  Object.assign(categoryForm, { id: null, name: '', sortOrder: 0, ownerScope: 'mine' })
-  categoryFormVisible.value = true
-}
-
-function startEditCategory(row) {
-  if (!canEditCategoryRow(row) || categorySubmitting.value || categoryOperationKey.value) return
-  Object.assign(categoryForm, {
-    id: Number(row.id),
-    name: row.name || '',
-    sortOrder: Number(row.sortOrder) || 0,
-    ownerScope: Number(row.ownerId) === 0 ? 'global' : 'mine',
-  })
-  categoryFormVisible.value = true
-}
-
-function cancelCategoryEdit() {
-  if (categorySubmitting.value) return
-  categoryFormVisible.value = false
-  Object.assign(categoryForm, { id: null, name: '', sortOrder: 0, ownerScope: 'mine' })
-}
-
-async function saveCategory() {
-  if (categorySubmitting.value || categoryOperationKey.value) return
-  const name = validateMindmapTagDisplayName(categoryForm.name, {
-    label: '分类名称',
-    maxLength: MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
-  })
-  const sortOrder = validateMindmapTagCategorySortOrder(categoryForm.sortOrder)
-  const invalid = [name, sortOrder].find(item => !item.valid)
-  if (invalid) return ElMessage.warning(invalid.message)
-  if (categoryForm.id) {
-    const source = tagCategories.value.find(item => Number(item.id) === Number(categoryForm.id))
-    if (!canEditCategoryRow(source)) return ElMessage.warning('你没有该分类的编辑权限')
-  } else if (!canAddCategory.value) {
-    return ElMessage.warning('你没有新建分类的权限')
-  }
-
-  categoryForm.name = name.value
-  categoryForm.sortOrder = sortOrder.value
-  const isEditing = Boolean(categoryForm.id)
-  categorySubmitting.value = true
-  try {
-    if (categoryForm.id) {
-      await updateTagCategory(categoryForm.id, name.value, sortOrder.value)
-    } else {
-      const response = await addTagCategory(name.value, sortOrder.value, categoryForm.ownerScope)
-      if (!getCreatedResourceId(response, 'categoryId')) {
-        throw new Error('分类已创建，但服务端未返回有效分类 ID，请刷新后重试')
-      }
-    }
-    if (!componentActive || !categoryDialog.visible) return
-    ElMessage.success(isEditing ? '分类已更新' : '分类已创建')
-    categoryFormVisible.value = false
-    Object.assign(categoryForm, { id: null, name: '', sortOrder: 0, ownerScope: 'mine' })
-    await loadTagCategories()
+    const response = await listTagCategories()
+    if (!componentActive || !categoryRequests.isCurrent(id)) return
+    categories.value = response.data || []
+    syncCategoryOrderRows(categories.value)
   } catch (error) {
-    if (!componentActive || !categoryDialog.visible) return
-    ElMessage.error(error?.message || '分类保存失败')
+    if (componentActive && categoryRequests.isCurrent(id)) categoryError.value = error?.message || '分组加载失败'
   } finally {
-    categorySubmitting.value = false
+    if (componentActive && categoryRequests.isCurrent(id)) categoryLoading.value = false
   }
 }
 
-async function removeCategory(row) {
-  if (!canRemoveCategoryRow(row) || categorySubmitting.value || categoryOperationKey.value) return
-  if (Number(row.tagCount) > 0) {
-    return ElMessage.warning(`该分类仍有 ${row.tagCount} 个标签，请先转移或移除`)
-  }
-  categoryOperationKey.value = `delete:${row.id}`
-  try {
-    await ElMessageBox.confirm(
-      `确认删除空分类「${row.name}」？该操作不会删除任何标签。`,
-      '删除标签分类',
-      { type: 'warning', confirmButtonText: '确认删除' },
-    )
-    await deleteTagCategory(row.id)
-    if (!componentActive || !categoryDialog.visible) return
-    const wasActiveFilter = Number(managedTagQuery.categoryId) === Number(row.id)
-    if (wasActiveFilter) managedTagQuery.categoryId = null
-    if (Number(tagEditDialog.categoryId) === Number(row.id)) tagEditDialog.categoryId = null
-    ElMessage.success('分类已删除')
-    await loadTagCategories()
-    if (wasActiveFilter) await loadManagedTags()
-  } catch (error) {
-    if (
-      componentActive
-      && categoryDialog.visible
-      && !isElementDialogDismissal(error)
-    ) {
-      ElMessage.error(error?.message || '分类删除失败')
-    }
-  } finally {
-    categoryOperationKey.value = ''
-  }
+function search() {
+  query.pageNum = 1
+  void loadTags()
 }
 
-function handleManagedTagSearch() {
-  managedTagQuery.pageNum = 1
-  loadManagedTags()
+function selectCategory(categoryId) {
+  if (query.categoryId === categoryId) return
+  query.categoryId = categoryId
+  query.pageNum = 1
+  void loadTags()
 }
 
-function resetManagedTagSearch() {
-  Object.assign(managedTagQuery, {
-    pageNum: 1, keyword: '', ownerScope: 'all', status: null, categoryId: null, fieldId: null,
-  })
-  loadManagedTags()
+function resetSearch() {
+  const categoryId = query.categoryId
+  Object.assign(query, { pageNum: 1, keyword: '', ownerScope: 'all', status: null, categoryId })
+  void loadTags()
 }
 
-function handleManagedTagPageSize(size) {
-  managedTagQuery.pageSize = size
-  managedTagQuery.pageNum = 1
-  loadManagedTags()
+function changePageSize(size) {
+  query.pageSize = size
+  query.pageNum = 1
+  void loadTags()
+}
+
+function handleSelectionChange(rows) {
+  selection.value = (rows || []).filter(canSelectTag)
+}
+
+function clearSelection() {
+  tableRef.value?.clearSelection()
+  selection.value = []
 }
 
 function categoryName(categoryId) {
-  if (!categoryId) return '未分类'
-  return tagCategories.value.find(item => Number(item.id) === Number(categoryId))?.name || '未知分类'
+  if (!categoryId) return '未分组'
+  return categories.value.find(item => Number(item.id) === Number(categoryId))?.name || '未知分组'
 }
 
-function fieldNames(row) {
-  const names = (row.fields || []).map(item => item.name).filter(Boolean)
-  return names.length ? names.join('、') : '独立标签'
+function statusText(status) {
+  return Number(status) === 0 ? '启用' : Number(status) === 1 ? '停用' : '归档'
 }
 
-function formatDateTime(value) {
-  if (!value) return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '—'
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  }).format(date)
+function statusType(status) {
+  return Number(status) === 0 ? 'success' : Number(status) === 1 ? 'warning' : 'info'
 }
 
-function getManagedTagStyle(row) {
+function tagStyle(row) {
   const style = row.style || {}
-  const fill = normalizeColor(style.fill) || '#eef4ff'
-  const color = normalizeColor(style.color) || '#3157a4'
   return {
-    backgroundColor: fill === 'transparent' ? '#f5f7fa' : fill,
-    color: color === 'transparent' ? '#303133' : color,
+    backgroundColor: style.fill === 'transparent' ? '#f5f7fa' : (style.fill || '#eef4ff'),
+    color: style.color === 'transparent' ? '#303133' : (style.color || '#3157a4'),
     fontSize: `${style.fontSize || 12}px`,
     borderRadius: `${style.radius ?? 5}px`,
     padding: `3px ${style.paddingX ?? 8}px`,
   }
 }
 
-async function fetchImpact(row) {
-  const res = await getTagImpact(row.id)
-  return res.data || { fileCount: 0, nodeCount: 0, files: [] }
+function formatDateTime(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }).format(date)
 }
 
-async function showTagImpact(row) {
-  if (tagOperationKey.value) return
-  tagOperationKey.value = `impact:${row.id}`
+async function fetchImpact(row) {
+  const response = await getTagImpact(row.id)
+  return response.data || { fileCount: 0, nodeCount: 0, files: [] }
+}
+
+async function showImpact(row) {
+  if (operationKey.value) return
+  operationKey.value = `impact:${row.id}`
   try {
     const impact = await fetchImpact(row)
     const examples = (impact.files || []).slice(0, 5).map(item => item.name).join('、')
     await ElMessageBox.alert(
       `当前影响 ${impact.fileCount || 0} 个脑图、${impact.nodeCount || 0} 个节点${examples ? `；示例：${examples}` : ''}。`,
       `标签「${row.name}」影响范围`,
-      { confirmButtonText: '知道了' }
     )
-  } catch (e) {
-    if (!isElementDialogDismissal(e)) ElMessage.error(e.message || '加载标签影响范围失败')
+  } catch (error) {
+    if (!isElementDialogDismissal(error)) ElMessage.error(error?.message || '影响范围加载失败')
   } finally {
-    tagOperationKey.value = ''
+    operationKey.value = ''
   }
 }
 
-async function handleEditManagedTag(row) {
-  if (tagOperationKey.value || !canEditManagedTag(row)) return
-  tagOperationKey.value = `edit:${row.id}`
+function openCreateTag() {
+  const categoryId = Number(query.categoryId) > 0 ? query.categoryId : null
+  Object.assign(editDialog, {
+    visible: true, id: null, name: '', tagKey: '', fill: '#409eff', color: '#ffffff',
+    fontSize: 12, radius: 3, paddingX: 8, placement: 'right', align: 'center',
+    ownerScope: 'mine', categoryId,
+    description: '', status: 0, source: null, impact: null,
+  })
+}
+
+async function openEditTag(row) {
+  operationKey.value = `edit:${row.id}`
   try {
     const impact = await fetchImpact(row)
     const style = row.style || {}
-    Object.assign(tagEditDialog, {
-      visible: true,
-      id: row.id,
-      name: row.name,
-      tagKey: row.tagKey,
-      fill: style.fill || '#409eff',
-      color: style.color || '#ffffff',
-      fontSize: style.fontSize || 12,
-      radius: style.radius ?? 3,
-      paddingX: style.paddingX ?? 8,
-      ownerScope: row.ownerId === 0 ? 'global' : 'mine',
-      categoryId: row.categoryId || null,
-      description: row.description || '',
-      status: row.status ?? 0,
-      source: row,
-      impact,
+    Object.assign(editDialog, {
+      visible: true, id: row.id, name: row.name, tagKey: row.tagKey,
+      fill: style.fill || '#409eff', color: style.color || '#ffffff',
+      fontSize: style.fontSize || 12, radius: style.radius ?? 3, paddingX: style.paddingX ?? 8,
+      placement: style.placement || 'right', align: style.align || 'center',
+      ownerScope: Number(row.ownerId) === 0 ? 'global' : 'mine', categoryId: row.categoryId || null,
+      description: row.description || '', status: row.status ?? 0, source: row, impact,
     })
-  } catch (e) {
-    ElMessage.error(e.message || '加载标签详情失败')
+  } catch (error) {
+    ElMessage.error(error?.message || '标签详情加载失败')
   } finally {
-    tagOperationKey.value = ''
+    operationKey.value = ''
   }
 }
 
-function handleCreateManagedTag() {
-  if (!canAddTag.value || tagOperationKey.value) return
-  Object.assign(tagEditDialog, {
-    visible: true,
-    id: null,
-    name: '',
-    tagKey: '',
-    fill: '#409eff',
-    color: '#ffffff',
-    fontSize: 12,
-    radius: 3,
-    paddingX: 8,
-    ownerScope: 'mine',
-    categoryId: null,
-    description: '',
-    status: 0,
-    source: null,
-    impact: null,
-  })
-}
-
-async function confirmEditManagedTag() {
-  if (tagEditSubmitting.value) return
-  if (tagEditDialog.id) {
-    if (!canEditManagedTag(tagEditDialog.source)) {
-      return ElMessage.warning('你没有该标签的编辑权限')
-    }
-  } else if (!canAddTag.value) {
-    return ElMessage.warning('你没有新建标签的权限')
-  }
-  const name = validateMindmapTagDisplayName(tagEditDialog.name)
-  const tagKey = validateMindmapTagIdentifier(tagEditDialog.tagKey)
-  const description = validateMindmapTagDescription(tagEditDialog.description)
+async function saveTag() {
+  if (editSubmitting.value) return
+  const name = validateMindmapTagDisplayName(editDialog.name)
+  const tagKey = validateMindmapTagIdentifier(editDialog.tagKey)
+  const description = validateMindmapTagDescription(editDialog.description)
   const style = validateMindmapTagStyle({
-    fill: tagEditDialog.fill,
-    color: tagEditDialog.color,
-    fontSize: tagEditDialog.fontSize,
-    radius: tagEditDialog.radius,
-    paddingX: tagEditDialog.paddingX,
+    fill: editDialog.fill,
+    color: editDialog.color,
+    fontSize: editDialog.fontSize,
+    radius: editDialog.radius,
+    paddingX: editDialog.paddingX,
+    placement: editDialog.placement,
+    align: editDialog.align,
   })
   const invalid = [name, tagKey, description, style].find(item => !item.valid)
   if (invalid) return ElMessage.warning(invalid.message)
-  tagEditDialog.name = name.value
-  tagEditDialog.tagKey = tagKey.value
-  tagEditDialog.description = description.value
-  tagEditSubmitting.value = true
+
+  editSubmitting.value = true
   try {
-    if (tagEditDialog.id) {
-      const impact = tagEditDialog.impact || {}
+    if (editDialog.id) {
+      const impact = editDialog.impact || {}
       await ElMessageBox.confirm(
         `保存后会影响 ${impact.fileCount || 0} 个脑图、${impact.nodeCount || 0} 个节点，是否继续？`,
-        '确认全局修改', { type: 'warning', confirmButtonText: '保存并全局生效' }
+        '确认全局修改',
+        { type: 'warning', confirmButtonText: '保存并全局生效' },
       )
     }
-    const source = tagEditDialog.source || {}
     const payload = {
       tagKey: tagKey.value,
       name: name.value,
-      categoryId: tagEditDialog.categoryId,
-      ownerId: tagEditDialog.ownerScope === 'global'
-        ? 0
-        : (tagEditDialog.id ? source.ownerId : userStore.id),
+      categoryId: editDialog.categoryId,
+      ownerId: editDialog.ownerScope === 'global' ? 0 : (editDialog.source?.ownerId || userStore.id),
       description: description.value || null,
-      status: tagEditDialog.status,
+      status: editDialog.status,
       style: style.value,
     }
-    if (tagEditDialog.id) await updateTag({ ...payload, id: tagEditDialog.id })
+    if (editDialog.id) await updateTag({ ...payload, id: editDialog.id })
     else await addTag(payload)
-    tagEditDialog.visible = false
-    ElMessage.success(tagEditDialog.id ? '标签定义已全局更新' : '标签创建成功')
-    await loadManagedTags()
-  } catch (e) {
-    if (!isElementDialogDismissal(e)) ElMessage.error(e.message || '标签更新失败')
+    editDialog.visible = false
+    ElMessage.success(editDialog.id ? '标签定义已全局更新' : '标签创建成功')
+    await Promise.all([loadTags(), loadCategories()])
+  } catch (error) {
+    if (!isElementDialogDismissal(error)) ElMessage.error(error?.message || '标签保存失败')
   } finally {
-    tagEditSubmitting.value = false
+    editSubmitting.value = false
   }
 }
 
-async function handleDisableTag(row) {
-  if (tagOperationKey.value || !canEditManagedTag(row)) return
-  tagOperationKey.value = `disable:${row.id}`
+async function disableManagedTag(row) {
+  operationKey.value = `disable:${row.id}`
   try {
     const impact = await fetchImpact(row)
-    if (!componentActive || !canEditManagedTag(row)) return
     await ElMessageBox.confirm(
-      `停用后既有 ${impact.nodeCount || 0} 个节点仍会显示，但新增时不可再选择。是否继续？`,
-      `停用「${row.name}」`, { type: 'warning' }
+      `停用后既有 ${impact.nodeCount || 0} 个节点仍会显示，但新增时不可选择。`,
+      `停用「${row.name}」`,
+      { type: 'warning' },
     )
-    if (!componentActive || !canEditManagedTag(row)) return
     await disableTag(row.id)
-    if (!componentActive) return
     ElMessage.success('标签已停用')
-    await loadManagedTags()
-  } catch (e) {
-    if (componentActive && !isElementDialogDismissal(e)) ElMessage.error(e.message || '停用失败')
+    await loadTags()
+  } catch (error) {
+    if (!isElementDialogDismissal(error)) ElMessage.error(error?.message || '停用失败')
   } finally {
-    tagOperationKey.value = ''
+    operationKey.value = ''
   }
 }
 
-async function handleReplaceTag(row) {
-  if (tagOperationKey.value || !canEditManagedTag(row)) return
-  tagOperationKey.value = `replace:${row.id}`
+async function openReplacement(row) {
+  operationKey.value = `replace:${row.id}`
   try {
     const impact = await fetchImpact(row)
-    if (!componentActive || !canEditManagedTag(row)) return
     Object.assign(replaceDialog, {
       visible: true,
       sourceTagId: row.id,
@@ -1088,1012 +839,767 @@ async function handleReplaceTag(row) {
       nodeCount: impact.nodeCount || 0,
     })
     await searchReplacementTags('')
-  } catch (e) {
-    ElMessage.error(e.message || '加载可替换标签失败')
+  } catch (error) {
+    ElMessage.error(error?.message || '替换标签加载失败')
   } finally {
-    tagOperationKey.value = ''
+    operationKey.value = ''
   }
-}
-
-function handleManagedTagCommand(command, row) {
-  if (
-    tagOperationKey.value
-    || row?.status === 2
-    || !canManageResource(row?.ownerId)
-  ) return
-  if (command === 'edit' && canEditManagedTag(row)) return handleEditManagedTag(row)
-  if (command === 'disable' && row.status === 0 && canEditManagedTag(row)) {
-    return handleDisableTag(row)
-  }
-  if (command === 'replace' && canEditManagedTag(row)) return handleReplaceTag(row)
-  if (command === 'archive' && canArchiveManagedTag(row)) return handleArchiveTag(row)
 }
 
 async function searchReplacementTags(keyword) {
-  const normalizedKeyword = validateMindmapTagSearchKeyword(String(keyword ?? ''))
-  if (!normalizedKeyword.valid) {
+  const normalized = validateMindmapTagSearchKeyword(String(keyword ?? ''))
+  if (!normalized.valid) {
     replacementRequests.invalidate()
     replacementOptions.value = []
     replacementLoading.value = false
-    replacementError.value = normalizedKeyword.message
-    return false
+    ElMessage.warning(normalized.message)
+    return
   }
-  const requestId = replacementRequests.begin()
+  const id = replacementRequests.begin()
   replacementLoading.value = true
-  replacementError.value = ''
   try {
-    const res = await listTags({
-      pageNum: 1,
-      pageSize: 100,
-      ownerScope: 'all',
-      keyword: normalizedKeyword.value || undefined,
-    })
-    if (!componentActive || !replacementRequests.isCurrent(requestId) || !replaceDialog.visible) return
-    replacementOptions.value = (res.rows || []).filter(
-      item => isCompatibleTagReplacement(
-        { id: replaceDialog.sourceTagId, ownerId: replaceDialog.sourceOwnerId },
-        item,
-      )
-    )
+    const response = await listTags({ pageNum: 1, pageSize: 100, ownerScope: 'all', keyword: normalized.value || undefined })
+    if (!componentActive || !replaceDialog.visible || !replacementRequests.isCurrent(id)) return
+    replacementOptions.value = (response.rows || []).filter(item => isCompatibleTagReplacement({
+      id: replaceDialog.sourceTagId,
+      ownerId: replaceDialog.sourceOwnerId,
+    }, item))
   } catch (error) {
-    if (!componentActive || !replacementRequests.isCurrent(requestId) || !replaceDialog.visible) return
+    if (!componentActive || !replaceDialog.visible || !replacementRequests.isCurrent(id)) return
     replacementOptions.value = []
-    replacementError.value = error?.message || '目标标签加载失败，请重新搜索'
+    ElMessage.error(error?.message || '目标标签加载失败，请重新搜索')
   } finally {
-    if (componentActive && replacementRequests.isCurrent(requestId)) {
-      replacementLoading.value = false
-    }
+    if (componentActive && replacementRequests.isCurrent(id)) replacementLoading.value = false
   }
 }
 
-async function confirmReplaceTag() {
-  if (
-    !replaceDialog.targetTagId
-    || !canEditTag.value
-    || !canManageResource(replaceDialog.sourceOwnerId)
-  ) return
+async function confirmReplacement() {
+  if (!replaceDialog.targetTagId || replaceSubmitting.value) return
   replaceSubmitting.value = true
   try {
     await replaceTag(replaceDialog.sourceTagId, replaceDialog.targetTagId)
-    if (!componentActive || !replaceDialog.visible) return
     replaceDialog.visible = false
     ElMessage.success('标签替换成功')
-    await loadManagedTags()
-  } catch (e) {
-    if (componentActive && replaceDialog.visible) ElMessage.error(e.message || '替换失败')
+    await loadTags()
+  } catch (error) {
+    ElMessage.error(error?.message || '替换失败')
   } finally {
     replaceSubmitting.value = false
   }
 }
 
-async function handleArchiveTag(row) {
-  if (tagOperationKey.value || !canArchiveManagedTag(row)) return
-  tagOperationKey.value = `archive:${row.id}`
+async function archiveTag(row) {
+  operationKey.value = `archive:${row.id}`
   try {
     const impact = await fetchImpact(row)
-    if (!componentActive || !canArchiveManagedTag(row)) return
     await ElMessageBox.confirm(
-      `将从 ${impact.nodeCount || 0} 个节点解除该标签并归档。此操作不会删除历史版本快照，是否继续？`,
+      `将从 ${impact.nodeCount || 0} 个节点解除该标签并归档；历史版本快照不受影响。`,
       `解绑并归档「${row.name}」`,
-      { type: 'error', confirmButtonText: '确认解绑并归档' }
+      { type: 'error', confirmButtonText: '确认解绑并归档' },
     )
-    if (!componentActive || !canArchiveManagedTag(row)) return
     await deleteTags(row.id, true)
-    if (!componentActive) return
     ElMessage.success('标签已解绑并归档')
-    await loadManagedTags()
-  } catch (e) {
-    if (componentActive && !isElementDialogDismissal(e)) ElMessage.error(e.message || '归档失败')
+    await Promise.all([loadTags(), loadCategories()])
+  } catch (error) {
+    if (!isElementDialogDismissal(error)) ElMessage.error(error?.message || '归档失败')
   } finally {
-    tagOperationKey.value = ''
+    operationKey.value = ''
   }
 }
 
-async function handleBatchArchiveTags() {
-  if (tagOperationKey.value) return
-  const rows = managedTagSelection.value.filter(canSelectManagedTag)
-  const tagIds = [...new Set(rows.map(row => Number(row.id)).filter(Number.isSafeInteger))]
-  if (!tagIds.length || tagIds.length !== managedTagSelection.value.length) {
-    return ElMessage.warning('所选标签已变化，请重新选择')
-  }
-  if (tagIds.length > MAX_MINDMAP_TAG_BATCH_SIZE) {
-    return ElMessage.warning(`单次最多处理 ${MAX_MINDMAP_TAG_BATCH_SIZE} 个标签`)
-  }
-
-  const estimatedNodeCount = selectedManagedTagNodeCount.value
-  tagOperationKey.value = 'archive:batch'
+async function archiveSelected() {
+  const rows = selection.value.filter(canSelectTag)
+  const ids = [...new Set(rows.map(row => Number(row.id)).filter(Number.isSafeInteger))]
+  if (!ids.length || ids.length !== selection.value.length) return ElMessage.warning('所选标签已变化，请重新选择')
+  if (ids.length > MAX_MINDMAP_TAG_BATCH_SIZE) return ElMessage.warning(`单次最多处理 ${MAX_MINDMAP_TAG_BATCH_SIZE} 个标签`)
+  operationKey.value = 'archive:batch'
   try {
     await ElMessageBox.confirm(
-      `将从预计 ${estimatedNodeCount} 个节点解除 ${tagIds.length} 个标签并归档。`
-        + '服务端会重新校验全部标签、权限和真实引用；历史版本快照不会删除。是否继续？',
-      `批量解绑并归档 ${tagIds.length} 个标签`,
+      `将从预计 ${selectedNodeCount.value} 个节点解除 ${ids.length} 个标签并归档。`,
+      `批量解绑并归档 ${ids.length} 个标签`,
       { type: 'error', confirmButtonText: '确认批量归档' },
     )
-    if (!componentActive || rows.some(row => !canArchiveManagedTag(row))) return
-    const response = await deleteTags(tagIds.join(','), true)
-    if (!componentActive) return
-    const affectedFiles = Number(response?.data?.affectedFileCount) || 0
-    ElMessage.success(`已归档 ${tagIds.length} 个标签，影响 ${affectedFiles} 个脑图`)
-    clearManagedTagSelection()
-    await loadManagedTags()
+    await deleteTags(ids.join(','), true)
+    ElMessage.success(`已归档 ${ids.length} 个标签`)
+    await Promise.all([loadTags(), loadCategories()])
   } catch (error) {
-    if (componentActive && !isElementDialogDismissal(error)) {
-      ElMessage.error(error?.message || '批量归档失败')
-    }
+    if (!isElementDialogDismissal(error)) ElMessage.error(error?.message || '批量归档失败')
   } finally {
-    tagOperationKey.value = ''
+    operationKey.value = ''
   }
 }
 
-// ── 字段列表 ──
-const fields = ref([])
-const fieldsLoading = ref(false)
-const fieldsError = ref('')
-const selectedFieldId = ref(null)
-const selectedField = ref(null)
-const fieldDetailLoading = ref(false)
-const fieldDetailError = ref('')
-const fieldSubmitting = ref(false)
-const fieldDeleting = ref(false)
-const canManageSelectedField = computed(() => (
-  !fieldForm.id || canManageResource(selectedField.value?.ownerId)
-))
-
-async function loadFields() {
-  const requestId = fieldListRequests.begin()
-  fieldsLoading.value = true
-  fieldsError.value = ''
-  try {
-    const res = await listTagFields()
-    if (!componentActive || !fieldListRequests.isCurrent(requestId)) return
-    fields.value = res.data || []
-  } catch (e) {
-    if (!componentActive || !fieldListRequests.isCurrent(requestId)) return
-    fieldsError.value = e?.message || '字段列表加载失败'
-  } finally {
-    if (componentActive && fieldListRequests.isCurrent(requestId)) {
-      fieldsLoading.value = false
-    }
-  }
+function handleCommand(command, row) {
+  if (operationKey.value || row.status === 2) return
+  if (command === 'edit' && canEditManagedTag(row)) void openEditTag(row)
+  if (command === 'disable' && canEditManagedTag(row)) void disableManagedTag(row)
+  if (command === 'replace' && canEditManagedTag(row)) void openReplacement(row)
+  if (command === 'archive' && canArchiveManagedTag(row)) void archiveTag(row)
 }
 
-async function selectField(field) {
-  if (!field?.id) return
-  const requestId = fieldDetailRequests.begin()
-  selectedFieldId.value = field.id
-  selectedField.value = field
-  fieldDetailLoading.value = true
-  fieldDetailError.value = ''
-  fieldForm.id = field.id
-  fieldForm.fieldKey = field.fieldKey || ''
-  fieldForm.name = field.name || ''
-  fieldForm.selectMode = field.selectMode || 'single'
-  fieldForm.ownerScope = Number(field.ownerId) === 0 ? 'global' : 'mine'
-  fieldForm.description = field.description || ''
-  styleForm.fontSize = 12
-  styleForm.radius = 3
-  styleForm.paddingX = 8
-  styleForm.placement = 'right'
-  styleForm.align = 'center'
-  options.value = []
-  try {
-    const res = await getTagFieldDetail(field.id)
-    if (
-      !componentActive
-      || !fieldDetailRequests.isCurrent(requestId)
-      || Number(selectedFieldId.value) !== Number(field.id)
-    ) return
-    const detail = res.data
-    selectedField.value = detail
-    // 填充表单
-    fieldForm.id = detail.id
-    fieldForm.fieldKey = detail.fieldKey
-    fieldForm.name = detail.name
-    fieldForm.selectMode = detail.selectMode || 'single'
-    fieldForm.ownerScope = detail.ownerId === 0 ? 'global' : 'mine'
-    fieldForm.description = detail.description || ''
-    // 样式
-    const style = detail.style || {}
-    styleForm.fontSize = style.fontSize || 12
-    styleForm.radius = style.radius ?? 3
-    styleForm.paddingX = style.paddingX ?? 8
-    styleForm.placement = style.placement || 'right'
-    styleForm.align = style.align || 'center'
-    // 选项
-    options.value = (detail.options || []).map(o => ({ ...o, _dirty: false }))
-  } catch (e) {
-    if (!componentActive || !fieldDetailRequests.isCurrent(requestId)) return
-    fieldDetailError.value = e?.message || '字段详情加载失败'
-  } finally {
-    if (componentActive && fieldDetailRequests.isCurrent(requestId)) {
-      fieldDetailLoading.value = false
-    }
-  }
+async function openCategoryManager() {
+  categoryDialog.visible = true
+  await loadCategories()
 }
 
-function retrySelectedField() {
-  const field = fields.value.find(item => Number(item.id) === Number(selectedFieldId.value))
-  if (field) selectField(field)
-}
-
-// ── 字段表单 ──
-const fieldForm = reactive({
-  id: null, fieldKey: '', name: '', selectMode: 'single',
-  ownerScope: 'mine', description: '',
-})
-const styleForm = reactive({
-  fontSize: 12, radius: 3, paddingX: 8, placement: 'right', align: 'center',
-})
-
-// 对齐选项
-const alignOptions = computed(() => {
-  const p = styleForm.placement
-  if (p === 'top' || p === 'bottom') {
-    return [
-      { label: '居中', value: 'center' },
-      { label: '靠左', value: 'left' },
-      { label: '靠右', value: 'right' },
-    ]
-  }
-  return [
-    { label: '居中', value: 'center' },
-    { label: '靠上', value: 'top' },
-    { label: '靠下', value: 'bottom' },
-  ]
-})
-
-watch(() => styleForm.placement, () => {
-  const valid = alignOptions.value.map(o => o.value)
-  if (!valid.includes(styleForm.align)) styleForm.align = 'center'
-})
-
-function handleAddField() {
-  fieldDetailRequests.invalidate()
-  selectedFieldId.value = null
-  selectedField.value = { id: 'new' }
-  fieldDetailLoading.value = false
-  fieldDetailError.value = ''
-  fieldForm.id = null
-  fieldForm.fieldKey = ''
-  fieldForm.name = ''
-  fieldForm.selectMode = 'single'
-  fieldForm.ownerScope = 'mine'
-  fieldForm.description = ''
-  styleForm.fontSize = 12
-  styleForm.radius = 3
-  styleForm.paddingX = 8
-  styleForm.placement = 'right'
-  styleForm.align = 'center'
-  options.value = []
-}
-
-// 静默保存字段（用于添加选项前自动创建字段），返回是否成功
-let fieldCreatePromise = null
-
-function buildFieldPayload() {
-  const fieldKey = validateMindmapTagIdentifier(fieldForm.fieldKey, { label: '字段 Key' })
-  const name = validateMindmapTagDisplayName(fieldForm.name, {
-    label: '字段名称',
-    maxLength: MAX_MINDMAP_TAG_FIELD_NAME_LENGTH,
+function startCreateCategory() {
+  Object.assign(categoryForm, {
+    id: null, name: '', sortOrder: 0, ownerScope: 'mine', categoryType: 'custom',
   })
-  const description = validateMindmapTagDescription(fieldForm.description, { label: '字段说明' })
-  const style = validateMindmapTagStyle({
-    fontSize: styleForm.fontSize,
-    radius: styleForm.radius,
-    paddingX: styleForm.paddingX,
-    placement: styleForm.placement,
-    align: styleForm.align,
-  }, { fieldStyle: true })
-  const invalid = [fieldKey, name, description, style].find(item => !item.valid)
-  if (invalid) {
-    ElMessage.warning(invalid.message)
-    return null
-  }
-  fieldForm.fieldKey = fieldKey.value
-  fieldForm.name = name.value
-  fieldForm.description = description.value
-  return {
-    fieldKey: fieldKey.value,
-    name: name.value,
-    selectMode: fieldForm.selectMode,
-    ownerId: fieldForm.ownerScope === 'global' ? 0 : userStore.id,
-    description: description.value || null,
-    style: style.value,
-  }
+  categoryEditing.value = true
 }
 
-async function saveFieldSilent() {
-  if (fieldForm.id) return true
-  if (fieldCreatePromise) return fieldCreatePromise
-  const data = buildFieldPayload()
-  if (!data) return false
-  fieldCreatePromise = (async () => {
-    try {
-      const res = await addTagField(data)
-      const fieldId = getCreatedResourceId(res, 'fieldId')
-      if (!fieldId) {
-        throw new Error('字段已创建，但服务端未返回有效字段 ID，请刷新后重试')
-      }
-      fieldForm.id = fieldId
-      selectedFieldId.value = fieldId
-      await loadFields()
-      selectedField.value = fields.value.find(f => Number(f.id) === fieldId) || {
-        id: fieldId,
-        ...data,
-      }
-      return true
-    } catch (e) {
-      ElMessage.error(e.message || '字段保存失败')
-      return false
-    } finally {
-      fieldCreatePromise = null
-    }
-  })()
-  return fieldCreatePromise
-}
-
-async function saveField() {
-  if (fieldSubmitting.value || fieldDeleting.value) return
-  if (!canManageSelectedField.value) return ElMessage.warning('当前字段为只读')
-  const data = buildFieldPayload()
-  if (!data) return
-
-  fieldSubmitting.value = true
-  try {
-    let savedFieldId = fieldForm.id
-    if (fieldForm.id) {
-      const impactRes = await getTagFieldImpact(fieldForm.id)
-      const impact = impactRes.data || {}
-      const switchingToSingle = selectedField.value?.selectMode !== 'single'
-        && fieldForm.selectMode === 'single'
-      if (switchingToSingle && impact.multiSelectionNodeCount > 0) {
-        await ElMessageBox.alert(
-          `当前有 ${impact.multiSelectionNodeCount} 个节点使用了该字段的多个选项，请先清理冲突后再切换为单选。`,
-          '无法切换为单选',
-          { type: 'warning', confirmButtonText: '知道了' }
-        )
-        return
-      }
-      const styleChanged = JSON.stringify(selectedField.value?.style || {})
-        !== JSON.stringify(data.style || {})
-      if (styleChanged && impact.nodeCount > 0) {
-        const examples = (impact.files || []).slice(0, 5).map(item => item.name).join('、')
-        await ElMessageBox.confirm(
-          `字段默认样式会同步影响 ${impact.fileCount || 0} 个脑图、${impact.nodeCount || 0} 个节点${examples ? `；示例：${examples}` : ''}。是否继续？`,
-          '确认全局样式修改',
-          { type: 'warning', confirmButtonText: '保存并全局生效' }
-        )
-      }
-      data.id = fieldForm.id
-      await updateTagField(data)
-      ElMessage.success('字段更新成功')
-    } else {
-      const res = await addTagField(data)
-      savedFieldId = getCreatedResourceId(res, 'fieldId')
-      if (!savedFieldId) {
-        throw new Error('字段已创建，但服务端未返回有效字段 ID，请刷新后重试')
-      }
-      fieldForm.id = savedFieldId
-      ElMessage.success('字段创建成功')
-    }
-    await loadFields()
-    const savedField = fields.value.find(f => Number(f.id) === Number(savedFieldId))
-    if (savedField) await selectField(savedField)
-  } catch (e) {
-    if (!isElementDialogDismissal(e)) ElMessage.error(e.message || '保存失败')
-  } finally {
-    fieldSubmitting.value = false
-  }
-}
-
-async function handleDeleteField() {
-  if (fieldSubmitting.value || fieldDeleting.value) return
-  if (!canManageSelectedField.value) return ElMessage.warning('当前字段为只读')
-  if (!fieldForm.id) {
-    // 新建未保存，直接清空
-    selectedField.value = null
-    selectedFieldId.value = null
-    return
-  }
-  fieldDeleting.value = true
-  try {
-    await ElMessageBox.confirm(`确认删除字段「${fieldForm.name}」及其所有选项？`, '提示', { type: 'warning' })
-    await deleteTagField(fieldForm.id)
-    ElMessage.success('字段删除成功')
-    selectedField.value = null
-    selectedFieldId.value = null
-    await loadFields()
-  } catch (e) {
-    if (!isElementDialogDismissal(e)) ElMessage.error(e.message || '删除失败')
-  } finally {
-    fieldDeleting.value = false
-  }
-}
-
-// ── 选项管理 ──
-const options = ref([])
-let tempIdCounter = 0
-
-function addOption() {
-  if (!canManageSelectedField.value) return
-  options.value.push({
-    _tempId: `temp_${++tempIdCounter}`,
-    optionKey: '',
-    name: '',
-    fill: '#409eff',
-    color: '#ffffff',
-    sortOrder: options.value.length,
-    _dirty: true,
+function startEditCategory(row) {
+  Object.assign(categoryForm, {
+    id: row.id,
+    name: row.name,
+    sortOrder: Number(row.sortOrder) || 0,
+    ownerScope: Number(row.ownerId) === 0 ? 'global' : 'mine',
+    categoryType: row.categoryType || 'custom',
   })
+  categoryEditing.value = true
 }
 
-const optionOperationKeys = reactive(new Set())
-
-function getOptionOperationKey(row) {
-  return String(row.id ? `id:${row.id}` : `temp:${row._tempId}`)
+function cancelCategoryEdit() {
+  categoryEditing.value = false
 }
 
-function isOptionBusy(row) {
-  return optionOperationKeys.has(getOptionOperationKey(row))
-}
-
-async function removeOption(index, row) {
-  if (!canManageSelectedField.value) return
-  if (!row.id) {
-    options.value.splice(index, 1)
-    return
-  }
-  const operationKey = getOptionOperationKey(row)
-  if (optionOperationKeys.has(operationKey)) return
-  optionOperationKeys.add(operationKey)
-  try {
-    await ElMessageBox.confirm(
-      `确认删除选项「${row.name || row.optionKey}」？正在使用的选项会被服务端阻止删除。`,
-      '删除字段选项',
-      { type: 'warning', confirmButtonText: '确认删除' }
-    )
-    await deleteTagFieldOption(row.id)
-    const currentIndex = options.value.findIndex(item => Number(item.id) === Number(row.id))
-    if (currentIndex >= 0) options.value.splice(currentIndex, 1)
-    ElMessage.success('选项删除成功')
-  } catch (e) {
-    if (!isElementDialogDismissal(e)) ElMessage.error(e.message || '删除选项失败')
-  } finally {
-    optionOperationKeys.delete(operationKey)
-  }
-}
-
-async function onOptionChange(row) {
-  if (!canManageSelectedField.value) return
-  if (!row.optionKey?.trim() && !row.name?.trim()) return
-  const optionKey = validateMindmapTagIdentifier(row.optionKey, { label: '选项 Key' })
-  const name = validateMindmapTagDisplayName(row.name, { label: '选项名称' })
-  const fill = validateMindmapTagColor(row.fill, { label: '选项背景色' })
-  const color = validateMindmapTagColor(row.color, { label: '选项文字色' })
-  const invalid = [optionKey, name, fill, color].find(item => !item.valid)
+async function saveCategory() {
+  const name = validateMindmapTagDisplayName(categoryForm.name, {
+    label: '分组名称',
+    maxLength: MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
+  })
+  const targetRows = categoryRowsForScope(categoryForm.ownerScope)
+  const nextSortOrder = targetRows.length
+    ? Math.min(MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER, Math.max(...targetRows.map(item => Number(item.sortOrder) || 0)) + 10)
+    : 10
+  const sortOrder = validateMindmapTagCategorySortOrder(
+    categoryForm.id ? categoryForm.sortOrder : nextSortOrder,
+  )
+  const invalid = [name, sortOrder].find(item => !item.valid)
   if (invalid) return ElMessage.warning(invalid.message)
-  row.optionKey = optionKey.value
-  row.name = name.value
-  row.fill = fill.value
-  row.color = color.value
-  const operationKey = getOptionOperationKey(row)
-  if (optionOperationKeys.has(operationKey)) return
-  optionOperationKeys.add(operationKey)
-
+  categorySubmitting.value = true
   try {
-    // 字段未保存时，先通过单飞请求创建，避免多个新选项并发创建重复字段。
-    if (!fieldForm.id) {
-      const saved = await saveFieldSilent()
-      if (!saved) return
-    }
-
-    if (row.id) {
-      // 更新已有选项
-      await updateTagFieldOption({
-        id: row.id,
-        fieldId: fieldForm.id,
-        optionKey: optionKey.value,
-        name: name.value,
-        fill: fill.value,
-        color: color.value,
-        sortOrder: row.sortOrder,
-      })
-    } else {
-      // 创建新选项
-      const res = await addTagFieldOption({
-        fieldId: fieldForm.id,
-        optionKey: optionKey.value,
-        name: name.value,
-        fill: fill.value,
-        color: color.value,
-        sortOrder: row.sortOrder,
-      })
-      const optionId = getCreatedResourceId(res, 'optionId')
-      if (!optionId) {
-        throw new Error('选项已创建，但服务端未返回有效选项 ID，请重新加载字段详情')
-      }
-      row.id = optionId
-      row.tagId = res.data?.tagId || null
-    }
-    row._dirty = false
-  } catch (e) {
-    ElMessage.error(e.message || '保存选项失败')
+    if (categoryForm.id) await updateTagCategory(categoryForm.id, name.value, sortOrder.value)
+    else await addTagCategory(name.value, sortOrder.value, categoryForm.ownerScope)
+    categoryEditing.value = false
+    ElMessage.success(categoryForm.id ? '分组已更新' : '分组已创建')
+    await loadCategories()
+  } catch (error) {
+    ElMessage.error(error?.message || '分组保存失败')
   } finally {
-    optionOperationKeys.delete(operationKey)
+    categorySubmitting.value = false
   }
 }
 
-// ── 颜色预设（背景色与文字色共用） ──
-const colorGroups = [
-  { label: '特殊', colors: ['transparent', '#FFFFFF'] },
-  { label: '灰色', colors: ['#F5F5F5', '#D9D9D9', '#B3B3B3', '#666666', '#333333'] },
-  { label: '红色', colors: ['#FFCCC7', '#FFA39E', '#FF4D4F', '#CF1322', '#820014'] },
-  { label: '橙黄', colors: ['#FFF1B8', '#FFD666', '#FAAD14', '#D48806', '#874D00'] },
-  { label: '绿色', colors: ['#D9F7BE', '#95DE64', '#52C41A', '#237804', '#092B00'] },
-  { label: '青色', colors: ['#B5F5EC', '#5CDBD3', '#13C2C2', '#006D75', '#002329'] },
-  { label: '蓝色', colors: ['#D6E4FF', '#85A5FF', '#4D73FF', '#1D39C4', '#061178'] },
-  { label: '紫色', colors: ['#EFDBFF', '#B37FEB', '#722ED1', '#391085', '#120338'] },
-]
-// 浅色圆点集合（在白底弹窗中需加边框才能看见）
-const lightColors = new Set(['#FFFFFF', '#F5F5F5'])
-function isLightColor(c) { return lightColors.has(c) }
-function describeColor(color) { return color === 'transparent' ? '透明色' : color }
-
-// ── 颜色工具 ──
-function normalizeColor(val) {
-  const result = validateMindmapTagColor(val)
-  return result.valid ? result.value : null
-}
-
-function applyFillColor(row, val) {
-  if (val === null) return
-  row.fill = normalizeColor(val)
-  onOptionChange(row)
-}
-
-function applyTextColor(row, val) {
-  if (val === null) return
-  row.color = normalizeColor(val)
-  onOptionChange(row)
-}
-
-// ── 预览样式 ──
-function getOptionStyle(opt) {
-  const fill = normalizeColor(opt.fill) || '#409eff'
-  const color = normalizeColor(opt.color) || '#fff'
-  return {
-    backgroundColor: fill === 'transparent' ? '#f5f5f5' : fill,
-    color: color === 'transparent' ? '#333333' : color,
-    fontSize: (styleForm.fontSize || 12) + 'px',
-    borderRadius: (styleForm.radius ?? 3) + 'px',
-    padding: `2px ${styleForm.paddingX ?? 8}px`,
-    display: 'inline-block',
-    marginRight: '8px',
+async function removeCategory(row) {
+  try {
+    await ElMessageBox.confirm(`确认删除空分组「${row.name}」？`, '删除标签分组', { type: 'warning' })
+    await deleteTagCategory(row.id)
+    if (Number(query.categoryId) === Number(row.id)) query.categoryId = null
+    ElMessage.success('分组已删除')
+    await Promise.all([loadCategories(), loadTags()])
+  } catch (error) {
+    if (!isElementDialogDismissal(error)) ElMessage.error(error?.message || '分组删除失败')
   }
 }
+
+watch(() => editDialog.ownerScope, () => {
+  if (editDialog.categoryId && !editableCategories.value.some(item => Number(item.id) === Number(editDialog.categoryId))) {
+    editDialog.categoryId = null
+  }
+})
+
+watch(() => replaceDialog.visible, visible => {
+  if (!visible) {
+    replacementRequests.invalidate()
+    replacementOptions.value = []
+  }
+})
+
+watch(() => editDialog.placement, () => {
+  if (!tagAlignOptions.value.some(option => option.value === editDialog.align)) {
+    editDialog.align = 'center'
+  }
+})
 
 onMounted(() => {
-  loadManagedTags()
-  loadTagCategories()
-  loadFields()
+  void Promise.all([loadTags(), loadCategories()])
 })
 
 onBeforeUnmount(() => {
   componentActive = false
-  managedTagRequests.invalidate()
-  tagCategoryRequests.invalidate()
+  tagRequests.invalidate()
+  categoryRequests.invalidate()
   replacementRequests.invalidate()
-  fieldListRequests.invalidate()
-  fieldDetailRequests.invalidate()
 })
 </script>
 
-<style lang="scss" scoped>
-.cardHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+<style scoped lang="scss">
+.tagManagementPage {
+  --tag-border: #e5e7eb;
+  padding: 0;
+  background: var(--el-bg-color);
 }
 
-.governanceCard {
-  margin-bottom: 16px;
-}
-
-.headerHint {
-  margin-left: 12px;
-  color: #909399;
-  font-size: 12px;
-  font-weight: normal;
-}
-
-.governanceToolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 14px;
-  padding: 12px;
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #fafcff 0%, #f7f9fc 100%);
-
-  .keywordInput {
-    width: min(280px, 100%);
-  }
-
-  .filterSelect {
-    width: 130px;
-  }
-}
-
-.managedTagCell {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 5px;
-  min-width: 0;
-}
-
-.managedTagPreview {
-  display: inline-flex;
-  max-width: 100%;
-  line-height: 1.4;
-  white-space: nowrap;
+.managementCard {
+  min-height: calc(100vh - 84px);
+  border: 0;
+  border-radius: 0;
+  background: var(--el-bg-color);
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.managedTagDescription {
-  width: 100%;
-  color: #909399;
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.managedTagActions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  white-space: nowrap;
-}
-
-.auditTime {
-  color: #606266;
-  cursor: help;
-}
-
-.auditDetail {
-  display: grid;
-  gap: 6px;
-  color: #606266;
-  font-size: 12px;
-}
-
-.governancePager {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-.governanceBatchBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  color: #7a2e0e;
-  background: #fff8eb;
-  border: 1px solid #fedf89;
-  border-radius: 8px;
-  font-size: 13px;
-}
-
-.governanceBatchActions {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 8px;
-}
-
-.categoryHint {
-  margin-bottom: 16px;
-}
-
+.filterBar,
+.batchBar,
 .categoryEditor {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) 130px 130px auto;
-  gap: 10px;
+  display: flex;
   align-items: center;
-  margin-bottom: 16px;
-  padding: 14px;
-  border: 1px solid #d9e6ff;
-  border-radius: 8px;
-  background: #f7faff;
 }
 
-.categoryEditorActions {
+.headerActions,
+.filterBar,
+.tagListHeader,
+.tagGroupPanelHeader {
   display: flex;
+  align-items: center;
   gap: 8px;
 }
 
-.categoryCreateAction {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 12px;
+.tagWorkspace {
+  display: grid;
+  grid-template-columns: clamp(240px, 20%, 280px) minmax(0, 1fr);
+  min-height: calc(100vh - 84px);
 }
 
-.categoryScopeTag {
-  margin-left: 8px;
+.tagGroupPanel {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: #fbfcfe;
+  border-right: 1px solid var(--el-border-color-lighter);
+  font-family: inherit;
+  line-height: normal;
+}
+
+.tagGroupPanelHeader {
+  justify-content: space-between;
+  min-height: 52px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  color: #303133;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.5px;
+}
+
+.tagGroupNav {
+  display: flex;
+  min-height: 120px;
+  padding: 2px 8px 16px;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tagGroupNavItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 8px 0 16px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #303133;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s;
+
+  &:hover {
+    background: #e8f0fe;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: -2px;
+  }
+
+  &.active {
+    background: #d6e4ff;
+    color: #303133;
+    font-weight: 500;
+  }
+}
+
+.tagGroupNavName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tagGroupNavCount {
+  min-width: 22px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: rgb(0 0 0 / 5%);
+  color: #86909c;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 20px;
+  text-align: center;
+}
+
+.groupLoadError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  color: var(--el-color-danger);
+  font-size: 12px;
+}
+
+.tagListPanel {
+  min-width: 0;
+  padding: 16px 20px 20px;
+}
+
+.tagListHeader {
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+
+  h3 {
+    margin: 0;
+    color: #1f2329;
+    font-size: 16px;
+  }
+
+  p {
+    margin: 4px 0 0;
+    color: #8f959e;
+    font-size: 12px;
+  }
+}
+
+.filterBar {
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f7f8fa;
+}
+
+.keywordInput {
+  width: 280px;
+}
+
+.filterSelect {
+  width: 140px;
 }
 
 .loadError {
   display: flex;
   align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--el-color-danger);
+  font-size: 13px;
+}
+
+.batchBar {
   justify-content: space-between;
-  gap: 12px;
   margin-bottom: 12px;
   padding: 10px 12px;
-  color: #b42318;
-  background: #fff4f2;
-  border: 1px solid #fecdca;
+  border: 1px solid #cdd8ff;
   border-radius: 8px;
-  font-size: 13px;
+  background: #f4f7ff;
+  color: #3155d9;
+}
 
-  &.compact {
-    margin: 8px 0 0;
+.tagCell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.tagActionCell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  width: 100%;
+  min-height: 32px;
+  line-height: 1;
+
+  :deep(.el-button),
+  :deep(.el-dropdown) {
+    margin: 0;
+    line-height: 1;
+    vertical-align: middle;
+  }
+
+  :deep(.el-dropdown) {
+    display: inline-flex;
+    align-items: center;
   }
 }
 
-.fieldError {
+.tagPreview {
+  display: inline-flex;
+  line-height: 1.5;
+}
+
+.tagDescription {
+  max-width: 220px;
+  overflow: hidden;
+  color: #8f959e;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tagStyleSection {
+  margin-top: 4px;
+  padding: 12px 14px 2px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-lighter);
+}
+
+.tagStyleSectionHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+
+  span:first-child {
+    color: var(--el-text-color-primary);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  span:last-child {
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+  }
+}
+
+.tagStyleColorGrid,
+.tagStyleNumberGrid,
+.tagStyleLayoutGrid {
+  display: grid;
+  gap: 12px;
+
+  :deep(.el-form-item) {
+    min-width: 0;
+    margin-bottom: 12px;
+  }
+}
+
+.tagStyleColorGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tagStyleNumberGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tagStyleLayoutGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tagStyleNumber {
   width: 100%;
-  margin-top: 6px;
-  color: #b42318;
+  min-width: 0;
+}
+
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.replaceForm {
+  margin-top: 18px;
+}
+
+.categoryToolbar {
+  margin: 14px 0;
+}
+
+.categoryEditor {
+  gap: 8px;
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--tag-border);
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.categoryEditorMain {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.categoryEditorHint,
+.categoryRowMeta,
+.categoryScopeHeader span,
+.categoryEmpty {
+  color: #8f959e;
   font-size: 12px;
 }
 
-.fieldWorkspace {
-  row-gap: 16px;
+.categoryManagerBody {
+  display: flex;
+  min-height: 150px;
+  flex-direction: column;
+  gap: 16px;
 }
 
-@media (max-width: 900px) {
-  .cardHeader {
-    align-items: flex-start;
-    gap: 12px;
+.categoryScopeSection {
+  overflow: hidden;
+  border: 1px solid var(--tag-border);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.categoryScopeHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef0f3;
+  background: #f7f8fa;
+
+  div {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
   }
 
-  .headerHint {
-    display: block;
-    margin: 4px 0 0;
-  }
-
-  .governanceToolbar {
-    .keywordInput,
-    .filterSelect {
-      width: calc(50% - 5px);
-    }
+  strong {
+    color: #1f2329;
+    font-size: 13px;
   }
 }
 
-@media (max-width: 560px) {
-  .cardHeader,
-  .governanceToolbar {
-    flex-direction: column;
+.categoryRows {
+  min-height: 1px;
+}
+
+.categoryRow {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 58px;
+  padding: 8px 12px 8px 8px;
+  border-bottom: 1px solid #f0f1f2;
+  background: #fff;
+  transition: border-color 0.16s, box-shadow 0.16s, transform 0.16s;
+
+  &:last-child {
+    border-bottom: 0;
+  }
+}
+
+.categoryDragHandle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #86909c;
+  font-size: 20px;
+  line-height: 1;
+  cursor: grab;
+
+  &:hover:not(:disabled) {
+    background: #f2f3f5;
+    color: #3155d9;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: -2px;
+  }
+
+  &:active:not(:disabled) {
+    cursor: grabbing;
+  }
+
+  &:disabled {
+    color: #c9cdd4;
+    cursor: not-allowed;
+  }
+}
+
+.categoryRowMain {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.categoryRowName {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #1f2329;
+  font-size: 13px;
+  font-weight: 500;
+
+  > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.categoryRowActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+
+  :deep(.el-button) {
+    margin: 0;
+  }
+}
+
+.categoryDragGhost {
+  opacity: 0.45;
+  background: #eef3ff;
+}
+
+.categoryDragChosen {
+  z-index: 2;
+  border: 1px solid #a9bfff;
+  box-shadow: 0 8px 22px rgb(49 85 217 / 14%);
+}
+
+.categoryEmpty {
+  padding: 26px 12px;
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .batchBar,
+  .tagListHeader {
     align-items: stretch;
+    flex-direction: column;
   }
 
-  .governanceToolbar {
-    .keywordInput,
-    .filterSelect {
-      width: 100%;
-    }
+  .tagWorkspace {
+    display: block;
   }
 
-  .governancePager {
-    justify-content: flex-start;
-    overflow-x: auto;
+  .tagGroupPanel {
+    margin-bottom: 16px;
+    padding: 0 0 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--tag-border);
+  }
+
+  .tagGroupNav {
+    min-height: auto;
+    padding: 8px;
+    flex-flow: row wrap;
+  }
+
+  .tagGroupNavItem {
+    width: auto;
+    max-width: 180px;
+  }
+
+  .tagListPanel {
+    padding: 0 12px 16px;
+  }
+
+  .headerActions {
+    flex-wrap: wrap;
+  }
+
+  .keywordInput,
+  .filterSelect {
+    width: 100%;
   }
 
   .categoryEditor {
-    grid-template-columns: 1fr;
-  }
-
-  .governanceBatchBar {
-    flex-direction: column;
     align-items: stretch;
+    flex-direction: column;
   }
 
-  .governanceBatchActions {
-    justify-content: flex-end;
+  .categoryRow {
+    grid-template-columns: 32px minmax(0, 1fr);
   }
 
-  .categoryScope,
-  .categoryEditorActions {
-    width: 100%;
-  }
-
-  .categoryEditorActions {
-    justify-content: flex-end;
+  .categoryRowActions {
+    grid-column: 2;
+    justify-content: flex-start;
   }
 }
 
-.fieldList {
-  .fieldItem {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    transition: background 0.2s;
-    margin-bottom: 2px;
-    width: 100%;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    appearance: none;
-    background: transparent;
-    border: 0;
-
-    &:hover {
-      background: #f5f7fa;
-    }
-
-    &:focus-visible {
-      outline: 2px solid #409eff;
-      outline-offset: 1px;
-    }
-
-    &:disabled {
-      cursor: wait;
-      opacity: 0.65;
-    }
-
-    &.active {
-      background: #ecf5ff;
-    }
-
-    .fieldInfo {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1;
-      overflow: hidden;
-    }
-
-    .fieldName {
-      font-size: 14px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .fieldBadge {
-      font-size: 11px;
-      color: #67c23a;
-      flex-shrink: 0;
-    }
+@media (max-width: 520px) {
+  .tagStyleSectionHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
   }
 
-  .emptyTip {
-    text-align: center;
-    color: #999;
-    padding: 24px 0;
-    font-size: 13px;
+  .tagStyleColorGrid,
+  .tagStyleNumberGrid,
+  .tagStyleLayoutGrid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
+</style>
 
-.sectionTitle {
-  font-size: 13px;
-  font-weight: 600;
-  color: #303133;
-  margin: 4px 0 12px;
-  padding-left: 8px;
-  border-left: 3px solid #4D73FF;
+<style lang="scss">
+.el-dialog.tagDefinitionDialog {
   display: flex;
-  align-items: center;
+  max-height: calc(100vh - 32px);
+  margin: 16px auto !important;
+  flex-direction: column;
+  overflow: hidden;
 
-  &:first-child {
-    margin-top: 0;
-  }
-}
-
-.el-form-item {
-  margin-bottom: 14px;
-}
-
-.previewBox {
-  padding: 12px 16px;
-  background: #fafafa;
-  border-radius: 6px;
-  border: 1px dashed #e4e7ed;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-
-  .tagBadge {
-    line-height: 1.4;
+  .el-dialog__header,
+  .el-dialog__footer {
+    flex: 0 0 auto;
   }
 
-  .emptyPreview {
-    color: #999;
-    font-size: 13px;
-  }
-}
-
-.emptyState {
-  text-align: center;
-  padding: 80px 0;
-  color: #999;
-
-  p {
-    margin-top: 12px;
-    font-size: 14px;
-  }
-}
-
-.colorGroupPanel {
-  .colorGroup {
-    margin-bottom: 6px;
-
-    .colorGroupLabel {
-      font-size: 11px;
-      color: #999;
-      margin-bottom: 3px;
-    }
-
-    .colorGroupSwatches {
-      display: flex;
-      gap: 5px;
-    }
+  .el-dialog__body {
+    min-height: 0;
+    padding-bottom: 12px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
-  .colorDot {
-    display: inline-block;
-    width: 22px;
-    height: 22px;
-    border-radius: 4px;
-    cursor: pointer;
-    border: 2px solid transparent;
-    transition: all 0.15s;
-    padding: 0;
-    appearance: none;
-    background-clip: padding-box;
-
-    &:hover {
-      transform: scale(1.15);
-    }
-
-    &:focus-visible {
-      outline: 2px solid #409eff;
-      outline-offset: 2px;
-    }
-
-    &.active {
-      border-color: #4D73FF;
-      box-shadow: 0 0 0 1px #4D73FF;
-    }
-
-    &.lightDot {
-      border-color: #e4e7ed;
-    }
-
-    &.transparentDot {
-      background: repeating-conic-gradient(#d9d9d9 0% 25%, #fff 0% 50%) 50% / 8px 8px;
-      border-color: #e4e7ed;
-    }
-  }
-
-  .customColorRow {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-top: 8px;
-    margin-top: 6px;
-    border-top: 1px solid #f0f0f0;
+  .el-dialog__footer {
+    padding-top: 12px;
+    border-top: 1px solid var(--el-border-color-lighter);
+    background: var(--el-bg-color-overlay);
   }
 }
 </style>

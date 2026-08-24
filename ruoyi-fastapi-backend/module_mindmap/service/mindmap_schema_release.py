@@ -69,7 +69,23 @@ MINDMAP_SCHEMA_MIGRATIONS = (
         '20260820_mindmap_node_tag_integrity.sql',
         '收敛字段与选项悬空引用并建立节点标签绑定外键',
     ),
+    MindmapMigrationDefinition(
+        '20260824_mindmap_unified_tags.sql',
+        '把历史标签字段选项迁移为统一标签并删除旧字段模型',
+    ),
 )
+
+POSTGRESQL_MIGRATION_OVERRIDES = {
+    '20260824_mindmap_unified_tags.sql': '20260824_mindmap_unified_tags_postgresql.sql',
+}
+
+
+def resolve_migration_filename(filename: str, database_type: str) -> str:
+    """返回当前数据库方言实际可执行的迁移文件名。"""
+    if database_type == 'postgresql':
+        return POSTGRESQL_MIGRATION_OVERRIDES.get(filename, filename)
+    return filename
+
 
 MANUAL_REVIEW_MIGRATIONS = (
     {
@@ -86,6 +102,7 @@ def referenced_migrations(issues: Iterable[MindmapSchemaIssue]) -> set[str]:
 def build_mindmap_migration_plan(
     issues: Iterable[MindmapSchemaIssue],
     migrations_dir: Path,
+    database_type: str = 'mysql',
 ) -> list[MindmapMigrationPlanItem]:
     """按固定依赖顺序归并缺失对象，并对实际 SQL 生成内容摘要。"""
     issue_list = list(issues)
@@ -99,13 +116,14 @@ def build_mindmap_migration_plan(
     for order, definition in enumerate(MINDMAP_SCHEMA_MIGRATIONS, start=1):
         if definition.filename not in issue_migrations:
             continue
-        migration_path = migrations_dir / definition.filename
+        migration_filename = resolve_migration_filename(definition.filename, database_type)
+        migration_path = migrations_dir / migration_filename
         try:
             content = migration_path.read_bytes()
         except FileNotFoundError as exc:
-            raise ValueError(f'迁移文件不存在: {definition.filename}') from exc
+            raise ValueError(f'迁移文件不存在: {migration_filename}') from exc
         if not content.strip():
-            raise ValueError(f'迁移文件为空: {definition.filename}')
+            raise ValueError(f'迁移文件为空: {migration_filename}')
         missing_objects = tuple(
             sorted({
                 f'{issue.kind}:{issue.object_name}'
@@ -116,7 +134,7 @@ def build_mindmap_migration_plan(
         plan.append(
             MindmapMigrationPlanItem(
                 order=order,
-                migration=definition.filename,
+                migration=migration_filename,
                 purpose=definition.purpose,
                 sha256=sha256(content).hexdigest(),
                 missing_objects=missing_objects,

@@ -22,6 +22,10 @@ class MindmapTagCategory(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True, comment='分类ID')
     name = Column(String(100), nullable=False, comment='分类名称')
+    category_type = Column(
+        String(20), nullable=False, server_default='custom',
+        comment='分组类型:system系统 custom用户自定义',
+    )
     owner_id = Column(BigInteger, nullable=False, server_default='0', comment='所有者(0=全局)')
     sort_order = Column(Integer, nullable=True, server_default='0', comment='排序')
     created_by = Column(String(64), nullable=True, comment='创建人')
@@ -55,7 +59,11 @@ class MindmapTag(Base):
         comment='所属分类ID',
     )
     owner_id = Column(BigInteger, nullable=False, server_default='0', comment='所有者(0=全局)')
-    style = Column(JSON_TYPE, nullable=True, comment='标签样式JSON {fill,color,fontSize,radius}')
+    style = Column(
+        JSON_TYPE,
+        nullable=True,
+        comment='标签样式JSON {fill,color,fontSize,radius,paddingX,placement,align}',
+    )
     description = Column(String(500), nullable=True, comment='标签描述')
     status = Column(SmallInteger, nullable=False, server_default='0', comment='状态:0启用 1停用 2归档')
     definition_revision = Column(BigInteger, nullable=False, server_default='1', comment='定义修订号')

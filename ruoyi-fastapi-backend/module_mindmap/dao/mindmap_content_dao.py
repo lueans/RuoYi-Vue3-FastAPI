@@ -17,7 +17,6 @@ from module_mindmap.entity.do.mindmap_content_do import (
     MindmapSummary,
 )
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
-from module_mindmap.entity.do.mindmap_tag_field_do import MindmapTagField, MindmapTagFieldOption
 from module_mindmap.service.simple_mind_document_codec import EncodedDocument
 
 if TYPE_CHECKING:
@@ -144,8 +143,6 @@ class MindmapContentDao:
                 'file_id': file_id,
                 'node_id': uid_to_node[row['node_uid']].id,
                 'tag_id': row['tag_id'],
-                'field_id': row.get('field_id'),
-                'option_id': row.get('option_id'),
                 'sort_order': row.get('sort_order', 0),
                 'placement': row.get('placement'),
                 'align': row.get('align'),
@@ -627,51 +624,17 @@ class MindmapContentDao:
             .where(MindmapNodeTag.file_id == file_id)
             .order_by(MindmapNodeTag.node_id, MindmapNodeTag.sort_order)
         )).all()
-        explicit_option_ids = {binding.option_id for binding, _tag in tag_rows if binding.option_id}
-        fallback_tag_ids = {tag.id for binding, tag in tag_rows if not binding.option_id}
-        option_by_id: dict[int, tuple[MindmapTagFieldOption, MindmapTagField]] = {}
-        options_by_tag: dict[int, list[tuple[MindmapTagFieldOption, MindmapTagField]]] = {}
-        option_filters = []
-        if explicit_option_ids:
-            option_filters.append(MindmapTagFieldOption.id.in_(explicit_option_ids))
-        if fallback_tag_ids:
-            option_filters.append(MindmapTagFieldOption.tag_id.in_(fallback_tag_ids))
-        if option_filters:
-            option_rows = (await db.execute(
-                select(MindmapTagFieldOption, MindmapTagField)
-                .join(MindmapTagField, MindmapTagField.id == MindmapTagFieldOption.field_id)
-                .where(or_(*option_filters))
-            )).all()
-            for option, field_model in option_rows:
-                option_by_id[option.id] = (option, field_model)
-                if option.tag_id:
-                    options_by_tag.setdefault(option.tag_id, []).append((option, field_model))
         node_tags = []
         for binding, tag in tag_rows:
-            option_row = option_by_id.get(binding.option_id) if binding.option_id else None
-            if option_row and (
-                option_row[0].tag_id != tag.id
-                or (binding.field_id and option_row[0].field_id != binding.field_id)
-            ):
-                option_row = None
-            if not binding.option_id:
-                candidates = options_by_tag.get(tag.id, [])
-                # 兼容旧关系：只有 tag -> option 唯一时才推断，禁止一对多时复制标签。
-                option_row = candidates[0] if len(candidates) == 1 else None
-            option, field_model = option_row if option_row else (None, None)
-            base_style = dict(field_model.style or {}) if field_model else {}
-            base_style.update(tag.style or {})
             resolved = {
                 'tagId': tag.id,
                 'uuid': tag.uuid,
                 'tagKey': tag.tag_key,
                 'text': tag.name,
-                'style': base_style,
+                'style': dict(tag.style or {}),
                 'status': tag.status,
                 'definitionRevision': tag.definition_revision,
             }
-            if option:
-                resolved.update({'fieldId': option.field_id, 'optionId': option.id})
             node_tags.append({
                 'node_uid': id_to_uid.get(binding.node_id),
                 'sort_order': binding.sort_order,

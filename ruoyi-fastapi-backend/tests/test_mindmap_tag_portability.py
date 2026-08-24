@@ -38,36 +38,28 @@ class MindmapTagPortabilityTest(unittest.TestCase):
         self.assertTrue(MindmapTagPortabilityService._is_reference_portable(
             raw,
             SimpleNamespace(owner_id=0, status=0),
-            None,
             target_owner_id=42,
         ))
         self.assertFalse(MindmapTagPortabilityService._is_reference_portable(
             raw,
             SimpleNamespace(owner_id=7, status=0),
-            None,
             target_owner_id=42,
         ))
         self.assertFalse(MindmapTagPortabilityService._is_reference_portable(
             raw,
             SimpleNamespace(owner_id=0, status=1),
-            None,
             target_owner_id=42,
         ))
         self.assertTrue(MindmapTagPortabilityService._is_reference_portable(
             raw,
             SimpleNamespace(owner_id=0, status=1),
-            None,
             target_owner_id=42,
             allow_disabled_references=True,
         ))
 
-    def test_detached_field_tag_keeps_resolved_inherited_style(self) -> None:
+    def test_detached_tag_keeps_unified_style(self) -> None:
         name, style = MindmapTagPortabilityService._fallback_definition(
-            SimpleNamespace(name='高优先级', style={'fill': '#f00'}),
-            (
-                SimpleNamespace(fill='#f00', color=None),
-                SimpleNamespace(style={'fontSize': 14, 'radius': 6}),
-            ),
+            SimpleNamespace(name='高优先级', style={'fontSize': 14, 'radius': 6, 'fill': '#f00'}),
         )
 
         self.assertEqual(name, '高优先级')

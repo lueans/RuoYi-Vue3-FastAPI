@@ -45,6 +45,7 @@ services:
     volumes:
       - ./ruoyi-fastapi-backend/sql/ruoyi-fastapi-pg.sql:/docker-entrypoint-initdb.d/ruoyi-fastapi-pg.sql
       - ./ruoyi-fastapi-backend/migrations/20260820_mindmap_postgresql.sql:/docker-entrypoint-initdb.d/zz-mindmap-postgresql.sql
+      - ./ruoyi-fastapi-backend/migrations/20260824_mindmap_unified_tags_postgresql.sql:/docker-entrypoint-initdb.d/zzz-mindmap-unified-tags-postgresql.sql
     networks:
       - ruoyi-network
     healthcheck:

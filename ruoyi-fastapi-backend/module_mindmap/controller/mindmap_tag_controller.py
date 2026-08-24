@@ -23,9 +23,11 @@ from module_mindmap.entity.vo.mindmap_tag_vo import (
     MindmapTagCategoryCreateResultModel,
     MindmapTagCategoryListItemModel,
     MindmapTagCategoryMutationModel,
+    MindmapTagCategoryReorderModel,
     MindmapTagModel,
     MindmapTagQueryModel,
     MindmapTagReplaceModel,
+    MindmapTagSuggestionModel,
     MindmapTagSuggestionQueryModel,
 )
 from module_mindmap.service.mindmap_tag_service import MindmapTagService
@@ -40,12 +42,12 @@ mindmap_tag_controller = APIRouterPro(
 )
 
 
-# ──────────────────── 标签分类 ────────────────────
+# ──────────────────── 标签分组（兼容 category API） ────────────────────
 
 @mindmap_tag_controller.get(
     '/categories',
-    summary='获取标签分类列表',
-    description='获取全局分类 + 当前用户私有分类',
+    summary='获取标签分组列表',
+    description='获取全局分组 + 当前用户私有分组',
     response_model=DataResponseModel[list[MindmapTagCategoryListItemModel]],
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:query')],
 )
@@ -58,20 +60,41 @@ async def get_tag_categories(
     return ResponseUtil.success(data=result)
 
 
+@mindmap_tag_controller.put(
+    '/categories/order',
+    summary='调整标签分组顺序',
+    description='通过完整ID列表调整同一所有者范围内的标签分组顺序',
+    response_model=ResponseBaseModel,
+    dependencies=[UserInterfaceAuthDependency('mindmap:tag:edit')],
+)
+@Log(title='标签分组排序', business_type=BusinessType.UPDATE)
+async def reorder_tag_categories(
+    request: Request,
+    model: MindmapTagCategoryReorderModel,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapTagService.reorder_categories(
+        query_db, model, current_user.user.user_id,
+    )
+    logger.info(result.message)
+    return ResponseUtil.success(msg=result.message)
+
+
 @mindmap_tag_controller.post(
     '/category',
-    summary='新增标签分类',
-    description='新增私有分类；管理员可显式创建全局分类',
+    summary='新增标签分组',
+    description='新增私有分组；管理员可显式创建全局分组',
     response_model=DataResponseModel[MindmapTagCategoryCreateResultModel],
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:add')],
 )
-@Log(title='标签分类', business_type=BusinessType.INSERT)
+@Log(title='标签分组', business_type=BusinessType.INSERT)
 async def add_tag_category(
     request: Request,
     category_name: Annotated[
         str,
         Query(
-            description='分类名称', alias='categoryName', min_length=1,
+            description='分组名称', alias='categoryName', min_length=1,
             max_length=MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
             pattern=MINDMAP_TAG_SEARCH_KEYWORD_PATTERN,
         ),
@@ -86,7 +109,7 @@ async def add_tag_category(
     ] = 0,
     owner_scope: Annotated[
         Literal['mine', 'global'],
-        Query(description='分类作用域', alias='ownerScope'),
+        Query(description='分组作用域', alias='ownerScope'),
     ] = 'mine',
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
@@ -105,19 +128,19 @@ async def add_tag_category(
 
 @mindmap_tag_controller.put(
     '/category',
-    summary='修改标签分类',
-    description='修改标签分类名称或排序',
+    summary='修改标签分组',
+    description='修改标签分组名称或排序',
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:edit')],
 )
-@Log(title='标签分类', business_type=BusinessType.UPDATE)
+@Log(title='标签分组', business_type=BusinessType.UPDATE)
 async def update_tag_category(
     request: Request,
-    category_id: Annotated[int, Query(description='分类ID', alias='categoryId', gt=0)],
+    category_id: Annotated[int, Query(description='分组ID', alias='categoryId', gt=0)],
     category_name: Annotated[
         str,
         Query(
-            description='分类名称', alias='categoryName', min_length=1,
+            description='分组名称', alias='categoryName', min_length=1,
             max_length=MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
             pattern=MINDMAP_TAG_SEARCH_KEYWORD_PATTERN,
         ),
@@ -143,15 +166,15 @@ async def update_tag_category(
 
 @mindmap_tag_controller.delete(
     '/category/{category_id}',
-    summary='删除标签分类',
-    description='删除标签分类（分类下有标签时拒绝删除）',
+    summary='删除标签分组',
+    description='删除标签分组（分组下有标签时拒绝删除）',
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:remove')],
 )
-@Log(title='标签分类', business_type=BusinessType.DELETE)
+@Log(title='标签分组', business_type=BusinessType.DELETE)
 async def delete_tag_category(
     request: Request,
-    category_id: Annotated[int, Path(description='分类ID', gt=0)],
+    category_id: Annotated[int, Path(description='分组ID', gt=0)],
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
@@ -238,13 +261,15 @@ async def replace_tag(
 @mindmap_tag_controller.get(
     '/list',
     summary='获取标签列表',
-    description='分页查询标签（支持分类、字段、状态、范围和关键词筛选）',
+    description='分页查询标签（支持分组、状态、范围和关键词筛选）',
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:query')],
 )
 async def get_tag_list(
     request: Request,
-    category_id: Annotated[int | None, Query(description='分类ID', alias='categoryId')] = None,
-    field_id: Annotated[int | None, Query(description='字段ID', alias='fieldId', gt=0)] = None,
+    category_id: Annotated[
+        int | None,
+        Query(description='分组ID，0 表示未分组', alias='categoryId', ge=0),
+    ] = None,
     status: Annotated[int | None, Query(description='状态:0启用 1停用 2归档', ge=0, le=2)] = None,
     keyword: Annotated[
         str | None,
@@ -261,7 +286,7 @@ async def get_tag_list(
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
     query = MindmapTagQueryModel(
-        categoryId=category_id, fieldId=field_id, status=status, keyword=keyword,
+        categoryId=category_id, status=status, keyword=keyword,
         ownerScope=owner_scope, pageNum=page_num, pageSize=page_size,
     )
     result = await MindmapTagService.get_tag_list(query_db, query, current_user.user.user_id)
@@ -271,7 +296,8 @@ async def get_tag_list(
 @mindmap_tag_controller.get(
     '/suggestions',
     summary='获取标签建议',
-    description='用于编辑器自动补全（全局+私有标签）',
+    description='用于编辑器按分组自动补全（全局+私有标签）',
+    response_model=DataResponseModel[list[MindmapTagSuggestionModel]],
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:query')],
 )
 async def get_tag_suggestions(

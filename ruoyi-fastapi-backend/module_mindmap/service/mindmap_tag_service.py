@@ -5,7 +5,6 @@ from datetime import datetime
 from sqlalchemy import and_, delete, distinct, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
 from common.vo import CrudResponseModel, PageModel
@@ -15,16 +14,15 @@ from module_mindmap.entity.do.mindmap_collaborator_do import MindmapCollaborator
 from module_mindmap.entity.do.mindmap_content_do import MindmapChangeLog, MindmapNode, MindmapNodeTag
 from module_mindmap.entity.do.mindmap_do import Mindmap
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
-from module_mindmap.entity.do.mindmap_tag_field_do import MindmapTagField, MindmapTagFieldOption
 from module_mindmap.entity.do.mindmap_ws_state_do import MindmapWsState
 from module_mindmap.entity.vo.mindmap_tag_vo import (
     MAX_MINDMAP_TAG_BATCH_SIZE,
     MAX_MINDMAP_TAG_ID,
     MindmapTagCategoryMutationModel,
+    MindmapTagCategoryReorderModel,
     MindmapTagModel,
     MindmapTagQueryModel,
 )
-from module_mindmap.service.mindmap_document_service import MindmapDocumentService
 from module_mindmap.service.mindmap_metrics import (
     observe_mindmap_operation,
     record_mindmap_event,
@@ -73,24 +71,24 @@ def _check_write_permission(resource_owner_id: int, user_id: int, resource_name:
 async def _validate_category_assignment(
     db: AsyncSession, category_id: int | None, tag_owner_id: int,
 ) -> None:
-    """标签只能归入全局分类或与标签同所有者的私有分类。"""
+    """标签只能归入全局分组或与标签同所有者的私有分组。"""
     if category_id is None:
         return
     category = await MindmapTagDao.get_category_by_id(db, category_id, for_update=True)
     if not category:
-        raise ServiceException(message='标签分类不存在')
+        raise ServiceException(message='标签分组不存在')
     if category.owner_id not in (0, tag_owner_id):
-        raise ServiceException(message='标签分类不属于当前标签作用域')
+        raise ServiceException(message='标签分组不属于当前标签作用域')
 
 
 class MindmapTagService:
     """标签服务层"""
 
-    # ── 分类 ──
+    # ── 标签分组（兼容 category 命名） ──
 
     @classmethod
     async def get_categories(cls, db: AsyncSession, user_id: int) -> list[dict]:
-        """获取分类列表（全局 + 当前用户私有）"""
+        """获取分组列表（全局 + 当前用户私有）"""
         categories = await MindmapTagDao.get_categories(db, user_id)
         counts = await MindmapTagDao.get_category_tag_counts(db, [category.id for category in categories])
         result = []
@@ -108,16 +106,17 @@ class MindmapTagService:
         user_id: int,
         user_name: str,
     ) -> CrudResponseModel:
-        """新增分类"""
+        """新增分组"""
         if model.owner_scope == 'global' and user_id != 1:
-            raise ServiceException(message='仅管理员可创建全局分类')
+            raise ServiceException(message='仅管理员可创建全局分组')
         owner_id = 0 if model.owner_scope == 'global' else user_id
         is_unique = await MindmapTagDao.check_category_name_unique(db, owner_id, model.name)
         if not is_unique:
-            raise ServiceException(message=f'分类“{model.name}”已存在')
+            raise ServiceException(message=f'分组“{model.name}”已存在')
         try:
             category = await MindmapTagDao.add_category(db, {
                 'name': model.name,
+                'category_type': 'custom',
                 'owner_id': owner_id,
                 'sort_order': model.sort_order,
                 'created_by': user_name,
@@ -126,12 +125,51 @@ class MindmapTagService:
             await db.commit()
             return CrudResponseModel(
                 is_success=True,
-                message='分类创建成功',
+                message='分组创建成功',
                 result={'categoryId': category.id},
             )
         except IntegrityError as exc:
             await db.rollback()
-            raise ServiceException(message=f'分类“{model.name}”已存在') from exc
+            raise ServiceException(message=f'分组“{model.name}”已存在') from exc
+        except Exception:
+            await db.rollback()
+            raise
+
+    @classmethod
+    async def reorder_categories(
+        cls,
+        db: AsyncSession,
+        model: MindmapTagCategoryReorderModel,
+        user_id: int,
+    ) -> CrudResponseModel:
+        """调整同一所有者范围内的完整分组顺序。"""
+        requested_ids = model.category_ids
+        requested_id_set = set(requested_ids)
+        visible_categories = await MindmapTagDao.get_categories(db, user_id)
+        requested_categories = [
+            category for category in visible_categories if category.id in requested_id_set
+        ]
+        if len(requested_categories) != len(requested_ids):
+            raise ServiceException(message='分组列表已变化，请刷新后重试')
+
+        owner_ids = {category.owner_id for category in requested_categories}
+        if len(owner_ids) != 1:
+            raise ServiceException(message='一次只能调整同一范围内的分组')
+        owner_id = owner_ids.pop()
+        _check_write_permission(owner_id, user_id, '分组排序')
+
+        try:
+            owner_categories = await MindmapTagDao.get_categories_by_owner(
+                db, owner_id, for_update=True,
+            )
+            if {category.id for category in owner_categories} != requested_id_set:
+                raise ServiceException(message='分组列表已变化，请刷新后重试')
+            await MindmapTagDao.update_category_sort_orders(db, requested_ids)
+            await db.commit()
+            return CrudResponseModel(is_success=True, message='分组排序已更新')
+        except ServiceException:
+            await db.rollback()
+            raise
         except Exception:
             await db.rollback()
             raise
@@ -144,11 +182,11 @@ class MindmapTagService:
         model: MindmapTagCategoryMutationModel,
         user_id: int,
     ) -> CrudResponseModel:
-        """修改分类"""
+        """修改分组"""
         cat = await MindmapTagDao.get_category_by_id(db, category_id, for_update=True)
         if not cat:
-            raise ServiceException(message='分类不存在')
-        _check_write_permission(cat.owner_id, user_id, '分类')
+            raise ServiceException(message='分组不存在')
+        _check_write_permission(cat.owner_id, user_id, '分组')
         is_unique = await MindmapTagDao.check_category_name_unique(
             db,
             cat.owner_id,
@@ -156,17 +194,17 @@ class MindmapTagService:
             exclude_id=category_id,
         )
         if not is_unique:
-            raise ServiceException(message=f'分类“{model.name}”已存在')
+            raise ServiceException(message=f'分组“{model.name}”已存在')
         try:
             await MindmapTagDao.update_category(db, category_id, {
                 'name': model.name,
                 'sort_order': model.sort_order,
             })
             await db.commit()
-            return CrudResponseModel(is_success=True, message='分类更新成功')
+            return CrudResponseModel(is_success=True, message='分组更新成功')
         except IntegrityError as exc:
             await db.rollback()
-            raise ServiceException(message=f'分类“{model.name}”已存在') from exc
+            raise ServiceException(message=f'分组“{model.name}”已存在') from exc
         except Exception:
             await db.rollback()
             raise
@@ -175,23 +213,23 @@ class MindmapTagService:
     async def delete_category(
         cls, db: AsyncSession, category_id: int, user_id: int,
     ) -> CrudResponseModel:
-        """删除分类（检查关联标签）"""
+        """删除分组（检查关联标签）"""
         cat = await MindmapTagDao.get_category_by_id(db, category_id, for_update=True)
         if not cat:
-            raise ServiceException(message='分类不存在')
-        _check_write_permission(cat.owner_id, user_id, '分类')
+            raise ServiceException(message='分组不存在')
+        _check_write_permission(cat.owner_id, user_id, '分组')
 
         tag_count = await MindmapTagDao.count_tags_in_category(db, category_id)
         if tag_count > 0:
-            raise ServiceException(message=f'该分类下还有 {tag_count} 个标签，请先移除或转移')
+            raise ServiceException(message=f'该分组下还有 {tag_count} 个标签，请先移除或转移')
 
         try:
             await MindmapTagDao.delete_category(db, category_id)
             await db.commit()
-            return CrudResponseModel(is_success=True, message='分类删除成功')
+            return CrudResponseModel(is_success=True, message='分组删除成功')
         except IntegrityError as exc:
             await db.rollback()
-            raise ServiceException(message='该分类正在被标签使用，请刷新后重试') from exc
+            raise ServiceException(message='该分组正在被标签使用，请刷新后重试') from exc
         except Exception:
             await db.rollback()
             raise
@@ -206,24 +244,12 @@ class MindmapTagService:
         result = await MindmapTagDao.get_tag_list(
             db, user_id,
             category_id=query.category_id,
-            field_id=query.field_id,
             status=query.status,
             keyword=query.keyword,
             owner_scope=query.owner_scope or 'all',
             page_num=query.page_num,
             page_size=query.page_size,
         )
-        inherited = await MindmapDocumentService.get_inherited_tag_styles(
-            db, {int(row['id']) for row in result.rows},
-        )
-        field_contexts = await MindmapTagDao.get_tag_field_contexts(
-            db, {int(row['id']) for row in result.rows},
-        )
-        for row in result.rows:
-            style = dict(inherited.get(int(row['id']), {}))
-            style.update(row.get('style') or {})
-            row['style'] = style
-            row['fields'] = field_contexts.get(int(row['id']), [])
         return result
 
     @classmethod
@@ -234,12 +260,7 @@ class MindmapTagService:
             raise ServiceException(message='标签不存在')
         if tag.owner_id not in (user_id, 0):
             raise ServiceException(message='无权限查看该标签')
-        result = CamelCaseUtil.transform_result(tag)
-        inherited = await MindmapDocumentService.get_inherited_tag_styles(db, {tag_id})
-        style = dict(inherited.get(tag_id, {}))
-        style.update(result.get('style') or {})
-        result['style'] = style
-        return result
+        return CamelCaseUtil.transform_result(tag)
 
     @classmethod
     @observe_mindmap_operation('tag_impact', work_units_getter=_tag_impact_metric_units)
@@ -353,18 +374,19 @@ class MindmapTagService:
                 'updated_time': datetime.now(),
                 'update_by': user_name,
             })
+            tag_result = CamelCaseUtil.transform_result(tag)
             await db.commit()
             return CrudResponseModel(
                 is_success=True,
                 message='标签创建成功',
-                result=CamelCaseUtil.transform_result(tag),
+                result=tag_result,
             )
         except Exception as e:
             await db.rollback()
             raise e
 
     @classmethod
-    async def update_tag(  # noqa: PLR0912
+    async def update_tag(
         cls, db: AsyncSession, model: MindmapTagModel, user_id: int,
     ) -> CrudResponseModel:
         """修改标签"""
@@ -380,20 +402,6 @@ class MindmapTagService:
             new_owner_id = model.owner_id
             # 非管理员忽略 owner_id 变更请求
         await _validate_category_assignment(db, model.category_id, new_owner_id)
-
-        if new_owner_id != tag.owner_id:
-            field_scope_mismatch = (await db.execute(
-                select(func.count(MindmapTagFieldOption.id))
-                .join(MindmapTagField, MindmapTagField.id == MindmapTagFieldOption.field_id)
-                .where(
-                    MindmapTagFieldOption.tag_id == model.id,
-                    MindmapTagField.owner_id != new_owner_id,
-                )
-            )).scalar_one()
-            if field_scope_mismatch:
-                raise ServiceException(
-                    message='该标签由标签字段选项管理，请通过字段作用域统一切换'
-                )
 
         if new_owner_id not in (tag.owner_id, 0):
             foreign_file_count = (await db.execute(
@@ -426,15 +434,17 @@ class MindmapTagService:
             affected_file_ids = list((await db.execute(
                 select(distinct(MindmapNodeTag.file_id)).where(MindmapNodeTag.tag_id == model.id)
             )).scalars())
-            inherited = await MindmapDocumentService.get_inherited_tag_styles(db, {model.id})
-            inherited_style = inherited.get(model.id, {})
             own_style = dict(model.style or {})
-            for key, value in inherited_style.items():
-                if own_style.get(key) == value:
-                    own_style.pop(key, None)
-            resolved_style = dict(inherited_style)
-            resolved_style.update(own_style)
             new_revision = (tag.definition_revision or 1) + 1
+            new_status = model.status if model.status is not None else tag.status
+            definition = {
+                'tagId': model.id,
+                'uuid': tag.uuid,
+                'tagKey': model.tag_key,
+                'text': model.name,
+                'style': own_style,
+                'status': new_status,
+            }
             await MindmapTagDao.update_tag(db, model.id, {
                 'tag_key': model.tag_key,
                 'name': model.name,
@@ -442,43 +452,24 @@ class MindmapTagService:
                 'owner_id': new_owner_id,
                 'style': own_style or None,
                 'description': model.description,
-                'status': model.status if model.status is not None else tag.status,
+                'status': new_status,
                 'definition_revision': new_revision,
                 'updated_time': datetime.now(),
                 'update_by': str(user_id),
             })
-            # 字段选项只是统一标签的选择入口；标签主数据变更后同步其展示字段，
-            # 防止后续编辑字段时把新名称/颜色覆盖回旧值。
-            await db.execute(
-                update(MindmapTagFieldOption)
-                .where(MindmapTagFieldOption.tag_id == model.id)
-                .values(
-                    name=model.name,
-                    fill=own_style.get('fill'),
-                    color=own_style.get('color'),
-                )
-            )
             await db.commit()
-            event = {
-                'type': 'tag_definition_changed',
-                'tagId': model.id,
-                'definitionRevision': new_revision,
-                'changedFields': ['name', 'style', 'status'],
-                'definition': {
-                    'tagId': model.id,
-                    'uuid': tag.uuid,
-                    'tagKey': model.tag_key,
-                    'text': model.name,
-                    'style': resolved_style,
-                    'status': model.status if model.status is not None else tag.status,
-                },
-            }
-            for file_id in affected_file_ids:
-                await room_manager.broadcast(file_id, event)
-            return CrudResponseModel(is_success=True, message='标签更新成功')
         except Exception as e:
             await db.rollback()
             raise e
+        await cls._broadcast_definition(
+            affected_file_ids,
+            tag_id=model.id,
+            revision=new_revision,
+            definition=definition,
+            event_type='tag_definition_changed',
+            changed_fields=['name', 'style', 'status'],
+        )
+        return CrudResponseModel(is_success=True, message='标签更新成功')
 
     @classmethod
     async def disable_tag(cls, db: AsyncSession, tag_id: int, user_id: int) -> CrudResponseModel:
@@ -493,10 +484,16 @@ class MindmapTagService:
             return CrudResponseModel(is_success=True, message='标签已处于停用状态')
 
         affected_file_ids = await cls._affected_file_ids(db, tag_id)
-        inherited = await MindmapDocumentService.get_inherited_tag_styles(db, {tag_id})
-        resolved_style = dict(inherited.get(tag_id, {}))
-        resolved_style.update(tag.style or {})
+        resolved_style = dict(tag.style or {})
         revision = (tag.definition_revision or 1) + 1
+        definition = {
+            'tagId': tag.id,
+            'uuid': tag.uuid,
+            'tagKey': tag.tag_key,
+            'text': tag.name,
+            'style': resolved_style,
+            'status': TAG_STATUS_DISABLED,
+        }
         try:
             await MindmapTagDao.update_tag(db, tag_id, {
                 'status': 1,
@@ -509,9 +506,12 @@ class MindmapTagService:
             await db.rollback()
             raise
         await cls._broadcast_definition(
-            affected_file_ids, tag, revision, status=1,
-            event_type='tag_definition_changed', changed_fields=['status'],
-            resolved_style=resolved_style,
+            affected_file_ids,
+            tag_id=tag_id,
+            revision=revision,
+            definition=definition,
+            event_type='tag_definition_changed',
+            changed_fields=['status'],
         )
         return CrudResponseModel(
             is_success=True,
@@ -542,19 +542,7 @@ class MindmapTagService:
         affected_file_ids = sorted(await cls._affected_file_ids(db, source_tag_id))
         await cls._check_files_edit_access(db, affected_file_ids, user_id)
 
-        duplicate_query, conflict_query = cls._replacement_binding_queries(
-            source_tag_id, target_tag_id,
-        )
-        conflict_count = (await db.execute(
-            select(func.count()).select_from(conflict_query.subquery())
-        )).scalar_one()
-        if conflict_count:
-            raise ServiceException(
-                message=(
-                    f'有 {conflict_count} 个节点同时使用源标签和目标标签，且字段/选项上下文不同；'
-                    '请先在受影响节点中合并字段值，再执行全局替换'
-                )
-            )
+        duplicate_query = cls._replacement_duplicate_query(source_tag_id, target_tag_id)
 
         binding_count = (await db.execute(
             select(func.count(MindmapNodeTag.id)).where(MindmapNodeTag.tag_id == source_tag_id)
@@ -563,9 +551,15 @@ class MindmapTagService:
             select(func.count()).select_from(duplicate_query.subquery())
         )).scalar_one()
         duplicate_ids = duplicate_query.subquery()
-        target_inherited = await MindmapDocumentService.get_inherited_tag_styles(db, {target_tag_id})
-        target_resolved_style = dict(target_inherited.get(target_tag_id, {}))
-        target_resolved_style.update(target.style or {})
+        target_definition_revision = target.definition_revision
+        target_definition = {
+            'tagId': target.id,
+            'uuid': target.uuid,
+            'tagKey': target.tag_key,
+            'text': target.name,
+            'style': dict(target.style or {}),
+            'status': target.status,
+        }
         source_revision = (source.definition_revision or 1) + 1
         try:
             await db.execute(
@@ -575,12 +569,6 @@ class MindmapTagService:
                 update(MindmapNodeTag)
                 .where(MindmapNodeTag.tag_id == source_tag_id)
                 .values(tag_id=target_tag_id)
-            )
-            await db.execute(
-                update(MindmapTagFieldOption)
-                .where(MindmapTagFieldOption.tag_id == source_tag_id)
-                .values(tag_id=target_tag_id, name=target.name,
-                        fill=(target.style or {}).get('fill'), color=(target.style or {}).get('color'))
             )
             await MindmapTagDao.update_tag(db, source_tag_id, {
                 'status': 2,
@@ -606,15 +594,8 @@ class MindmapTagService:
                 'type': 'tag_replaced',
                 'sourceTagId': source_tag_id,
                 'targetTagId': target_tag_id,
-                'definitionRevision': target.definition_revision,
-                'definition': {
-                    'tagId': target.id,
-                    'uuid': target.uuid,
-                    'tagKey': target.tag_key,
-                    'text': target.name,
-                    'style': target_resolved_style,
-                    'status': target.status,
-                },
+                'definitionRevision': target_definition_revision,
+                'definition': target_definition,
                 'contentRevision': revisions[file_id],
             }, revision=revisions[file_id], operation='标签替换')
         return CrudResponseModel(
@@ -674,11 +655,6 @@ class MindmapTagService:
         try:
             if unbind:
                 await db.execute(delete(MindmapNodeTag).where(MindmapNodeTag.tag_id.in_(id_list)))
-            await db.execute(
-                update(MindmapTagFieldOption)
-                .where(MindmapTagFieldOption.tag_id.in_(id_list))
-                .values(tag_id=None)
-            )
             tag_updates = {
                 'status': TAG_STATUS_ARCHIVED,
                 'definition_revision': MindmapTag.definition_revision + 1,
@@ -718,17 +694,7 @@ class MindmapTagService:
     ) -> list[dict]:
         """获取标签建议（编辑器自动补全）"""
         tags = await MindmapTagDao.get_suggestions(db, user_id, keyword)
-        inherited = await MindmapDocumentService.get_inherited_tag_styles(
-            db, {tag.id for tag in tags},
-        )
-        results = []
-        for tag in tags:
-            item = CamelCaseUtil.transform_result(tag)
-            style = dict(inherited.get(tag.id, {}))
-            style.update(item.get('style') or {})
-            item['style'] = style
-            results.append(item)
-        return results
+        return [CamelCaseUtil.transform_result(tag) for tag in tags]
 
     @staticmethod
     async def _affected_file_ids(db: AsyncSession, tag_id: int) -> list[int]:
@@ -776,50 +742,16 @@ class MindmapTagService:
         return tag_ids
 
     @staticmethod
-    def _replacement_binding_queries(
+    def _replacement_duplicate_query(
         source_tag_id: int, target_tag_id: int,
-    ) -> tuple[Select, Select]:
-        """返回可安全合并的重复绑定与必须人工处理的上下文冲突绑定。"""
-        source_binding = aliased(MindmapNodeTag)
-        target_binding = aliased(MindmapNodeTag)
-        same_field = or_(
-            source_binding.field_id == target_binding.field_id,
-            and_(source_binding.field_id.is_(None), target_binding.field_id.is_(None)),
+    ) -> Select:
+        """返回同一节点已存在目标标签时应删除的源标签绑定。"""
+        target_nodes = select(MindmapNodeTag.node_id).where(
+            MindmapNodeTag.tag_id == target_tag_id,
         )
-        same_option = or_(
-            source_binding.option_id == target_binding.option_id,
-            and_(source_binding.option_id.is_(None), target_binding.option_id.is_(None)),
-        )
-        different_field = or_(
-            and_(source_binding.field_id.is_(None), target_binding.field_id.is_not(None)),
-            and_(source_binding.field_id.is_not(None), target_binding.field_id.is_(None)),
-            and_(
-                source_binding.field_id.is_not(None),
-                target_binding.field_id.is_not(None),
-                source_binding.field_id != target_binding.field_id,
-            ),
-        )
-        different_option = or_(
-            and_(source_binding.option_id.is_(None), target_binding.option_id.is_not(None)),
-            and_(source_binding.option_id.is_not(None), target_binding.option_id.is_(None)),
-            and_(
-                source_binding.option_id.is_not(None),
-                target_binding.option_id.is_not(None),
-                source_binding.option_id != target_binding.option_id,
-            ),
-        )
-        base_query = (
-            select(source_binding.id)
-            .join(
-                target_binding,
-                (target_binding.node_id == source_binding.node_id)
-                & (target_binding.tag_id == target_tag_id),
-            )
-            .where(source_binding.tag_id == source_tag_id)
-        )
-        return (
-            base_query.where(same_field, same_option),
-            base_query.where(or_(different_field, different_option)),
+        return select(MindmapNodeTag.id).where(
+            MindmapNodeTag.tag_id == source_tag_id,
+            MindmapNodeTag.node_id.in_(target_nodes),
         )
 
     @staticmethod
@@ -894,22 +826,15 @@ class MindmapTagService:
 
     @staticmethod
     async def _broadcast_definition(
-        file_ids: list[int], tag: object, revision: int, *, status: int,
-        event_type: str, changed_fields: list[str], resolved_style: dict | None = None,
+        file_ids: list[int], *, tag_id: int, revision: int, definition: dict,
+        event_type: str, changed_fields: list[str],
     ) -> None:
         event = {
             'type': event_type,
-            'tagId': tag.id,
+            'tagId': tag_id,
             'definitionRevision': revision,
             'changedFields': changed_fields,
-            'definition': {
-                'tagId': tag.id,
-                'uuid': tag.uuid,
-                'tagKey': tag.tag_key,
-                'text': tag.name,
-                'style': resolved_style if resolved_style is not None else (tag.style or {}),
-                'status': status,
-            },
+            'definition': definition,
         }
         for file_id in file_ids:
             await MindmapTagService._safe_broadcast(

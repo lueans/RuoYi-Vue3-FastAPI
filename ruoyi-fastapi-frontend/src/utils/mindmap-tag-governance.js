@@ -1,7 +1,6 @@
 export const MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH = 200
 export const MAX_MINDMAP_TAG_KEY_LENGTH = 100
 export const MAX_MINDMAP_TAG_NAME_LENGTH = 200
-export const MAX_MINDMAP_TAG_FIELD_NAME_LENGTH = 100
 export const MAX_MINDMAP_TAG_DESCRIPTION_LENGTH = 500
 export const MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH = 100
 export const MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER = 100000
@@ -22,7 +21,6 @@ const TAG_STYLE_KEYS = new Set([
   'placement',
   'align',
 ])
-const FIELD_STYLE_KEYS = new Set([...TAG_STYLE_NUMBER_KEYS, 'placement', 'align'])
 
 export function validateMindmapTagIdentifier(value, { label = '标签 Key' } = {}) {
   const normalized = String(value ?? '').trim()
@@ -142,15 +140,14 @@ function validateMindmapTagStyleNumber(value, key) {
   return { valid: true, value, message: '' }
 }
 
-export function validateMindmapTagStyle(style, { fieldStyle = false } = {}) {
+export function validateMindmapTagStyle(style) {
   if (style === null || style === undefined) {
     return { valid: true, value: null, message: '' }
   }
   if (!style || typeof style !== 'object' || Array.isArray(style)) {
     return { valid: false, value: null, message: '标签样式必须是对象' }
   }
-  const allowedKeys = fieldStyle ? FIELD_STYLE_KEYS : TAG_STYLE_KEYS
-  const unknownKeys = Object.keys(style).filter(key => !allowedKeys.has(key)).sort()
+  const unknownKeys = Object.keys(style).filter(key => !TAG_STYLE_KEYS.has(key)).sort()
   if (unknownKeys.length) {
     return {
       valid: false,

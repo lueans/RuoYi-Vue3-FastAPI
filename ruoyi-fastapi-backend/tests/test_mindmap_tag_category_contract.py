@@ -11,8 +11,11 @@ from exceptions.exception import ServiceException
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTagCategory
 from module_mindmap.entity.vo.mindmap_tag_vo import (
     MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
+    MAX_MINDMAP_TAG_CATEGORY_BATCH_SIZE,
     MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER,
+    MindmapTagCategoryListItemModel,
     MindmapTagCategoryMutationModel,
+    MindmapTagCategoryReorderModel,
 )
 from module_mindmap.service.mindmap_tag_service import MindmapTagService
 from server import create_app
@@ -39,6 +42,20 @@ class MindmapTagCategoryModelTest(unittest.TestCase):
         ):
             with self.subTest(payload=payload), self.assertRaises(ValidationError):
                 MindmapTagCategoryMutationModel(**payload)
+
+    def test_category_type_and_reorder_payload_are_explicit_and_bounded(self) -> None:
+        category = MindmapTagCategoryListItemModel(
+            id=7, name='优先级', categoryType='system', ownerId=0,
+        )
+        self.assertEqual(category.category_type, 'system')
+        self.assertEqual(
+            MindmapTagCategoryReorderModel(categoryIds=[8, 7]).category_ids,
+            [8, 7],
+        )
+
+        for category_ids in ([7, 7], [0], [True], [1.5]):
+            with self.subTest(category_ids=category_ids), self.assertRaises(ValidationError):
+                MindmapTagCategoryReorderModel(categoryIds=category_ids)
 
 
 class MindmapTagCategoryServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -95,6 +112,7 @@ class MindmapTagCategoryServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.result, {'categoryId': 73})
         self.assertEqual(add_mock.await_args.args[1]['owner_id'], 42)
+        self.assertEqual(add_mock.await_args.args[1]['category_type'], 'custom')
         self.assertEqual(add_mock.await_args.args[1]['sort_order'], 8)
         db.commit.assert_awaited_once()
 
@@ -163,6 +181,55 @@ class MindmapTagCategoryServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item['tagCount'] for item in result], [3, 0])
         count_mock.assert_awaited_once_with(ANY, [7, 8])
 
+    async def test_reorder_updates_a_complete_single_owner_scope(self) -> None:
+        categories = [
+            SimpleNamespace(id=7, owner_id=42),
+            SimpleNamespace(id=8, owner_id=42),
+        ]
+        db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+        model = MindmapTagCategoryReorderModel(categoryIds=[8, 7])
+        with (
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.get_categories',
+                new=AsyncMock(return_value=categories),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.get_categories_by_owner',
+                new=AsyncMock(return_value=categories),
+            ) as owner_mock,
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.update_category_sort_orders',
+                new=AsyncMock(),
+            ) as update_mock,
+        ):
+            result = await MindmapTagService.reorder_categories(db, model, user_id=42)
+
+        self.assertTrue(result.is_success)
+        owner_mock.assert_awaited_once_with(db, 42, for_update=True)
+        update_mock.assert_awaited_once_with(db, [8, 7])
+        db.commit.assert_awaited_once()
+        db.rollback.assert_not_awaited()
+
+    async def test_reorder_rejects_mixed_owner_scopes(self) -> None:
+        categories = [
+            SimpleNamespace(id=7, owner_id=0),
+            SimpleNamespace(id=8, owner_id=42),
+        ]
+        with (
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.get_categories',
+                new=AsyncMock(return_value=categories),
+            ),
+            self.assertRaises(ServiceException) as context,
+        ):
+            await MindmapTagService.reorder_categories(
+                SimpleNamespace(),
+                MindmapTagCategoryReorderModel(categoryIds=[8, 7]),
+                user_id=42,
+            )
+
+        self.assertIn('同一范围', context.exception.message)
+
 
 class MindmapTagCategoryOpenApiTest(unittest.TestCase):
     def test_mutation_routes_publish_name_sort_scope_and_positive_id_bounds(self) -> None:
@@ -198,6 +265,16 @@ class MindmapTagCategoryOpenApiTest(unittest.TestCase):
         list_items = list_response_model['properties']['data']['items']
         category_item = schema['components']['schemas'][list_items['$ref'].rsplit('/', 1)[-1]]
         self.assertEqual(category_item['properties']['tagCount']['minimum'], 0)
+        self.assertEqual(category_item['properties']['categoryType']['enum'], ['system', 'custom'])
+
+        reorder_schema = schema['paths']['/mindmap/tag/categories/order']['put']['requestBody'][
+            'content'
+        ]['application/json']['schema']
+        reorder_model = schema['components']['schemas'][reorder_schema['$ref'].rsplit('/', 1)[-1]]
+        self.assertEqual(
+            reorder_model['properties']['categoryIds']['maxItems'],
+            MAX_MINDMAP_TAG_CATEGORY_BATCH_SIZE,
+        )
 
 
 if __name__ == '__main__':

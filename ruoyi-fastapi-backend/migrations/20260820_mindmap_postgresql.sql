@@ -258,38 +258,49 @@ CREATE TABLE IF NOT EXISTS mindmap_creation_request (
 CREATE TABLE IF NOT EXISTS mindmap_tag_category (
     id BIGSERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
+    category_type VARCHAR(20) NOT NULL DEFAULT 'custom',
     owner_id BIGINT NOT NULL DEFAULT 0,
     sort_order INTEGER DEFAULT 0,
     created_by VARCHAR(64),
     created_time TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS mindmap_tag_field (
-    id BIGSERIAL PRIMARY KEY,
-    field_key VARCHAR(100) NOT NULL,
-    name VARCHAR(100) NOT NULL,
-    select_mode VARCHAR(10) NOT NULL DEFAULT 'single',
-    style JSONB,
-    owner_id BIGINT NOT NULL DEFAULT 0,
-    sort_order INTEGER DEFAULT 0,
-    description VARCHAR(500),
-    created_by VARCHAR(64),
-    created_time TIMESTAMP,
-    updated_time TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS mindmap_tag_field_option (
-    id BIGSERIAL PRIMARY KEY,
-    field_id BIGINT NOT NULL,
-    tag_id BIGINT,
-    option_key VARCHAR(100) NOT NULL,
-    name VARCHAR(200) NOT NULL,
-    fill VARCHAR(20),
-    color VARCHAR(20),
-    sort_order INTEGER DEFAULT 0,
-    created_time TIMESTAMP
-);
-ALTER TABLE mindmap_tag_field_option ADD COLUMN IF NOT EXISTS tag_id BIGINT;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'mindmap_tag_category'
+          AND column_name = 'category_type'
+    ) THEN
+        ALTER TABLE mindmap_tag_category
+            ADD COLUMN category_type VARCHAR(20) NOT NULL DEFAULT 'custom';
+        UPDATE mindmap_tag_category AS category
+        SET category_type = 'system'
+        WHERE category.owner_id = 0
+           OR (
+                EXISTS (
+                    SELECT 1 FROM mindmap_tag AS tag
+                    WHERE tag.category_id = category.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM mindmap_tag AS tag
+                    WHERE tag.category_id = category.id AND tag.owner_id <> 0
+                )
+           );
+        UPDATE mindmap_tag_category AS category
+        SET owner_id = 0
+        WHERE category.category_type = 'system'
+          AND category.owner_id <> 0
+          AND NOT EXISTS (
+              SELECT 1 FROM mindmap_tag_category AS global_category
+              WHERE global_category.owner_id = 0
+                AND LOWER(global_category.name) = LOWER(category.name)
+                AND global_category.id <> category.id
+          );
+    END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS mindmap_tag (
     id BIGSERIAL PRIMARY KEY,
@@ -318,16 +329,12 @@ CREATE TABLE IF NOT EXISTS mindmap_node_tag (
     file_id BIGINT NOT NULL,
     node_id BIGINT NOT NULL,
     tag_id BIGINT NOT NULL,
-    field_id BIGINT,
-    option_id BIGINT,
     sort_order INTEGER NOT NULL DEFAULT 0,
     placement VARCHAR(16),
     align VARCHAR(16),
     created_by VARCHAR(64),
     created_time TIMESTAMP
 );
-ALTER TABLE mindmap_node_tag ADD COLUMN IF NOT EXISTS field_id BIGINT;
-ALTER TABLE mindmap_node_tag ADD COLUMN IF NOT EXISTS option_id BIGINT;
 
 -- Converge data into the same normalization domain used by service writes.
 UPDATE mindmap_folder SET name = '未命名目录-' || id WHERE del_flag = '0' AND BTRIM(name) = '';
@@ -399,13 +406,6 @@ WHERE canonical.owner_id = category.owner_id
   AND category.id <> canonical.keep_id;
 UPDATE mindmap_tag_category SET name = BTRIM(name);
 
-UPDATE mindmap_node_tag AS binding SET field_id = NULL
-WHERE field_id IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM mindmap_tag_field f WHERE f.id = binding.field_id);
-UPDATE mindmap_node_tag AS binding SET option_id = NULL
-WHERE option_id IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM mindmap_tag_field_option o WHERE o.id = binding.option_id);
-
 -- Recreate named constraints so an existing constraint with the wrong target or
 -- delete policy is repaired rather than silently accepted.
 ALTER TABLE mindmap DROP CONSTRAINT IF EXISTS fk_mindmap_template_category;
@@ -414,12 +414,6 @@ ALTER TABLE mindmap ADD CONSTRAINT fk_mindmap_template_category
 ALTER TABLE mindmap_tag DROP CONSTRAINT IF EXISTS fk_mindmap_tag_category;
 ALTER TABLE mindmap_tag ADD CONSTRAINT fk_mindmap_tag_category
     FOREIGN KEY (category_id) REFERENCES mindmap_tag_category(id) ON DELETE RESTRICT;
-ALTER TABLE mindmap_node_tag DROP CONSTRAINT IF EXISTS fk_mindmap_node_tag_field;
-ALTER TABLE mindmap_node_tag ADD CONSTRAINT fk_mindmap_node_tag_field
-    FOREIGN KEY (field_id) REFERENCES mindmap_tag_field(id) ON DELETE RESTRICT;
-ALTER TABLE mindmap_node_tag DROP CONSTRAINT IF EXISTS fk_mindmap_node_tag_option;
-ALTER TABLE mindmap_node_tag ADD CONSTRAINT fk_mindmap_node_tag_option
-    FOREIGN KEY (option_id) REFERENCES mindmap_tag_field_option(id) ON DELETE RESTRICT;
 
 CREATE INDEX IF NOT EXISTS idx_mindmap_name ON mindmap(name);
 CREATE INDEX IF NOT EXISTS idx_mindmap_owner ON mindmap(owner_id, del_flag);
@@ -464,17 +458,11 @@ CREATE INDEX IF NOT EXISTS idx_mindmap_creation_result ON mindmap_creation_reque
 CREATE INDEX IF NOT EXISTS idx_mindmap_creation_retention ON mindmap_creation_request(completed_time, id);
 CREATE INDEX IF NOT EXISTS idx_tag_cat_owner ON mindmap_tag_category(owner_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_mindmap_tag_category_owner_name ON mindmap_tag_category(owner_id, name);
-CREATE INDEX IF NOT EXISTS idx_tag_field_owner ON mindmap_tag_field(owner_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_field_owner_key ON mindmap_tag_field(owner_id, field_key);
-CREATE INDEX IF NOT EXISTS idx_tag_option_field ON mindmap_tag_field_option(field_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_option_field_key ON mindmap_tag_field_option(field_id, option_key);
-CREATE INDEX IF NOT EXISTS idx_tag_option_tag ON mindmap_tag_field_option(tag_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_owner_key ON mindmap_tag(owner_id, tag_key);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_uuid ON mindmap_tag(uuid);
 CREATE INDEX IF NOT EXISTS idx_tag_category ON mindmap_tag(category_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_mindmap_node_tag ON mindmap_node_tag(node_id, tag_id);
 CREATE INDEX IF NOT EXISTS idx_mindmap_node_tag_usage ON mindmap_node_tag(tag_id, file_id);
-CREATE INDEX IF NOT EXISTS idx_mindmap_node_tag_option ON mindmap_node_tag(option_id, file_id);
 CREATE INDEX IF NOT EXISTS idx_mindmap_node_tag_order ON mindmap_node_tag(node_id, sort_order);
 
 -- Keep the legacy menu rows aligned with the controller permission namespace.

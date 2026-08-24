@@ -13,8 +13,6 @@ export function stripManagedTagDefinitions(data = {}) {
       if (!tag || typeof tag !== 'object' || !tag.tagId) return tag
       return Object.fromEntries(Object.entries({
         tagId: tag.tagId,
-        fieldId: tag.fieldId,
-        optionId: tag.optionId,
         placement: tag.placement,
         align: tag.align,
       }).filter(([, value]) => value !== undefined))

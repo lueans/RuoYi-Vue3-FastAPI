@@ -41,9 +41,6 @@ def _normalize_value(value: Any) -> Any:
 def _tag_identity(raw: Any) -> str:
     if not isinstance(raw, dict):
         return f'custom:{build_custom_tag_key(raw)}'
-    option_id = raw.get('optionId') or raw.get('option_id')
-    if option_id:
-        return f'option:{option_id}'
     tag_key = raw.get('tagKey') or raw.get('tag_key')
     if tag_key and str(tag_key).startswith('custom_'):
         return f'custom:{tag_key}'

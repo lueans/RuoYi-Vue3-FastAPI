@@ -30,7 +30,6 @@ from module_mindmap.entity.do.mindmap_creation_do import MindmapCreationRequest
 from module_mindmap.entity.do.mindmap_do import Mindmap
 from module_mindmap.entity.do.mindmap_folder_do import MindmapFolder
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
-from module_mindmap.entity.do.mindmap_tag_field_do import MindmapTagField, MindmapTagFieldOption
 from module_mindmap.entity.vo.mindmap_vo import (
     CROSS_NODE_OPERATION_PREFIXES,
     CROSS_NODE_OPERATION_TYPES,
@@ -777,16 +776,6 @@ def _normalize_tag_binding(payload: dict[str, Any]) -> tuple[str, dict[str, Any]
     if tag_key != str(tag_id):
         raise ValueError('标签绑定标识与 tagId 不一致')
     normalized: dict[str, Any] = {'tagId': tag_id}
-    for field in ('fieldId', 'optionId'):
-        value = tag.get(field)
-        if value is None:
-            continue
-        try:
-            normalized[field] = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f'标签绑定包含非法 {field}') from exc
-        if normalized[field] <= 0:
-            raise ValueError(f'标签绑定包含非法 {field}')
     for field in ('placement', 'align'):
         if field in tag:
             normalized[field] = copy.deepcopy(tag[field])
@@ -1152,27 +1141,20 @@ class MindmapService:
         node_ids = [row.id for row in rows]
         paths_by_node = await cls._load_node_paths(query_db, node_ids, file_id=mindmap_id)
         tag_rows = (await query_db.execute(
-            select(MindmapNodeTag, MindmapTag, MindmapTagFieldOption, MindmapTagField)
+            select(MindmapNodeTag, MindmapTag)
             .join(MindmapTag, MindmapTag.id == MindmapNodeTag.tag_id)
-            .outerjoin(MindmapTagFieldOption, MindmapTagFieldOption.id == MindmapNodeTag.option_id)
-            .outerjoin(MindmapTagField, MindmapTagField.id == MindmapTagFieldOption.field_id)
             .where(MindmapNodeTag.node_id.in_(node_ids))
             .order_by(MindmapNodeTag.node_id, MindmapNodeTag.sort_order)
         )).all() if node_ids else []
         tags_by_node: dict[int, list[dict[str, Any]]] = {}
-        for binding, tag, option, field in tag_rows:
-            valid_option = option and option.tag_id == tag.id
-            style = dict(field.style or {}) if valid_option and field else {}
-            style.update(tag.style or {})
+        for binding, tag in tag_rows:
             resolved_tag = {
                 'tagId': tag.id,
                 'text': tag.name,
-                'style': style,
+                'style': dict(tag.style or {}),
                 'status': tag.status,
                 'definitionRevision': tag.definition_revision,
             }
-            if valid_option:
-                resolved_tag.update({'fieldId': option.field_id, 'optionId': option.id})
             tags_by_node.setdefault(binding.node_id, []).append(resolved_tag)
         return PageModel(
             rows=[{

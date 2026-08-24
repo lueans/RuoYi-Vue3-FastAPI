@@ -91,7 +91,7 @@ test('节点标签绑定使用独立操作且定义样式不进入节点冲突�
       uid: 'root', text: 'root',
       tag: [
         { tagId: 11, text: '新名称', style: { color: 'blue' }, placement: 'top' },
-        { tagId: 12, fieldId: 3, optionId: 8, text: '选项' },
+        { tagId: 12, text: '第二个标签' },
       ],
     },
     children: [],
@@ -105,7 +105,7 @@ test('节点标签绑定使用独立操作且定义样式不进入节点冲突�
     payload: {
       key: 'root:12',
       tagKey: '12',
-      tag: { tagId: 12, fieldId: 3, optionId: 8 },
+      tag: { tagId: 12 },
     },
   }])
 })

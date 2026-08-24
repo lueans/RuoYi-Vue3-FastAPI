@@ -37,15 +37,9 @@ const CROSS_NODE_OPERATION_DOMAINS = Object.freeze({
 function normalizeManagedTagBinding(tag) {
   if (!tag || typeof tag !== 'object' || tag.tagId === undefined || tag.tagId === null) return null
   const tagId = Number(tag.tagId)
-  const fieldId = tag.fieldId == null ? undefined : Number(tag.fieldId)
-  const optionId = tag.optionId == null ? undefined : Number(tag.optionId)
   if (!Number.isInteger(tagId) || tagId <= 0) return null
-  if (fieldId !== undefined && (!Number.isInteger(fieldId) || fieldId <= 0)) return null
-  if (optionId !== undefined && (!Number.isInteger(optionId) || optionId <= 0)) return null
   return Object.fromEntries(Object.entries({
     tagId,
-    fieldId,
-    optionId,
     placement: tag.placement,
     align: tag.align,
   }).filter(([, value]) => value !== undefined))

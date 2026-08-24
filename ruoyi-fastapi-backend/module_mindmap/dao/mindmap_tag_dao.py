@@ -1,10 +1,9 @@
 """脑图标签 DAO"""
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.vo import PageModel
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag, MindmapTagCategory
-from module_mindmap.entity.do.mindmap_tag_field_do import MindmapTagField, MindmapTagFieldOption
 from utils.page_util import PageUtil
 
 
@@ -24,7 +23,11 @@ class MindmapTagDao:
                     MindmapTagCategory.owner_id == user_id,
                 )
             )
-            .order_by(MindmapTagCategory.sort_order.asc(), MindmapTagCategory.id.asc())
+            .order_by(
+                MindmapTagCategory.owner_id.asc(),
+                MindmapTagCategory.sort_order.asc(),
+                MindmapTagCategory.id.asc(),
+            )
         )).scalars().all()
         return list(result)
 
@@ -48,6 +51,23 @@ class MindmapTagDao:
         db.add(cat)
         await db.flush()
         return cat
+
+    @classmethod
+    async def get_categories_by_owner(
+        cls,
+        db: AsyncSession,
+        owner_id: int,
+        *,
+        for_update: bool = False,
+    ) -> list[MindmapTagCategory]:
+        query = (
+            select(MindmapTagCategory)
+            .where(MindmapTagCategory.owner_id == owner_id)
+            .order_by(MindmapTagCategory.sort_order.asc(), MindmapTagCategory.id.asc())
+        )
+        if for_update:
+            query = query.with_for_update()
+        return list((await db.execute(query)).scalars().all())
 
     @classmethod
     async def check_category_name_unique(
@@ -89,6 +109,22 @@ class MindmapTagDao:
         )
 
     @classmethod
+    async def update_category_sort_orders(
+        cls,
+        db: AsyncSession,
+        category_ids: list[int],
+    ) -> None:
+        sort_orders = {
+            category_id: (index + 1) * 10
+            for index, category_id in enumerate(category_ids)
+        }
+        await db.execute(
+            update(MindmapTagCategory)
+            .where(MindmapTagCategory.id.in_(category_ids))
+            .values(sort_order=case(sort_orders, value=MindmapTagCategory.id))
+        )
+
+    @classmethod
     async def delete_category(cls, db: AsyncSession, category_id: int) -> None:
         await db.execute(
             delete(MindmapTagCategory).where(MindmapTagCategory.id == category_id)
@@ -108,7 +144,6 @@ class MindmapTagDao:
     async def get_tag_list(
         cls, db: AsyncSession, user_id: int,
         category_id: int | None = None,
-        field_id: int | None = None,
         status: int | None = None,
         keyword: str | None = None,
         owner_scope: str = 'all',
@@ -127,13 +162,10 @@ class MindmapTagDao:
                 or_(MindmapTag.owner_id == 0, MindmapTag.owner_id == user_id)
             )
 
-        if category_id is not None:
+        if category_id == 0:
+            query = query.where(MindmapTag.category_id.is_(None))
+        elif category_id is not None:
             query = query.where(MindmapTag.category_id == category_id)
-        if field_id is not None:
-            query = query.where(select(MindmapTagFieldOption.id).where(
-                MindmapTagFieldOption.tag_id == MindmapTag.id,
-                MindmapTagFieldOption.field_id == field_id,
-            ).exists())
         if status is not None:
             query = query.where(MindmapTag.status == status)
 
@@ -149,33 +181,6 @@ class MindmapTagDao:
 
         query = query.order_by(MindmapTag.updated_time.desc())
         return await PageUtil.paginate(db, query, page_num, page_size, True)
-
-    @classmethod
-    async def get_tag_field_contexts(
-        cls, db: AsyncSession, tag_ids: set[int],
-    ) -> dict[int, list[dict]]:
-        """批量返回标签所属字段，供治理列表展示，避免逐标签查询。"""
-        if not tag_ids:
-            return {}
-        rows = (await db.execute(
-            select(
-                MindmapTagFieldOption.tag_id,
-                MindmapTagField.id,
-                MindmapTagField.field_key,
-                MindmapTagField.name,
-            )
-            .join(MindmapTagField, MindmapTagField.id == MindmapTagFieldOption.field_id)
-            .where(MindmapTagFieldOption.tag_id.in_(tag_ids))
-            .order_by(MindmapTagField.sort_order.asc(), MindmapTagField.id.asc())
-        )).all()
-        contexts: dict[int, list[dict]] = {}
-        for tag_id, field_id, field_key, field_name in rows:
-            contexts.setdefault(int(tag_id), []).append({
-                'id': field_id,
-                'fieldKey': field_key,
-                'name': field_name,
-            })
-        return contexts
 
     @classmethod
     async def get_tag_by_id(cls, db: AsyncSession, tag_id: int) -> MindmapTag | None:

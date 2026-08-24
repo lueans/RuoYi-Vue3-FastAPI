@@ -41,14 +41,9 @@ def _apply_tag_snapshots(node_tree: dict, tag_snapshots: dict | None) -> dict:
                     resolved.append(tag)
                     continue
                 tag_key = str(tag['tagId'])
-                scoped_key = (
-                    f'{tag_key}:{tag["fieldId"]}:{tag["optionId"]}'
-                    if tag.get('fieldId') and tag.get('optionId')
-                    else tag_key
-                )
-                snapshot = tag_snapshots.get(scoped_key) or tag_snapshots.get(tag_key)
+                snapshot = tag_snapshots.get(tag_key)
                 if snapshot:
-                    local = {key: tag[key] for key in ('placement', 'align', 'fieldId', 'optionId') if key in tag}
+                    local = {key: tag[key] for key in ('placement', 'align') if key in tag}
                     resolved.append({**snapshot, **local, 'style': dict(snapshot.get('style') or {})})
                 else:
                     resolved.append(tag)

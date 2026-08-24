@@ -352,6 +352,8 @@ python -m scripts.cleanup_mindmap_retention --env=prod --execute
 ```bash
 psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
   -f ruoyi-fastapi-backend/migrations/20260820_mindmap_postgresql.sql
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
+  -f ruoyi-fastapi-backend/migrations/20260824_mindmap_unified_tags_postgresql.sql
 ```
 
 迁移成功后继续保持 `DB_AUTO_CREATE_TABLES=false`，再启动服务：

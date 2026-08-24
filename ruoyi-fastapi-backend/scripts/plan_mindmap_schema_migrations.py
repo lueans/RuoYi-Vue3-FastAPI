@@ -27,7 +27,11 @@ async def plan() -> int:
         await engine.dispose()
 
     issues = find_mindmap_schema_issues(snapshot)
-    migration_plan = build_mindmap_migration_plan(issues, MIGRATIONS_DIR)
+    migration_plan = build_mindmap_migration_plan(
+        issues,
+        MIGRATIONS_DIR,
+        database_type=DataBaseConfig.db_type,
+    )
     payload = {
         'status': 'READY' if not issues else 'NOT_READY',
         'database': DataBaseConfig.db_database,

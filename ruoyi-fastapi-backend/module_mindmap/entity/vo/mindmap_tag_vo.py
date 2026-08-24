@@ -2,7 +2,7 @@
 import math
 import re
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
@@ -14,6 +14,7 @@ MAX_MINDMAP_TAG_NAME_LENGTH = 200
 MAX_MINDMAP_TAG_DESCRIPTION_LENGTH = 500
 MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH = 100
 MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER = 100_000
+MAX_MINDMAP_TAG_CATEGORY_BATCH_SIZE = 500
 MAX_MINDMAP_TAG_BATCH_SIZE = 100
 MAX_MINDMAP_TAG_BATCH_IDS_TEXT_LENGTH = 4096
 MAX_MINDMAP_TAG_ID = 9_223_372_036_854_775_807
@@ -31,11 +32,6 @@ MINDMAP_TAG_STYLE_PLACEMENTS = frozenset({'left', 'right', 'top', 'bottom'})
 MINDMAP_TAG_STYLE_ALIGNS = frozenset({'left', 'right', 'top', 'bottom', 'center'})
 MINDMAP_TAG_STYLE_KEYS = frozenset({
     *MINDMAP_TAG_STYLE_COLOR_KEYS,
-    *MINDMAP_TAG_STYLE_NUMBER_BOUNDS,
-    'placement',
-    'align',
-})
-MINDMAP_TAG_FIELD_STYLE_KEYS = frozenset({
     *MINDMAP_TAG_STYLE_NUMBER_BOUNDS,
     'placement',
     'align',
@@ -175,18 +171,13 @@ def _validate_mindmap_tag_style_alignment(style: dict[str, Any]) -> None:
         raise ValueError('标签位置与对齐方式不兼容')
 
 
-def normalize_mindmap_tag_style(
-    value: Any,
-    *,
-    field_style: bool = False,
-) -> dict[str, Any] | None:
-    """校验统一标签/字段样式，避免任意对象进入跨文件渲染链路。"""
+def normalize_mindmap_tag_style(value: Any) -> dict[str, Any] | None:
+    """校验统一标签样式，避免任意对象进入跨文件渲染链路。"""
     if value is None:
         return None
     if not isinstance(value, dict):
         raise ValueError('标签样式必须是对象')
-    allowed_keys = MINDMAP_TAG_FIELD_STYLE_KEYS if field_style else MINDMAP_TAG_STYLE_KEYS
-    unknown_keys = sorted(str(key) for key in value if key not in allowed_keys)
+    unknown_keys = sorted(str(key) for key in value if key not in MINDMAP_TAG_STYLE_KEYS)
     if unknown_keys:
         raise ValueError(f'标签样式包含不支持的字段: {", ".join(unknown_keys)}')
 
@@ -203,11 +194,14 @@ def normalize_mindmap_tag_style(
 
 
 class MindmapTagCategoryModel(BaseModel):
-    """标签分类模型"""
+    """标签分组模型（字段名保持 category 兼容）。"""
     model_config = ConfigDict(alias_generator=to_camel, from_attributes=True)
 
-    id: int | None = Field(default=None, description='分类ID')
-    name: str | None = Field(default=None, description='分类名称')
+    id: int | None = Field(default=None, description='分组ID')
+    name: str | None = Field(default=None, description='分组名称')
+    category_type: Literal['system', 'custom'] = Field(
+        default='custom', description='分组类型:system系统 custom用户自定义',
+    )
     owner_id: int | None = Field(default=0, description='所有者(0=全局)')
     sort_order: int | None = Field(default=0, description='排序')
     created_by: str | None = Field(default=None, description='创建人')
@@ -215,20 +209,20 @@ class MindmapTagCategoryModel(BaseModel):
 
 
 class MindmapTagCategoryListItemModel(MindmapTagCategoryModel):
-    """标签分类列表项。"""
+    """标签分组列表项。"""
 
-    tag_count: int = Field(default=0, ge=0, description='分类下的标签数量')
+    tag_count: int = Field(default=0, ge=0, description='分组下的标签数量')
 
 
 class MindmapTagCategoryMutationModel(BaseModel):
-    """标签分类创建/更新模型。"""
+    """标签分组创建/更新模型。"""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     name: str = Field(
         min_length=1,
         max_length=MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
-        description='分类名称',
+        description='分组名称',
     )
     sort_order: int = Field(
         default=0,
@@ -236,20 +230,39 @@ class MindmapTagCategoryMutationModel(BaseModel):
         le=MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER,
         description='排序值',
     )
-    owner_scope: Literal['mine', 'global'] = Field(default='mine', description='分类作用域')
+    owner_scope: Literal['mine', 'global'] = Field(default='mine', description='分组作用域')
 
     @field_validator('name', mode='before')
     @classmethod
     def normalize_name(cls, value: Any) -> Any:
-        return normalize_mindmap_tag_display_name(value, label='分类名称')
+        return normalize_mindmap_tag_display_name(value, label='分组名称')
 
 
 class MindmapTagCategoryCreateResultModel(BaseModel):
-    """标签分类创建结果。"""
+    """标签分组创建结果。"""
 
     model_config = ConfigDict(alias_generator=to_camel)
 
-    category_id: int = Field(gt=0, description='新分类ID')
+    category_id: int = Field(gt=0, description='新分组ID')
+
+
+class MindmapTagCategoryReorderModel(BaseModel):
+    """同一所有者范围内的标签分组排序。"""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    category_ids: list[Annotated[int, Field(strict=True, gt=0)]] = Field(
+        min_length=1,
+        max_length=MAX_MINDMAP_TAG_CATEGORY_BATCH_SIZE,
+        description='按目标顺序排列的完整分组ID列表',
+    )
+
+    @field_validator('category_ids')
+    @classmethod
+    def validate_category_ids(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError('分组ID不能重复')
+        return value
 
 
 class MindmapTagArchiveResultModel(BaseModel):
@@ -279,7 +292,7 @@ class MindmapTagModel(BaseModel):
         description='标签key(自定义必填)',
     )
     name: str = Field(min_length=1, max_length=MAX_MINDMAP_TAG_NAME_LENGTH, description='标签显示名称')
-    category_id: int | None = Field(default=None, description='所属分类ID')
+    category_id: int | None = Field(default=None, description='所属分组ID')
     owner_id: int | None = Field(default=0, description='所有者(0=全局)')
     style: dict[str, Any] | None = Field(default=None, description='标签样式JSON')
     description: str | None = Field(
@@ -325,7 +338,7 @@ class MindmapTagListItemModel(BaseModel):
     uuid: str | None = Field(default=None, description='UUID')
     tag_key: str | None = Field(default=None, description='标签key')
     name: str | None = Field(default=None, description='标签名称')
-    category_id: int | None = Field(default=None, description='分类ID')
+    category_id: int | None = Field(default=None, description='分组ID')
     owner_id: int | None = Field(default=None, description='所有者')
     style: dict[str, Any] | None = Field(default=None, description='标签样式')
     description: str | None = Field(default=None, description='描述')
@@ -333,7 +346,6 @@ class MindmapTagListItemModel(BaseModel):
     definition_revision: int | None = Field(default=1, description='定义修订号')
     usage_node_count: int | None = Field(default=0, description='使用节点数')
     usage_file_count: int | None = Field(default=0, description='使用文件数')
-    fields: list[dict[str, Any]] = Field(default_factory=list, description='关联字段上下文')
     created_by: str | None = Field(default=None, description='创建人')
     created_time: datetime | None = Field(default=None, description='创建时间')
     update_by: str | None = Field(default=None, description='最后修改人')
@@ -344,8 +356,7 @@ class MindmapTagQueryModel(BaseModel):
     """标签查询模型"""
     model_config = ConfigDict(alias_generator=to_camel)
 
-    category_id: int | None = Field(default=None, gt=0, description='分类ID筛选')
-    field_id: int | None = Field(default=None, gt=0, description='字段ID筛选')
+    category_id: int | None = Field(default=None, ge=0, description='分组ID筛选，0 表示未分组')
     status: int | None = Field(default=None, ge=0, le=2, description='状态筛选:0启用 1停用 2归档')
     keyword: str | None = Field(
         default=None,
@@ -393,5 +404,8 @@ class MindmapTagSuggestionModel(BaseModel):
     uuid: str | None = Field(default=None, description='UUID')
     tag_key: str | None = Field(default=None, description='标签key')
     name: str | None = Field(default=None, description='标签名称')
+    category_id: int | None = Field(default=None, description='所属标签分组ID')
     style: dict[str, Any] | None = Field(default=None, description='标签样式')
     owner_id: int | None = Field(default=None, description='所有者(0=全局)')
+    status: int | None = Field(default=0, description='状态')
+    definition_revision: int | None = Field(default=1, description='定义修订号')

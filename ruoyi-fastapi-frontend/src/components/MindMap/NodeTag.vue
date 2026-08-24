@@ -18,122 +18,137 @@
       show-icon
       class="batchImpact"
     />
-    <!-- 字段选项面板 -->
-    <div class="field-section">
-      <div class="sectionTitle">字段标签</div>
-      <el-input
-        v-model="fieldSearchKeyword"
-        class="fieldSearchInput"
-        size="small"
-        clearable
-        aria-label="搜索字段或选项"
-        placeholder="搜索字段名称、Key 或选项"
-        :maxlength="MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH"
-        :disabled="isReadonly"
-        @input="scheduleFieldSearch"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
-      <div v-if="fieldsLoading" class="field-state" role="status" aria-live="polite">
+
+    <div class="sectionTitle">选择标签</div>
+    <el-input
+      ref="inputRef"
+      v-model="searchKeyword"
+      clearable
+      aria-label="搜索标签"
+      placeholder="搜索标签名称或 Key"
+      :maxlength="MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH"
+      :disabled="isReadonly || creating"
+      @input="scheduleSearch"
+      @keydown.enter.prevent="handleEnter"
+    >
+      <template #prefix><el-icon><Search /></el-icon></template>
+    </el-input>
+
+    <div class="suggestionPanel">
+      <div v-if="loading" class="panelState" role="status" aria-live="polite">
         <el-icon class="is-loading"><Loading /></el-icon>
-        正在加载字段标签…
+        正在加载标签…
       </div>
-      <div v-else-if="fieldsError" class="field-state is-error" role="alert">
-        <span>{{ fieldsError }}</span>
-        <el-button link type="primary" :disabled="isReadonly || fieldsLoading" @click="loadFields">
-          重新加载
-        </el-button>
+      <div v-else-if="loadError" class="panelState isError" role="alert">
+        <span>{{ loadError }}</span>
+        <el-button link type="primary" :disabled="isReadonly" @click="loadSuggestions">重新加载</el-button>
       </div>
-      <div v-else-if="fields.length === 0" class="empty-field-tip">
-        {{ fieldSearchKeyword.trim() ? '未找到匹配的字段或选项' : '暂无字段，请在标签管理中创建' }}
-      </div>
-      <div v-for="field in fields" :key="field.id" class="fieldGroup">
-        <button
-          type="button"
-          class="fieldHeader"
-          :aria-expanded="expandedFields.includes(field.id)"
-          :aria-controls="`field-options-${field.id}`"
-          :disabled="isReadonly"
-          @click="toggleField(field.id)"
-        >
-          <el-icon class="fieldArrow" :class="{ expanded: expandedFields.includes(field.id) }">
-            <ArrowRight />
-          </el-icon>
-          <span class="fieldName">{{ field.name }}</span>
-          <el-tag size="small" :type="field.selectMode === 'multi' ? 'warning' : 'info'" effect="plain">
-            {{ field.selectMode === 'multi' ? '多选' : '单选' }}
-          </el-tag>
-        </button>
-        <div
-          :id="`field-options-${field.id}`"
-          v-show="expandedFields.includes(field.id)"
-          class="fieldOptions"
-          role="group"
-          :aria-label="`${field.name}选项`"
-        >
-          <button v-for="opt in field.options" :key="opt.id"
-            type="button"
-            class="optionBadge"
-            :class="{ selected: isOptionSelected(field.id, opt.id) }"
-            :style="getOptionBadgeStyle(opt, field, isOptionSelected(field.id, opt.id))"
-            :aria-pressed="isOptionSelected(field.id, opt.id)"
-            :disabled="isReadonly"
-            @click="toggleOption(field, opt)"
-          >
-            <el-icon v-if="isOptionSelected(field.id, opt.id)" class="checkIcon"><Check /></el-icon>
-            {{ opt.name }}
-          </button>
-          <span v-if="!field.options || field.options.length === 0" class="empty-opt-tip">暂无选项</span>
+      <template v-else>
+        <div v-if="groupLoadError" class="groupLoadWarning" role="status">
+          <span>{{ groupLoadError }}，暂按全部标签展示</span>
+          <el-button link type="primary" :disabled="isReadonly" @click="loadTagGroups">重新加载分组</el-button>
         </div>
-      </div>
-      <div
-        v-if="!fieldsLoading && !fieldsError && !fieldSearchKeyword.trim() && fields.length >= 30"
-        class="fieldSearchHint"
+        <div v-if="groupedSuggestions.length" class="suggestionBrowser">
+          <nav class="suggestionGroupSidebar" aria-label="标签分组">
+            <button
+              v-for="group in groupedSuggestions"
+              :key="group.id"
+              type="button"
+              class="suggestionGroupNavItem"
+              :class="{ active: activeGroupId === group.id }"
+              :aria-current="activeGroupId === group.id ? 'true' : undefined"
+              @click="activeGroupId = group.id"
+            >
+              <span class="suggestionGroupName">{{ group.name }}</span>
+              <span class="suggestionGroupCount">{{ group.tags.length }}</span>
+            </button>
+          </nav>
+          <section
+            v-if="activeSuggestionGroup"
+            class="suggestionGroupContent"
+            role="group"
+            :aria-label="`${activeSuggestionGroup.name}，${activeSuggestionGroup.tags.length} 个标签`"
+          >
+            <div class="suggestionGroupContentHeader">
+              <span>{{ activeSuggestionGroup.name }}</span>
+              <span>可多选</span>
+            </div>
+            <div class="suggestionGroupTags">
+              <button
+                v-for="tag in activeSuggestionGroup.tags"
+                :key="tag.id"
+                type="button"
+                class="suggestionTag"
+                :class="{ selected: isSelected(tag.id) }"
+                :style="getSuggestionStyle(tag, isSelected(tag.id))"
+                :aria-pressed="isSelected(tag.id)"
+                :disabled="isReadonly"
+                @click="toggleSuggestion(tag)"
+              >
+                <el-icon v-if="isSelected(tag.id)"><Check /></el-icon>
+                <span>{{ tag.name }}</span>
+              </button>
+            </div>
+          </section>
+        </div>
+        <button
+          v-if="canCreate"
+          type="button"
+          class="createTagButton"
+          :disabled="isReadonly || creating"
+          @click="createAndSelectTag"
+        >
+          <el-icon><Plus /></el-icon>
+          创建“{{ normalizedKeyword }}”
+        </button>
+        <div v-if="suggestions.length === 0 && !canCreate" class="panelState">
+          {{ normalizedKeyword ? '没有匹配的标签' : '暂无可用标签' }}
+        </div>
+      </template>
+    </div>
+
+    <div class="sectionTitle currentTitle">
+      <span>已选标签</span>
+      <span class="selectionCount">{{ tagArr.length }}/20</span>
+    </div>
+    <div v-if="tagArr.length" class="selectedList">
+      <el-tag
+        v-for="(tag, index) in tagArr"
+        :key="getTagIdentity(tag, index)"
+        :closable="!isReadonly"
+        :color="getTagColor(tag)"
+        effect="dark"
+        @close="removeTag(index)"
       >
-        当前展示前 30 个字段，输入关键词可以搜索更多字段或选项
-      </div>
-    </div>
-
-    <!-- 手动输入 -->
-    <div class="sectionTitle" style="margin-top: 14px">自定义标签</div>
-    <div class="tag-input-row">
-      <el-input v-model="tagInput" placeholder="输入标签后按 Enter 添加" size="small"
-        :maxlength="MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH" show-word-limit
-        :disabled="isReadonly || customTagSubmitting" @keydown.enter="addCustomTag" ref="inputRef" />
-      <el-button size="small" type="primary" @click="addCustomTag"
-        :loading="customTagSubmitting" :disabled="isReadonly || !tagInput.trim() || customTagSubmitting">添加</el-button>
-    </div>
-
-    <!-- 当前标签列表 -->
-    <div class="sectionTitle" style="margin-top: 14px">当前标签</div>
-    <div class="tag-list" v-if="tagArr.length > 0">
-      <el-tag v-for="(tag, index) in tagArr" :key="index" :closable="!isReadonly"
-        :color="getTagColor(tag)" effect="dark" @close="removeTag(index)"
-        style="margin: 4px">
-        <template v-if="typeof tag === 'object' && tag.fieldId">
-          🏷️ {{ tag.text }}
-        </template>
-        <template v-else>
-          {{ typeof tag === 'object' ? tag.text : tag }}
-        </template>
+        {{ typeof tag === 'object' ? tag.text : tag }}
       </el-tag>
     </div>
-    <div v-else class="empty-tip">暂无标签</div>
+    <div v-else class="emptySelection">暂无标签</div>
 
     <template #footer>
-      <el-button :disabled="customTagSubmitting" @click="dialogVisible = false">取消</el-button>
-      <el-button type="primary" :disabled="isReadonly || customTagSubmitting" @click="confirm">确定</el-button>
+      <el-button :disabled="creating" @click="dialogVisible = false">取消</el-button>
+      <el-button type="primary" :disabled="isReadonly || creating" @click="confirm">确定</el-button>
     </template>
   </el-dialog>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { ArrowRight, Check, Loading, Search } from '@element-plus/icons-vue'
-import bus from './useEventBus'
-import { store } from './useStore'
-import { getTagFieldSuggestions, getTagSuggestions, addTag as createManagedTag } from '@/api/mindmap/tag'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  shallowRef,
+  watch,
+} from 'vue'
+import { Check, Loading, Plus, Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import {
+  addTag as createManagedTag,
+  getTagSuggestions,
+  listTagCategories,
+} from '@/api/mindmap/tag'
 import useUserStore from '@/store/modules/user'
 import { captureMindmapEditTargets } from '@/utils/mindmap-edit-targets'
 import {
@@ -141,201 +156,275 @@ import {
   validateMindmapTagDisplayName,
   validateMindmapTagSearchKeyword,
 } from '@/utils/mindmap-tag-governance'
+import bus from './useEventBus'
+import { store } from './useStore'
 import { useMindMapActiveNodes } from './useMindMapActiveNodes'
+
+const MAX_NODE_TAG_COUNT = 20
+const SEARCH_DEBOUNCE_MS = 250
+const tagColors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#00bcd4', '#9c27b0', '#ff5722']
 
 const props = defineProps({
   readonly: { type: Boolean, default: false },
 })
 
 const userStore = useUserStore()
-
 const dialogVisible = ref(false)
-const tagInput = ref('')
+const searchKeyword = ref('')
+const suggestions = ref([])
+const tagGroups = ref([])
+const tagGroupsLoaded = ref(false)
+const activeGroupId = ref('')
 const tagArr = ref([])
+const editTargets = shallowRef([])
+const inputRef = ref(null)
+const loading = ref(false)
+const loadError = ref('')
+const groupLoadError = ref('')
+const groupLoading = ref(false)
+const creating = ref(false)
+const requestId = ref(0)
+const groupRequestId = ref(0)
+const dialogSessionId = ref(0)
+let searchTimer = null
+
 const { activeNodes } = useMindMapActiveNodes({
   onMindMapChange: invalidateTagDialogForMindMapChange,
 })
-const editTargets = shallowRef([])
-const inputRef = ref(null)
 
-// 字段数据
-const fields = ref([])
-const expandedFields = ref([])
-const fieldsLoading = ref(false)
-const fieldsError = ref('')
-const fieldSearchKeyword = ref('')
-const fieldRequestId = ref(0)
-const dialogSessionId = ref(0)
-const customTagSubmitting = ref(false)
 const isReadonly = computed(() => props.readonly || store.isReadonly)
 const targetCount = computed(() => editTargets.value.length)
 const dialogTitle = computed(() => targetCount.value > 1
   ? `批量设置标签（${targetCount.value} 个节点）`
   : '标签')
+const normalizedKeyword = computed(() => searchKeyword.value.trim())
+const groupedSuggestions = computed(() => {
+  if (suggestions.value.length === 0) return []
+  if (!tagGroupsLoaded.value) {
+    return [{ id: 'all', name: groupLoading.value ? '正在读取分组…' : '全部标签', tags: suggestions.value }]
+  }
 
-const tagColors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#00bcd4', '#9c27b0', '#ff5722']
-const FIELD_SEARCH_DEBOUNCE_MS = 250
-let fieldSearchTimer = null
+  const knownGroupIds = new Set(tagGroups.value.map(group => Number(group.id)))
+  const groups = tagGroups.value
+    .map(group => ({
+      id: `group-${group.id}`,
+      name: group.name,
+      tags: suggestions.value.filter(tag => Number(tag.categoryId) === Number(group.id)),
+    }))
+    .filter(group => group.tags.length > 0)
+  const unknownGroupTags = suggestions.value.filter(tag => (
+    tag.categoryId != null && !knownGroupIds.has(Number(tag.categoryId))
+  ))
+  const ungroupedTags = suggestions.value.filter(tag => tag.categoryId == null)
+
+  if (unknownGroupTags.length > 0) {
+    groups.push({ id: 'unknown', name: '其他分组', tags: unknownGroupTags })
+  }
+  if (ungroupedTags.length > 0) {
+    groups.push({ id: 'ungrouped', name: '未分组', tags: ungroupedTags })
+  }
+  return groups
+})
+const activeSuggestionGroup = computed(() => (
+  groupedSuggestions.value.find(group => group.id === activeGroupId.value)
+  || groupedSuggestions.value[0]
+  || null
+))
+const canCreate = computed(() => {
+  const validation = validateMindmapTagDisplayName(searchKeyword.value)
+  if (!validation.valid || tagArr.value.length >= MAX_NODE_TAG_COUNT) return false
+  return !suggestions.value.some(tag => tag.name === validation.value)
+})
 
 function getTagColor(tag) {
-  if (typeof tag === 'object' && tag.style?.fill) return tag.style.fill
-  const text = typeof tag === 'object' ? tag.text : tag
+  if (typeof tag === 'object' && tag?.style?.fill) return tag.style.fill
+  const text = typeof tag === 'object' ? String(tag?.text || '') : String(tag || '')
   let hash = 0
-  for (let i = 0; i < text.length; i++) {
-    hash = text.charCodeAt(i) + ((hash << 5) - hash)
+  for (let index = 0; index < text.length; index += 1) {
+    hash = text.charCodeAt(index) + ((hash << 5) - hash)
   }
   return tagColors[Math.abs(hash) % tagColors.length]
 }
 
-// ── 字段加载 ──
-async function loadFields() {
-  if (isReadonly.value || !dialogVisible.value) return
-  const keyword = validateMindmapTagSearchKeyword(fieldSearchKeyword.value)
-  if (!keyword.valid) {
-    fieldRequestId.value += 1
-    fields.value = []
-    fieldsLoading.value = false
-    fieldsError.value = keyword.message
-    return false
-  }
-  const requestId = ++fieldRequestId.value
-  fieldsLoading.value = true
-  fieldsError.value = ''
-  try {
-    const res = await getTagFieldSuggestions(keyword.value || undefined)
-    if (requestId !== fieldRequestId.value || !dialogVisible.value || isReadonly.value) return
-    const details = (res.data || []).map(field => ({
-      ...field,
-      id: field.id ?? field.fieldId,
-      name: field.name ?? field.fieldName,
-    }))
-    fields.value = details
-    // 默认展开所有字段
-    expandedFields.value = details.map(f => f.id)
-  } catch (e) {
-    if (requestId !== fieldRequestId.value || !dialogVisible.value || isReadonly.value) return
-    fields.value = []
-    fieldsError.value = e?.message || '字段标签加载失败，请重试'
-  } finally {
-    if (requestId === fieldRequestId.value) fieldsLoading.value = false
-  }
-}
-
-function clearFieldSearchTimer() {
-  if (fieldSearchTimer === null) return
-  clearTimeout(fieldSearchTimer)
-  fieldSearchTimer = null
-}
-
-function scheduleFieldSearch() {
-  clearFieldSearchTimer()
-  fieldRequestId.value += 1
-  const keyword = validateMindmapTagSearchKeyword(fieldSearchKeyword.value)
-  if (!keyword.valid) {
-    fields.value = []
-    fieldsLoading.value = false
-    fieldsError.value = keyword.message
-    return
-  }
-  fieldsLoading.value = true
-  fieldsError.value = ''
-  fieldSearchTimer = setTimeout(() => {
-    fieldSearchTimer = null
-    void loadFields()
-  }, FIELD_SEARCH_DEBOUNCE_MS)
-}
-
-function toggleField(fieldId) {
-  const idx = expandedFields.value.indexOf(fieldId)
-  if (idx >= 0) {
-    expandedFields.value.splice(idx, 1)
-  } else {
-    expandedFields.value.push(fieldId)
-  }
-}
-
-// ── 选项选择逻辑 ──
-function isOptionSelected(fieldId, optionId) {
-  return tagArr.value.some(t =>
-    typeof t === 'object' && t.fieldId === fieldId && t.optionId === optionId
-  )
-}
-
-function toggleOption(field, opt) {
-  if (isReadonly.value) return
-  const wasSelected = isOptionSelected(field.id, opt.id)
-  if (field.selectMode === 'single') {
-    // 单选：先移除同字段的其他选项
-    tagArr.value = tagArr.value.filter(t =>
-      !(typeof t === 'object' && t.fieldId === field.id)
-    )
-    // 如果点击的是已选中的，则只取消（不重新添加）
-    if (wasSelected) return
-  } else {
-    // 多选：切换
-    if (isOptionSelected(field.id, opt.id)) {
-      tagArr.value = tagArr.value.filter(t =>
-        !(typeof t === 'object' && t.fieldId === field.id && t.optionId === opt.id)
-      )
-      return
-    }
-  }
-
-  if (tagArr.value.length >= 20) {
-    ElMessage.warning('最多添加 20 个标签')
-    return
-  }
-
-  // 构建标签对象，注入字段的基础样式
-  const fieldStyle = field.style || {}
-  tagArr.value.push({
-    tagId: opt.tagId || undefined,
-    fieldId: field.id,
-    optionId: opt.id,
-    text: opt.name,
-    style: {
-      fill: opt.fill || '#409eff',
-      color: opt.color || '#ffffff',
-      fontSize: fieldStyle.fontSize || 12,
-      radius: fieldStyle.radius ?? 3,
-      paddingX: fieldStyle.paddingX ?? 8,
-    },
-    placement: fieldStyle.placement || undefined,
-    align: fieldStyle.align || undefined,
-  })
-}
-
-// ── 选项样式（始终按预览效果展示，选中态用边框+勾选标识） ──
-function getOptionBadgeStyle(opt, field, selected) {
-  const fieldStyle = field.style || {}
-  const fill = opt.fill || '#409eff'
-  const color = opt.color || '#fff'
-  const isFillTransparent = fill === 'transparent'
-  const isColorTransparent = color === 'transparent'
+function getSuggestionStyle(tag, selected) {
+  const fill = tag.style?.fill || getTagColor(tag.name)
+  const color = tag.style?.color || '#ffffff'
   return {
-    backgroundColor: isFillTransparent ? '#f5f5f5' : fill,
-    color: isColorTransparent ? '#333333' : color,
-    borderColor: selected ? '#4D73FF' : (isFillTransparent ? '#d9d9d9' : fill),
-    fontSize: (fieldStyle.fontSize || 12) + 'px',
-    borderRadius: (fieldStyle.radius ?? 3) + 'px',
-    padding: `2px ${fieldStyle.paddingX ?? 8}px`,
+    backgroundColor: fill === 'transparent' ? '#ffffff' : fill,
+    color: color === 'transparent' ? '#303133' : color,
+    borderColor: selected ? '#4d73ff' : (fill === 'transparent' ? '#dcdfe6' : fill),
   }
 }
 
-// ── 弹窗生命周期 ──
+function getTagIdentity(tag, index) {
+  if (tag && typeof tag === 'object') return tag.tagId || tag.uuid || `${tag.text}-${index}`
+  return `${tag}-${index}`
+}
+
+function clearSearchTimer() {
+  if (searchTimer === null) return
+  clearTimeout(searchTimer)
+  searchTimer = null
+}
+
+async function loadSuggestions() {
+  if (!dialogVisible.value) return
+  const keyword = validateMindmapTagSearchKeyword(searchKeyword.value)
+  if (!keyword.valid) {
+    requestId.value += 1
+    suggestions.value = []
+    loading.value = false
+    loadError.value = keyword.message
+    return
+  }
+  const currentRequestId = ++requestId.value
+  loading.value = true
+  loadError.value = ''
+  try {
+    const response = await getTagSuggestions(keyword.value || undefined)
+    if (currentRequestId !== requestId.value || !dialogVisible.value) return
+    suggestions.value = (response.data || []).filter(tag => tag?.id && tag.status === 0)
+  } catch (error) {
+    if (currentRequestId !== requestId.value || !dialogVisible.value) return
+    suggestions.value = []
+    loadError.value = error?.message || '标签加载失败，请重试'
+  } finally {
+    if (currentRequestId === requestId.value) loading.value = false
+  }
+}
+
+async function loadTagGroups() {
+  if (!dialogVisible.value) return
+  const currentRequestId = ++groupRequestId.value
+  groupLoading.value = true
+  groupLoadError.value = ''
+  try {
+    const response = await listTagCategories()
+    if (currentRequestId !== groupRequestId.value || !dialogVisible.value) return
+    tagGroups.value = (response.data || []).filter(group => group?.id && group.name)
+    tagGroupsLoaded.value = true
+  } catch (error) {
+    if (currentRequestId !== groupRequestId.value || !dialogVisible.value) return
+    tagGroups.value = []
+    tagGroupsLoaded.value = false
+    groupLoadError.value = error?.message || '标签分组加载失败'
+  } finally {
+    if (currentRequestId === groupRequestId.value) groupLoading.value = false
+  }
+}
+
+function scheduleSearch() {
+  clearSearchTimer()
+  requestId.value += 1
+  loadError.value = ''
+  loading.value = true
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    void loadSuggestions()
+  }, SEARCH_DEBOUNCE_MS)
+}
+
+function isSelected(tagId) {
+  return tagArr.value.some(tag => (
+    tag && typeof tag === 'object' && Number(tag.tagId) === Number(tagId)
+  ))
+}
+
+function toNodeTag(tag) {
+  const style = { ...(tag.style || {}) }
+  return {
+    tagId: tag.id,
+    uuid: tag.uuid,
+    tagKey: tag.tagKey,
+    text: tag.name,
+    style,
+    placement: style.placement,
+    align: style.align,
+    status: tag.status,
+    definitionRevision: tag.definitionRevision,
+  }
+}
+
+function toggleSuggestion(tag) {
+  if (isReadonly.value) return
+  const index = tagArr.value.findIndex(item => (
+    item && typeof item === 'object' && Number(item.tagId) === Number(tag.id)
+  ))
+  if (index >= 0) {
+    tagArr.value.splice(index, 1)
+    return
+  }
+  if (tagArr.value.length >= MAX_NODE_TAG_COUNT) {
+    ElMessage.warning(`最多添加 ${MAX_NODE_TAG_COUNT} 个标签`)
+    return
+  }
+  tagArr.value.push(toNodeTag(tag))
+}
+
+async function createAndSelectTag() {
+  if (isReadonly.value || creating.value) return
+  const validation = validateMindmapTagDisplayName(searchKeyword.value)
+  if (!validation.valid) {
+    ElMessage.warning(validation.message)
+    return
+  }
+  if (tagArr.value.length >= MAX_NODE_TAG_COUNT) {
+    ElMessage.warning(`最多添加 ${MAX_NODE_TAG_COUNT} 个标签`)
+    return
+  }
+  const exactMatch = suggestions.value.find(tag => tag.name === validation.value)
+  if (exactMatch) {
+    if (!isSelected(exactMatch.id)) toggleSuggestion(exactMatch)
+    return
+  }
+
+  const sessionId = dialogSessionId.value
+  creating.value = true
+  try {
+    const response = await createManagedTag({
+      tagKey: `custom_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      name: validation.value,
+      ownerId: userStore.id,
+      style: { fill: getTagColor(validation.value), color: '#ffffff' },
+      status: 0,
+    })
+    if (!isCurrentDialogSession(sessionId)) return
+    const tag = response.data
+    if (!tag?.id) throw new Error('标签创建后未能读取')
+    tagArr.value.push(toNodeTag(tag))
+    searchKeyword.value = ''
+    await loadSuggestions()
+  } catch (error) {
+    if (isCurrentDialogSession(sessionId)) {
+      ElMessage.error(error?.message || '创建标签失败')
+    }
+  } finally {
+    if (sessionId === dialogSessionId.value) creating.value = false
+  }
+}
+
+function handleEnter() {
+  if (canCreate.value) {
+    void createAndSelectTag()
+    return
+  }
+  if (suggestions.value.length === 1 && !isSelected(suggestions.value[0].id)) {
+    toggleSuggestion(suggestions.value[0])
+  }
+}
+
 function handleShow() {
   if (isReadonly.value) return
   editTargets.value = captureMindmapEditTargets(activeNodes.value)
   const node = editTargets.value[0]
   if (!node) return
-  const tags = node.getData('tag') || []
-  tagArr.value = [...tags]
-  tagInput.value = ''
-  clearFieldSearchTimer()
-  fieldSearchKeyword.value = ''
-  dialogVisible.value = true
+  tagArr.value = [...(node.getData('tag') || [])]
+  searchKeyword.value = ''
+  activeGroupId.value = ''
   dialogSessionId.value += 1
-  void loadFields()
+  dialogVisible.value = true
+  void loadSuggestions()
+  void loadTagGroups()
 }
 
 function onOpen() {
@@ -344,108 +433,47 @@ function onOpen() {
 }
 
 function onClose() {
-  clearFieldSearchTimer()
+  clearSearchTimer()
   dialogSessionId.value += 1
-  fieldRequestId.value += 1
-  fieldsLoading.value = false
-  customTagSubmitting.value = false
+  requestId.value += 1
+  groupRequestId.value += 1
+  loading.value = false
+  groupLoading.value = false
+  creating.value = false
   editTargets.value = []
   bus.emit('endTextEdit')
 }
 
-// ── 手动标签 ──
-async function addCustomTag() {
-  if (isReadonly.value || customTagSubmitting.value) return
-  const validation = validateMindmapTagDisplayName(tagInput.value)
-  if (!validation.valid) {
-    ElMessage.warning(validation.message)
-    return
-  }
-  const text = validation.value
-  if (tagArr.value.length >= 20) {
-    ElMessage.warning('最多添加 20 个标签')
-    return
-  }
-  const sessionId = dialogSessionId.value
-  customTagSubmitting.value = true
-  try {
-    const suggestionResponse = await getTagSuggestions(text)
-    if (!isCurrentDialogSession(sessionId)) return
-    let tag = (suggestionResponse.data || []).find(item => item.name === text && item.status !== 2)
-    if (!tag) {
-      const createResponse = await createManagedTag({
-        tagKey: `custom_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        name: text,
-        ownerId: userStore.id,
-        style: { fill: getTagColor(text), color: '#ffffff' },
-        status: 0,
-      })
-      if (!isCurrentDialogSession(sessionId)) return
-      tag = createResponse.data
-    }
-    if (!tag) throw new Error('标签创建后未能读取')
-    if (!tagArr.value.some(item => typeof item === 'object' && item.tagId === tag.id)) {
-      tagArr.value.push({
-        tagId: tag.id,
-        uuid: tag.uuid,
-        tagKey: tag.tagKey,
-        text: tag.name,
-        style: tag.style || {},
-        status: tag.status,
-        definitionRevision: tag.definitionRevision,
-      })
-    }
-    tagInput.value = ''
-  } catch (error) {
-    if (!isCurrentDialogSession(sessionId)) return
-    ElMessage.error(error?.message || '创建统一标签失败')
-  } finally {
-    if (sessionId === dialogSessionId.value) customTagSubmitting.value = false
-  }
-}
-
 function removeTag(index) {
-  if (isReadonly.value) return
-  tagArr.value.splice(index, 1)
+  if (!isReadonly.value) tagArr.value.splice(index, 1)
 }
 
 function confirm() {
-  if (isReadonly.value || customTagSubmitting.value || editTargets.value.length === 0) return
-  editTargets.value.forEach(node => {
-    node.setTag([...tagArr.value])
-  })
+  if (isReadonly.value || creating.value || editTargets.value.length === 0) return
+  editTargets.value.forEach(node => node.setTag(tagArr.value.map(tag => (
+    tag && typeof tag === 'object' ? { ...tag, style: { ...(tag.style || {}) } } : tag
+  ))))
   dialogVisible.value = false
 }
 
 function isCurrentDialogSession(sessionId) {
-  return Boolean(
-    sessionId === dialogSessionId.value &&
-    dialogVisible.value &&
-    !isReadonly.value
-  )
+  return sessionId === dialogSessionId.value && dialogVisible.value && !isReadonly.value
 }
 
 function invalidateTagDialogForMindMapChange() {
-  clearFieldSearchTimer()
+  clearSearchTimer()
   dialogSessionId.value += 1
-  fieldRequestId.value += 1
-  fieldsLoading.value = false
-  fieldsError.value = ''
-  fields.value = []
-  expandedFields.value = []
-  customTagSubmitting.value = false
+  requestId.value += 1
+  groupRequestId.value += 1
+  loading.value = false
+  loadError.value = ''
+  groupLoading.value = false
+  groupLoadError.value = ''
+  suggestions.value = []
+  creating.value = false
   editTargets.value = []
   if (dialogVisible.value) dialogVisible.value = false
 }
-
-watch(isReadonly, (readonly) => {
-  if (!readonly || !dialogVisible.value) return
-  clearFieldSearchTimer()
-  dialogSessionId.value += 1
-  fieldRequestId.value += 1
-  customTagSubmitting.value = false
-  dialogVisible.value = false
-})
 
 function onManagedTagDefinitionChanged(data) {
   const definition = data?.definition
@@ -460,17 +488,29 @@ function onManagedTagDefinitionChanged(data) {
         }
       : tag
   ))
-  if (dialogVisible.value) void loadFields()
+  if (dialogVisible.value) void loadSuggestions()
 }
+
+watch(isReadonly, (readonly) => {
+  if (readonly && dialogVisible.value) dialogVisible.value = false
+})
+
+watch(groupedSuggestions, (groups) => {
+  if (!groups.some(group => group.id === activeGroupId.value)) {
+    activeGroupId.value = groups[0]?.id || ''
+  }
+})
 
 onMounted(() => {
   bus.on('showNodeTag', handleShow)
   bus.on('managed_tag_definition_changed', onManagedTagDefinitionChanged)
 })
+
 onBeforeUnmount(() => {
-  clearFieldSearchTimer()
+  clearSearchTimer()
   dialogSessionId.value += 1
-  fieldRequestId.value += 1
+  requestId.value += 1
+  groupRequestId.value += 1
   if (dialogVisible.value) bus.emit('endTextEdit')
   bus.off('showNodeTag', handleShow)
   bus.off('managed_tag_definition_changed', onManagedTagDefinitionChanged)
@@ -479,75 +519,78 @@ onBeforeUnmount(() => {
 
 <style scoped lang="scss">
 .sectionTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: #606266;
   font-size: 13px;
   font-weight: 500;
-  color: #606266;
-  margin-bottom: 8px;
 }
 
 .batchImpact {
   margin-bottom: 12px;
 }
 
-.field-section {
-  padding-bottom: 12px;
-  border-bottom: 1px solid #ebeef5;
-  max-height: 320px;
+.suggestionPanel {
+  min-height: 112px;
+  max-height: 260px;
+  margin-top: 10px;
+  padding: 12px;
   overflow-y: auto;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fafbfc;
 }
 
-.fieldSearchInput {
-  margin-bottom: 8px;
-}
-
-.fieldSearchHint {
-  padding: 6px 8px 0;
-  color: #909399;
+.groupLoadWarning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--el-color-warning-dark-2);
   font-size: 12px;
-  line-height: 1.5;
 }
 
-.empty-field-tip {
-  color: #999;
-  font-size: 13px;
-  padding: 8px 0;
+.suggestionBrowser {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  min-height: 150px;
+  max-height: 220px;
+  margin: -12px;
 }
 
-.field-state {
+.suggestionGroupSidebar {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  overflow-y: auto;
+  border-right: 1px solid #ebeef5;
+  background: #f5f6f8;
+}
+
+.suggestionGroupNavItem {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 42px;
-  color: #909399;
-  font-size: 13px;
-
-  &.is-error {
-    flex-wrap: wrap;
-    color: var(--el-color-danger);
-  }
-}
-
-.fieldGroup {
-  margin-bottom: 6px;
-}
-
-.fieldHeader {
-  display: flex;
-  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   width: 100%;
-  gap: 6px;
+  min-height: 34px;
   padding: 6px 8px;
   border: 0;
+  border-radius: 6px;
   background: transparent;
-  cursor: pointer;
-  border-radius: 4px;
-  font-family: inherit;
+  color: #606266;
+  font: inherit;
+  font-size: 12px;
   text-align: left;
-  transition: background 0.2s;
+  cursor: pointer;
 
   &:hover {
-    background: #f5f7fa;
+    background: #e9ebef;
   }
 
   &:focus-visible {
@@ -555,86 +598,142 @@ onBeforeUnmount(() => {
     outline-offset: -2px;
   }
 
-  .fieldArrow {
-    font-size: 12px;
-    color: #999;
-    transition: transform 0.2s;
-
-    &.expanded {
-      transform: rotate(90deg);
-    }
-  }
-
-  .fieldName {
-    font-size: 13px;
-    font-weight: 500;
-    color: #303133;
-    flex: 1;
+  &.active {
+    background: #e8edff;
+    color: #3155d9;
+    font-weight: 600;
   }
 }
 
-.fieldOptions {
+.suggestionGroupName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestionGroupCount {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #ebeef5;
+  color: #909399;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 18px;
+  text-align: center;
+}
+
+.suggestionGroupContent {
+  min-width: 0;
+  padding: 12px;
+  overflow-y: auto;
+  background: #fff;
+}
+
+.suggestionGroupContentHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  color: #303133;
+  font-size: 12px;
+  font-weight: 600;
+
+  span:last-child {
+    color: #909399;
+    font-weight: 400;
+  }
+}
+
+.suggestionGroupTags {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 8px 6px 26px;
+  gap: 8px;
 }
 
-.optionBadge {
+.panelState {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 78px;
+  color: #909399;
+  font-size: 13px;
+
+  &.isError {
+    flex-wrap: wrap;
+    color: var(--el-color-danger);
+  }
+}
+
+.suggestionTag,
+.createTagButton {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  border: 1.5px solid;
-  font-family: inherit;
+  align-self: flex-start;
+  gap: 4px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid;
+  border-radius: 6px;
+  font: inherit;
   font-size: 12px;
+  line-height: 20px;
   cursor: pointer;
-  transition: all 0.15s;
-  user-select: none;
-  line-height: 1.6;
+  transition: transform 0.15s, box-shadow 0.15s;
 
   &:hover {
-    opacity: 0.85;
-    transform: scale(1.05);
+    transform: translateY(-1px);
   }
 
   &:focus-visible {
     outline: 2px solid var(--el-color-primary);
     outline-offset: 2px;
   }
+}
 
-  &.selected {
-    font-weight: 500;
-    border-color: #4D73FF;
-    box-shadow: 0 0 0 1.5px #4D73FF;
+.suggestionTag.selected {
+  box-shadow: 0 0 0 2px rgb(77 115 255 / 24%);
+}
+
+.createTagButton {
+  margin-top: 12px;
+  border-style: dashed;
+  border-color: #8da2fb;
+  background: #f2f5ff;
+  color: #3155d9;
+}
+
+@media (max-width: 520px) {
+  .suggestionBrowser {
+    grid-template-columns: 116px minmax(0, 1fr);
   }
-
-  .checkIcon {
-    font-size: 11px;
-  }
 }
 
-.empty-opt-tip {
-  color: #bbb;
-  font-size: 12px;
+.currentTitle {
+  margin-top: 16px;
 }
 
-.tag-input-row {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
+.selectionCount {
+  color: #909399;
+  font-weight: 400;
 }
 
-.tag-list {
+.selectedList {
   display: flex;
   flex-wrap: wrap;
+  gap: 8px;
   min-height: 32px;
 }
 
-.empty-tip {
-  text-align: center;
-  color: #999;
+.emptySelection {
   padding: 12px 0;
+  color: #909399;
   font-size: 13px;
+  text-align: center;
 }
 </style>
 

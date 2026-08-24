@@ -1,95 +1,6 @@
 import request from '@/utils/request'
 
-// ── 标签字段 ──
-
-export function listTagFields() {
-  return request({
-    url: '/mindmap/tag-field/list',
-    method: 'get'
-  })
-}
-
-export function getTagFieldDetail(fieldId) {
-  return request({
-    url: '/mindmap/tag-field/' + fieldId,
-    method: 'get'
-  })
-}
-
-export function getTagFieldImpact(fieldId) {
-  return request({
-    url: '/mindmap/tag-field/' + fieldId + '/impact',
-    method: 'get'
-  })
-}
-
-export function addTagField(data) {
-  return request({
-    url: '/mindmap/tag-field',
-    method: 'post',
-    data: data
-  })
-}
-
-export function updateTagField(data) {
-  return request({
-    url: '/mindmap/tag-field',
-    method: 'put',
-    data: data
-  })
-}
-
-export function deleteTagField(fieldId) {
-  return request({
-    url: '/mindmap/tag-field/' + fieldId,
-    method: 'delete'
-  })
-}
-
-// ── 字段选项 ──
-
-export function addTagFieldOption(data) {
-  return request({
-    url: '/mindmap/tag-field/option',
-    method: 'post',
-    data: data
-  })
-}
-
-export function updateTagFieldOption(data) {
-  return request({
-    url: '/mindmap/tag-field/option',
-    method: 'put',
-    data: data
-  })
-}
-
-export function deleteTagFieldOption(optionId) {
-  return request({
-    url: '/mindmap/tag-field/option/' + optionId,
-    method: 'delete'
-  })
-}
-
-export function batchUpdateOptionSort(fieldId, sortList) {
-  return request({
-    url: '/mindmap/tag-field/option/sort/' + fieldId,
-    method: 'put',
-    data: sortList
-  })
-}
-
-// ── 搜索建议（侧边栏用） ──
-
-export function getTagFieldSuggestions(keyword) {
-  return request({
-    url: '/mindmap/tag-field/suggestions',
-    method: 'get',
-    params: { keyword }
-  })
-}
-
-// ── 旧标签 API（过渡期保留） ──
+// ── 统一标签 API ──
 
 export function listTagCategories() {
   return request({
@@ -111,6 +22,14 @@ export function updateTagCategory(categoryId, name, sortOrder) {
     url: '/mindmap/tag/category',
     method: 'put',
     params: { categoryId, categoryName: name, sortOrder: sortOrder ?? 0 }
+  })
+}
+
+export function reorderTagCategories(categoryIds) {
+  return request({
+    url: '/mindmap/tag/categories/order',
+    method: 'put',
+    data: { categoryIds }
   })
 }
 

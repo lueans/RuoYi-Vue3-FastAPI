@@ -14,6 +14,7 @@ from module_mindmap.service.mindmap_schema_verifier import (
     REQUIRED_FOREIGN_KEYS,
     REQUIRED_INDEXES,
     REQUIRED_TABLES,
+    UNIFIED_TAG_MIGRATION,
     MindmapSchemaIssue,
 )
 
@@ -27,6 +28,7 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
             | set(REQUIRED_COLUMNS.values())
             | set(REQUIRED_INDEXES.values())
             | set(REQUIRED_FOREIGN_KEYS.values())
+            | {UNIFIED_TAG_MIGRATION}
         )
 
         self.assertEqual(
@@ -92,6 +94,25 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
         ):
             build_mindmap_migration_plan([issue], Path(directory))
 
+    def test_postgresql_plan_selects_the_postgresql_unified_migration(self) -> None:
+        issue = MindmapSchemaIssue(
+            'legacy_table',
+            'mindmap_tag_field',
+            '20260824_mindmap_unified_tags.sql',
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            migration_dir = Path(directory)
+            migration_name = '20260824_mindmap_unified_tags_postgresql.sql'
+            (migration_dir / migration_name).write_text('-- PostgreSQL\nSELECT 1;\n')
+
+            plan = build_mindmap_migration_plan(
+                [issue],
+                migration_dir,
+                database_type='postgresql',
+            )
+
+        self.assertEqual([item.migration for item in plan], [migration_name])
+
     def test_definition_checked_objects_can_be_repaired_by_their_migrations(self) -> None:
         contracts = {
             '20260817_mindmap_structured_content.sql': (
@@ -131,6 +152,12 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
                 'fk_mindmap_node_tag_option',
                 'DROP FOREIGN KEY',
                 'ON DELETE RESTRICT',
+            ),
+            '20260824_mindmap_unified_tags.sql': (
+                'INSERT IGNORE INTO `mindmap_tag`',
+                'DROP COLUMN `field_id`',
+                'DROP COLUMN `option_id`',
+                'DROP TABLE IF EXISTS `mindmap_tag_field`',
             ),
         }
 
@@ -179,12 +206,19 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
         migration_source = (
             self.MIGRATIONS_DIR / '20260820_mindmap_postgresql.sql'
         ).read_text(encoding='utf-8')
+        unified_source = (
+            self.MIGRATIONS_DIR / '20260824_mindmap_unified_tags_postgresql.sql'
+        ).read_text(encoding='utf-8')
 
         self.assertIn('zz-mindmap-postgresql.sql', compose_source)
+        self.assertIn('zzz-mindmap-unified-tags-postgresql.sql', compose_source)
         for table in REQUIRED_TABLES:
             self.assertIn(f'CREATE TABLE IF NOT EXISTS {table}', migration_source)
-        self.assertIn('fk_mindmap_node_tag_field', migration_source)
-        self.assertIn('fk_mindmap_node_tag_option', migration_source)
+        self.assertNotIn('CREATE TABLE IF NOT EXISTS mindmap_tag_field', migration_source)
+        self.assertNotIn('field_id BIGINT', migration_source)
+        self.assertNotIn('option_id BIGINT', migration_source)
+        self.assertIn('DROP TABLE IF EXISTS mindmap_tag_field', unified_source)
+        self.assertIn('DROP COLUMN IF EXISTS option_id', unified_source)
         self.assertNotIn('DELIMITER', migration_source)
         self.assertNotIn('AUTO_INCREMENT', migration_source)
         self.assertNotIn('`', migration_source)

@@ -14,14 +14,12 @@ from utils.page_util import PageUtil
 
 
 class MindmapVersionTagSnapshotsTest(unittest.TestCase):
-    def test_snapshot_freezes_field_resolved_style(self) -> None:
+    def test_snapshot_freezes_unified_tag_style(self) -> None:
         tree = {
             'data': {
                 'uid': 'root',
                 'tag': [{
                     'tagId': 8,
-                    'fieldId': 2,
-                    'optionId': 5,
                     'text': '高',
                     'style': {'fontSize': 14, 'fill': '#f00'},
                     'placement': 'right',
@@ -32,17 +30,15 @@ class MindmapVersionTagSnapshotsTest(unittest.TestCase):
 
         snapshots = collect_tag_snapshots(tree)
 
-        self.assertEqual(snapshots['8:2:5']['style'], {'fontSize': 14, 'fill': '#f00'})
+        self.assertEqual(snapshots['8']['style'], {'fontSize': 14, 'fill': '#f00'})
         self.assertEqual(snapshots['8']['text'], '高')
 
-    def test_preview_prefers_field_scoped_snapshot_and_preserves_local_layout(self) -> None:
+    def test_preview_uses_tag_snapshot_and_preserves_local_layout(self) -> None:
         tree = {
             'data': {
                 'uid': 'root',
                 'tag': [{
                     'tagId': 8,
-                    'fieldId': 2,
-                    'optionId': 5,
                     'text': '当前名称',
                     'style': {'fill': '#000'},
                     'placement': 'left',
@@ -51,14 +47,13 @@ class MindmapVersionTagSnapshotsTest(unittest.TestCase):
             'children': [],
         }
         snapshots = {
-            '8': {'tagId': 8, 'text': '默认历史名称', 'style': {'fill': '#111'}},
-            '8:2:5': {'tagId': 8, 'text': '字段历史名称', 'style': {'fill': '#f00'}},
+            '8': {'tagId': 8, 'text': '历史名称', 'style': {'fill': '#f00'}},
         }
 
         preview = _apply_tag_snapshots(tree, snapshots)
         tag = preview['data']['tag'][0]
 
-        self.assertEqual(tag['text'], '字段历史名称')
+        self.assertEqual(tag['text'], '历史名称')
         self.assertEqual(tag['style'], {'fill': '#f00'})
         self.assertEqual(tag['placement'], 'left')
 

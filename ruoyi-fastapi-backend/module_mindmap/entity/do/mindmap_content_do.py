@@ -10,7 +10,6 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
-    ForeignKey,
     Index,
     Integer,
     SmallInteger,
@@ -185,7 +184,6 @@ class MindmapNodeTag(Base):
     __table_args__ = (
         Index('uk_mindmap_node_tag', 'node_id', 'tag_id', unique=True),
         Index('idx_mindmap_node_tag_usage', 'tag_id', 'file_id'),
-        Index('idx_mindmap_node_tag_option', 'option_id', 'file_id'),
         Index('idx_mindmap_node_tag_order', 'node_id', 'sort_order'),
         {'comment': '脑图节点标签关系表'},
     )
@@ -194,18 +192,6 @@ class MindmapNodeTag(Base):
     file_id = Column(BigInteger, nullable=False)
     node_id = Column(BigInteger, nullable=False)
     tag_id = Column(BigInteger, nullable=False)
-    field_id = Column(
-        BigInteger,
-        ForeignKey('mindmap_tag_field.id', name='fk_mindmap_node_tag_field', ondelete='RESTRICT'),
-        nullable=True,
-        comment='绑定时所属标签字段ID',
-    )
-    option_id = Column(
-        BigInteger,
-        ForeignKey('mindmap_tag_field_option.id', name='fk_mindmap_node_tag_option', ondelete='RESTRICT'),
-        nullable=True,
-        comment='绑定时选择的字段选项ID',
-    )
     sort_order = Column(Integer, nullable=False, server_default='0')
     placement = Column(String(16), nullable=True)
     align = Column(String(16), nullable=True)

@@ -16,6 +16,7 @@ CREATION_IDEMPOTENCY_MIGRATION = '20260819_mindmap_creation_idempotency.sql'
 RETENTION_INDEX_MIGRATION = '20260819_mindmap_retention_indexes.sql'
 TAG_CATEGORY_INTEGRITY_MIGRATION = '20260819_mindmap_tag_category_integrity.sql'
 NODE_TAG_INTEGRITY_MIGRATION = '20260820_mindmap_node_tag_integrity.sql'
+UNIFIED_TAG_MIGRATION = '20260824_mindmap_unified_tags.sql'
 
 REQUIRED_TABLES = dict.fromkeys(
     (
@@ -49,13 +50,11 @@ REQUIRED_COLUMNS = {
     ('mindmap_tag', column): STRUCTURED_MIGRATION
     for column in ('status', 'definition_revision', 'usage_node_count', 'usage_file_count', 'update_by')
 } | {
-    ('mindmap_tag_field_option', 'tag_id'): STRUCTURED_MIGRATION,
-    ('mindmap_node_tag', 'field_id'): STRUCTURED_MIGRATION,
-    ('mindmap_node_tag', 'option_id'): STRUCTURED_MIGRATION,
     ('mindmap_ws_state', 'content_revision'): INCREMENTAL_MIGRATION,
     ('mindmap_version', 'snapshot_schema_version'): VERSION_MIGRATION,
     ('mindmap_version', 'tag_snapshots'): VERSION_MIGRATION,
     ('mindmap_folder', 'active_name'): FOLDER_MIGRATION,
+    ('mindmap_tag_category', 'category_type'): UNIFIED_TAG_MIGRATION,
 } | {
     ('mindmap_creation_request', column): CREATION_IDEMPOTENCY_MIGRATION
     for column in (
@@ -71,8 +70,6 @@ REQUIRED_COLUMNS = {
 }
 
 REQUIRED_INDEXES = {
-    ('mindmap_tag_field_option', 'idx_tag_option_tag'): STRUCTURED_MIGRATION,
-    ('mindmap_node_tag', 'idx_mindmap_node_tag_option'): STRUCTURED_MIGRATION,
     ('mindmap_folder', 'uq_mindmap_folder_active_sibling'): FOLDER_MIGRATION,
     ('mindmap', 'idx_mindmap_owner_folder'): FOLDER_MIGRATION,
     ('mindmap', 'idx_mindmap_owner_status'): ARCHIVE_MIGRATION,
@@ -93,8 +90,6 @@ REQUIRED_INDEXES = {
 }
 
 REQUIRED_INDEX_DEFINITIONS = {
-    ('mindmap_tag_field_option', 'idx_tag_option_tag'): (('tag_id',), False),
-    ('mindmap_node_tag', 'idx_mindmap_node_tag_option'): (('option_id', 'file_id'), False),
     ('mindmap_folder', 'uq_mindmap_folder_active_sibling'): (
         ('owner_id', 'parent_id', 'active_name'),
         True,
@@ -141,8 +136,6 @@ REQUIRED_INDEX_DEFINITIONS = {
 REQUIRED_FOREIGN_KEYS = {
     ('mindmap', 'fk_mindmap_template_category'): TEMPLATE_MIGRATION,
     ('mindmap_tag', 'fk_mindmap_tag_category'): TAG_CATEGORY_INTEGRITY_MIGRATION,
-    ('mindmap_node_tag', 'fk_mindmap_node_tag_field'): NODE_TAG_INTEGRITY_MIGRATION,
-    ('mindmap_node_tag', 'fk_mindmap_node_tag_option'): NODE_TAG_INTEGRITY_MIGRATION,
 }
 
 REQUIRED_FOREIGN_KEY_DEFINITIONS = {
@@ -156,16 +149,22 @@ REQUIRED_FOREIGN_KEY_DEFINITIONS = {
         'mindmap_tag_category',
         ('id',),
     ),
-    ('mindmap_node_tag', 'fk_mindmap_node_tag_field'): (
-        ('field_id',),
-        'mindmap_tag_field',
-        ('id',),
-    ),
-    ('mindmap_node_tag', 'fk_mindmap_node_tag_option'): (
-        ('option_id',),
-        'mindmap_tag_field_option',
-        ('id',),
-    ),
+}
+
+FORBIDDEN_TABLES = {
+    'mindmap_tag_field',
+    'mindmap_tag_field_option',
+}
+FORBIDDEN_COLUMNS = {
+    ('mindmap_node_tag', 'field_id'),
+    ('mindmap_node_tag', 'option_id'),
+}
+FORBIDDEN_INDEXES = {
+    ('mindmap_node_tag', 'idx_mindmap_node_tag_option'),
+}
+FORBIDDEN_FOREIGN_KEYS = {
+    ('mindmap_node_tag', 'fk_mindmap_node_tag_field'),
+    ('mindmap_node_tag', 'fk_mindmap_node_tag_option'),
 }
 
 
@@ -188,6 +187,10 @@ def inspect_mindmap_schema(connection: Connection) -> dict[str, Any]:
         | {table for table, _ in REQUIRED_COLUMNS}
         | {table for table, _ in REQUIRED_INDEXES}
         | {table for table, _ in REQUIRED_FOREIGN_KEYS}
+        | FORBIDDEN_TABLES
+        | {table for table, _ in FORBIDDEN_COLUMNS}
+        | {table for table, _ in FORBIDDEN_INDEXES}
+        | {table for table, _ in FORBIDDEN_FOREIGN_KEYS}
     )
     columns: dict[str, set[str]] = {}
     indexes: dict[str, set[str]] = {}
@@ -272,5 +275,19 @@ def find_mindmap_schema_issues(snapshot: dict[str, Any]) -> list[MindmapSchemaIs
                 issues.append(
                     MindmapSchemaIssue('foreign_key_definition', f'{table}.{foreign_key}', migration)
                 )
+
+    for table in FORBIDDEN_TABLES & tables:
+        issues.append(MindmapSchemaIssue('legacy_table', table, UNIFIED_TAG_MIGRATION))
+    for table, column in FORBIDDEN_COLUMNS:
+        if table in tables and column in set(columns.get(table) or ()):
+            issues.append(MindmapSchemaIssue('legacy_column', f'{table}.{column}', UNIFIED_TAG_MIGRATION))
+    for table, index in FORBIDDEN_INDEXES:
+        if table in tables and index in set(indexes.get(table) or ()):
+            issues.append(MindmapSchemaIssue('legacy_index', f'{table}.{index}', UNIFIED_TAG_MIGRATION))
+    for table, foreign_key in FORBIDDEN_FOREIGN_KEYS:
+        if table in tables and foreign_key in set(foreign_keys.get(table) or ()):
+            issues.append(MindmapSchemaIssue(
+                'legacy_foreign_key', f'{table}.{foreign_key}', UNIFIED_TAG_MIGRATION,
+            ))
 
     return sorted(issues, key=lambda item: (item.migration, item.kind, item.object_name))

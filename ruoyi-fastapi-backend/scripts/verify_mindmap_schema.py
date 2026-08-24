@@ -4,6 +4,8 @@ import asyncio
 import json
 
 from config.database import create_async_db_engine
+from config.env import DataBaseConfig
+from module_mindmap.service.mindmap_schema_release import resolve_migration_filename
 from module_mindmap.service.mindmap_schema_verifier import (
     find_mindmap_schema_issues,
     inspect_mindmap_schema,
@@ -19,7 +21,12 @@ async def verify() -> int:
         await engine.dispose()
     issues = find_mindmap_schema_issues(snapshot)
     for issue in issues:
-        print(json.dumps({'status': 'MISSING', **issue.to_dict()}, ensure_ascii=False))
+        issue_payload = issue.to_dict()
+        issue_payload['migration'] = resolve_migration_filename(
+            issue.migration,
+            DataBaseConfig.db_type,
+        )
+        print(json.dumps({'status': 'MISSING', **issue_payload}, ensure_ascii=False))
     print(json.dumps({
         'status': 'READY' if not issues else 'NOT_READY',
         'missingCount': len(issues),

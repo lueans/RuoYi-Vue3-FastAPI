@@ -16,7 +16,6 @@ from config.database import AsyncSessionLocal
 from module_mindmap.dao.mindmap_dao import MindmapDao
 from module_mindmap.entity.do.mindmap_content_do import MindmapMigrationRecord
 from module_mindmap.entity.do.mindmap_do import Mindmap
-from module_mindmap.entity.do.mindmap_tag_field_do import MindmapTagFieldOption
 from module_mindmap.service.mindmap_document_service import MindmapDocumentService
 from module_mindmap.service.mindmap_shadow_verifier import (
     canonicalize_mindmap_tree,
@@ -164,14 +163,6 @@ async def migrate(args: argparse.Namespace) -> int:
     migrated = failed = 0
     batch_id = args.batch_id or f'{datetime.now():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}'
     async with AsyncSessionLocal() as db:
-        option_ids = list((await db.execute(
-            select(MindmapTagFieldOption.id).where(MindmapTagFieldOption.tag_id.is_(None))
-        )).scalars())
-        if not args.dry_run:
-            for option_id in option_ids:
-                await MindmapDocumentService.sync_option_tag_definition(db, option_id, 'migration')
-            await db.commit()
-
         query = select(Mindmap).where(
             Mindmap.del_flag == '0',
             or_(Mindmap.schema_version < SCHEMA_VERSION, Mindmap.root_node_id.is_(None)),

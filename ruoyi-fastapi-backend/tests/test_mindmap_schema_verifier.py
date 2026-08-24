@@ -9,6 +9,7 @@ from module_mindmap.service.mindmap_schema_verifier import (
     REQUIRED_INDEX_DEFINITIONS,
     REQUIRED_INDEXES,
     REQUIRED_TABLES,
+    UNIFIED_TAG_MIGRATION,
     find_mindmap_schema_issues,
 )
 
@@ -88,6 +89,19 @@ class MindmapSchemaVerifierTest(unittest.TestCase):
                 'kind': 'table',
                 'object_name': 'mindmap_creation_request',
                 'migration': '20260819_mindmap_creation_idempotency.sql',
+            },
+            [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
+        )
+
+    def test_missing_category_type_requires_unified_tag_migration(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['columns']['mindmap_tag_category'].remove('category_type')
+
+        self.assertIn(
+            {
+                'kind': 'column',
+                'object_name': 'mindmap_tag_category.category_type',
+                'migration': UNIFIED_TAG_MIGRATION,
             },
             [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
         )
@@ -186,6 +200,25 @@ class MindmapSchemaVerifierTest(unittest.TestCase):
             },
             issues,
         )
+
+    def test_legacy_tag_field_schema_requires_unified_tag_migration(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['tables'].update({'mindmap_tag_field', 'mindmap_tag_field_option'})
+        snapshot['columns']['mindmap_node_tag'].update({'field_id', 'option_id'})
+        snapshot['indexes']['mindmap_node_tag'].add('idx_mindmap_node_tag_option')
+        snapshot['foreignKeys']['mindmap_node_tag'].update({
+            'fk_mindmap_node_tag_field', 'fk_mindmap_node_tag_option',
+        })
+
+        issues = [item.to_dict() for item in find_mindmap_schema_issues(snapshot)]
+
+        self.assertTrue(issues)
+        self.assertTrue(all(item['migration'] == UNIFIED_TAG_MIGRATION for item in issues))
+        self.assertIn({
+            'kind': 'legacy_table',
+            'object_name': 'mindmap_tag_field',
+            'migration': UNIFIED_TAG_MIGRATION,
+        }, issues)
 
 
 if __name__ == '__main__':

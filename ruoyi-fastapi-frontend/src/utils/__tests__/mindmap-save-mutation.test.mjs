@@ -401,6 +401,7 @@ test('authoritative collaboration reload retries with a bounded visible recovery
   assert.match(cancelBlock, /clearTimeout\(authoritativeReloadTimer\)/)
   assert.match(recoverBlock, /saveRecoveryKind\.value === 'sync'/)
   assert.match(recoverBlock, /return performAuthoritativeReload\(\)/)
-  assert.match(pageSource, /\['saving', 'retrying', 'syncing'\]/)
+  assert.match(pageSource, /class="meta-save-status"[\s\S]*?:class="saveStatus"[\s\S]*?\{\{ saveStatusText \}\}/)
+  assert.match(pageSource, /&\.syncing \{[\s\S]*?color: #8f6b20/)
   assert.match(pageSource, /syncing: '正在同步画布'/)
 })

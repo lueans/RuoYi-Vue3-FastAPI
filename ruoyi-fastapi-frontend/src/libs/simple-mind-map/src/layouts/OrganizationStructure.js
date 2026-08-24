@@ -52,13 +52,15 @@ class OrganizationStructure extends Base {
           newNode.top =
             parent._node.top + parent._node.height + this.getMarginX(layerIndex)
         }
-        if (!cur.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(cur)) {
           return true
         }
       },
       (cur, parent, isRoot, layerIndex) => {
         // 返回时计算节点的areaWidth，也就是子节点所占的宽度之和，包括外边距
-        let len = cur.data.expand === false ? 0 : cur._node.children.length
+        let len = this.renderer.isNodeExpandedForLayout(cur)
+          ? cur._node.children.length
+          : 0
         cur._node.childrenAreaWidth = len
           ? cur._node.children.reduce((h, item) => {
               return h + item.width
@@ -86,7 +88,11 @@ class OrganizationStructure extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (node.getData('expand') && node.children && node.children.length) {
+        if (
+          this.renderer.isNodeExpandedForLayout(node)
+          && node.children
+          && node.children.length
+        ) {
           let marginX = this.getMarginY(layerIndex + 1)
           // 第一个子节点的left值 = 该节点中心的left值 - 子节点的宽度之和的一半
           let left = node.left + node.width / 2 - node.childrenAreaWidth / 2
@@ -108,7 +114,7 @@ class OrganizationStructure extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (!node.getData('expand')) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return
         }
         // 判断子节点所占的宽度之和是否大于该节点自身，大于则需要调整位置

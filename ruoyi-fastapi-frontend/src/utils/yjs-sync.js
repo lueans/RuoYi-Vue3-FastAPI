@@ -1267,6 +1267,29 @@ export class YjsMindmapSync {
       ? data.states
       : [data.state]
     const staged = stagePersistedYjsStates(states, data.stateSources)
+    if (this.options.preferAuthoritativeDocument === true) {
+      // “使用云端版本”是一次明确的丢弃决定。不要再把同 revision 的
+      // 旧协作缓存合回刚加载的 HTTP 权威文档；以当前画布重新播种并
+      // 用检查点替换这些来源，避免数秒后再次进入同一个冲突循环。
+      this.options.preferAuthoritativeDocument = false
+      const currentData = this.mindMap?.getData?.(true)
+      const currentDocument = currentData?.root ? {
+        ...currentData,
+        documentData: this.options.getDocumentData?.(),
+      } : currentData
+      if (currentDocument) this.initFromMindmap(currentDocument)
+      this._hasUnconfirmedRemoteState = false
+      this._completeSyncHandshake(true)
+      this._sendConsolidatedCheckpoint(
+        staged.acceptedSourceIds,
+        staged.invalidSourceIds,
+      )
+      if (staged.invalidStateCount) {
+        this.connectionState.value = 'degraded'
+        this.syncError.value = `检测到 ${staged.invalidStateCount} 份异常协作缓存，已隔离并继续同步`
+      }
+      return
+    }
     if (staged.mergedUpdate) this._hasUnconfirmedRemoteState = true
     this._localYjsChange = true
     try {

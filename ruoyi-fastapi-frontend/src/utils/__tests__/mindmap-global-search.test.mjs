@@ -77,7 +77,7 @@ test('列表级搜索具备分页、竞态保护、错误恢复和移动端布�
   assert.match(dialogSource, /所属文件和完整节点路径/)
   assert.match(dialogSource, /归档文件仅可只读打开/)
   assert.match(dialogSource, /@media \(max-width: 720px\)/)
-  assert.match(indexSource, /搜索全部内容/)
+  assert.match(indexSource, /搜索全部节点/)
   assert.match(indexSource, /v-if="canQueryMindmaps"/)
   assert.match(indexSource, /buildMindmapNodeSearchRoute/)
 })

@@ -68,7 +68,7 @@ class Timeline extends Base {
                 : (parent._node.height - cur._node.height) / 2)
           }
         }
-        if (!cur.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(cur)) {
           return true
         }
       },
@@ -84,7 +84,11 @@ class Timeline extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex, index) => {
-        if (node.getData('expand') && node.children && node.children.length) {
+        if (
+          this.renderer.isNodeExpandedForLayout(node)
+          && node.children
+          && node.children.length
+        ) {
           let marginX = this.getMarginX(layerIndex + 1)
           let marginY = this.getMarginY(layerIndex + 1)
           if (isRoot) {
@@ -122,7 +126,7 @@ class Timeline extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (!node.getData('expand')) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return
         }
         // 调整left

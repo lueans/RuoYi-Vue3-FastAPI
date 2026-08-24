@@ -199,7 +199,7 @@ class Fishbone extends Base {
             }
           }
         }
-        if (!node.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return true
         }
       },
@@ -250,7 +250,7 @@ class Fishbone extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (!node.getData('expand')) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return
         }
         let params = { node, parent, layerIndex, ctx: this }

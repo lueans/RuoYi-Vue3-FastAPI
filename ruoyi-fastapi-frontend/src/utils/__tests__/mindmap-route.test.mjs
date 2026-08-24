@@ -71,6 +71,7 @@ test('同路由切换文件或访问模式也必须执行离开保存守卫', as
 
   assert.match(source, /:key="editorInstanceKey"/)
   assert.match(source, /const editorInstanceKey = computed\(\(\) => `\$\{editorSessionKey\.value\}:\$\{editorRetryNonce\.value\}`\)/)
+  assert.match(source, /editRef\.value\?\.prepareForCloudExit\?\.\(\)/)
   assert.match(source, /onBeforeRouteLeave\(confirmEditorNavigation\)/)
   assert.match(source, /onBeforeRouteUpdate\(\(to\) => \{[\s\S]*?return confirmEditorNavigation\(\)/)
   assert.match(source, /watch\(editorSessionKey, \(\) => \{/)

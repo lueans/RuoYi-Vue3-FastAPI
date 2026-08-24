@@ -1,8 +1,10 @@
 <template>
   <el-dialog
     v-model="visible"
+    class="mindmap-metadata-dialog"
     title="编辑脑图信息"
     width="min(500px, calc(100vw - 32px))"
+    :z-index="4200"
     append-to-body
     destroy-on-close
     :close-on-click-modal="!submitting"
@@ -188,7 +190,26 @@ defineExpose({
 })
 </script>
 
-<style scoped>
+<style>
+.el-dialog.mindmap-metadata-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 32px);
+  margin-top: max(16px, 6vh) !important;
+  margin-bottom: 16px;
+}
+
+.mindmap-metadata-dialog .el-dialog__header,
+.mindmap-metadata-dialog .el-dialog__footer {
+  flex: none;
+}
+
+.mindmap-metadata-dialog .el-dialog__body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .metadata-dialog-intro {
   margin: -4px 0 18px 80px;
   color: var(--el-text-color-secondary);

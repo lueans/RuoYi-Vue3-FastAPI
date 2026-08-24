@@ -47,13 +47,15 @@ class CatalogOrganization extends Base {
               this.getMarginX(layerIndex)
           }
         }
-        if (!cur.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(cur)) {
           return true
         }
       },
       (cur, parent, isRoot, layerIndex) => {
         if (isRoot) {
-          let len = cur.data.expand === false ? 0 : cur._node.children.length
+          let len = this.renderer.isNodeExpandedForLayout(cur)
+            ? cur._node.children.length
+            : 0
           cur._node.childrenAreaWidth = len
             ? cur._node.children.reduce((h, item) => {
                 return h + item.width
@@ -73,7 +75,11 @@ class CatalogOrganization extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (node.getData('expand') && node.children && node.children.length) {
+        if (
+          this.renderer.isNodeExpandedForLayout(node)
+          && node.children
+          && node.children.length
+        ) {
           let marginX = this.getMarginX(layerIndex + 1)
           let marginY = this.getMarginY(layerIndex + 1)
           if (isRoot) {
@@ -111,7 +117,7 @@ class CatalogOrganization extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (!node.getData('expand')) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return
         }
         // 调整left

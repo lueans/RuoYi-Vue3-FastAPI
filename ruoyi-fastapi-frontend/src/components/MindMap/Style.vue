@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="节点样式" open-on-mount>
+  <div class="nodeStylePanel" :class="{ embedded: props.embedded }">
     <div
       class="styleBox"
       :class="{ isDark: isDark }"
@@ -7,128 +7,180 @@
     >
       <div class="sidebarContent customScrollbar">
         <!-- 文字 -->
-        <div class="title noTop">文字</div>
-        <div class="row">
-          <div class="rowItem">
-            <el-select
-              size="small"
-              style="width: 100px"
-              v-model="style.fontFamily"
-              placeholder=""
-              @change="update('fontFamily')"
-            >
-              <el-option
-                v-for="item in fontFamilyList"
-                :key="item.value"
-                :label="item.name"
-                :value="item.value"
-                :style="{ fontFamily: item.value }"
-              />
-            </el-select>
-          </div>
-          <div class="rowItem">
-            <el-select
-              size="small"
-              style="width: 60px"
-              v-model="style.fontSize"
-              placeholder=""
-              @change="update('fontSize')"
-            >
-              <el-option
-                v-for="item in fontSizeList"
-                :key="item"
-                :label="item"
-                :value="item"
-                :style="{ fontSize: item + 'px' }"
-              />
-            </el-select>
-          </div>
-          <div class="rowItem">
-            <el-select
-              size="small"
-              style="width: 80px"
-              v-model="style.textAlign"
-              placeholder=""
-              @change="update('textAlign')"
-            >
-              <el-option
-                v-for="item in alignList"
-                :key="item.value"
-                :label="item.name"
-                :value="item.value"
-              />
-            </el-select>
-          </div>
-        </div>
-        <div class="row">
-          <div class="btnGroup">
-            <el-tooltip content="颜色" placement="bottom">
-              <el-popover placement="bottom" trigger="hover" :width="260">
-                <template #reference>
-                  <div class="styleBtn">
-                    A
-                    <span
-                      class="colorShow"
-                      :style="{ backgroundColor: style.color || '#eee' }"
-                    ></span>
-                  </div>
-                </template>
-                <Color
-                  :color="style.color"
-                  @change="changeFontColor"
+        <details class="styleSection" open>
+          <summary class="title noTop">
+            <span>文字</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody">
+            <div class="fieldBlock">
+              <span class="fieldLabel">字体</span>
+              <el-select
+                size="small"
+                style="width: 100%"
+                v-model="style.fontFamily"
+                placeholder="选择字体"
+                aria-label="字体"
+                @change="update('fontFamily')"
+              >
+                <el-option
+                  v-for="item in fontFamilyList"
+                  :key="item.value"
+                  :label="item.name"
+                  :value="item.value"
+                  :style="{ fontFamily: item.value }"
                 />
-              </el-popover>
-            </el-tooltip>
-            <el-tooltip content="加粗" placement="bottom">
-              <div
-                class="styleBtn"
-                :class="{ actived: style.fontWeight === 'bold' }"
-                @click="toggleFontWeight"
+              </el-select>
+            </div>
+
+            <div class="typographyToolbar" role="group" aria-label="文字样式">
+              <el-select
+                class="fontSizeSelect"
+                size="small"
+                v-model="style.fontSize"
+                placeholder="字号"
+                aria-label="字号"
+                @change="update('fontSize')"
               >
-                B
-              </div>
-            </el-tooltip>
-            <el-tooltip content="斜体" placement="bottom">
-              <div
-                class="styleBtn i"
-                :class="{ actived: style.fontStyle === 'italic' }"
-                @click="toggleFontStyle"
-              >
-                I
-              </div>
-            </el-tooltip>
-            <el-tooltip content="划线" placement="bottom">
-              <el-popover placement="bottom" trigger="hover" :width="300">
-                <template #reference>
-                  <div
+                <el-option
+                  v-for="item in fontSizeList"
+                  :key="item"
+                  :label="item"
+                  :value="item"
+                  :style="{ fontSize: item + 'px' }"
+                />
+              </el-select>
+              <div class="btnGroup compactButtonGroup">
+                <el-tooltip content="加粗" placement="bottom">
+                  <button
+                    class="styleBtn"
+                    type="button"
+                    aria-label="加粗"
+                    :aria-pressed="style.fontWeight === 'bold'"
+                    :disabled="store.isReadonly"
+                    :class="{ actived: style.fontWeight === 'bold' }"
+                    @click="toggleFontWeight"
+                  >B</button>
+                </el-tooltip>
+                <el-tooltip content="斜体" placement="bottom">
+                  <button
+                    class="styleBtn i"
+                    type="button"
+                    aria-label="斜体"
+                    :aria-pressed="style.fontStyle === 'italic'"
+                    :disabled="store.isReadonly"
+                    :class="{ actived: style.fontStyle === 'italic' }"
+                    @click="toggleFontStyle"
+                  >I</button>
+                </el-tooltip>
+                <el-tooltip content="下划线" placement="bottom">
+                  <button
                     class="styleBtn u"
-                    :style="{ textDecoration: style.textDecoration || 'none' }"
+                    type="button"
+                    aria-label="下划线"
+                    :aria-pressed="style.textDecoration === 'underline'"
+                    :disabled="store.isReadonly"
+                    :class="{ actived: style.textDecoration === 'underline' }"
+                    @click="toggleTextDecoration('underline')"
+                  >U</button>
+                </el-tooltip>
+                <el-tooltip content="中划线" placement="bottom">
+                  <button
+                    class="styleBtn strike"
+                    type="button"
+                    aria-label="中划线"
+                    :aria-pressed="style.textDecoration === 'line-through'"
+                    :disabled="store.isReadonly"
+                    :class="{ actived: style.textDecoration === 'line-through' }"
+                    @click="toggleTextDecoration('line-through')"
+                  >S</button>
+                </el-tooltip>
+                <el-tooltip content="减小字号" placement="bottom">
+                  <button
+                    class="styleBtn fontStepBtn"
+                    type="button"
+                    aria-label="减小字号"
+                    :disabled="store.isReadonly"
+                    @click="stepFontSize(-1)"
+                  >A<sup>−</sup></button>
+                </el-tooltip>
+                <el-tooltip content="增大字号" placement="bottom">
+                  <button
+                    class="styleBtn fontStepBtn"
+                    type="button"
+                    aria-label="增大字号"
+                    :disabled="store.isReadonly"
+                    @click="stepFontSize(1)"
+                  >A<sup>+</sup></button>
+                </el-tooltip>
+              </div>
+            </div>
+
+            <div class="fieldBlock colorPaletteBlock">
+              <span class="fieldLabel">文字颜色</span>
+              <div class="colorPaletteControls">
+                <div class="quickColorList" role="group" aria-label="常用文字颜色">
+                  <button
+                    v-for="color in fontQuickColors"
+                    :key="color"
+                    class="quickColorButton"
+                    :class="{ active: normalizeColor(style.color) === normalizeColor(color) }"
+                    type="button"
+                    :aria-label="`文字颜色 ${color}`"
+                    :aria-pressed="normalizeColor(style.color) === normalizeColor(color)"
+                    :disabled="store.isReadonly"
+                    @click="changeFontColor(color)"
                   >
-                    U
-                  </div>
-                </template>
-                <el-radio-group
-                  size="small"
-                  v-model="style.textDecoration"
-                  @change="update('textDecoration')"
-                >
-                  <el-radio-button label="none">无</el-radio-button>
-                  <el-radio-button label="underline">下划线</el-radio-button>
-                  <el-radio-button label="line-through">中划线</el-radio-button>
-                  <el-radio-button label="overline">上划线</el-radio-button>
-                </el-radio-group>
-              </el-popover>
-            </el-tooltip>
+                    <span class="quickColorSwatch" :style="{ backgroundColor: color }"></span>
+                  </button>
+                </div>
+                <el-popover placement="bottom-end" trigger="click" :width="260">
+                  <template #reference>
+                    <button
+                      class="moreColorButton"
+                      type="button"
+                      aria-label="选择更多文字颜色"
+                      :disabled="store.isReadonly"
+                    >
+                      <span>更多</span>
+                      <el-icon><ArrowDown /></el-icon>
+                    </button>
+                  </template>
+                  <Color :color="style.color" @change="changeFontColor" />
+                </el-popover>
+              </div>
+            </div>
+
+            <div class="fieldBlock">
+              <span class="fieldLabel">对齐</span>
+              <div class="segmentedControl" role="group" aria-label="文字对齐方式">
+                <button
+                  v-for="item in alignList"
+                  :key="item.value"
+                  class="segmentButton"
+                  type="button"
+                  :aria-label="item.name"
+                  :aria-pressed="style.textAlign === item.value"
+                  :disabled="store.isReadonly"
+                  :class="{ active: style.textAlign === item.value }"
+                  @click="setTextAlign(item.value)"
+                >{{ alignShortName[item.value] }}</button>
+              </div>
+            </div>
           </div>
-        </div>
+        </details>
         <!-- 边框 -->
-        <div class="title">边框</div>
-        <div class="row">
-          <div class="rowItem">
-            <span class="name">颜色</span>
+        <details class="styleSection" open>
+          <summary class="title">
+            <span>边框</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody controlGrid">
+          <div class="fieldBlock">
+            <span class="fieldLabel">颜色</span>
             <el-popover placement="bottom" trigger="click" :width="260">
               <template #reference>
-                <ColorTrigger :color="style.borderColor" label="选择节点边框颜色" :width="80" />
+                <ColorTrigger :color="style.borderColor" label="选择节点边框颜色" :width="124" />
               </template>
               <Color
                 :color="style.borderColor"
@@ -136,13 +188,39 @@
               />
             </el-popover>
           </div>
-          <div class="rowItem">
-            <span class="name">样式</span>
+          <div class="fieldBlock">
+            <span class="fieldLabel">宽度</span>
             <el-select
               size="small"
-              style="width: 80px"
+              style="width: 100%"
+              v-model="style.borderWidth"
+              placeholder="边框宽度"
+              aria-label="边框宽度"
+              @change="update('borderWidth')"
+            >
+              <el-option
+                v-for="item in borderWidthList"
+                :key="item"
+                :label="`${item}px`"
+                :value="item"
+              >
+                <span
+                  v-if="item > 0"
+                  class="borderLine"
+                  :class="{ isDark: isDark }"
+                  :style="{ height: item + 'px' }"
+                ></span>
+              </el-option>
+            </el-select>
+          </div>
+          <div class="fieldBlock fullSpanField">
+            <span class="fieldLabel">样式</span>
+            <el-select
+              size="small"
+              style="width: 100%"
               v-model="style.borderDasharray"
-              placeholder=""
+              placeholder="边框样式"
+              aria-label="边框样式"
               @change="update('borderDasharray')"
             >
               <el-option
@@ -162,70 +240,53 @@
               </el-option>
             </el-select>
           </div>
-        </div>
-        <div class="row">
-          <div class="rowItem">
-            <span class="name">宽度</span>
+          <div class="fieldBlock fullSpanField" v-show="style.shape === 'rectangle'">
+            <span class="fieldLabel">圆角</span>
             <el-select
               size="small"
-              style="width: 80px"
-              v-model="style.borderWidth"
-              placeholder=""
-              @change="update('borderWidth')"
-            >
-              <el-option
-                v-for="item in borderWidthList"
-                :key="item"
-                :label="item"
-                :value="item"
-              >
-                <span
-                  v-if="item > 0"
-                  class="borderLine"
-                  :class="{ isDark: isDark }"
-                  :style="{ height: item + 'px' }"
-                ></span>
-              </el-option>
-            </el-select>
-          </div>
-          <div class="rowItem" v-show="style.shape === 'rectangle'">
-            <span class="name">圆角</span>
-            <el-select
-              size="small"
-              style="width: 80px"
+              style="width: 100%"
               v-model="style.borderRadius"
-              placeholder=""
+              placeholder="圆角"
+              aria-label="圆角"
               @change="update('borderRadius')"
             >
               <el-option
                 v-for="item in borderRadiusList"
                 :key="item"
-                :label="item"
+                :label="`${item}px`"
                 :value="item"
               />
             </el-select>
           </div>
-        </div>
-        <!-- 背景 -->
-        <div class="title">背景</div>
-        <div class="row">
-          <div class="rowItem">
-            <span class="name">颜色</span>
+          </div>
+        </details>
+        <!-- 填充 -->
+        <details class="styleSection" open>
+          <summary class="title">
+            <span>填充</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody">
+        <div class="fillControlRow">
+          <div class="fieldBlock fillColorField">
+            <span class="fieldLabel">颜色</span>
             <el-popover placement="bottom" trigger="click" :width="260">
               <template #reference>
-                <ColorTrigger :color="style.fillColor" label="选择节点背景颜色" />
+                <ColorTrigger :color="style.fillColor" label="选择节点填充颜色" :width="124" />
               </template>
               <Color
                 :color="style.fillColor"
                 @change="changeFillColor"
               />
             </el-popover>
-            <span class="name" style="margin-left: 20px;">渐变</span>
+          </div>
+          <label class="gradientToggle">
+            <span>渐变</span>
             <el-checkbox
               v-model="style.gradientStyle"
               @change="update('gradientStyle')"
             />
-          </div>
+          </label>
         </div>
         <div class="row" v-if="style.gradientStyle">
           <div class="rowItem">
@@ -270,16 +331,23 @@
             </el-select>
           </div>
         </div>
+          </div>
+        </details>
         <!-- 形状 -->
-        <div class="title">形状</div>
-        <div class="row">
-          <div class="rowItem">
-            <span class="name">形状</span>
+        <details class="styleSection" open>
+          <summary class="title">
+            <span>形状</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody">
+        <div class="fieldBlock">
+            <span class="fieldLabel">形状</span>
             <el-select
               size="small"
-              style="width: 120px"
+              style="width: 100%"
               v-model="style.shape"
-              placeholder=""
+              placeholder="选择形状"
+              aria-label="节点形状"
               @change="update('shape')"
             >
               <el-option
@@ -303,10 +371,16 @@
                 </svg>
               </el-option>
             </el-select>
-          </div>
         </div>
+          </div>
+        </details>
         <!-- 线条 -->
-        <div class="title">线条</div>
+        <details class="styleSection">
+          <summary class="title">
+            <span>线条</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody">
         <div class="row">
           <div class="rowItem">
             <span class="name">颜色</span>
@@ -386,8 +460,15 @@
             </el-select>
           </div>
         </div>
+          </div>
+        </details>
         <!-- 节点内边距 -->
-        <div class="title">节点内边距</div>
+        <details class="styleSection">
+          <summary class="title">
+            <span>节点内边距</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody">
         <div class="row noBottom">
           <div class="rowItem">
             <span class="name">水平</span>
@@ -408,8 +489,15 @@
             />
           </div>
         </div>
+          </div>
+        </details>
         <!-- 节点图片布局 -->
-        <div class="title">图片</div>
+        <details class="styleSection">
+          <summary class="title">
+            <span>图片</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody">
         <div class="row">
           <div class="rowItem">
             <span class="name">布局</span>
@@ -425,8 +513,15 @@
             </el-radio-group>
           </div>
         </div>
+          </div>
+        </details>
         <!-- 节点标签布局 -->
-        <div class="title">标签</div>
+        <details class="styleSection">
+          <summary class="title">
+            <span>标签</span>
+            <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+          </summary>
+          <div class="sectionBody">
         <div class="row">
           <div class="rowItem">
             <span class="name">布局</span>
@@ -440,17 +535,19 @@
             </el-radio-group>
           </div>
         </div>
+          </div>
+        </details>
       </div>
     </div>
     <div class="tipBox" v-else>
       <div class="tipIcon iconfont icontianjiazijiedian"></div>
       <div class="tipText">请选择一个节点</div>
     </div>
-  </Sidebar>
+  </div>
 </template>
 
 <script setup>
-import Sidebar from './Sidebar.vue'
+import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import Color from './Color.vue'
 import ColorTrigger from './ColorTrigger.vue'
 import { store } from './useStore'
@@ -468,14 +565,27 @@ import {
 } from './config'
 
 const props = defineProps({
-  mindMap: { type: Object, default: null }
+  mindMap: { type: Object, default: null },
+  embedded: { type: Boolean, default: false }
 })
 
-const sidebarRef = ref(null)
 const { activeNodes, syncActiveNodes } = useMindMapActiveNodes({
   resolveMindMap: () => props.mindMap,
 })
 const isDark = computed(() => store.localConfig.isDark)
+const fontQuickColors = Object.freeze([
+  '#000000',
+  '#3370FF',
+  '#F53F3F',
+  '#FFB400',
+  '#34C759',
+  '#7A5AF8',
+])
+const alignShortName = Object.freeze({
+  left: '左',
+  center: '中',
+  right: '右',
+})
 
 const style = reactive({
   shape: '',
@@ -589,6 +699,31 @@ function toggleFontStyle() {
   update('fontStyle')
 }
 
+function toggleTextDecoration(decoration) {
+  if (store.isReadonly) return
+  style.textDecoration = style.textDecoration === decoration ? 'none' : decoration
+  update('textDecoration')
+}
+
+function stepFontSize(step) {
+  if (store.isReadonly) return
+  const current = Number(style.fontSize)
+  const currentIndex = fontSizeList.indexOf(current)
+  const closestIndex = currentIndex >= 0
+    ? currentIndex
+    : fontSizeList.findIndex(item => item >= current)
+  const baseIndex = closestIndex >= 0 ? closestIndex : fontSizeList.length - 1
+  const nextIndex = Math.min(fontSizeList.length - 1, Math.max(0, baseIndex + step))
+  style.fontSize = fontSizeList[nextIndex]
+  update('fontSize')
+}
+
+function setTextAlign(value) {
+  if (store.isReadonly) return
+  style.textAlign = value
+  update('textAlign')
+}
+
 function changeFontColor(color) {
   if (store.isReadonly) return
   style.color = color
@@ -625,6 +760,10 @@ function changeEndColor(color) {
   update('endColor')
 }
 
+function normalizeColor(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
 watch(activeNodes, (nodes) => {
   if (nodes.length <= 0) return
   const activeMindMap = props.mindMap
@@ -634,16 +773,16 @@ watch(activeNodes, (nodes) => {
 }, { flush: 'sync' })
 
 watch(() => store.activeSidebar, (val) => {
-  if (val === 'nodeStyle') {
-    syncActiveNodes()
-    sidebarRef.value?.open()
-  } else {
-    sidebarRef.value?.close()
-  }
+  if (val === 'nodeStyle') syncActiveNodes()
 }, { immediate: true })
 </script>
 
 <style lang="less" scoped>
+.nodeStylePanel {
+  width: 100%;
+  min-height: 100%;
+}
+
 .styleBox {
   width: 100%;
   height: 100%;
@@ -668,6 +807,32 @@ watch(() => store.activeSidebar, (val) => {
           color: hsla(0, 0%, 100%, 0.6);
           border-color: hsla(0, 0%, 100%, 0.1);
         }
+
+        .quickColorButton {
+          background: #30343a;
+          border-color: #454950;
+        }
+      }
+
+      .fieldLabel,
+      .gradientToggle {
+        color: hsla(0, 0%, 100%, 0.6);
+      }
+
+      .styleBtn,
+      .segmentButton,
+      .moreColorButton,
+      .quickColorButton {
+        background-color: #363b3f;
+        color: hsla(0, 0%, 100%, 0.72);
+        border-color: hsla(0, 0%, 100%, 0.12);
+      }
+
+      .segmentButton.active,
+      .styleBtn.actived {
+        color: #82a7ff;
+        border-color: #4d73ff;
+        background: rgba(77, 115, 255, 0.16);
       }
     }
   }
@@ -681,7 +846,7 @@ watch(() => store.activeSidebar, (val) => {
 
 .tipBox {
   width: 100%;
-  height: 100%;
+  min-height: 360px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -689,71 +854,426 @@ watch(() => store.activeSidebar, (val) => {
   color: #666;
 
   .tipIcon {
-    font-size: 100px;
+    font-size: 54px;
+    color: #c9cdd4;
+    margin-bottom: 12px;
+  }
+
+  .tipText {
+    color: #8f959e;
+    font-size: 13px;
   }
 }
 
 .sidebarContent {
-  padding: 20px;
-  padding-top: 10px;
+  padding: 18px 20px 22px;
+
+  .styleSection {
+    margin: 0;
+
+    &[open] .sectionChevron {
+      transform: rotate(0deg);
+    }
+
+    &:not([open]) {
+      .title {
+        margin-bottom: 0;
+      }
+
+      .sectionChevron {
+        transform: rotate(180deg);
+      }
+    }
+  }
 
   .title {
-    font-size: 16px;
-    font-family: PingFangSC-Medium, PingFang SC;
-    font-weight: 500;
-    color: rgba(26, 26, 26, 0.9);
-    margin-bottom: 10px;
-    margin-top: 35px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding-top: 16px;
+    border-top: 1px solid #eef0f3;
+    font-size: 14px;
+    font-family: PingFangSC-Medium, PingFang SC, sans-serif;
+    font-weight: 600;
+    color: #1f2329;
+    margin-bottom: 13px;
+    margin-top: 16px;
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    &:hover {
+      color: #3370ff;
+    }
 
     &.noTop {
       margin-top: 0;
+      padding-top: 0;
+      border-top: 0;
     }
+
+    .sectionChevron {
+      color: #646a73;
+      font-size: 13px;
+      transition: transform 0.16s ease;
+    }
+  }
+
+  .sectionBody {
+    min-width: 0;
+  }
+
+  .fieldBlock {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    margin-bottom: 12px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  .fieldLabel {
+    color: #8f959e;
+    font-size: 12px;
+    line-height: 18px;
+  }
+
+  .typographyToolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+
+    .fontSizeSelect {
+      width: 68px;
+      flex: 0 0 68px;
+    }
+  }
+
+  .btnGroup {
+    display: flex;
+    align-items: center;
+  }
+
+  .compactButtonGroup {
+    min-width: 0;
+    flex: 1;
+    justify-content: space-between;
+    gap: 2px;
+  }
+
+  .styleBtn {
+    position: relative;
+    width: 34px;
+    height: 32px;
+    flex: 0 0 34px;
+    padding: 0;
+    background: transparent;
+    color: #1f2329;
+    border: 1px solid transparent;
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    font-weight: 600;
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: 0.15s ease;
+
+    &:hover:not(:disabled) {
+      border-color: #c6d5ff;
+      color: #3370ff;
+      background: #f5f8ff;
+    }
+
+    &.actived {
+      color: #3370ff;
+      border-color: #8fb0ff;
+      background-color: #edf4ff;
+    }
+
+    &:disabled {
+      color: #c0c4cc;
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    &.i {
+      font-style: italic;
+    }
+
+    &.u {
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    &.strike {
+      text-decoration: line-through;
+    }
+
+    &.fontStepBtn {
+      font-size: 13px;
+
+      sup {
+        font-size: 9px;
+        line-height: 1;
+        margin-left: 1px;
+      }
+    }
+  }
+
+  .colorPaletteControls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .quickColorList {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .quickColorButton {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    transition: 0.15s ease;
+
+    &:hover:not(:disabled),
+    &.active {
+      border-color: #8fb0ff;
+      box-shadow: 0 0 0 2px #edf4ff;
+    }
+
+    &:focus-visible {
+      outline: 2px solid #3370ff;
+      outline-offset: 2px;
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+  }
+
+  .quickColorSwatch {
+    width: 20px;
+    height: 20px;
+    border: 1px solid rgba(31, 35, 41, 0.08);
+    border-radius: 4px;
+  }
+
+  .moreColorButton {
+    height: 28px;
+    flex: 0 0 56px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 0 10px;
+    border: 1px solid #dfe2e6;
+    border-radius: 6px;
+    color: #646a73;
+    background: #fff;
+    font-size: 12px;
+    cursor: pointer;
+
+    .el-icon {
+      font-size: 12px;
+    }
+
+    &:hover:not(:disabled) {
+      color: #3370ff;
+      border-color: #8fb0ff;
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+  }
+
+  .segmentedControl {
+    display: flex;
+    width: 100%;
+    border: 1px solid #dfe2e6;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .segmentButton {
+    min-width: 0;
+    height: 30px;
+    flex: 1;
+    border: 0;
+    border-right: 1px solid #eef0f3;
+    background: #fff;
+    color: #646a73;
+    font-size: 12px;
+    cursor: pointer;
+    transition: 0.15s ease;
+
+    &:last-child {
+      border-right: 0;
+    }
+
+    &:hover:not(:disabled) {
+      color: #3370ff;
+      background: #f5f8ff;
+    }
+
+    &.active {
+      color: #3370ff;
+      background: #edf4ff;
+      box-shadow: inset 0 0 0 1px #3370ff;
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+  }
+
+  .controlGrid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px;
+    row-gap: 10px;
+
+    .fieldBlock {
+      margin-bottom: 0;
+    }
+
+    .fullSpanField {
+      grid-column: 1 / -1;
+    }
+  }
+
+  .fillControlRow {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+
+    .fillColorField {
+      margin-bottom: 0;
+    }
+  }
+
+  .gradientToggle {
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #646a73;
+    font-size: 12px;
+    cursor: pointer;
   }
 
   .row {
     display: flex;
     justify-content: space-between;
-    margin-bottom: 10px;
+    gap: 8px;
+    margin-bottom: 12px;
 
     &.noBottom {
       margin-bottom: 0;
     }
 
+    &.textSettingsRow {
+      flex-wrap: wrap;
+
+      .fontFamilyItem {
+        flex: 1 0 100%;
+        width: 100%;
+      }
+
+      .alignItem {
+        margin-left: auto;
+      }
+    }
+
+    &.colorPaletteRow {
+      align-items: center;
+
+      > .name {
+        color: #646a73;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+    }
+
     .btnGroup {
       width: 100%;
       display: flex;
-      justify-content: space-between;
+      justify-content: flex-start;
+      gap: 8px;
     }
 
     .rowItem {
       display: flex;
       align-items: center;
+      min-width: 0;
 
       .name {
         font-size: 12px;
-        margin-right: 10px;
+        margin-right: 8px;
+        color: #646a73;
+        white-space: nowrap;
       }
 
     }
 
     .styleBtn {
       position: relative;
-      width: 50px;
-      height: 30px;
+      width: 38px;
+      height: 32px;
+      padding: 0;
       background: #fff;
-      border: 1px solid #eee;
+      border: 1px solid #dfe2e6;
       display: flex;
       justify-content: center;
       align-items: center;
       font-weight: bold;
+      font-family: inherit;
+      font-size: 14px;
       cursor: pointer;
-      border-radius: 4px;
+      border-radius: 6px;
+      transition: 0.15s ease;
 
-      &.actived {
-        background-color: #eee;
+      &:hover {
+        border-color: #8fb0ff;
+        color: #3370ff;
       }
 
-      &.disabled {
+      &.actived {
+        color: #3370ff;
+        border-color: #8fb0ff;
+        background-color: #edf4ff;
+      }
+
+      &.disabled,
+      &:disabled {
         background-color: #f5f7fa !important;
         border-color: #e4e7ed !important;
         color: #c0c4cc !important;
@@ -771,6 +1291,49 @@ watch(() => store.activeSidebar, (val) => {
         bottom: 0;
         height: 2px;
       }
+    }
+
+    .quickColorList {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .quickColorButton {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      transition: 0.15s ease;
+
+      &:hover:not(:disabled),
+      &.active {
+        border-color: #8fb0ff;
+        box-shadow: 0 0 0 2px #edf4ff;
+      }
+
+      &:focus-visible {
+        outline: 2px solid #3370ff;
+        outline-offset: 2px;
+      }
+
+      &:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+    }
+
+    .quickColorSwatch {
+      width: 20px;
+      height: 20px;
+      border: 1px solid rgba(31, 35, 41, 0.08);
+      border-radius: 4px;
     }
   }
 }

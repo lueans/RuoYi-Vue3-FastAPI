@@ -2,7 +2,12 @@
   <div
     class="sidebarTriggerContainer"
     @click.stop
-    :class="{ hasActive: show && activeSidebar, show: show, isDark: isDark }"
+    :class="{
+      hasActive: show && activeSidebar,
+      hasInspector: show && isPropertyInspectorActive,
+      show,
+      isDark
+    }"
     :style="{ maxHeight: maxHeight + 'px' }"
   >
     <button
@@ -21,9 +26,9 @@
         v-for="item in triggerList"
         :key="item.value"
         type="button"
-        :class="{ active: activeSidebar === item.value }"
+        :class="{ active: isTriggerActive(item) }"
         :aria-label="item.name"
-        :aria-pressed="activeSidebar === item.value"
+        :aria-pressed="isTriggerActive(item)"
         :ref="el => setTriggerRef(item.value, el)"
         @click="triggerClick(item)"
       >
@@ -47,8 +52,12 @@ const show = ref(true)
 const maxHeight = ref(0)
 const isDark = computed(() => store.localConfig.isDark)
 const activeSidebar = computed(() => store.activeSidebar)
+const propertySidebarNames = new Set(['nodeStyle', 'baseStyle', 'structure', 'theme'])
+const isPropertyInspectorActive = computed(() => propertySidebarNames.has(activeSidebar.value))
 const isReadonly = computed(() => store.isReadonly)
 const canManageCollaborators = computed(() => store.canManageCollaborators)
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
+const readonlyHeaderSidebarNames = new Set(['outline', 'versionHistory'])
 const triggerRefs = new Map()
 
 const triggerList = computed(() => {
@@ -58,18 +67,40 @@ const triggerList = computed(() => {
   }
   if (isReadonly.value) {
     list = list.filter(item => isMindmapSidebarReadonlySafe(item.value))
+    if (viewportWidth.value > 760) {
+      list = list.filter(item => (
+        !readonlyHeaderSidebarNames.has(item.value)
+        || activeSidebar.value === item.value
+      ))
+    }
   }
   return list
 })
 
 function triggerClick(item) {
   if (isReadonly.value && !isMindmapSidebarReadonlySafe(item?.value)) return
-  if (activeSidebar.value === item.value) {
+  if (isTriggerActive(item)) {
     actions.setActiveSidebar(null)
   } else {
-    actions.setActiveSidebar(item.value)
+    const targetSidebar = item.value === 'nodeStyle'
+      ? resolveFormatSidebar()
+      : item.value
+    actions.setActiveSidebar(targetSidebar)
     nextTick(() => bus.emit('focusActiveSidebar'))
   }
+}
+
+function resolveFormatSidebar() {
+  const hasActiveNodes = (store.mindMap?.renderer?.activeNodeList || []).length > 0
+  if (hasActiveNodes) return 'nodeStyle'
+  return ['baseStyle', 'structure', 'theme'].includes(store.lastPropertySidebar)
+    ? store.lastPropertySidebar
+    : 'baseStyle'
+}
+
+function isTriggerActive(item) {
+  if (item?.value === 'nodeStyle') return isPropertyInspectorActive.value
+  return activeSidebar.value === item?.value
 }
 
 function setTriggerRef(name, element) {
@@ -85,9 +116,16 @@ function focusTrigger(name) {
 }
 
 function updateSize() {
-  const topMargin = 60
-  const bottomMargin = 60
-  maxHeight.value = window.innerHeight - topMargin - bottomMargin
+  viewportWidth.value = window.innerWidth
+  const editorShell = document.querySelector('.mindmap-edit-page')
+  const shellTop = Number.parseFloat(
+    editorShell
+      ? getComputedStyle(editorShell).getPropertyValue('--mindmap-shell-top')
+      : ''
+  )
+  const topMargin = (Number.isFinite(shellTop) ? shellTop : 80) + 24
+  const bottomMargin = 36
+  maxHeight.value = Math.max(0, window.innerHeight - topMargin - bottomMargin)
 }
 
 function onResize() {
@@ -119,7 +157,7 @@ onBeforeUnmount(() => {
 <style lang="less" scoped>
 .sidebarTriggerContainer {
   position: fixed;
-  top: calc(var(--mindmap-shell-top, 60px) + 12px);
+  top: calc(var(--mindmap-shell-top, 80px) + 12px);
   bottom: 18px;
   right: -72px;
   z-index: 2000;
@@ -158,7 +196,11 @@ onBeforeUnmount(() => {
   }
 
   &.hasActive {
-    right: 332px;
+    right: 360px;
+  }
+
+  &.hasInspector {
+    display: none;
   }
 
   .toggleShowBtn {
@@ -280,4 +322,5 @@ onBeforeUnmount(() => {
     }
   }
 }
+
 </style>

@@ -107,13 +107,13 @@ defineExpose({ show, open, close, bodyRef, getEl })
 <style lang="less" scoped>
 .sidebarContainer {
   position: fixed;
-  right: -320px;
-  top: var(--mindmap-shell-top, 60px);
+  right: -348px;
+  top: var(--mindmap-shell-top, 80px);
   bottom: 0;
-  width: 320px;
-  background-color: #fff;
+  width: 348px;
+  background-color: #fcfcfd;
   border-left: 1px solid #e2e5ea;
-  box-shadow: -10px 0 30px rgba(31, 35, 41, 0.07);
+  box-shadow: -4px 0 14px rgba(31, 35, 41, 0.035);
   display: flex;
   flex-direction: column;
   transition: right 0.25s ease;
@@ -208,6 +208,17 @@ defineExpose({ show, open, close, bodyRef, getEl })
       &:hover {
         background: #b0b3b8;
       }
+    }
+  }
+}
+
+@media (max-width: 420px) {
+  .sidebarContainer {
+    right: -100%;
+    width: min(100%, 348px);
+
+    &.show {
+      right: 0;
     }
   }
 }

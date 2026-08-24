@@ -55,8 +55,9 @@ test('公开分享和模板预览应用与编辑器一致的文档展示设置',
 })
 
 test('布局和主题元数据由编辑器按文件类型统一持久化', async () => {
-  const [editor, structure, theme, baseStyle] = await Promise.all([
+  const [editor, inspector, structure, theme, baseStyle] = await Promise.all([
     readFile(new URL('Edit.vue', componentRoot), 'utf8'),
+    readFile(new URL('PropertyInspector.vue', componentRoot), 'utf8'),
     readFile(new URL('Structure.vue', componentRoot), 'utf8'),
     readFile(new URL('Theme.vue', componentRoot), 'utf8'),
     readFile(new URL('BaseStyle.vue', componentRoot), 'utf8'),
@@ -69,8 +70,13 @@ test('布局和主题元数据由编辑器按文件类型统一持久化', async
   }
   assert.equal(
     (editor.match(/@document-meta-change="onDocumentMetaChange"/g) || []).length,
+    1,
+  )
+  assert.equal(
+    (inspector.match(/@document-meta-change="handleDocumentMetaChange\('(canvas|theme)', \$event\)"/g) || []).length,
     3,
   )
+  assert.match(inspector, /function handleDocumentMetaChange\(scope, payload\)[\s\S]*emit\('document-meta-change', payload\)/)
   assert.match(editor, /function onDocumentMetaChange\(patch\)/)
   assert.match(editor, /normalizedPatch = normalizeMindmapDocumentMetaPatch\(patch\)/)
   assert.match(editor, /if \(!props\.mindmapId\) \{\s*persistLocalWorkspace\(normalizedPatch\)\s*return/)

@@ -68,13 +68,13 @@ class MindMap extends Base {
                 this.getMarginX(layerIndex)
               : parent._node.left - this.getMarginX(layerIndex) - newNode.width
         }
-        if (!cur.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(cur)) {
           return true
         }
       },
       (cur, parent, isRoot, layerIndex) => {
         // 返回时计算节点的leftChildrenAreaHeight和rightChildrenAreaHeight，也就是左侧和右侧子节点所占的高度之和，包括外边距
-        if (!cur.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(cur)) {
           cur._node.leftChildrenAreaHeight = 0
           cur._node.rightChildrenAreaHeight = 0
           return
@@ -125,7 +125,11 @@ class MindMap extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (node.getData('expand') && node.children && node.children.length) {
+        if (
+          this.renderer.isNodeExpandedForLayout(node)
+          && node.children
+          && node.children.length
+        ) {
           let marginY = this.getMarginY(layerIndex + 1)
           let baseTop = node.top + node.height / 2 + marginY
           // 第一个子节点的top值 = 该节点中心的top值 - 子节点的高度之和的一半
@@ -153,7 +157,7 @@ class MindMap extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (!node.getData('expand')) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return
         }
         // 判断子节点所占的高度之和是否大于该节点自身，大于则需要调整位置

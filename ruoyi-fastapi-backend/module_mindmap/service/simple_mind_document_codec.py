@@ -88,13 +88,21 @@ def _stable_identifier(
     return text
 
 
-def _relation_uid(source_uid: str, target_uid: str) -> str:
-    raw_uid = f'{ASSOCIATIVE_RELATION_PREFIX}{source_uid}:{target_uid}'
+def normalize_relation_uid(relation_uid: str) -> str:
+    raw_uid = str(relation_uid)
+    if not raw_uid.startswith(ASSOCIATIVE_RELATION_PREFIX):
+        raise ValueError('脑图关联线缺少合法稳定 UID')
     if len(raw_uid) <= MAX_STABLE_UID_LENGTH:
         return raw_uid
     digest = hashlib.sha256(raw_uid.encode()).hexdigest()
     available_digest_length = MAX_STABLE_UID_LENGTH - len(ASSOCIATIVE_RELATION_PREFIX)
     return f'{ASSOCIATIVE_RELATION_PREFIX}{digest[:available_digest_length]}'
+
+
+def stable_relation_uid(source_uid: str, target_uid: str) -> str:
+    return normalize_relation_uid(
+        f'{ASSOCIATIVE_RELATION_PREFIX}{source_uid}:{target_uid}'
+    )
 
 
 def _clone(value: Any) -> Any:
@@ -564,7 +572,7 @@ class SimpleMindDocumentCodec:
         for order, target_value in enumerate(targets):
             target_uid = str(target_value)
             result.relations.append({
-                'relation_uid': _relation_uid(source_uid, target_uid),
+                'relation_uid': stable_relation_uid(source_uid, target_uid),
                 'relation_type': 'associative_line',
                 'source_uid': source_uid,
                 'target_uid': target_uid,

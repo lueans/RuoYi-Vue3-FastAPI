@@ -1,7 +1,11 @@
 const isObjectNode = node => Boolean(node && typeof node === 'object')
 
 const getExpandedChildren = node => {
-  if (node?.getData?.('expand') === false) return []
+  const isNodeExpandedForLayout = node?.mindMap?.renderer?.isNodeExpandedForLayout
+  const expanded = typeof isNodeExpandedForLayout === 'function'
+    ? isNodeExpandedForLayout.call(node.mindMap.renderer, node)
+    : node?.getData?.('expand') !== false
+  if (!expanded) return []
   return Array.isArray(node?.children) ? node.children : []
 }
 

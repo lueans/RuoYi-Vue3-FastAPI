@@ -11,7 +11,7 @@ export const MINDMAP_LIST_SORT_OPTIONS = Object.freeze({
 })
 
 export const DEFAULT_MINDMAP_LIST_PREFERENCES = Object.freeze({
-  viewMode: 'grid',
+  viewMode: 'table',
   sortKey: 'updated-desc',
 })
 
@@ -39,32 +39,54 @@ function resolveStorage(storage) {
 }
 
 export function readMindmapListPreferences(storage) {
+  return readMindmapListPreferenceState(storage).preferences
+}
+
+export function readMindmapListPreferenceState(storage) {
   const target = resolveStorage(storage)
-  if (!target?.getItem) return { ...DEFAULT_MINDMAP_LIST_PREFERENCES }
+  const fallback = {
+    preferences: { ...DEFAULT_MINDMAP_LIST_PREFERENCES },
+    hasExplicitViewPreference: false,
+  }
+  if (!target?.getItem) return fallback
   try {
     const raw = target.getItem(MINDMAP_LIST_PREFERENCE_KEY)
-    if (!raw) return { ...DEFAULT_MINDMAP_LIST_PREFERENCES }
+    if (!raw) return fallback
     const parsed = JSON.parse(raw)
-    if (parsed?.schemaVersion !== 1) return { ...DEFAULT_MINDMAP_LIST_PREFERENCES }
-    return normalizeMindmapListPreferences(parsed.values)
+    if (![1, 2].includes(parsed?.schemaVersion)) return fallback
+    return {
+      preferences: normalizeMindmapListPreferences(parsed.values),
+      // Version 1 predates responsive defaults, so its stored mode came from
+      // the user's workspace and must continue to win on every viewport.
+      hasExplicitViewPreference: parsed.schemaVersion === 1
+        || parsed.viewModeExplicit === true,
+    }
   } catch {
-    return { ...DEFAULT_MINDMAP_LIST_PREFERENCES }
+    return fallback
   }
 }
 
-export function writeMindmapListPreferences(preferences, storage) {
+export function writeMindmapListPreferences(preferences, storage, options = {}) {
   const target = resolveStorage(storage)
   if (!target?.setItem) return false
   const values = normalizeMindmapListPreferences(preferences)
   try {
     target.setItem(MINDMAP_LIST_PREFERENCE_KEY, JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      viewModeExplicit: options.viewModeExplicit !== false,
       values,
     }))
     return true
   } catch {
     return false
   }
+}
+
+export function resolveInitialMindmapListViewMode(preferenceState, isCompactViewport = false) {
+  if (preferenceState?.hasExplicitViewPreference) {
+    return normalizeMindmapListPreferences(preferenceState.preferences).viewMode
+  }
+  return isCompactViewport ? 'grid' : DEFAULT_MINDMAP_LIST_PREFERENCES.viewMode
 }
 
 export function resolveMindmapListSort(sortKey) {

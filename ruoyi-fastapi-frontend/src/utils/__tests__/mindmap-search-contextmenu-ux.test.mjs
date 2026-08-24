@@ -4,12 +4,24 @@ import test from 'node:test'
 
 const searchSourceUrl = new URL('../../components/MindMap/Search.vue', import.meta.url)
 const contextMenuSourceUrl = new URL('../../components/MindMap/Contextmenu.vue', import.meta.url)
+const renderSourceUrl = new URL(
+  '../../libs/simple-mind-map/src/core/render/Render.js',
+  import.meta.url,
+)
+const layoutBaseSourceUrl = new URL(
+  '../../libs/simple-mind-map/src/layouts/Base.js',
+  import.meta.url,
+)
+const mindMapNodeSourceUrl = new URL(
+  '../../libs/simple-mind-map/src/core/render/node/MindMapNode.js',
+  import.meta.url,
+)
 
 test('节点搜索区分加载、失败、空结果并支持继续加载', async () => {
   const source = await readFile(searchSourceUrl, 'utf8')
 
   assert.match(source, /v-show="show"/)
-  assert.match(source, /role="search"/)
+  assert.match(source, /:role="panelMode === 'filter' \? 'dialog' : 'search'"/)
   assert.match(source, /const SERVER_SEARCH_PAGE_SIZE = 100/)
   assert.match(source, /function loadMoreServerResults\(\)/)
   assert.match(source, /function retryServerSearch\(\)/)
@@ -78,8 +90,10 @@ test('搜索请求绑定脑图实例、文件和查询条件并在切换时失�
   assert.match(source, /props\.mindMap === mindMap/)
   assert.match(source, /Number\(props\.mindmapId\) === mindmapId/)
   assert.match(source, /getServerCriteriaKey\(\) === criteriaKey/)
-  assert.match(source, /close\(\{ mindMap: oldMm, restoreFocus: false \}\)/)
-  assert.match(source, /watch\(\(\) => props\.mindmapId,[\s\S]*close\(\{ restoreFocus: false \}\)/)
+  assert.match(source, /close\(\{ mindMap: oldMm, restoreFocus: false, forceReset: true \}\)/)
+  assert.match(source, /watch\(\(\) => props\.mindmapId,[\s\S]*close\(\{ restoreFocus: false, forceReset: true \}\)/)
+  assert.match(source, /onDocumentReplace\(\)[\s\S]*close\(\{ restoreFocus: false, forceReset: true \}\)/)
+  assert.match(source, /function resetSearchResults\(mindMap = props\.mindMap\)[\s\S]*restoreCanvasVisibility\(\{ mindMap \}\)/)
 })
 
 test('搜索替换在界面与核心插件边界都重新校验只读状态', async () => {
@@ -107,6 +121,97 @@ test('搜索输入临时暂停按键编辑并恢复用户原配置', async () =>
   assert.doesNotMatch(source, /enableAutoEnterTextEditWhenKeydown: true/)
   assert.match(source, /function close\(options = \{\}\)[\s\S]*?restoreAutoEnterTextEdit\(\)/)
   assert.match(source, /onBeforeUnmount\(\(\) => \{[\s\S]*?restoreAutoEnterTextEdit\(\)/)
+})
+
+test('节点搜索支持实时反馈并在任意焦点位置接管跨平台查找快捷键', async () => {
+  const source = await readFile(searchSourceUrl, 'utf8')
+
+  assert.match(source, /const LIVE_SEARCH_DELAY = 220/)
+  assert.match(source, /function scheduleLiveSearch\(keyword\)/)
+  assert.match(source, /liveSearchTimer = setTimeout\(\(\) => \{[\s\S]*startLocalSearch\(keyword\)/)
+  assert.match(source, /event\.ctrlKey \|\| event\.metaKey/)
+  assert.match(source, /window\.addEventListener\('keydown', handleGlobalSearchShortcut, true\)/)
+  assert.match(source, /window\.removeEventListener\('keydown', handleGlobalSearchShortcut, true\)/)
+})
+
+test('画布筛选从完整文档树计算命中节点并保留祖先路径', async () => {
+  const [source, mindMapNodeSource] = await Promise.all([
+    readFile(searchSourceUrl, 'utf8'),
+    readFile(mindMapNodeSourceUrl, 'utf8'),
+  ])
+
+  assert.match(source, /aria-label="画布节点筛选"/)
+  assert.match(source, /function applyCanvasFilter\(\)/)
+  assert.match(source, /function getDocumentFilterMatches\(keyword = searchText\.value\.trim\(\)\)/)
+  assert.match(source, /const root = props\.mindMap\?\.renderer\?\.renderTree/)
+  assert.match(source, /node\?\.group\?\.node\?\.textContent/)
+  assert.doesNotMatch(source, /syncRuntimeKeywordResults/)
+  assert.match(source, /function createDocumentTreeIndex\(root\)/)
+  assert.match(source, /parentUidByUid\.set\(uid, parentUid\)/)
+  assert.match(source, /uid = parentUidByUid\.get\(uid\) \?\? null/)
+  assert.match(source, /walkDocumentNodeTree\(root, visit\)/)
+  assert.match(source, /addClass\?\.\('smm-filter-hidden'\)/)
+  assert.match(source, /removeClass\?\.\('smm-filter-hidden'\)/)
+  assert.match(mindMapNodeSource, /line\.__smmFilterOwnerUid = String\(this\.uid\)/)
+  assert.match(mindMapNodeSource, /line\.__smmFilterTargetUid = String\(targetNode\.uid\)/)
+  assert.match(mindMapNodeSource, /line\.__smmFilterRenderVersion = lineRenderVersion/)
+  assert.match(source, /const ownerUid = line\?\.__smmFilterOwnerUid[\s\S]*?const targetUid = line\?\.__smmFilterTargetUid[\s\S]*?const lineRenderVersion = line\?\.__smmFilterRenderVersion/)
+  assert.match(source, /lineRenderVersion === node\._lineRenderVersion/)
+  assert.match(source, /isSharedBranchLine[\s\S]*?Boolean\(node\.children\?\.length\)[\s\S]*?visibleNodeUids\.has\(targetUid\)/)
+  assert.doesNotMatch(source, /node\.parent\._lines\?\.\[childIndex\]/)
+  assert.match(source, /setTransientVisibleNodeUids\?\.\(visibleNodeUids\)/)
+  assert.match(source, /clearTransientVisibleNodeUids\?\.\(clearElements\)/)
+  assert.match(source, /restoreCanvasVisibility\(\{ deactivate: false, relayout: false \}\)/)
+  assert.match(source, /mm\.on\('node_tree_render_end', reapplyCanvasFilter\)/)
+  assert.doesNotMatch(source, /renderer\?\.setData|mindMap\?\.setData/)
+  assert.match(source, /nodeHasSelectedTag\(node\)[\s\S]*Number\(tag\.tagId\) === tagId/)
+  assert.doesNotMatch(source, /searchResultList\.value\.map\(resolveResultRuntimeNode\)/)
+})
+
+test('画布筛选以临时可见集合局部刷新布局并对重复集合去重', async () => {
+  const [renderSource, layoutSource] = await Promise.all([
+    readFile(renderSourceUrl, 'utf8'),
+    readFile(layoutBaseSourceUrl, 'utf8'),
+  ])
+
+  assert.match(renderSource, /this\.transientVisibleNodeUids = null/)
+  assert.match(renderSource, /isSameTransientVisibleNodeUids\(nextNodeUids\)/)
+  assert.match(renderSource, /setTransientVisibleNodeUids\(nodeUids, callback\)/)
+  assert.match(renderSource, /this\.mindMap\.render\(callback, 'transient_node_filter'\)/)
+  assert.match(renderSource, /clearTransientVisibleNodeUids\(callback\)/)
+  assert.match(renderSource, /isNodeTransientlyVisible\(uid, isRoot = false\)/)
+  assert.match(renderSource, /isNodeExpandedForLayout\(node\)/)
+  assert.match(renderSource, /this\.transientVisibleNodeUids\.has\(String\(child\?\.data\?\.uid\)\)/)
+  assert.match(layoutSource, /else if \(this\.renderer\.isNodeTransientlyVisible\(newNode\.uid\)\)/)
+  assert.doesNotMatch(renderSource, /setTransientVisibleNodeUids[\s\S]{0,800}setData\(/)
+})
+
+test('筛选稀疏运行时树上的结构命令只按完整数据树 UID 修改节点', async () => {
+  const renderSource = await readFile(renderSourceUrl, 'utf8')
+
+  assert.match(renderSource, /upNode\(appointNode\)[\s\S]*?const nodeDataIndex = getNodeDataIndex\(node\)[\s\S]*?const previousNodeDataIndex = getNodeDataIndex\(previousNode\)/)
+  assert.match(renderSource, /downNode\(appointNode\)[\s\S]*?const nodeDataIndex = getNodeDataIndex\(node\)[\s\S]*?const nextNodeDataIndex = getNodeDataIndex\(nextNode\)/)
+  assert.match(renderSource, /moveUpOneLevel\(node\)[\s\S]*?const index = getNodeDataIndex\(node\)[\s\S]*?const parentIndex = getNodeDataIndex\(parent\)/)
+  assert.match(renderSource, /insertTo\(node, exist, dir = 'before'\)[\s\S]*?const nodeIndex = getNodeDataIndex\(item\)[\s\S]*?let existIndex = getNodeDataIndex\(exist\)/)
+  assert.doesNotMatch(renderSource, /nodeBorthers|existBorthers/)
+})
+
+test('筛选面板复刻飞书的条件行、增删清空与确认结构', async () => {
+  const source = await readFile(searchSourceUrl, 'utf8')
+
+  assert.match(source, /设置筛选条件/)
+  assert.match(source, /class="filterConditionRow"/)
+  assert.match(source, /placeholder="请选择运算符"/)
+  assert.match(source, /placeholder="请输入字段值"/)
+  assert.match(source, /function addFilterCondition\(\)/)
+  assert.match(source, /function removeFilterCondition\(index\)/)
+  assert.match(source, /function clearFilterConditions\(\)/)
+  assert.match(source, /function confirmFilterConditions\(\)/)
+  assert.match(source, /class="filterDialogActions"/)
+  assert.match(source, /const titleRows = activeRows\.filter\(row => row\.field === 'title'\)/)
+  assert.match(source, /const anyNodeRows = activeRows\.filter\(row => row\.field !== 'title'\)/)
+  assert.match(source, /isMindmapCaseTitleData\(data\)[\s\S]*?titleRows\.every/)
+  assert.match(source, /matchedCaseTitleNodes\.forEach\(caseTitleNode => \{[\s\S]*?walkDocumentNodeTree\(caseTitleNode/)
 })
 
 test('上下文菜单使用数据驱动定义、原生禁用和标准键盘导航', async () => {

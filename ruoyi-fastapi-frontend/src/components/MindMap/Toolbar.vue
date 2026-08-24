@@ -1,15 +1,23 @@
 <template>
-  <div ref="toolbarContainerRef" class="toolbarContainer" :class="{ isDark: isDark }">
+  <div
+    ref="toolbarContainerRef"
+    class="toolbarContainer"
+    :class="{ isDark: isDark, embedded: props.embedded }"
+  >
     <div class="toolbar" ref="toolbarRef" role="toolbar" aria-label="脑图编辑操作">
       <!-- Node operation buttons -->
       <div class="toolbarBlock" role="group" aria-label="节点操作">
         <div class="toolbarNodeBtnList">
-          <template v-for="item in horizontalList" :key="item">
+          <template v-for="(item, index) in horizontalList" :key="item">
             <el-tooltip :content="btnLabels[item]" placement="bottom" :show-after="300">
               <button
                 type="button"
                 class="toolbarBtn"
-                :class="{ disabled: isButtonDisabled(item), active: isButtonActive(item) }"
+                :class="{
+                  disabled: isButtonDisabled(item),
+                  active: isButtonActive(item),
+                  dividerBefore: index > 0 && ['back', 'painter'].includes(item)
+                }"
                 :disabled="isButtonDisabled(item)"
                 :aria-pressed="item === 'painter' ? isInPainter : undefined"
                 @click="executeToolbarItem(item)"
@@ -27,7 +35,7 @@
           :width="120"
           trigger="click"
           v-if="showMoreBtn"
-          :style="{ marginLeft: horizontalList.length > 0 ? '20px' : 0 }"
+          :style="{ marginLeft: horizontalList.length > 0 ? (props.embedded ? '2px' : '20px') : 0 }"
         >
           <template #reference>
             <button
@@ -61,11 +69,30 @@
                 <span class="text">{{ btnLabels[item] }}</span>
               </button>
             </template>
+            <div v-if="props.embedded" class="overflowFileOperations" role="group" aria-label="文件操作">
+              <button
+                type="button"
+                class="toolbarBtn"
+                :disabled="isReadonly"
+                @click="bus.emit('showImport')"
+              >
+                <span class="icon iconfont icondaoru"></span>
+                <span class="text">导入</span>
+              </button>
+              <button
+                type="button"
+                class="toolbarBtn"
+                @click="bus.emit('showExport')"
+              >
+                <span class="icon iconfont iconexport"></span>
+                <span class="text">导出</span>
+              </button>
+            </div>
           </div>
         </el-popover>
       </div>
       <!-- File operations block -->
-      <div class="toolbarBlock" role="group" aria-label="文件操作">
+      <div v-if="!props.embedded" class="toolbarBlock" role="group" aria-label="文件操作">
         <el-tooltip :content="btnLabels.import" placement="bottom" :show-after="300">
           <button type="button" class="toolbarBtn" :disabled="isReadonly" @click="bus.emit('showImport')">
             <span class="icon iconfont icondaoru"></span>
@@ -104,13 +131,20 @@ import { createLatestRequestTracker } from '@/utils/mindmap-async'
 import { isCurrentMindmapEventSource } from '@/utils/mindmap-event'
 import { selectLargestFittingToolbarCount } from '@/utils/mindmap-toolbar-layout'
 
+const props = defineProps({
+  embedded: {
+    type: Boolean,
+    default: false,
+  },
+})
+
 const btnLabels = {
-  back: '回退',
-  forward: '前进',
+  back: '撤销',
+  forward: '重做',
   painter: '格式刷',
-  siblingNode: '同级节点',
-  childNode: '子节点',
-  deleteNode: '删除节点',
+  siblingNode: '主题',
+  childNode: '子主题',
+  deleteNode: '删除',
   image: '图片',
   icon: '图标',
   link: '超链接',
@@ -118,7 +152,7 @@ const btnLabels = {
   note: '备注',
   tag: '标签',
   summary: '概要',
-  associativeLine: '关联线',
+  associativeLine: '联系',
   outerFrame: '外框',
   import: '导入',
   export: '导出',
@@ -143,21 +177,21 @@ const toolbarItemDefinitions = Object.freeze({
 })
 
 const defaultBtnList = [
+  'siblingNode',
+  'childNode',
+  'associativeLine',
+  'summary',
+  'outerFrame',
+  'image',
   'back',
   'forward',
   'painter',
-  'siblingNode',
-  'childNode',
   'deleteNode',
-  'image',
   'icon',
   'link',
   'attachment',
   'note',
   'tag',
-  'summary',
-  'associativeLine',
-  'outerFrame',
 ]
 
 const toolbarContainerRef = ref(null)
@@ -259,10 +293,11 @@ async function computeToolbarShow() {
   const requestId = toolbarLayoutRequests.begin()
   const containerWidth = getToolbarContainerWidth()
   const all = [...btnList.value]
+  const maxVisibleCount = props.embedded ? Math.min(8, all.length) : all.length
   const candidateWidths = []
 
   popoverShow.value = false
-  for (let candidateCount = 0; candidateCount <= all.length; candidateCount += 1) {
+  for (let candidateCount = 0; candidateCount <= maxVisibleCount; candidateCount += 1) {
     if (!isToolbarLayoutCurrent(requestId, toolbar)) return false
 
     horizontalList.value = all.slice(0, candidateCount)
@@ -362,6 +397,133 @@ onBeforeUnmount(() => {
   right: 0;
   z-index: 100;
   pointer-events: none;
+
+  &.embedded {
+    position: static;
+    inset: auto;
+    z-index: auto;
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+
+    .toolbar {
+      min-width: 0;
+      padding: 0;
+      justify-content: center;
+
+      .toolbarBlock {
+        gap: 0;
+        margin-right: 7px;
+        padding: 0 8px 0 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
+
+        &::after {
+          content: '';
+          position: absolute;
+          top: 50%;
+          right: 0;
+          width: 1px;
+          height: 28px;
+          background: #e1e4e8;
+          transform: translateY(-50%);
+        }
+
+        &:last-of-type {
+          margin-right: 0;
+          padding-right: 0;
+
+          &::after {
+            display: none;
+          }
+        }
+      }
+
+      .toolbarBtn {
+        position: relative;
+        min-width: 50px;
+        height: 58px;
+        margin-right: 1px;
+        padding: 7px 7px 5px;
+        border-radius: 8px;
+        color: #646a73;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s ease, color 0.15s ease;
+
+        &:hover:not(.disabled) {
+          color: #1f2329;
+          background: #f0f2f5;
+
+          .icon {
+            background: transparent;
+          }
+        }
+
+        &.active {
+          color: #3370ff;
+          background: #edf4ff;
+
+          .icon {
+            background: transparent;
+          }
+        }
+
+        &.disabled,
+        &:disabled {
+          color: #c5c8ce;
+        }
+
+        .icon {
+          height: 21px;
+          padding: 0;
+          border: 0;
+          background: transparent;
+          color: inherit;
+          font-size: 19px;
+        }
+
+        .text {
+          margin-top: 4px;
+          color: inherit;
+          font-size: 11px;
+          line-height: 13px;
+          white-space: nowrap;
+        }
+
+        &.dividerBefore {
+          margin-left: 9px;
+
+          &::before {
+            content: '';
+            position: absolute;
+            top: 15px;
+            bottom: 15px;
+            left: -5px;
+            width: 1px;
+            background: #e1e4e8;
+          }
+        }
+      }
+    }
+
+    &.isDark .toolbar {
+      .toolbarBlock {
+        background: transparent;
+        border-color: transparent;
+
+        &::after {
+          background: #3d4046;
+        }
+      }
+
+      .toolbarBtn:hover:not(.disabled) {
+        background: rgba(255, 255, 255, 0.07);
+      }
+    }
+  }
 
   &.isDark {
     .toolbar {
@@ -511,6 +673,12 @@ onBeforeUnmount(() => {
         overflow: hidden;
         text-overflow: ellipsis;
       }
+    }
+
+    .overflowFileOperations {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #eef0f3;
     }
   }
 }

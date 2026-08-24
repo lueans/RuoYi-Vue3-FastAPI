@@ -52,6 +52,25 @@ export function buildMindmapSearchHighlightSegments(value, keyword, options = {}
   return segments.length > 0 ? segments : [{ text: source, match: false }]
 }
 
+export function matchesMindmapFilterText(value, operator, target) {
+  const source = String(value ?? '')
+  const needle = String(target ?? '')
+  if (operator === 'equals') return source === needle
+  if (operator === 'notContains') return !source.includes(needle)
+  if (operator === 'notEquals') return source !== needle
+  return source.includes(needle)
+}
+
+export function isMindmapCaseTitleData(data) {
+  const tags = Array.isArray(data?.tag) ? data.tag : []
+  return tags.some(tag => {
+    const text = typeof tag === 'object' && tag !== null
+      ? tag.text ?? tag.name ?? ''
+      : tag
+    return String(text ?? '').trim() === '用例标题'
+  })
+}
+
 export function resolveMindmapSearchNavigationIndex(currentIndex, resultCount, key) {
   const count = Number(resultCount)
   if (!Number.isSafeInteger(count) || count <= 0) return -1

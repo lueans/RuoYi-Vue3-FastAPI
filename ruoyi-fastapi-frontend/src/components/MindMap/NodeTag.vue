@@ -1,6 +1,15 @@
 <template>
-  <el-dialog v-model="dialogVisible" :title="dialogTitle" width="min(560px, calc(100vw - 32px))" :close-on-click-modal="false"
-    @open="onOpen" @close="onClose" append-to-body>
+  <el-dialog
+    v-model="dialogVisible"
+    class="mindmap-node-tag-dialog"
+    :title="dialogTitle"
+    width="min(560px, calc(100vw - 32px))"
+    :z-index="4200"
+    :close-on-click-modal="false"
+    append-to-body
+    @open="onOpen"
+    @close="onClose"
+  >
     <el-alert
       v-if="targetCount > 1"
       :title="`保存后将用当前标签集合覆盖打开弹窗时选中的 ${targetCount} 个节点；各节点原有差异标签会被替换`"
@@ -626,5 +635,26 @@ onBeforeUnmount(() => {
   color: #999;
   padding: 12px 0;
   font-size: 13px;
+}
+</style>
+
+<style>
+.el-dialog.mindmap-node-tag-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 32px);
+  margin-top: max(16px, 6vh) !important;
+  margin-bottom: 16px;
+}
+
+.mindmap-node-tag-dialog .el-dialog__header,
+.mindmap-node-tag-dialog .el-dialog__footer {
+  flex: none;
+}
+
+.mindmap-node-tag-dialog .el-dialog__body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 </style>

@@ -1,6 +1,7 @@
 <template>
   <div
     class="editContainer"
+    :class="{ hasPropertyInspector }"
     ref="editContainerRef"
     @dragenter.stop.prevent="onDragenter"
     @dragleave.stop.prevent
@@ -17,20 +18,9 @@
     ></div>
     <Navigator v-if="mindMap" :mindMap="mindMap" />
     <OutlineSidebar v-if="mindMap && activeSidebar === 'outline'" :mindMap="mindMap" />
-    <MmStyle v-if="mindMap && !isZenMode && activeSidebar === 'nodeStyle'" :mindMap="mindMap" />
-    <BaseStyle
-      v-if="mindMap && activeSidebar === 'baseStyle'"
-      :mindMap="mindMap"
-      @document-meta-change="onDocumentMetaChange"
-    />
     <AssociativeLineStyle v-if="mindMap" :mindMap="mindMap" />
-    <Theme
-      v-if="mindMap && activeSidebar === 'theme'"
-      :mindMap="mindMap"
-      @document-meta-change="onDocumentMetaChange"
-    />
-    <Structure
-      v-if="mindMap && activeSidebar === 'structure'"
+    <PropertyInspector
+      v-if="mindMap && hasPropertyInspector"
       :mindMap="mindMap"
       @document-meta-change="onDocumentMetaChange"
     />
@@ -158,10 +148,7 @@ import Contextmenu from './Contextmenu.vue'
 import Navigator from './Navigator.vue'
 import Search from './Search.vue'
 import SidebarTrigger from './SidebarTrigger.vue'
-import MmStyle from './Style.vue'
-import BaseStyle from './BaseStyle.vue'
-import Theme from './Theme.vue'
-import Structure from './Structure.vue'
+import PropertyInspector from './PropertyInspector.vue'
 import ShortcutKey from './ShortcutKey.vue'
 import OutlineSidebar from './OutlineSidebar.vue'
 import NodeIconSidebar from './NodeIconSidebar.vue'
@@ -225,6 +212,7 @@ const saveStatus = ref('idle') // idle | pending | saving | retrying | syncing |
 let saveStatusTimer = null
 const AUTO_SAVE_DELAY = 2000
 const DRAFT_SAVE_DELAY = 500
+const CLOUD_EXIT_MAX_PASSES = 3
 const SAVE_RETRY_DELAYS = [2000, 5000, 10000, 30000, 60000]
 const AUTHORITATIVE_RELOAD_RETRY_DELAYS = [2000, 5000, 10000, 30000]
 let dataChangeDetailHandler = null
@@ -262,6 +250,7 @@ let saveRetryAttempt = 0
 let retryNoticeShown = false
 let localDraftFailureNoticeShown = false
 let crossNodeOperationSnapshot = null
+let authoritativeCollaborationResetRequired = false
 
 const documentMetaBuffer = createMindmapDocumentMetaBuffer((meta) => {
   yjsSync?.syncDocumentMeta(meta)
@@ -459,6 +448,10 @@ function clearRestoredDraft() {
   clearDraftRecord(record)
 }
 
+function requestAuthoritativeCollaborationReset() {
+  authoritativeCollaborationResetRequired = true
+}
+
 function persistLocalDraftBeforeUnload() {
   if (terminalState || !canUseLocalDraft() || !mindMap.value || !hasUnsavedChanges()) return false
   const draftChangeVersion = draftProtection.beginPersist()
@@ -530,7 +523,10 @@ async function resolveLocalDraft(serverDocument, signal) {
       return draft.document
     } catch (action) {
       if (sessionCancelled(signal)) return null
-      if (action === 'cancel') clearDraftRecord(draft)
+      if (action === 'cancel') {
+        clearDraftRecord(draft)
+        requestAuthoritativeCollaborationReset()
+      }
       return null
     } finally {
       localDraftDialogOpen = false
@@ -559,7 +555,10 @@ async function resolveLocalDraft(serverDocument, signal) {
     }
   } catch (action) {
     if (sessionCancelled(signal)) return null
-    if (action === 'cancel') clearDraftRecord(draft)
+    if (action === 'cancel') {
+      clearDraftRecord(draft)
+      requestAuthoritativeCollaborationReset()
+    }
   } finally {
     localDraftDialogOpen = false
   }
@@ -649,7 +648,10 @@ function setupTextEditExitDetection() {
 
 function createYjsSyncInstance() {
   let documentPrepareFailureNotified = false
+  const preferAuthoritativeDocument = authoritativeCollaborationResetRequired
+  authoritativeCollaborationResetRequired = false
   return new YjsMindmapSync(props.mindmapId, mindMap.value, contentRevision, {
+    preferAuthoritativeDocument,
     user: {
       id: userStore.id,
       name: userStore.nickName || userStore.name,
@@ -726,9 +728,16 @@ function createYjsSyncInstance() {
 
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const activeSidebar = computed(() => store.activeSidebar)
+const propertySidebarNames = new Set(['nodeStyle', 'baseStyle', 'structure', 'theme'])
+const hasPropertyInspector = computed(() => propertySidebarNames.has(activeSidebar.value))
 const openNodeRichText = computed(() => store.localConfig.openNodeRichText)
 const isShowScrollbar = computed(() => store.localConfig.isShowScrollbar)
 const useLeftKeySelectionRightKeyDrag = computed(() => store.localConfig.useLeftKeySelectionRightKeyDrag)
+
+watch(hasPropertyInspector, async () => {
+  await nextTick()
+  mindMap.value?.resize?.()
+})
 
 // All events to forward from mindMap instance to bus
 const forwardEvents = [
@@ -888,6 +897,9 @@ async function initMindMap(signal) {
         contentStateMessage: data.contentStateMessage,
         status: data.status,
         description: data.description || '',
+        nodeCount: data.nodeCount,
+        versionCount: data.versionCount,
+        updateTime: data.updateTime,
       })
       emit('name-change', data.name)
     } catch (error) {
@@ -1894,6 +1906,7 @@ async function performContentConflictResolution(localFullData, conflictData) {
     clearSaveRetryState()
     clearLocalDraft()
     clearRestoredDraft()
+    requestAuthoritativeCollaborationReset()
     onYjsReinit(data.nodeTree || defaultData)
     setSaveStatus('saved')
     ElMessage.success('已加载服务器最新内容，本地冲突副本已下载')
@@ -2007,6 +2020,47 @@ async function flushBeforeLeave() {
     },
     persistLocalBackup: persistLocalDraftBeforeUnload,
   })
+}
+
+async function prepareForCloudExit() {
+  if (terminalState || isReadonly.value || !props.mindmapId) return true
+
+  for (let pass = 0; pass < CLOUD_EXIT_MAX_PASSES; pass += 1) {
+    // 文本、关联线等浮层编辑器只有在关闭时才会把最终值提交到脑图模型，
+    // 必须先提交，再判断是否存在需要上传的修改。
+    commitActiveEditorsBeforeTermination()
+    await nextTick()
+
+    if (await flushBeforeLeave() !== true) return false
+
+    clearTimeout(draftSaveTimer)
+    const clearBeforeUpdatedAt = nextDraftUpdatedAt()
+    await draftWriteQueue
+
+    // 用户可能在离开守卫等待网络或 IndexedDB 时继续编辑。新修改必须再次
+    // 保存到云端，不能被本轮缓存清理当成已经提交的数据。
+    if (hasUnsavedChanges()) continue
+
+    const restoredDraftToClear = restoredDraftRecord
+    await removeMindmapDraft(userStore.id, props.mindmapId, {
+      beforeUpdatedAt: clearBeforeUpdatedAt,
+      sessionId: draftSessionId,
+    })
+    if (restoredDraftToClear?.key) {
+      await removeMindmapDraft(userStore.id, props.mindmapId, {
+        key: restoredDraftToClear.key,
+        beforeUpdatedAt: restoredDraftToClear.updatedAt,
+      })
+    }
+    if (hasUnsavedChanges()) continue
+
+    if (restoredDraftRecord === restoredDraftToClear) restoredDraftRecord = null
+    draftProtection.markClean()
+    return true
+  }
+
+  persistLocalDraftBeforeUnload()
+  return false
 }
 
 function onExecCommand(...args) {
@@ -2260,6 +2314,7 @@ defineExpose({
   getLocalDraftProtectionState: () => draftProtection.getState(),
   hasUnsavedChanges,
   flushBeforeLeave,
+  prepareForCloudExit,
   manualSave,
   saveStatus,
   saveRecoveryKind,
@@ -2270,6 +2325,8 @@ defineExpose({
 
 <style lang="scss" scoped>
 .editContainer {
+  --mindmap-inspector-width: 348px;
+  --mindmap-inspector-compact-width: 324px;
   position: relative;
   flex: 1;
   overflow: hidden;
@@ -2277,6 +2334,12 @@ defineExpose({
   .mindMapContainer {
     width: 100%;
     height: 100%;
+  }
+
+  &.hasPropertyInspector {
+    .mindMapContainer {
+      width: calc(100% - var(--mindmap-inspector-width));
+    }
   }
 
   .dragMask {
@@ -2296,6 +2359,22 @@ defineExpose({
       font-weight: bold;
       font-size: 16px;
       color: #333;
+    }
+  }
+}
+
+@media (max-width: 1180px) {
+  .editContainer.hasPropertyInspector {
+    .mindMapContainer {
+      width: calc(100% - var(--mindmap-inspector-compact-width));
+    }
+  }
+}
+
+@media (max-width: 720px) {
+  .editContainer.hasPropertyInspector {
+    .mindMapContainer {
+      width: 100%;
     }
   }
 }

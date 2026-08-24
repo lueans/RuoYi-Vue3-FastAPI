@@ -6,7 +6,9 @@ import {
   DEFAULT_MINDMAP_LIST_PREFERENCES,
   MINDMAP_LIST_PREFERENCE_KEY,
   normalizeMindmapListPreferences,
+  readMindmapListPreferenceState,
   readMindmapListPreferences,
+  resolveInitialMindmapListViewMode,
   resolveMindmapListSort,
   writeMindmapListPreferences,
 } from '../mindmap-list-preferences.js'
@@ -46,11 +48,42 @@ test('file workspace preferences are versioned, normalized and storage-failure s
   const storage = new MemoryStorage()
   assert.equal(writeMindmapListPreferences({ viewMode: 'table', sortKey: 'name-asc' }, storage), true)
   assert.deepEqual(readMindmapListPreferences(storage), { viewMode: 'table', sortKey: 'name-asc' })
+  assert.equal(readMindmapListPreferenceState(storage).hasExplicitViewPreference, true)
   assert.deepEqual(resolveMindmapListSort('name-asc'), { sortField: 'name', sortOrder: 'asc' })
 
   storage.setItem(MINDMAP_LIST_PREFERENCE_KEY, '{broken')
   assert.deepEqual(readMindmapListPreferences(storage), DEFAULT_MINDMAP_LIST_PREFERENCES)
   assert.equal(writeMindmapListPreferences({}, { setItem() { throw new Error('quota') } }), false)
+})
+
+test('compact workspace defaults to cards until the user explicitly chooses a view', () => {
+  const storage = new MemoryStorage()
+  const initialState = readMindmapListPreferenceState(storage)
+  assert.equal(resolveInitialMindmapListViewMode(initialState, true), 'grid')
+  assert.equal(resolveInitialMindmapListViewMode(initialState, false), 'table')
+
+  assert.equal(writeMindmapListPreferences(
+    { viewMode: 'grid', sortKey: 'name-asc' },
+    storage,
+    { viewModeExplicit: false },
+  ), true)
+  const responsiveState = readMindmapListPreferenceState(storage)
+  assert.equal(responsiveState.hasExplicitViewPreference, false)
+  assert.equal(resolveInitialMindmapListViewMode(responsiveState, false), 'table')
+
+  assert.equal(writeMindmapListPreferences(
+    { viewMode: 'table', sortKey: 'name-asc' },
+    storage,
+    { viewModeExplicit: true },
+  ), true)
+  const explicitState = readMindmapListPreferenceState(storage)
+  assert.equal(resolveInitialMindmapListViewMode(explicitState, true), 'table')
+
+  storage.setItem(MINDMAP_LIST_PREFERENCE_KEY, JSON.stringify({
+    schemaVersion: 1,
+    values: { viewMode: 'grid', sortKey: 'updated-desc' },
+  }))
+  assert.equal(readMindmapListPreferenceState(storage).hasExplicitViewPreference, true)
 })
 
 test('grid workspace exposes accessible cards, complete actions and responsive layouts', async () => {
@@ -62,6 +95,8 @@ test('grid workspace exposes accessible cards, complete actions and responsive l
   assert.match(listPage, /<MindmapFileCard/)
   assert.match(listPage, /aria-label="脑图展示方式"/)
   assert.match(listPage, /:aria-pressed="viewMode === 'grid'"/)
+  assert.match(listPage, /resolveInitialMindmapListViewMode\([\s\S]*?matchMedia\?\.\('\(max-width: 760px\)'\)/)
+  assert.match(listPage, /function setViewMode\(nextViewMode\) \{[\s\S]*?hasExplicitViewPreference\.value = true[\s\S]*?nextViewMode === viewMode\.value[\s\S]*?persistListPreferences\(\)/)
   assert.match(listPage, /@selection-change="selected => handleCardSelection\(item, selected\)"/)
   assert.match(listPage, /grid-template-columns: repeat\(3, minmax\(230px, 1fr\)\)/)
   assert.match(listPage, /grid-template-columns: minmax\(0, 1fr\)/)

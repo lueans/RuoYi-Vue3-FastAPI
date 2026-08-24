@@ -132,6 +132,47 @@ test('同一脑图的多个编辑窗口使用独立草稿并可精确恢复删�
   }
 })
 
+test('云端退出清理同一脑图的旧窗口草稿但保留清理期间的新草稿', async () => {
+  const previousStorage = globalThis.localStorage
+  const previousIndexedDb = globalThis.indexedDB
+  globalThis.localStorage = new MemoryStorage()
+  globalThis.indexedDB = undefined
+  try {
+    await saveMindmapDraft({
+      userId: 7,
+      mindmapId: 108,
+      sessionId: 'old-window-a',
+      contentRevision: 3,
+      updatedAt: 100,
+      document: { root: { data: { text: '旧窗口 A' }, children: [] } },
+    })
+    await saveMindmapDraft({
+      userId: 7,
+      mindmapId: 108,
+      sessionId: 'old-window-b',
+      contentRevision: 3,
+      updatedAt: 120,
+      document: { root: { data: { text: '旧窗口 B' }, children: [] } },
+    })
+    await saveMindmapDraft({
+      userId: 7,
+      mindmapId: 108,
+      sessionId: 'new-window',
+      contentRevision: 4,
+      updatedAt: 160,
+      document: { root: { data: { text: '清理期间的新草稿' }, children: [] } },
+    })
+
+    await removeMindmapDraft(7, 108, { beforeUpdatedAt: 150 })
+
+    const drafts = await listMindmapDrafts(7)
+    assert.deepEqual(drafts.map(item => item.name), ['清理期间的新草稿'])
+  } finally {
+    globalThis.localStorage = previousStorage
+    globalThis.indexedDB = previousIndexedDb
+  }
+})
+
 test('备份文件名拒绝路径字符且序列化只接受脑图对象', () => {
   assert.equal(
     createMindmapBackupFileName({ prefix: '../冲突:副本', mindmapId: '1/2', timestamp: 42 }),
@@ -386,6 +427,26 @@ test('草稿中心把指定记录键传给编辑器并只删除该编辑窗口�
   assert.match(pageSource, /nextDraftKey === requestedDraftKey\.value/)
   assert.match(editorSource, /getMindmapDraft\(userStore\.id, props\.mindmapId, \{\s*key: props\.draftKey \|\| undefined/)
   assert.match(editorSource, /clearDraftRecord\(draft\)/)
+})
+
+test('明确使用云端版本会让新协作会话替换旧缓存而不是再次合入', async () => {
+  const editorSource = await readFile(
+    new URL('../../components/MindMap/Edit.vue', import.meta.url),
+    'utf8',
+  )
+  const draftBlock = editorSource.match(
+    /async function resolveLocalDraft[\s\S]*?function recordContentOperations/,
+  )?.[0] || ''
+  const createSyncBlock = editorSource.match(
+    /function createYjsSyncInstance[\s\S]*?const isZenMode/,
+  )?.[0] || ''
+  const conflictBlock = editorSource.match(
+    /async function performContentConflictResolution[\s\S]*?async function manualSave/,
+  )?.[0] || ''
+
+  assert.match(draftBlock, /action === 'cancel'[\s\S]*?requestAuthoritativeCollaborationReset\(\)/)
+  assert.match(createSyncBlock, /preferAuthoritativeDocument/)
+  assert.match(conflictBlock, /requestAuthoritativeCollaborationReset\(\)[\s\S]*?onYjsReinit/)
 })
 
 test('固定脑图导航具备原生键盘语义与清晰焦点样式', async () => {

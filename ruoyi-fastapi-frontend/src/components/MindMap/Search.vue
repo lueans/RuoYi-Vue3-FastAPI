@@ -3,11 +3,63 @@
     v-show="show"
     ref="searchContainerRef"
     class="searchContainer"
-    :class="{ isDark: isDark }"
-    role="search"
-    aria-label="搜索脑图节点"
+    :class="{ isDark: isDark, filterDialog: panelMode === 'filter' }"
+    :role="panelMode === 'filter' ? 'dialog' : 'search'"
+    :aria-modal="panelMode === 'filter' ? 'false' : undefined"
+    :aria-label="panelMode === 'filter' ? '设置筛选条件' : '搜索脑图节点'"
     @keydown.esc.stop="close()"
   >
+    <template v-if="panelMode === 'filter'">
+      <header class="filterDialogHeader">
+        <h2>设置筛选条件</h2>
+        <button type="button" aria-label="关闭筛选条件" @click="close()">
+          <el-icon><Close /></el-icon>
+        </button>
+      </header>
+      <div class="filterConditionList">
+        <div v-for="(row, index) in filterRows" :key="row.id" class="filterConditionRow">
+          <el-select v-model="row.field" aria-label="筛选字段" size="small">
+            <el-option label="用例标题" value="title" />
+            <el-option label="任意节点名称" value="any" />
+          </el-select>
+          <el-select v-model="row.operator" aria-label="筛选运算符" size="small" placeholder="请选择运算符">
+            <el-option label="包含" value="contains" />
+            <el-option label="等于" value="equals" />
+            <el-option label="不包含" value="notContains" />
+            <el-option label="不等于" value="notEquals" />
+          </el-select>
+          <el-input
+            v-model="row.value"
+            aria-label="筛选目标值"
+            placeholder="请输入字段值"
+            maxlength="200"
+            size="small"
+            @keyup.enter.stop="confirmFilterConditions"
+          />
+          <el-button
+            class="removeConditionButton"
+            text
+            type="danger"
+            circle
+            :aria-label="`删除第 ${index + 1} 个筛选条件`"
+            @click="removeFilterCondition(index)"
+          >
+            <el-icon><RemoveFilled /></el-icon>
+          </el-button>
+        </div>
+      </div>
+      <footer class="filterDialogFooter">
+        <el-button class="addConditionButton" size="small" @click="addFilterCondition">
+          <el-icon><CirclePlusFilled /></el-icon>
+          添加条件
+        </el-button>
+        <div class="filterDialogActions">
+          <el-button size="small" @click="clearFilterConditions">清空筛选条件</el-button>
+          <el-button type="primary" size="small" @click="confirmFilterConditions">确认</el-button>
+        </div>
+      </footer>
+    </template>
+    <template v-else>
     <button class="closeBtnBox" type="button" aria-label="关闭搜索" @click="close()">
       <el-icon><Close /></el-icon>
     </button>
@@ -64,6 +116,21 @@
       >
         {{ currentIndex }} / {{ total }}
       </div>
+    </div>
+    <div class="canvasFilterBar" role="group" aria-label="画布节点筛选">
+      <el-button
+        size="small"
+        :type="filterActive ? 'primary' : 'default'"
+        :disabled="!hasFilterCriteria"
+        :aria-pressed="filterActive"
+        @click="toggleCanvasFilter"
+      >
+        <el-icon><Filter /></el-icon>
+        {{ filterActive ? '退出筛选' : '筛选画布' }}
+      </el-button>
+      <span :class="{ active: filterActive }">
+        {{ filterActive ? `已显示 ${filteredMatchCount} 个匹配节点及其路径` : '仅保留匹配节点及其路径' }}
+      </span>
     </div>
     <el-input
       v-if="showReplaceInput && !serverSearchMode"
@@ -150,11 +217,12 @@
         <span class="text">暂无结果</span>
       </div>
     </div>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { Close, Edit, Loading, Search } from '@element-plus/icons-vue'
+import { CirclePlusFilled, Close, Edit, Filter, Loading, RemoveFilled, Search } from '@element-plus/icons-vue'
 import bus from './useEventBus'
 import { store } from './useStore'
 import { getTagSuggestions } from '@/api/mindmap/tag'
@@ -162,6 +230,8 @@ import { searchMindmapNodes } from '@/api/mindmap/mindmap'
 import {
   buildMindmapSearchHighlightSegments,
   buildMindmapTagFilterOptions,
+  isMindmapCaseTitleData,
+  matchesMindmapFilterText,
   resolveMindmapSearchNavigationIndex,
   resolveMindmapSearchResultListHeight,
 } from '@/utils/mindmap-search'
@@ -175,6 +245,19 @@ const isDark = computed(() => store.localConfig.isDark)
 const isReadonly = computed(() => store.isReadonly)
 
 const show = ref(false)
+const panelMode = ref('search')
+let filterRowSequence = 2
+const createFilterRow = (field = 'any') => ({
+  id: ++filterRowSequence,
+  field,
+  operator: 'contains',
+  value: '',
+})
+const filterRows = ref([
+  { id: 1, field: 'title', operator: 'contains', value: '' },
+  { id: 2, field: 'any', operator: 'contains', value: '' },
+])
+const confirmedFilterRows = ref([])
 const searchText = ref('')
 const replaceText = ref('')
 const showReplaceInput = ref(false)
@@ -198,6 +281,8 @@ const searching = ref(false)
 const loadingMore = ref(false)
 const searchError = ref('')
 const serverPageNum = ref(0)
+const filterActive = ref(false)
+const filteredMatchCount = ref(0)
 let searchRequestId = 0
 let tagOptionsRequestId = 0
 let focusReturnTarget = null
@@ -207,11 +292,15 @@ let componentAlive = true
 let activeServerCriteriaKey = ''
 let activeLocalKeyword = ''
 let searchPanelResizeObserver = null
+let liveSearchTimer = null
+const filteredCanvasElements = new Set()
 
 const SERVER_SEARCH_PAGE_SIZE = 100
+const LIVE_SEARCH_DELAY = 220
 const hasMoreServerResults = computed(() => (
   serverSearchMode.value && searchResultList.value.length < total.value
 ))
+const hasFilterCriteria = computed(() => Boolean(searchText.value.trim() || selectedTagId.value))
 const activeSearchResultId = computed(() => {
   const index = currentIndex.value - 1
   return index >= 0 && index < searchResultList.value.length
@@ -253,6 +342,263 @@ function activateSearchResult(index, { focus = false } = {}) {
   return true
 }
 
+function setCanvasElementFiltered(element, hidden) {
+  if (!element) return
+  if (hidden) {
+    element.addClass?.('smm-filter-hidden')
+    filteredCanvasElements.add(element)
+  } else {
+    element.removeClass?.('smm-filter-hidden')
+    filteredCanvasElements.delete(element)
+  }
+}
+
+function clearFilteredCanvasElements() {
+  filteredCanvasElements.forEach(element => element?.removeClass?.('smm-filter-hidden'))
+  filteredCanvasElements.clear()
+}
+
+function restoreCanvasVisibility({
+  deactivate = true,
+  relayout = true,
+  mindMap = props.mindMap,
+} = {}) {
+  filteredMatchCount.value = 0
+  if (deactivate) filterActive.value = false
+  const clearElements = () => clearFilteredCanvasElements()
+  const relayoutScheduled = relayout
+    && mindMap?.renderer?.clearTransientVisibleNodeUids?.(clearElements)
+  if (!relayoutScheduled) clearElements()
+}
+
+function walkRuntimeNodeTree(root, visit) {
+  if (!root || typeof visit !== 'function') return
+  const visited = new WeakSet()
+  const stack = [root]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (!node || typeof node !== 'object' || visited.has(node)) continue
+    visited.add(node)
+    visit(node)
+    const children = Array.isArray(node.children) ? node.children : []
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index])
+    }
+  }
+}
+
+function walkDocumentNodeTree(root, visit) {
+  if (!root || typeof visit !== 'function') return
+  const visited = new WeakSet()
+  const stack = [{ node: root, parentUid: null }]
+  while (stack.length > 0) {
+    const { node, parentUid } = stack.pop()
+    if (!node || typeof node !== 'object' || visited.has(node)) continue
+    visited.add(node)
+    visit(node, parentUid)
+    const nodeUid = getMindmapNodeUid(node)
+    const children = Array.isArray(node?.nodeData?.children)
+      ? node.nodeData.children
+      : (Array.isArray(node.children) ? node.children : [])
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push({ node: children[index], parentUid: nodeUid })
+    }
+  }
+}
+
+function getMindmapNodeData(node) {
+  return node?.nodeData?.data || node?.data || {}
+}
+
+function getMindmapNodeUid(node) {
+  const uid = node?.uid ?? getMindmapNodeData(node).uid
+  return uid === undefined || uid === null ? null : String(uid)
+}
+
+function getMindmapNodeText(node) {
+  const data = getMindmapNodeData(node)
+  const renderedText = String(node?.group?.node?.textContent ?? '').trim()
+  if (renderedText) return renderedText
+  const rawText = String(data.text ?? '')
+  if (!data.richText) return rawText
+  const template = document.createElement('template')
+  template.innerHTML = rawText
+  return template.content.textContent || ''
+}
+
+function nodeHasSelectedTag(node) {
+  const tagId = Number(selectedTagId.value)
+  if (!Number.isSafeInteger(tagId) || tagId <= 0) return true
+  const tags = Array.isArray(getMindmapNodeData(node).tag)
+    ? getMindmapNodeData(node).tag
+    : []
+  return tags.some(tag => (
+    typeof tag === 'object' && tag !== null && Number(tag.tagId) === tagId
+  ))
+}
+
+function getDocumentFilterMatches(keyword = searchText.value.trim()) {
+  const root = props.mindMap?.renderer?.renderTree
+  if (!root) return []
+  if (selectedTagId.value) {
+    const matches = []
+    walkDocumentNodeTree(root, node => {
+      if (
+        nodeHasSelectedTag(node)
+        && (!keyword || getMindmapNodeText(node).includes(keyword))
+      ) {
+        matches.push(node)
+      }
+    })
+    return matches
+  }
+  const activeRows = confirmedFilterRows.value
+  if (filterActive.value && activeRows.length > 0) {
+    const titleRows = activeRows.filter(row => row.field === 'title')
+    const anyNodeRows = activeRows.filter(row => row.field !== 'title')
+    const matchesAnyNodeRows = node => {
+      const nodeText = getMindmapNodeText(node)
+      return anyNodeRows.every(row => (
+        matchesMindmapFilterText(nodeText, row.operator, row.value)
+      ))
+    }
+    if (titleRows.length === 0) {
+      const matches = []
+      walkDocumentNodeTree(root, node => {
+        if (matchesAnyNodeRows(node)) matches.push(node)
+      })
+      return matches
+    }
+
+    // 飞书脑图的一份文档可包含多条用例；本地数据用“用例标题”标签标记
+    // 用例根节点。标题条件只匹配这些节点，任意节点条件再限定到命中用例
+    // 的子树，避免普通分支名称误命中“用例标题”。
+    const matchedCaseTitleNodes = []
+    walkDocumentNodeTree(root, node => {
+      const data = getMindmapNodeData(node)
+      const nodeText = getMindmapNodeText(node)
+      if (
+        isMindmapCaseTitleData(data)
+        && titleRows.every(row => (
+          matchesMindmapFilterText(nodeText, row.operator, row.value)
+        ))
+      ) {
+        matchedCaseTitleNodes.push(node)
+      }
+    })
+    if (anyNodeRows.length === 0) return matchedCaseTitleNodes
+
+    const matches = new Set()
+    matchedCaseTitleNodes.forEach(caseTitleNode => {
+      walkDocumentNodeTree(caseTitleNode, node => {
+        if (matchesAnyNodeRows(node)) matches.add(node)
+      })
+    })
+    return Array.from(matches)
+  }
+  if (!keyword) return []
+  const matches = []
+  walkDocumentNodeTree(root, node => {
+    if (getMindmapNodeText(node).includes(keyword)) matches.push(node)
+  })
+  return matches
+}
+
+function createDocumentTreeIndex(root) {
+  const parentUidByUid = new Map()
+  const nodeByUid = new Map()
+  walkDocumentNodeTree(root, (node, parentUid) => {
+    const uid = getMindmapNodeUid(node)
+    if (uid === null) return
+    parentUidByUid.set(uid, parentUid)
+    nodeByUid.set(uid, node)
+  })
+  return { parentUidByUid, nodeByUid }
+}
+
+function applyCanvasFilter() {
+  restoreCanvasVisibility({ deactivate: false, relayout: false })
+  if (!filterActive.value) return
+  const renderer = props.mindMap?.renderer
+  const runtimeRoot = renderer?.root
+  const documentRoot = renderer?.renderTree
+  if (!runtimeRoot || !documentRoot) return
+
+  const { parentUidByUid } = createDocumentTreeIndex(documentRoot)
+  const rootUid = getMindmapNodeUid(documentRoot) || String(runtimeRoot.uid)
+  const visibleNodeUids = new Set([rootUid])
+  const matchedNodes = getDocumentFilterMatches()
+  const matchedNodeUids = new Set()
+  matchedNodes.forEach(matchedNode => {
+    let uid = getMindmapNodeUid(matchedNode)
+    const pathGuard = new Set()
+    if (uid !== null) matchedNodeUids.add(uid)
+    while (uid !== null && !pathGuard.has(uid)) {
+      pathGuard.add(uid)
+      visibleNodeUids.add(uid)
+      uid = parentUidByUid.get(uid) ?? null
+    }
+  })
+  filteredMatchCount.value = matchedNodeUids.size
+
+  props.mindMap?.execCommand?.('CLEAR_ACTIVE_NODE')
+  walkRuntimeNodeTree(runtimeRoot, node => {
+    const nodeUid = getMindmapNodeUid(node)
+    const hidden = nodeUid === null || !visibleNodeUids.has(nodeUid)
+    setCanvasElementFiltered(node.group, hidden)
+    // 临时筛选布局后，node.children 只保留可见子节点，但 _lines 仍可能
+    // 带有完整树上一次渲染的多余路径。优先使用渲染阶段记录的真实起止
+    // 节点；这样也兼容组织结构、时间轴等会追加共享主干线的布局。
+    ;(node._lines || []).forEach((line, index) => {
+      const ownerUid = line?.__smmFilterOwnerUid
+      const targetUid = line?.__smmFilterTargetUid
+      const lineRenderVersion = line?.__smmFilterRenderVersion
+      let lineVisible
+      if (
+        ownerUid !== undefined
+        && targetUid !== undefined
+        && lineRenderVersion !== undefined
+      ) {
+        const isSharedBranchLine = ownerUid === targetUid
+        lineVisible = lineRenderVersion === node._lineRenderVersion
+          && visibleNodeUids.has(ownerUid)
+          && (isSharedBranchLine
+            ? Boolean(node.children?.length)
+            : visibleNodeUids.has(targetUid))
+      } else {
+        const child = node.children?.[index]
+        const childUid = getMindmapNodeUid(child)
+        lineVisible = Boolean(
+          childUid !== null
+          && nodeUid !== null
+          && visibleNodeUids.has(nodeUid)
+          && visibleNodeUids.has(childUid)
+        )
+      }
+      setCanvasElementFiltered(line, !lineVisible)
+    })
+    ;(node._generalizationList || []).forEach(item => {
+      setCanvasElementFiltered(item?.generalizationLine, hidden)
+      setCanvasElementFiltered(item?.generalizationNode?.group || item?.generalizationNode, hidden)
+    })
+  })
+  renderer.setTransientVisibleNodeUids?.(visibleNodeUids)
+}
+
+function toggleCanvasFilter() {
+  if (!hasFilterCriteria.value) return
+  filterActive.value = !filterActive.value
+  if (filterActive.value) {
+    applyCanvasFilter()
+  } else {
+    restoreCanvasVisibility()
+  }
+}
+
+function reapplyCanvasFilter() {
+  if (filterActive.value) nextTick(applyCanvasFilter)
+}
+
 function navigateSearchResults(key, { focus = false } = {}) {
   const nextIndex = resolveMindmapSearchNavigationIndex(
     currentIndex.value - 1,
@@ -285,12 +631,57 @@ function showSearch() {
     focusReturnTarget = document.activeElement
   }
   bus.emit('closeSideBar')
+  panelMode.value = 'search'
   show.value = true
   nextTick(() => {
     searchInputRef.value?.focus()
     setSearchResultListHeight()
   })
   void loadTagOptions()
+}
+
+function showFilter() {
+  if (!show.value) focusReturnTarget = document.activeElement
+  bus.emit('closeSideBar')
+  panelMode.value = 'filter'
+  show.value = true
+}
+
+function addFilterCondition() {
+  filterRows.value.push(createFilterRow())
+}
+
+function removeFilterCondition(index) {
+  filterRows.value.splice(index, 1)
+  if (filterRows.value.length === 0) filterRows.value.push(createFilterRow())
+}
+
+function clearFilterConditions() {
+  filterRows.value = [createFilterRow('title'), createFilterRow('any')]
+  confirmedFilterRows.value = []
+  restoreCanvasVisibility()
+}
+
+function confirmFilterConditions() {
+  confirmedFilterRows.value = filterRows.value
+    .map(row => ({ ...row, value: String(row.value || '').trim() }))
+    .filter(row => row.value)
+  if (confirmedFilterRows.value.length === 0) {
+    restoreCanvasVisibility()
+  } else {
+    filterActive.value = true
+    applyCanvasFilter()
+  }
+  show.value = false
+  nextTick(() => focusReturnTarget?.focus?.())
+}
+
+function handleGlobalSearchShortcut(event) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+  if (String(event.key || '').toLowerCase() !== 'f') return
+  event.preventDefault()
+  event.stopPropagation()
+  showSearch()
 }
 
 async function loadTagOptions() {
@@ -361,6 +752,8 @@ function blur() {
 }
 
 async function onSearchNext(event) {
+  clearTimeout(liveSearchTimer)
+  liveSearchTimer = null
   const keyword = searchText.value.trim()
   const navigationKey = event?.shiftKey ? 'ArrowUp' : 'ArrowDown'
   if (keyword !== searchText.value) searchText.value = keyword
@@ -388,13 +781,6 @@ async function onSearchNext(event) {
     await runServerSearch(false)
     return
   }
-  searchRequestId += 1
-  activeServerCriteriaKey = ''
-  serverSearchMode.value = false
-  searching.value = false
-  loadingMore.value = false
-  searchError.value = ''
-  serverPageNum.value = 0
   if (
     activeLocalKeyword === keyword
     && searchResultList.value.length > 0
@@ -402,8 +788,31 @@ async function onSearchNext(event) {
     navigateSearchResults(navigationKey)
     return
   }
+  startLocalSearch(keyword)
+}
+
+function startLocalSearch(keyword) {
+  if (!show.value || selectedTagId.value || !keyword || activeLocalKeyword === keyword) return
+  searchRequestId += 1
+  activeServerCriteriaKey = ''
+  serverSearchMode.value = false
+  searching.value = true
+  loadingMore.value = false
+  searchError.value = ''
+  serverPageNum.value = 0
+  showSearchResultList.value = true
   activeLocalKeyword = keyword
   props.mindMap?.search?.search(keyword)
+}
+
+function scheduleLiveSearch(keyword) {
+  clearTimeout(liveSearchTimer)
+  liveSearchTimer = null
+  if (!show.value || selectedTagId.value || !keyword) return
+  liveSearchTimer = setTimeout(() => {
+    liveSearchTimer = null
+    startLocalSearch(keyword)
+  }, LIVE_SEARCH_DELAY)
 }
 
 async function runServerSearch(append) {
@@ -452,6 +861,7 @@ async function runServerSearch(append) {
     if (!append && rows.length > 0) {
       activateSearchResult(0)
     }
+    reapplyCanvasFilter()
   } catch (error) {
     if (!isCurrentServerSearchSession(requestId, sessionMindMap, sessionMindmapId, criteriaKey)) return
     searchError.value = error?.response?.data?.msg || '搜索失败，请检查网络后重试'
@@ -502,6 +912,8 @@ function doReplaceAll() {
 }
 
 function resetSearchResults(mindMap = props.mindMap) {
+  clearTimeout(liveSearchTimer)
+  liveSearchTimer = null
   searchRequestId += 1
   showSearchResultList.value = false
   showSearchInfo.value = false
@@ -515,6 +927,7 @@ function resetSearchResults(mindMap = props.mindMap) {
   searchResultList.value = []
   activeServerCriteriaKey = ''
   activeLocalKeyword = ''
+  restoreCanvasVisibility({ mindMap })
   mindMap?.search?.endSearch()
 }
 
@@ -522,7 +935,14 @@ function close(options = {}) {
   const wasShown = show.value
   const returnTarget = focusReturnTarget
   const restoreFocus = options?.restoreFocus !== false
+  const forceReset = options?.forceReset === true
   const searchMindMap = options?.mindMap || props.mindMap
+  if (panelMode.value === 'filter' && !forceReset) {
+    focusReturnTarget = null
+    show.value = false
+    if (wasShown && restoreFocus) nextTick(() => returnTarget?.focus?.())
+    return
+  }
   focusReturnTarget = null
   tagOptionsRequestId += 1
   tagOptionsLoading.value = false
@@ -568,6 +988,7 @@ function onSearchMatchNodeListChange(list) {
   total.value = searchResultList.value.length
   showSearchInfo.value = true
   if (searchResultList.value.length <= 0) currentIndex.value = 0
+  reapplyCanvasFilter()
 }
 
 function setSearchResultListHeight() {
@@ -608,6 +1029,7 @@ watch(searchText, (val) => {
   ) {
     resetSearchResults()
   }
+  scheduleLiveSearch(String(val || '').trim())
 })
 
 watch(isReadonly, (readonly) => {
@@ -621,17 +1043,19 @@ onMounted(() => {
     searchPanelResizeObserver.observe(searchContainerRef.value)
   }
   bus.on('show_search', showSearch)
+  bus.on('show_filter', showFilter)
   bus.on('setData', onDocumentReplace)
   window.addEventListener('resize', setSearchResultListHeight)
+  window.addEventListener('keydown', handleGlobalSearchShortcut, true)
 })
 
 function onDocumentReplace() {
-  close({ restoreFocus: false })
+  close({ restoreFocus: false, forceReset: true })
 }
 
 watch(() => props.mindMap, (mm, oldMm) => {
   if (oldMm && oldMm !== mm) {
-    close({ mindMap: oldMm, restoreFocus: false })
+    close({ mindMap: oldMm, restoreFocus: false, forceReset: true })
   }
   restoreAutoEnterTextEdit()
   if (oldMm) {
@@ -640,6 +1064,7 @@ watch(() => props.mindMap, (mm, oldMm) => {
     oldMm.off('draw_click', blur)
     oldMm.off('expand_btn_click', blur)
     oldMm.off('search_match_node_list_change', onSearchMatchNodeListChange)
+    oldMm.off('node_tree_render_end', reapplyCanvasFilter)
     oldMm.keyCommand?.removeShortcut?.('Control+f', showSearch)
   }
   if (mm) {
@@ -648,13 +1073,14 @@ watch(() => props.mindMap, (mm, oldMm) => {
     mm.on('draw_click', blur)
     mm.on('expand_btn_click', blur)
     mm.on('search_match_node_list_change', onSearchMatchNodeListChange)
+    mm.on('node_tree_render_end', reapplyCanvasFilter)
     mm.keyCommand.addShortcut('Control+f', showSearch)
   }
 }, { immediate: true })
 
 watch(() => props.mindmapId, (mindmapId, oldMindmapId) => {
   if (oldMindmapId != null && mindmapId !== oldMindmapId) {
-    close({ restoreFocus: false })
+    close({ restoreFocus: false, forceReset: true })
   }
 })
 
@@ -666,14 +1092,18 @@ onBeforeUnmount(() => {
   searchPanelResizeObserver = null
   restoreAutoEnterTextEdit()
   bus.off('show_search', showSearch)
+  bus.off('show_filter', showFilter)
   bus.off('setData', onDocumentReplace)
   window.removeEventListener('resize', setSearchResultListHeight)
+  window.removeEventListener('keydown', handleGlobalSearchShortcut, true)
   props.mindMap?.off?.('search_info_change', handleSearchInfoChange)
   props.mindMap?.off?.('node_click', blur)
   props.mindMap?.off?.('draw_click', blur)
   props.mindMap?.off?.('expand_btn_click', blur)
   props.mindMap?.off?.('search_match_node_list_change', onSearchMatchNodeListChange)
+  props.mindMap?.off?.('node_tree_render_end', reapplyCanvasFilter)
   props.mindMap?.keyCommand?.removeShortcut?.('Control+f', showSearch)
+  restoreCanvasVisibility()
 })
 </script>
 
@@ -690,6 +1120,118 @@ onBeforeUnmount(() => {
   top: 110px;
   left: clamp(12px, 2vw, 20px);
   transition: all 0.3s;
+
+  &.filterDialog {
+    top: 88px;
+    left: 50%;
+    width: min(625px, calc(100vw - 32px));
+    padding: 18px 24px 16px;
+    border: 1px solid #dee0e3;
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgba(31, 35, 41, 0.14);
+    transform: translateX(-50%);
+    transition: none;
+    z-index: 30;
+
+    .filterDialogHeader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+
+      h2 {
+        margin: 0;
+        color: #1f2329;
+        font-size: 16px;
+        font-weight: 600;
+        line-height: 24px;
+      }
+
+      button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: 0;
+        border-radius: 6px;
+        color: #8f959e;
+        background: transparent;
+        cursor: pointer;
+
+        &:hover { color: #1f2329; background: #f2f3f5; }
+        &:focus-visible { outline: 2px solid #3370ff; outline-offset: 1px; }
+      }
+    }
+
+    .filterConditionList {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .filterConditionRow {
+      display: grid;
+      grid-template-columns: 200px 122px minmax(150px, 1fr) 28px;
+      align-items: center;
+      gap: 8px;
+
+      :deep(.el-input__wrapper),
+      :deep(.el-select__wrapper) {
+        min-height: 32px;
+        border-radius: 5px;
+        background: #f5f6f7;
+        box-shadow: none;
+      }
+
+      :deep(.el-input__wrapper:hover),
+      :deep(.el-select__wrapper:hover) { background: #eff0f1; }
+      :deep(.is-focused .el-input__wrapper),
+      :deep(.el-select__wrapper.is-focused) { box-shadow: 0 0 0 1px #3370ff inset; }
+
+      .removeConditionButton {
+        width: 28px;
+        height: 28px;
+        margin: 0;
+        color: #d83931;
+        font-size: 16px;
+      }
+    }
+
+    .filterDialogFooter {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+
+      .addConditionButton {
+        margin: 0;
+        color: #245bdb;
+        border-color: #d0d3d6;
+        background: #fff;
+
+        .el-icon { color: #3370ff; }
+      }
+
+      .filterDialogActions {
+        display: flex;
+        gap: 8px;
+
+        .el-button { margin: 0; }
+      }
+    }
+
+    &.isDark {
+      border-color: #4a4f55;
+      background: #2f3438;
+
+      .filterDialogHeader h2 { color: #f2f3f5; }
+      .filterConditionRow :deep(.el-input__wrapper),
+      .filterConditionRow :deep(.el-select__wrapper) { background: #3a4046; }
+      .filterDialogFooter .addConditionButton { color: #7da2ff; border-color: #5b6066; background: #2f3438; }
+    }
+  }
 
   &.isDark {
     background-color: #363b3f;
@@ -774,6 +1316,22 @@ onBeforeUnmount(() => {
       transform: translateY(-50%);
       color: #909090;
       font-size: 14px;
+    }
+  }
+
+  .canvasFilterBar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+
+    > span {
+      min-width: 0;
+      color: #8f959e;
+      font-size: 11px;
+      line-height: 16px;
+
+      &.active { color: #3370ff; }
     }
   }
 
@@ -891,9 +1449,35 @@ onBeforeUnmount(() => {
   }
 }
 
+:global(.smm-filter-hidden) {
+  display: none !important;
+}
+
 @media (max-height: 520px) {
   .searchContainer {
     top: 12px;
+  }
+}
+
+@media (max-width: 680px) {
+  .searchContainer.filterDialog {
+    top: 12px;
+    padding: 16px;
+
+    .filterConditionRow {
+      grid-template-columns: 1fr 1fr 28px;
+
+      :deep(.el-input) { grid-column: 1 / 3; }
+      .removeConditionButton { grid-column: 3; grid-row: 1 / 3; }
+    }
+
+    .filterDialogFooter {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 10px;
+
+      .filterDialogActions { justify-content: flex-end; }
+    }
   }
 }
 </style>

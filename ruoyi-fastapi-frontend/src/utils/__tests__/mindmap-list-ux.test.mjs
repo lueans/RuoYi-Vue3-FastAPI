@@ -14,6 +14,7 @@ import {
 const listSourceUrl = new URL('../../views/mindmap/index.vue', import.meta.url)
 const mindmapApiSourceUrl = new URL('../../api/mindmap/mindmap.js', import.meta.url)
 const rightToolbarSourceUrl = new URL('../../components/RightToolbar/index.vue', import.meta.url)
+const detailDrawerSourceUrl = new URL('../../components/MindMap/MindmapDetailDrawer.vue', import.meta.url)
 
 test('脑图空列表按筛选、共享和首次使用场景提供明确下一步', async () => {
   const source = await readFile(listSourceUrl, 'utf8')
@@ -68,7 +69,8 @@ test('文件关键词同时覆盖名称与说明并使用严格长度契约', as
     readFile(new URL('../../../../ruoyi-fastapi-backend/module_mindmap/dao/mindmap_dao.py', import.meta.url), 'utf8'),
   ])
 
-  assert.match(source, /label="文件关键词" prop="keyword"/)
+  assert.match(source, /prop="keyword" class="keyword-filter-item"/)
+  assert.match(source, /aria-label="文件关键词"/)
   assert.match(source, /placeholder="搜索名称或说明"/)
   assert.match(source, /:maxlength="MAX_MINDMAP_FILE_KEYWORD_LENGTH"/)
   assert.match(source, /keyword: queryParams\.value\.keyword\?\.trim\(\) \|\| undefined/)
@@ -124,6 +126,10 @@ test('共享文件信息对话框统一严格契约并隔离迟到响应', async
   assert.match(source, /:session-key="editorSessionKey"/)
   assert.doesNotMatch(source, /updateMindmapMetadata/)
   assert.match(dialogSource, /title="编辑脑图信息"/)
+  assert.match(dialogSource, /class="mindmap-metadata-dialog"/)
+  assert.match(dialogSource, /:z-index="4200"/)
+  assert.match(dialogSource, /max-height:\s*calc\(100dvh - 32px\)/)
+  assert.match(dialogSource, /\.mindmap-metadata-dialog \.el-dialog__body[\s\S]*overflow-y:\s*auto/)
   assert.match(dialogSource, /width="min\(500px, calc\(100vw - 32px\)\)"/)
   assert.match(dialogSource, /:maxlength="MAX_MINDMAP_DESCRIPTION_LENGTH"/)
   assert.match(dialogSource, /await updateMindmapMetadata\(\{/)
@@ -187,7 +193,35 @@ test('窄屏列表隐藏目录分栏并保留我的脑图与共享范围切换',
   assert.match(source, /@click="selectShared"/)
   assert.match(source, /class="mobile-scope-bar"[\s\S]*:aria-current="listScope === 'owned' \? 'page' : undefined"/)
   assert.match(source, /class="mobile-scope-bar"[\s\S]*:aria-current="listScope === 'shared' \? 'page' : undefined"/)
-  assert.match(source, /label="操作" width="220" align="center" fixed="right"/)
+  assert.match(source, /label="操作" width="190" align="center" fixed="right"/)
+})
+
+test('脑图管理页采用高密度表格并通过详情抽屉衔接沉浸式画布', async () => {
+  const [source, drawer] = await Promise.all([
+    readFile(listSourceUrl, 'utf8'),
+    readFile(detailDrawerSourceUrl, 'utf8'),
+  ])
+
+  assert.match(source, /class="mindmap-dense-table"/)
+  assert.match(source, /<el-table-column type="index" label="序号"/)
+  assert.match(source, /label="节点数"[\s\S]*prop="nodeCount"/)
+  assert.match(source, /label="版本数"[\s\S]*prop="versionCount"/)
+  assert.match(source, /@click="openMindmapDetail\(scope\.row\)"/)
+  assert.match(source, /<MindmapDetailDrawer/)
+  assert.match(source, /@view="handleDetailView"/)
+  assert.match(source, /@edit="handleDetailEdit"/)
+  assert.match(drawer, /class="mindmap-detail-drawer"/)
+  assert.match(drawer, /内容概览/)
+  assert.match(drawer, /文件信息/)
+  assert.match(drawer, /只读查看/)
+  assert.match(drawer, /继续编辑/)
+  assert.match(drawer, /aria-label="脑图详情"/)
+  assert.match(drawer, /class="mindmap-detail-tabs" aria-label="当前详情分区"[\s\S]*?<span aria-current="page">基本信息<\/span>/)
+  assert.match(drawer, /class="mindmap-detail-edit-label">编辑信息<\/span>/)
+  assert.match(drawer, /@media \(max-width: 760px\)[\s\S]*?\.mindmap-detail-header-actions[\s\S]*?\.el-button \{[\s\S]*?width: 34px/)
+  assert.match(drawer, /padding: 10px 14px max\(10px, env\(safe-area-inset-bottom\)\)/)
+  assert.match(drawer, /:class="\{ 'is-single-action': !canEdit \}"/)
+  assert.match(drawer, /@media \(max-width: 420px\)[\s\S]*?\.mindmap-detail-info-list \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/)
 })
 
 test('列表下拉权限使用响应式状态并在执行入口再次校验', async () => {

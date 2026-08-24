@@ -102,6 +102,7 @@ class MindMapNode {
     this._fillExpandNode = null
     this._userListGroup = null
     this._lines = []
+    this._lineRenderVersion = 0
     this._generalizationList = []
     this._unVisibleRectRegionNode = null
     this._isMouseenter = false
@@ -695,7 +696,7 @@ class MindMapNode {
     if (
       this.children &&
       this.children.length &&
-      this.getData('expand') !== false
+      this.mindMap.renderer.isNodeExpandedForLayout(this)
     ) {
       // 固定本轮子节点集合，避免异步期间数组变化导致完成计数永远无法收敛。
       const children = [...this.children]
@@ -852,9 +853,11 @@ class MindMapNode {
 
   //  连线
   renderLine(deep = false) {
-    if (this.getData('expand') === false) {
+    if (!this.mindMap.renderer.isNodeExpandedForLayout(this)) {
       return
     }
+    this._lineRenderVersion = (Number(this._lineRenderVersion) || 0) + 1
+    const lineRenderVersion = this._lineRenderVersion
     let childrenLen = this.getChildrenLength()
     // 切换为鱼骨结构时，清空根节点和二级节点的连线
     if (this.mindMap.renderer.layout.nodeIsRemoveAllLines) {
@@ -879,6 +882,14 @@ class MindMapNode {
       this,
       this._lines,
       (...args) => {
+        const [line, targetNode] = args
+        if (line && targetNode) {
+          // 部分布局会在子节点连线之外追加共享主干线，不能再依赖数组索引
+          // 判断连线归属。记录本轮真实的起止节点，供临时画布筛选精确隐藏。
+          line.__smmFilterOwnerUid = String(this.uid)
+          line.__smmFilterTargetUid = String(targetNode.uid)
+          line.__smmFilterRenderVersion = lineRenderVersion
+        }
         // 添加样式
         this.styleLine(...args)
       },

@@ -1,12 +1,17 @@
 <template>
-  <Sidebar ref="sidebarRef" title="基础样式" open-on-mount>
+  <div class="baseStylePanel" :class="{ embedded: props.embedded }">
     <div
       class="sidebarContent customScrollbar"
       :class="{ isDark: isDark }"
       v-if="props.mindMap"
     >
       <!-- 背景 -->
-      <div class="title noTop">背景</div>
+      <details class="baseStyleSection" open>
+        <summary class="title noTop">
+          <span>背景</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row">
         <el-tabs class="tab" v-model="activeTab">
           <el-tab-pane label="颜色" name="color">
@@ -78,8 +83,15 @@
           </el-tab-pane>
         </el-tabs>
       </div>
+        </div>
+      </details>
       <!-- 连线 -->
-      <div class="title">连线</div>
+      <details class="baseStyleSection" open>
+        <summary class="title">
+          <span>连线</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
@@ -210,8 +222,15 @@
           >是否显示箭头</el-checkbox>
         </div>
       </div>
+        </div>
+      </details>
       <!-- 彩虹线条 -->
-      <div class="title">彩虹线条</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>彩虹线条</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row">
         <div class="rowItem">
           <el-popover
@@ -268,8 +287,15 @@
           </el-popover>
         </div>
       </div>
+        </div>
+      </details>
       <!-- 概要连线 -->
-      <div class="title">概要的连线</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>概要连线</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
@@ -308,8 +334,15 @@
           </el-select>
         </div>
       </div>
+        </div>
+      </details>
       <!-- 关联线 -->
-      <div class="title">关联线</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>关联线</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
@@ -414,8 +447,15 @@
           </el-select>
         </div>
       </div>
+        </div>
+      </details>
       <!-- 关联线文字 -->
-      <div class="title">关联线文字</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>关联线文字</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row">
         <div class="rowItem">
           <span class="name">字体</span>
@@ -467,9 +507,15 @@
           </el-select>
         </div>
       </div>
+        </div>
+      </details>
       <!-- 节点边框风格 -->
-      <template v-if="showNodeUseLineStyle">
-        <div class="title">节点边框风格</div>
+      <details v-if="showNodeUseLineStyle" class="baseStyleSection" open>
+        <summary class="title">
+          <span>节点边框风格</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
         <div class="row">
           <div class="rowItem">
             <el-checkbox
@@ -478,9 +524,15 @@
             >是否使用只有底边框的风格</el-checkbox>
           </div>
         </div>
-      </template>
+        </div>
+      </details>
       <!-- 内边距 -->
-      <div class="title">节点内边距</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>节点内边距</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row noBottom">
         <div class="rowItem">
           <span class="name">水平</span>
@@ -501,8 +553,15 @@
           />
         </div>
       </div>
+        </div>
+      </details>
       <!-- 图片 -->
-      <div class="title">图片</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>图片</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row noBottom">
         <div class="rowItem">
           <span class="name">显示的最大宽度</span>
@@ -527,8 +586,15 @@
           />
         </div>
       </div>
+        </div>
+      </details>
       <!-- 图标 -->
-      <div class="title">图标</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>图标</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row">
         <div class="rowItem">
           <span class="name">大小</span>
@@ -541,8 +607,15 @@
           />
         </div>
       </div>
+        </div>
+      </details>
       <!-- 二级节点外边距 -->
-      <div class="title">节点外边距</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>节点外边距</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row column noBottom">
         <el-tabs
           class="tab"
@@ -571,8 +644,15 @@
           />
         </div>
       </div>
+        </div>
+      </details>
       <!-- 外框内边距 -->
-      <div class="title">外框内边距</div>
+      <details class="baseStyleSection">
+        <summary class="title">
+          <span>外框内边距</span>
+          <el-icon class="sectionChevron"><ArrowUp /></el-icon>
+        </summary>
+        <div class="sectionBody">
       <div class="row noBottom">
         <div class="rowItem">
           <span class="name">水平</span>
@@ -593,12 +673,14 @@
           />
         </div>
       </div>
+        </div>
+      </details>
     </div>
-  </Sidebar>
+  </div>
 </template>
 
 <script setup>
-import Sidebar from './Sidebar.vue'
+import { ArrowUp } from '@element-plus/icons-vue'
 import ImgUpload from './ImgUpload/index.vue'
 import Color from './Color.vue'
 import ColorTrigger from './ColorTrigger.vue'
@@ -625,11 +707,11 @@ import {
 const props = defineProps({
   data: { type: [Object, null], default: null },
   configData: { type: Object, default: () => ({}) },
-  mindMap: { type: Object, default: null }
+  mindMap: { type: Object, default: null },
+  embedded: { type: Boolean, default: false }
 })
 const emit = defineEmits(['document-meta-change'])
 
-const sidebarRef = ref(null)
 const isDark = computed(() => store.localConfig.isDark)
 
 const activeTab = ref('color')
@@ -822,7 +904,7 @@ function updateMargin(type, value) {
 }
 
 function onSetData() {
-  if (store.activeSidebar !== 'baseStyle') return
+  if (!['baseStyle', 'structure'].includes(store.activeSidebar)) return
   setTimeout(() => { initStyle() }, 0)
 }
 
@@ -833,57 +915,118 @@ onBeforeUnmount(() => {
 })
 
 watch(() => store.activeSidebar, (val) => {
-  if (val === 'baseStyle') {
-    sidebarRef.value?.open()
+  if (['baseStyle', 'structure'].includes(val)) {
     initStyle()
     initRainbowLines()
     initOuterFramePadding()
     if (props.mindMap) {
       currentLayout.value = props.mindMap.getLayout()
     }
-  } else {
-    sidebarRef.value?.close()
   }
 }, { immediate: true })
 </script>
 
 <style lang="less" scoped>
+.baseStylePanel {
+  width: 100%;
+}
+
 .sidebarContent {
-  padding: 20px;
-  padding-top: 10px;
+  padding: 0;
 
   &.isDark {
     .title {
-      color: #fff;
+      color: #e5e6eb;
+      border-color: #3d4046;
+
+      &:hover {
+        color: #7aa2ff;
+      }
     }
 
     .row {
       .rowItem {
         .name,
         .curRainbowLine {
-          color: hsla(0, 0%, 100%, 0.6);
+          color: #a9aeb8;
+        }
+
+        .curRainbowLine {
+          border-color: #454950;
+          background: #2f3338;
         }
       }
     }
   }
 
+  .baseStyleSection {
+    margin: 0;
+
+    &[open] .sectionChevron {
+      transform: rotate(0deg);
+    }
+
+    &:not([open]) {
+      .title {
+        margin-bottom: 0;
+      }
+
+      .sectionChevron {
+        transform: rotate(180deg);
+      }
+    }
+  }
+
   .title {
-    font-size: 16px;
-    font-family: PingFangSC-Medium, PingFang SC;
-    font-weight: 500;
-    color: rgba(26, 26, 26, 0.9);
-    margin-bottom: 10px;
-    margin-top: 35px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding-top: 18px;
+    border-top: 1px solid #eef0f3;
+    font-size: 14px;
+    font-family: PingFangSC-Medium, PingFang SC, sans-serif;
+    font-weight: 600;
+    color: #1f2329;
+    margin-bottom: 14px;
+    margin-top: 20px;
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    &:hover {
+      color: #3370ff;
+    }
+
+    &:focus-visible {
+      outline: 2px solid #3370ff;
+      outline-offset: 4px;
+      border-radius: 4px;
+    }
 
     &.noTop {
       margin-top: 0;
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .sectionChevron {
+      flex: 0 0 auto;
+      color: #646a73;
+      font-size: 13px;
+      transition: transform 0.16s ease;
     }
   }
 
   .row {
     display: flex;
     justify-content: space-between;
-    margin-bottom: 10px;
+    gap: 8px;
+    margin-bottom: 12px;
 
     &.noBottom {
       margin-bottom: 0;
@@ -895,6 +1038,15 @@ watch(() => store.activeSidebar, (val) => {
 
     .tab {
       width: 100%;
+
+      :deep(.el-tabs__header) {
+        margin-bottom: 12px;
+      }
+
+      :deep(.el-tabs__item) {
+        height: 34px;
+        font-size: 12px;
+      }
     }
 
     .imgUpload {
@@ -910,7 +1062,8 @@ watch(() => store.activeSidebar, (val) => {
     .rowItem {
       display: flex;
       align-items: center;
-      margin-bottom: 5px;
+      min-width: 0;
+      margin-bottom: 6px;
 
       &.spaceBetween {
         justify-content: space-between;
@@ -918,22 +1071,29 @@ watch(() => store.activeSidebar, (val) => {
 
       .name {
         font-size: 12px;
-        margin-right: 10px;
+        margin-right: 8px;
+        color: #646a73;
         white-space: nowrap;
       }
 
       .curRainbowLine {
-        height: 24px;
-        border: 1px solid #dcdfe6;
+        width: 100%;
+        min-width: 0;
+        height: 34px;
+        border: 1px solid #dfe2e6;
+        border-radius: 6px;
         font-size: 12px;
-        width: 240px;
         display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
         padding: 0;
-        background: transparent;
+        background: #fff;
         color: inherit;
+
+        &:hover {
+          border-color: #8fb0ff;
+        }
 
         &:focus-visible {
           outline: 2px solid #409eff;
@@ -949,6 +1109,14 @@ watch(() => store.activeSidebar, (val) => {
           transform: rotateZ(-180deg);
         }
       }
+    }
+
+    > .rowItem:only-child {
+      width: 100%;
+    }
+
+    :deep(.el-slider) {
+      max-width: 100%;
     }
 
     .styleBtn {
@@ -975,6 +1143,16 @@ watch(() => store.activeSidebar, (val) => {
         bottom: 0;
         height: 2px;
       }
+    }
+  }
+}
+
+@media (max-width: 1180px) {
+  .sidebarContent .row {
+    gap: 6px;
+
+    .rowItem .name {
+      margin-right: 6px;
     }
   }
 }

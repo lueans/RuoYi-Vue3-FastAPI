@@ -66,6 +66,8 @@ from module_mindmap.service.simple_mind_document_codec import (
     MAX_TREE_DEPTH,
     SCHEMA_VERSION,
     SimpleMindDocumentCodec,
+    normalize_relation_uid,
+    stable_relation_uid,
     validate_mindmap_tree,
 )
 from utils.common_util import CamelCaseUtil
@@ -602,11 +604,19 @@ def _normalize_cross_record(prefix: str, payload: dict[str, Any]) -> dict[str, A
     if not key or len(key) > 256:  # noqa: PLR2004
         raise ValueError(f'{prefix} 操作缺少合法稳定标识')
     if prefix == 'relation':
+        source_uid = str(_payload_value(payload, 'sourceUid', 'source_uid') or '')
+        target_uid = str(_payload_value(payload, 'targetUid', 'target_uid') or '')
+        canonical_relation_uid = stable_relation_uid(source_uid, target_uid)
+        supplied_relation_uid = str(
+            _payload_value(payload, 'relationUid', 'relation_uid') or key
+        )
+        if supplied_relation_uid != key:
+            raise ValueError(f'{prefix} 操作标识与载荷不一致')
         record = {
-            'relation_uid': str(_payload_value(payload, 'relationUid', 'relation_uid') or key),
+            'relation_uid': canonical_relation_uid,
             'relation_type': _payload_value(payload, 'relationType', 'relation_type') or 'associative_line',
-            'source_uid': str(_payload_value(payload, 'sourceUid', 'source_uid') or ''),
-            'target_uid': str(_payload_value(payload, 'targetUid', 'target_uid') or ''),
+            'source_uid': source_uid,
+            'target_uid': target_uid,
             'text': payload.get('text'),
             'control_data': copy.deepcopy(_payload_value(payload, 'controlData', 'control_data') or {}),
             'style_data': copy.deepcopy(_payload_value(payload, 'styleData', 'style_data')),
@@ -641,7 +651,7 @@ def _normalize_cross_record(prefix: str, payload: dict[str, Any]) -> dict[str, A
             'asset_key': str(_payload_value(payload, 'assetKey', 'asset_key') or key),
             'uri': copy.deepcopy(payload.get('uri')),
         }
-    if _cross_record_key(prefix, record) != key:
+    if prefix != 'relation' and _cross_record_key(prefix, record) != key:
         raise ValueError(f'{prefix} 操作标识与载荷不一致')
     return record
 
@@ -729,6 +739,16 @@ def _apply_cross_node_operations(
         if not isinstance(payload, dict) or not payload.get('key'):
             raise ValueError(f'{operation_type} 缺少操作载荷')
         key = str(payload['key'])
+        if prefix == 'relation':
+            source_uid = str(_payload_value(payload, 'sourceUid', 'source_uid') or '')
+            target_uid = str(_payload_value(payload, 'targetUid', 'target_uid') or '')
+            # 旧客户端的 relation.delete 只发送稳定 key。只有端点齐全时才由
+            # 端点重新推导；否则直接规范化 key，避免退化为无效的 "assoc::"。
+            key = (
+                stable_relation_uid(source_uid, target_uid)
+                if source_uid and target_uid
+                else normalize_relation_uid(key)
+            )
         collection = collection_by_prefix[prefix]
         collection[:] = [row for row in collection if _cross_record_key(prefix, row) != key]
         if action == 'upsert':
@@ -860,7 +880,9 @@ def _apply_single_node_operation(
         if node_uid in server_entries:
             # 父节点结构事件可能先于 create，把新节点从客户端快照带入。
             if node_uid in initial_server_uids:
-                raise ValueError(f'新增节点已存在: {node_uid}')
+                # 同一稳定 UID 的创建可能已经由 Yjs 或另一个标签页送达。
+                # 把它视为幂等重放；父边和后续 update 仍独立物化。
+                return
             return
         new_entry = copy.deepcopy(local_entry)
         if payload.get('crossNodeDataSeparated', payload.get('cross_node_data_separated')) is True:
@@ -888,7 +910,22 @@ def merge_node_operations(
     server_entries, server_root_uid = _flatten_tree_for_merge(server_tree)
     client_entries, client_root_uid = _flatten_tree_for_merge(client_tree)
     if client_root_uid != server_root_uid:
-        raise ValueError('客户端与服务端的脑图根节点不一致')
+        # 草稿恢复或旧客户端可能只重新生成了根 UID。根节点是文档锚点，
+        # 仅当本批不修改根节点本身时将别名收敛到已锁定的服务端根；
+        # 根节点编辑仍必须回到权威快照，避免旧草稿覆盖文档级内容。
+        operation_node_uids = {
+            str(operation.get('nodeUid') or operation.get('node_uid') or '')
+            for operation in operations
+        }
+        if server_root_uid in client_entries or client_root_uid in operation_node_uids:
+            raise ValueError('客户端与服务端的脑图根节点不一致')
+        client_root_entry = client_entries.pop(client_root_uid)
+        client_root_entry['uid'] = server_root_uid
+        client_root_entry['node'].setdefault('data', {})['uid'] = server_root_uid
+        client_entries[server_root_uid] = client_root_entry
+        for entry in client_entries.values():
+            if entry.get('parent_uid') == client_root_uid:
+                entry['parent_uid'] = server_root_uid
     initial_server_uids = set(server_entries)
     deleted_in_batch_uids = {
         str(operation.get('nodeUid') or operation.get('node_uid'))

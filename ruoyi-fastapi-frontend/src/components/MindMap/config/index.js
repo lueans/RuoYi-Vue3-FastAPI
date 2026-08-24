@@ -216,10 +216,7 @@ export const shortcutKeyList = [
 ]
 
 export const sidebarTriggerList = [
-  { name: '节点样式', value: 'nodeStyle', icon: 'iconzhuti' },
-  { name: '基础样式', value: 'baseStyle', icon: 'iconyangshi' },
-  { name: '主题', value: 'theme', icon: 'iconjingzi' },
-  { name: '结构', value: 'structure', icon: 'iconjiegou' },
+  { name: '格式', value: 'nodeStyle', icon: 'iconzhuti' },
   { name: '大纲', value: 'outline', icon: 'iconfuhao-dagangshu' },
   { name: '公式', value: 'formulaSidebar', icon: 'icongongshi' },
   { name: '设置', value: 'setting', icon: 'iconshezhi' },

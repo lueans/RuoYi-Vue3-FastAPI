@@ -91,6 +91,9 @@ class Render {
     // 用于缓存节点
     this.nodeCache = {}
     this.lastNodeCache = {}
+    // 画布筛选只影响当前视图，不修改 renderTree。Set 中保存本次布局需要参与
+    // 排版的节点 uid；null 表示展示完整文档树。
+    this.transientVisibleNodeUids = null
     // 收集触发render的来源
     this.renderSourceList = []
     // 收集render的回调函数
@@ -143,6 +146,64 @@ class Render {
   setData(data) {
     this.cancelPerformanceRender()
     this.renderTree = data || null
+  }
+
+  // 判断两个临时可见节点集合是否一致，避免 render_end 后重复触发布局。
+  isSameTransientVisibleNodeUids(nextNodeUids) {
+    const currentNodeUids = this.transientVisibleNodeUids
+    if (currentNodeUids === nextNodeUids) return true
+    if (!currentNodeUids || !nextNodeUids) return false
+    if (currentNodeUids.size !== nextNodeUids.size) return false
+    for (const uid of currentNodeUids) {
+      if (!nextNodeUids.has(uid)) return false
+    }
+    return true
+  }
+
+  // 更新仅用于画布筛选的可见节点集合。渲染树、历史记录和协作数据均不变，
+  // render 自带 RAF 合帧，因此连续条件变化只进行最后一次布局。
+  setTransientVisibleNodeUids(nodeUids, callback) {
+    const nextNodeUids = nodeUids instanceof Set
+      ? new Set(Array.from(nodeUids, uid => String(uid)))
+      : null
+    if (this.isSameTransientVisibleNodeUids(nextNodeUids)) return false
+    this.transientVisibleNodeUids = nextNodeUids
+    this.mindMap.render(callback, 'transient_node_filter')
+    return true
+  }
+
+  // 退出画布筛选时恢复完整布局。调用方可在布局结束后再移除隐藏样式，
+  // 防止隐藏节点先在旧坐标闪现一帧。
+  clearTransientVisibleNodeUids(callback) {
+    if (this.transientVisibleNodeUids === null) return false
+    this.transientVisibleNodeUids = null
+    this.mindMap.render(callback, 'transient_node_filter')
+    return true
+  }
+
+  // 根节点始终参与布局，避免空结果时画布失去渲染入口。
+  isNodeTransientlyVisible(uid, isRoot = false) {
+    return isRoot || this.transientVisibleNodeUids === null
+      || this.transientVisibleNodeUids.has(String(uid))
+  }
+
+  // 筛选视图需要展示命中节点的完整路径。即使某个祖先节点在文档中处于
+  // 收起状态，只要它有本次筛选可见的直接子节点，布局和渲染阶段也应继续
+  // 遍历；这里不修改 expand，避免筛选产生历史记录或协作变更。
+  isNodeExpandedForLayout(node) {
+    const nodeData = node?.nodeData || node
+    if (
+      this.transientVisibleNodeUids !== null
+      && !this.transientVisibleNodeUids.has(String(nodeData?.data?.uid))
+    ) {
+      return false
+    }
+    if (nodeData?.data?.expand !== false) return true
+    if (this.transientVisibleNodeUids === null) return false
+    const children = Array.isArray(nodeData?.children) ? nodeData.children : []
+    return children.some(child => (
+      this.transientVisibleNodeUids.has(String(child?.data?.uid))
+    ))
   }
 
   // 取消仍在分帧执行的性能模式渲染，并闭合对应的渲染事件。
@@ -1158,19 +1219,20 @@ class Render {
     if (node.isRoot) {
       return
     }
-    let parent = node.parent
-    let childList = parent.children
-    let index = getNodeIndexInNodeList(node, childList)
-    if (index === -1 || index === 0) {
+    const parent = node.parent
+    const childList = parent.children
+    const visibleIndex = getNodeIndexInNodeList(node, childList)
+    if (visibleIndex === -1 || visibleIndex === 0) {
       return
     }
-    let insertIndex = index - 1
-    // 节点实例
-    childList.splice(index, 1)
-    childList.splice(insertIndex, 0, node)
-    // 节点数据
-    parent.nodeData.children.splice(index, 1)
-    parent.nodeData.children.splice(insertIndex, 0, node.nodeData)
+    const previousNode = childList[visibleIndex - 1]
+    const nodeDataIndex = getNodeDataIndex(node)
+    const previousNodeDataIndex = getNodeDataIndex(previousNode)
+    if (nodeDataIndex === -1 || previousNodeDataIndex === -1) return
+    // 筛选布局下 childList 只包含可见兄弟节点，不能用它的下标修改完整数据树。
+    // 按稳定 uid 找到完整数据位置，并移动到上一个可见兄弟节点之前。
+    const [nodeData] = parent.nodeData.children.splice(nodeDataIndex, 1)
+    parent.nodeData.children.splice(previousNodeDataIndex, 0, nodeData)
     this.mindMap.render()
   }
 
@@ -1184,19 +1246,19 @@ class Render {
     if (node.isRoot) {
       return
     }
-    let parent = node.parent
-    let childList = parent.children
-    let index = getNodeIndexInNodeList(node, childList)
-    if (index === -1 || index === childList.length - 1) {
+    const parent = node.parent
+    const childList = parent.children
+    const visibleIndex = getNodeIndexInNodeList(node, childList)
+    if (visibleIndex === -1 || visibleIndex === childList.length - 1) {
       return
     }
-    let insertIndex = index + 1
-    // 节点实例
-    childList.splice(index, 1)
-    childList.splice(insertIndex, 0, node)
-    // 节点数据
-    parent.nodeData.children.splice(index, 1)
-    parent.nodeData.children.splice(insertIndex, 0, node.nodeData)
+    const nextNode = childList[visibleIndex + 1]
+    const nodeDataIndex = getNodeDataIndex(node)
+    if (nodeDataIndex === -1 || getNodeDataIndex(nextNode) === -1) return
+    // 先按完整数据位置移除，再重新解析目标位置，兼容同一父节点内的下标变化。
+    const [nodeData] = parent.nodeData.children.splice(nodeDataIndex, 1)
+    const nextNodeDataIndex = getNodeDataIndex(nextNode)
+    parent.nodeData.children.splice(nextNodeDataIndex + 1, 0, nodeData)
     this.mindMap.render()
   }
 
@@ -1208,8 +1270,9 @@ class Render {
     }
     const parent = node.parent
     const grandpa = parent.parent
-    const index = getNodeIndexInNodeList(node, parent.children)
-    const parentIndex = getNodeIndexInNodeList(parent, grandpa.children)
+    const index = getNodeDataIndex(node)
+    const parentIndex = getNodeDataIndex(parent)
+    if (index === -1 || parentIndex === -1) return
     // 节点数据
     parent.nodeData.children.splice(index, 1)
     grandpa.nodeData.children.splice(parentIndex + 1, 0, node.nodeData)
@@ -1470,27 +1533,25 @@ class Render {
     }
     nodeList.forEach(item => {
       // 移动节点
-      let nodeParent = item.parent
-      let nodeBorthers = nodeParent.children
-      let nodeIndex = getNodeIndexInNodeList(item, nodeBorthers)
+      const nodeParent = item.parent
+      const nodeIndex = getNodeDataIndex(item)
       if (nodeIndex === -1) {
         return
       }
-      nodeBorthers.splice(nodeIndex, 1)
-      nodeParent.nodeData.children.splice(nodeIndex, 1)
+      const [nodeData] = nodeParent.nodeData.children.splice(nodeIndex, 1)
 
       // 目标节点
-      let existParent = exist.parent
-      let existBorthers = existParent.children
-      let existIndex = getNodeIndexInNodeList(exist, existBorthers)
+      const existParent = exist.parent
+      let existIndex = getNodeDataIndex(exist)
       if (existIndex === -1) {
+        // 目标节点失效时恢复原数据，不能因为运行时树不同步而静默丢节点。
+        nodeParent.nodeData.children.splice(nodeIndex, 0, nodeData)
         return
       }
       if (dir === 'after') {
         existIndex++
       }
-      existBorthers.splice(existIndex, 0, item)
-      existParent.nodeData.children.splice(existIndex, 0, item.nodeData)
+      existParent.nodeData.children.splice(existIndex, 0, nodeData)
     })
     this.mindMap.render()
   }

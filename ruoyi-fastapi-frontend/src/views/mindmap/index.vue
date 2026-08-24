@@ -2,7 +2,7 @@
   <div class="app-container mindmap-index">
     <splitpanes class="default-theme" style="height: calc(100vh - 84px);">
       <!-- 左侧：文件夹目录树 -->
-      <pane size="20" min-size="15" max-size="40">
+      <pane size="20" min-size="16" max-size="30">
         <div class="dir-tree-container">
           <div class="dir-tree-header">
             <span class="dir-tree-title">脑图目录</span>
@@ -155,11 +155,20 @@
       <pane>
         <div class="main-content">
           <header class="content-overview">
-            <div>
-              <h1>{{ scopeTitle }}</h1>
-              <p>{{ scopeDescription }}</p>
+            <div class="content-overview-copy">
+              <div class="content-title-row">
+                <h1>{{ scopeTitle }}</h1>
+                <span v-if="!loading && !listError" class="result-count">{{ total }}</span>
+              </div>
+              <p>{{ currentLocationText }} · {{ scopeDescription }}</p>
             </div>
-            <span v-if="!loading && !listError" class="result-count">{{ total }} 张脑图</span>
+            <el-button
+              v-if="listScope === 'owned' && canCreateMindmaps"
+              type="primary"
+              icon="Plus"
+              :disabled="isOperating"
+              @click="handleAdd"
+            >新建脑图</el-button>
           </header>
 
           <nav class="mobile-scope-bar" aria-label="脑图列表范围">
@@ -193,27 +202,30 @@
           </nav>
 
           <el-form :model="queryParams" ref="queryRef" :inline="true" class="content-toolbar" v-show="showSearch">
-            <el-form-item label="文件关键词" prop="keyword">
+            <el-form-item prop="keyword" class="keyword-filter-item">
               <el-input
                 v-model="queryParams.keyword"
                 placeholder="搜索名称或说明"
+                aria-label="文件关键词"
                 clearable
+                prefix-icon="Search"
                 :maxlength="MAX_MINDMAP_FILE_KEYWORD_LENGTH"
-                style="width: 220px"
+                style="width: 260px"
                 @keyup.enter="handleQuery"
               />
             </el-form-item>
-            <el-form-item label="状态" prop="status">
-              <el-select v-model="queryParams.status" placeholder="脑图状态" clearable style="width: 140px">
+            <el-form-item prop="status">
+              <el-select v-model="queryParams.status" aria-label="脑图状态" placeholder="全部状态" clearable style="width: 120px">
                 <el-option label="正常" :value="0" />
                 <el-option label="归档" :value="1" />
               </el-select>
             </el-form-item>
-            <el-form-item v-if="listScope === 'owned'" label="标签" prop="tagId">
+            <el-form-item v-if="listScope === 'owned'" prop="tagId">
               <div class="tag-filter-control">
                 <el-select
                 v-model="queryParams.tagId"
                 placeholder="按标签筛选"
+                aria-label="脑图标签"
                 clearable
                 filterable
                 remote
@@ -248,15 +260,17 @@
                 </div>
               </div>
             </el-form-item>
-            <el-form-item>
-              <el-button type="primary" icon="Search" @click="handleQuery">搜索</el-button>
-              <el-button icon="Refresh" @click="resetQuery">重置</el-button>
+            <el-form-item class="filter-submit-item">
+              <el-button type="primary" plain icon="Search" @click="handleQuery">筛选</el-button>
+              <el-button v-if="hasActiveFilters" link icon="Refresh" @click="resetQuery">清除</el-button>
+            </el-form-item>
+            <span class="toolbar-divider" aria-hidden="true"></span>
+            <el-form-item class="global-search-item">
+              <el-button v-if="canQueryMindmaps" link icon="Search" :disabled="isOperating" @click="globalSearchOpen = true">搜索全部节点</el-button>
             </el-form-item>
           </el-form>
 
           <div class="content-actions">
-            <el-button v-if="listScope === 'owned' && canCreateMindmaps" type="primary" plain icon="Plus" :disabled="isOperating" @click="handleAdd">新建脑图</el-button>
-            <el-button v-if="canQueryMindmaps" plain icon="Search" :disabled="isOperating" @click="globalSearchOpen = true">搜索全部内容</el-button>
             <el-button
               v-if="listScope === 'owned' && canEditMindmaps && selectedActiveMindmaps.length"
               plain
@@ -274,9 +288,9 @@
               :disabled="isOperating"
               @click="handleBatchStatusChange(0)"
             >恢复 {{ selectedArchivedMindmaps.length }} 张</el-button>
-            <el-button v-if="listScope === 'owned' && canRemoveMindmaps" type="danger" plain icon="Delete" :loading="operationType === 'delete:batch'" :disabled="multiple || isOperating" @click="handleDelete">删除</el-button>
-            <el-button v-if="listScope === 'trash' && canEditMindmaps" type="primary" plain icon="RefreshLeft" :loading="operationType === 'restore:batch'" :disabled="multiple || isOperating" @click="handleRestore">恢复</el-button>
-            <el-button v-if="listScope === 'trash' && canRemoveMindmaps" type="danger" plain icon="Delete" :loading="operationType === 'purge:batch'" :disabled="multiple || isOperating" @click="handlePermanentDelete">永久删除</el-button>
+            <el-button v-if="listScope === 'owned' && canRemoveMindmaps && selectedMindmaps.length" type="danger" plain icon="Delete" :loading="operationType === 'delete:batch'" :disabled="isOperating" @click="handleDelete">删除 {{ selectedMindmaps.length }} 张</el-button>
+            <el-button v-if="listScope === 'trash' && canEditMindmaps && selectedMindmaps.length" type="primary" plain icon="RefreshLeft" :loading="operationType === 'restore:batch'" :disabled="isOperating" @click="handleRestore">恢复 {{ selectedMindmaps.length }} 张</el-button>
+            <el-button v-if="listScope === 'trash' && canRemoveMindmaps && selectedMindmaps.length" type="danger" plain icon="Delete" :loading="operationType === 'purge:batch'" :disabled="isOperating" @click="handlePermanentDelete">永久删除 {{ selectedMindmaps.length }} 张</el-button>
             <el-button v-if="listScope === 'owned' && canEditMindmaps && selectedFolderKey !== 'all'" plain icon="Rank" :disabled="multiple || isOperating" @click="handleMoveSelected">移动到</el-button>
             <el-badge
               :value="localDrafts.length"
@@ -338,14 +352,24 @@
             <el-table
               v-if="viewMode === 'table' && (loading || mindmapList.length)"
               v-loading="loading"
+              class="mindmap-dense-table"
+              size="small"
               :data="mindmapList"
               @selection-change="handleSelectionChange"
               style="width: 100%"
             >
-              <el-table-column v-if="listScope !== 'shared'" type="selection" width="55" align="center" />
-              <el-table-column label="名称" align="center" prop="name" :show-overflow-tooltip="true">
+              <el-table-column v-if="listScope !== 'shared'" type="selection" width="44" align="center" />
+              <el-table-column type="index" label="序号" width="58" align="center" />
+              <el-table-column label="名称" align="left" prop="name" min-width="220" :show-overflow-tooltip="true">
                 <template #default="scope">
-                  <el-link v-if="listScope !== 'trash'" type="primary" @click="handleEdit(scope.row)">{{ scope.row.name }}</el-link>
+                  <button
+                    v-if="listScope !== 'trash'"
+                    type="button"
+                    class="mindmap-name-button"
+                    :disabled="isOperating"
+                    :aria-label="`查看脑图详情：${scope.row.name || '未命名脑图'}`"
+                    @click="openMindmapDetail(scope.row)"
+                  >{{ scope.row.name }}</button>
                   <span v-else>{{ scope.row.name }}</span>
                   <el-tooltip
                     v-if="scope.row.contentState === 'migration_failed'"
@@ -364,20 +388,28 @@
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="版本数" align="center" prop="versionCount" width="80" />
-              <el-table-column label="状态" align="center" prop="status" width="80">
+              <el-table-column label="节点数" align="center" prop="nodeCount" width="78">
+                <template #default="scope">{{ Math.max(0, Number(scope.row.nodeCount) || 0) }}</template>
+              </el-table-column>
+              <el-table-column label="版本数" align="center" prop="versionCount" width="78" />
+              <el-table-column label="状态" align="center" prop="status" width="82">
                 <template #default="scope">
-                  <el-tag :type="scope.row.status === 0 ? 'success' : 'info'">
+                  <el-tag size="small" effect="plain" :type="scope.row.status === 0 ? 'success' : 'info'">
                     {{ scope.row.status === 0 ? '正常' : '归档' }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column :label="listScope === 'trash' ? '删除记录时间' : '更新时间'" align="center" prop="updateTime" width="180">
+              <el-table-column v-if="listScope !== 'trash'" label="创建时间" align="center" prop="createTime" width="152" class-name="mindmap-optional-column">
+                <template #default="scope">
+                  <span>{{ parseTime(scope.row.createTime) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column :label="listScope === 'trash' ? '删除记录时间' : '更新时间'" align="center" prop="updateTime" width="152">
                 <template #default="scope">
                   <span>{{ parseTime(scope.row.updateTime) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="220" align="center" fixed="right" class-name="small-padding fixed-width">
+              <el-table-column label="操作" width="190" align="center" fixed="right" class-name="small-padding fixed-width">
                 <template #default="scope">
                   <template v-if="listScope === 'trash'">
                     <el-button v-if="canEditMindmaps" link type="primary" icon="RefreshLeft" :loading="operationType === `restore:${scope.row.id}`" :disabled="isOperating" @click="handleRestore(scope.row)">恢复</el-button>
@@ -443,7 +475,7 @@
                 :can-remove-files="canRemoveMindmaps"
                 :time-text="parseTime(item.updateTime) || ''"
                 @selection-change="selected => handleCardSelection(item, selected)"
-                @open="handleEdit"
+                @open="openMindmapDetail"
                 @view="handleView"
                 @edit="handleEdit"
                 @command="handleCardCommand"
@@ -476,6 +508,20 @@
         </div>
       </pane>
     </splitpanes>
+
+    <MindmapDetailDrawer
+      v-model="detailDrawerOpen"
+      :item="detailMindmap"
+      :scope="listScope"
+      :folder-name="detailFolderName"
+      :can-edit="canEditMindmap(detailMindmap)"
+      :busy="isOperating"
+      :time-text="parseTime(detailMindmap?.updateTime) || ''"
+      :create-time-text="parseTime(detailMindmap?.createTime) || ''"
+      @view="handleDetailView"
+      @edit="handleDetailEdit"
+      @metadata="handleMetadata"
+    />
 
     <!-- 新建脑图对话框 -->
     <el-dialog title="新建脑图" v-model="addDialogOpen" width="500px" append-to-body destroy-on-close :close-on-click-modal="!isOperating" :close-on-press-escape="!isOperating" :show-close="!isOperating">
@@ -667,11 +713,13 @@ import { getFolderTree, addFolder, updateFolder, deleteFolder, getFolderDeleteIm
 import { FolderOpened, Folder, Files, Share, Plus, Edit, Delete, Rank, MoreFilled, Search, WarningFilled, Loading, ArrowDown, Box, CopyDocument, RefreshLeft, Document, Download, Grid, List } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import GlobalSearchDialog from '@/components/MindMap/GlobalSearchDialog.vue'
+import MindmapDetailDrawer from '@/components/MindMap/MindmapDetailDrawer.vue'
 import MindmapFileCard from '@/components/MindMap/MindmapFileCard.vue'
 import MindmapMetadataDialog from '@/components/MindMap/MindmapMetadataDialog.vue'
 import { buildMindmapNodeSearchRoute } from '@/utils/mindmap-route'
 import {
-  readMindmapListPreferences,
+  readMindmapListPreferenceState,
+  resolveInitialMindmapListViewMode,
   resolveMindmapListSort,
   writeMindmapListPreferences,
 } from '@/utils/mindmap-list-preferences'
@@ -724,7 +772,8 @@ const { proxy } = getCurrentInstance()
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
-const initialListPreferences = readMindmapListPreferences()
+const initialListPreferenceState = readMindmapListPreferenceState()
+const initialListPreferences = initialListPreferenceState.preferences
 const initialListRouteState = parseMindmapListRouteQuery(
   route.query,
   initialListPreferences.sortKey,
@@ -767,7 +816,13 @@ const tagOptions = computed(() => {
 const operationType = ref('')
 const globalSearchOpen = ref(false)
 const metadataDialogRef = ref(null)
-const viewMode = ref(initialListPreferences.viewMode)
+const detailDrawerOpen = ref(false)
+const detailMindmapId = ref(null)
+const hasExplicitViewPreference = ref(initialListPreferenceState.hasExplicitViewPreference)
+const viewMode = ref(resolveInitialMindmapListViewMode(
+  initialListPreferenceState,
+  globalThis.matchMedia?.('(max-width: 760px)')?.matches === true,
+))
 const sortKey = ref(initialListRouteState.sortKey)
 const isOperating = computed(() => Boolean(operationType.value))
 const selectedMindmaps = computed(() => {
@@ -780,6 +835,11 @@ const selectedActiveMindmaps = computed(() => (
 const selectedArchivedMindmaps = computed(() => (
   selectedMindmaps.value.filter(item => Number(item.status) === 1)
 ))
+const detailMindmap = computed(() => {
+  const targetId = Number(detailMindmapId.value)
+  if (!Number.isSafeInteger(targetId) || targetId <= 0) return null
+  return mindmapList.value.find(item => Number(item.id) === targetId) || null
+})
 const listRequests = createLatestRequestTracker()
 const tagRequests = createLatestRequestTracker()
 const selectedTagRequests = createLatestRequestTracker()
@@ -878,6 +938,34 @@ const scopeDescription = computed(() => ({
   shared: '集中查看他人授权给你的脑图与当前访问权限',
   trash: '恢复误删的脑图，或永久清理不再需要的内容',
 })[listScope.value])
+const folderNameById = computed(() => {
+  const names = new Map()
+  const visit = items => {
+    for (const item of items || []) {
+      const id = Number(item?.id)
+      if (Number.isSafeInteger(id) && id > 0) names.set(id, item.name || `目录 ${id}`)
+      visit(item?.children)
+    }
+  }
+  visit(folderTree.value)
+  return names
+})
+const currentLocationText = computed(() => {
+  if (listScope.value === 'shared') return '共享给我的文件'
+  if (listScope.value === 'trash') return '已删除文件'
+  const folderId = Number(queryParams.value.folderId)
+  return Number.isSafeInteger(folderId) && folderId > 0
+    ? (folderNameById.value.get(folderId) || '当前目录')
+    : '全部脑图'
+})
+const detailFolderName = computed(() => {
+  if (listScope.value === 'shared') return '与我共享'
+  if (listScope.value === 'trash') return '回收站'
+  const folderId = Number(detailMindmap.value?.folderId)
+  return Number.isSafeInteger(folderId) && folderId > 0
+    ? (folderNameById.value.get(folderId) || '未知目录')
+    : '根目录'
+})
 const appliedListRouteState = computed(() => parseMindmapListRouteQuery(
   route.query,
   initialListPreferences.sortKey,
@@ -939,7 +1027,11 @@ function applyListRouteState(state) {
   queryParams.value.sortOrder = sort.sortOrder
   ids.value = []
   multiple.value = true
-  writeMindmapListPreferences({ viewMode: viewMode.value, sortKey: state.sortKey })
+  writeMindmapListPreferences(
+    { viewMode: viewMode.value, sortKey: state.sortKey },
+    undefined,
+    { viewModeExplicit: hasExplicitViewPreference.value },
+  )
   nextTick(() => folderTreeRef.value?.setCurrentKey(state.folderId || null))
 }
 
@@ -987,6 +1079,7 @@ watch(() => route.query, (nextQuery) => {
   const nextState = parseMindmapListRouteQuery(nextQuery, initialListPreferences.sortKey)
   if (isSameMindmapListState(nextState, getCurrentListRouteState())) return
   metadataDialogRef.value?.close?.({ force: true })
+  detailDrawerOpen.value = false
   applyListRouteState(nextState)
   void getList()
 }, { deep: true })
@@ -1003,6 +1096,7 @@ onBeforeUnmount(() => {
 onDeactivated(() => {
   creationRequests.invalidate()
   metadataDialogRef.value?.close?.({ force: true })
+  detailDrawerOpen.value = false
   if (operationType.value === 'add') operationType.value = ''
 })
 
@@ -1463,10 +1557,11 @@ function handlePagination() {
 }
 
 function persistListPreferences() {
-  writeMindmapListPreferences({
-    viewMode: viewMode.value,
-    sortKey: sortKey.value,
-  })
+  writeMindmapListPreferences(
+    { viewMode: viewMode.value, sortKey: sortKey.value },
+    undefined,
+    { viewModeExplicit: hasExplicitViewPreference.value },
+  )
 }
 
 function handleSortChange(nextSortKey) {
@@ -1483,7 +1578,12 @@ function handleSortChange(nextSortKey) {
 }
 
 function setViewMode(nextViewMode) {
-  if (!['grid', 'table'].includes(nextViewMode) || nextViewMode === viewMode.value) return
+  if (!['grid', 'table'].includes(nextViewMode)) return
+  hasExplicitViewPreference.value = true
+  if (nextViewMode === viewMode.value) {
+    persistListPreferences()
+    return
+  }
   viewMode.value = nextViewMode
   ids.value = []
   multiple.value = true
@@ -1599,6 +1699,24 @@ function handleView(row) {
       returnList: getListReturnState(),
     },
   })
+}
+
+function openMindmapDetail(row) {
+  if (isOperating.value || listScope.value === 'trash') return
+  const id = Number(row?.id)
+  if (!Number.isSafeInteger(id) || id <= 0) return
+  detailMindmapId.value = id
+  detailDrawerOpen.value = true
+}
+
+function handleDetailView(row) {
+  detailDrawerOpen.value = false
+  handleView(row)
+}
+
+function handleDetailEdit(row) {
+  detailDrawerOpen.value = false
+  handleEdit(row)
 }
 
 function openGlobalSearchResult(item) {
@@ -1888,9 +2006,12 @@ async function submitMove() {
 
 <style lang="scss" scoped>
 .mindmap-index {
+  padding: 0;
+  background: var(--el-bg-color);
+
   :deep(.splitpanes__splitter) {
-    background: #e8eaed;
-    width: 3px;
+    width: 1px;
+    background: var(--el-border-color-lighter);
     &:hover {
       background: #409eff;
     }
@@ -1931,40 +2052,42 @@ async function submitMove() {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #fafbfc;
-  border-right: 1px solid #ebeef5;
+  background: #fbfcfe;
+  border-right: 0;
 }
 
 .dir-tree-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 16px 0;
+  min-height: 52px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
   flex-shrink: 0;
 
   .dir-tree-title {
-    font-size: 15px;
-    font-weight: 600;
+    font-size: 14px;
+    font-weight: 650;
     color: #303133;
     letter-spacing: 0.5px;
   }
 }
 
 .dir-tree-search {
-  padding: 12px 16px;
+  padding: 10px 12px 8px;
   flex-shrink: 0;
 
   :deep(.el-input__wrapper) {
-    border-radius: 8px;
+    border-radius: 6px;
     background: #fff;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    box-shadow: 0 0 0 1px var(--el-border-color-lighter) inset;
   }
 }
 
 .dir-tree-body {
   flex: 1;
   overflow: auto;
-  padding: 0 8px 16px;
+  padding: 2px 8px 16px;
 
   &::-webkit-scrollbar {
     width: 4px;
@@ -1981,9 +2104,9 @@ async function submitMove() {
     background: transparent;
 
     .el-tree-node__content {
-      height: 36px;
-      border-radius: 6px;
-      margin-bottom: 2px;
+      height: 34px;
+      border-radius: 5px;
+      margin-bottom: 1px;
       padding-right: 8px;
       transition: background-color 0.15s;
 
@@ -2056,11 +2179,11 @@ async function submitMove() {
   display: flex;
   align-items: center;
   width: 100%;
-  height: 36px;
+  height: 34px;
   padding: 0 8px 0 16px;
   border: 0;
-  border-radius: 6px;
-  margin-bottom: 2px;
+  border-radius: 5px;
+  margin-bottom: 1px;
   background: transparent;
   cursor: pointer;
   font-family: inherit;
@@ -2185,34 +2308,53 @@ async function submitMove() {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 22px 20px 4px;
+  min-height: 62px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
   flex-shrink: 0;
+
+  .content-overview-copy {
+    min-width: 0;
+  }
+
+  .content-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
 
   h1 {
     margin: 0;
     color: var(--el-text-color-primary);
-    font-size: 22px;
+    font-size: 17px;
     font-weight: 650;
     line-height: 1.35;
     letter-spacing: -0.3px;
   }
 
   p {
-    margin: 5px 0 0;
+    margin: 3px 0 0;
+    overflow: hidden;
     color: var(--el-text-color-secondary);
     font-size: 13px;
-    line-height: 1.5;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
 .result-count {
   flex-shrink: 0;
-  padding: 5px 10px;
-  border: 1px solid var(--el-border-color-lighter);
+  min-width: 22px;
+  min-height: 20px;
+  padding: 1px 7px;
+  border: 0;
   border-radius: 999px;
   background: var(--el-fill-color-extra-light);
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
 }
 
 .mobile-scope-bar {
@@ -2220,17 +2362,54 @@ async function submitMove() {
 }
 
 .content-toolbar {
-  padding: 16px 20px 0;
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
   flex-shrink: 0;
+
+  :deep(.el-form-item) {
+    margin-right: 0;
+    margin-bottom: 0;
+  }
+
+  :deep(.el-input__wrapper),
+  :deep(.el-select__wrapper) {
+    min-height: 32px;
+  }
+}
+
+.keyword-filter-item {
+  flex: none;
+}
+
+.filter-submit-item,
+.global-search-item {
+  flex: none;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 2px;
+  background: var(--el-border-color-lighter);
 }
 
 .content-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 20px;
+  min-height: 48px;
+  gap: 6px;
+  padding: 7px 18px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
   flex-shrink: 0;
+
+  :deep(.el-button + .el-button) {
+    margin-left: 0;
+  }
 }
 
 .local-draft-badge {
@@ -2310,10 +2489,70 @@ async function submitMove() {
   vertical-align: middle;
 }
 
+.mindmap-name-button {
+  max-width: calc(100% - 8px);
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--el-color-primary);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+  line-height: 26px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  &:focus-visible {
+    border-radius: 3px;
+    outline: 2px solid var(--el-color-primary-light-5);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.55;
+  }
+}
+
+.mindmap-dense-table {
+  :deep(.el-table__header th.el-table__cell) {
+    height: 38px;
+    padding: 5px 0;
+    background: #f7f8fa;
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  :deep(.el-table__body td.el-table__cell) {
+    height: 42px;
+    padding: 5px 0;
+    color: var(--el-text-color-regular);
+    font-size: 12px;
+  }
+
+  :deep(.el-table__row:hover > td.el-table__cell) {
+    background: #f8faff;
+  }
+
+  :deep(.el-button.is-link) {
+    padding-right: 3px;
+    padding-left: 3px;
+    font-size: 12px;
+  }
+}
+
 .content-body {
   flex: 1;
   overflow: auto;
-  padding: 0 20px 16px;
+  padding: 0 18px 14px;
 
   &::-webkit-scrollbar {
     width: 4px;
@@ -2375,6 +2614,12 @@ async function submitMove() {
   }
 }
 
+@media (max-width: 1280px) {
+  .mindmap-dense-table :deep(.mindmap-optional-column) {
+    display: none;
+  }
+}
+
 @media (max-width: 900px) {
   .mindmap-index {
     padding: 8px;
@@ -2390,10 +2635,11 @@ async function submitMove() {
   }
 
   .content-overview {
-    padding: 18px 16px 6px;
+    min-height: 60px;
+    padding: 0 16px;
 
     h1 {
-      font-size: 20px;
+      font-size: 17px;
     }
 
     p {
@@ -2438,21 +2684,29 @@ async function submitMove() {
   }
 
   .content-toolbar {
-    padding: 14px 16px 0;
+    min-height: auto;
+    flex-wrap: wrap;
+    padding: 10px 16px;
 
     :deep(.el-form-item) {
-      width: 100%;
-      margin-right: 0;
+      width: auto;
     }
 
     :deep(.el-form-item__content) {
       min-width: 0;
     }
 
-    :deep(.el-input),
-    :deep(.el-select) {
-      width: 100% !important;
+    .keyword-filter-item {
+      width: min(100%, 320px);
+
+      :deep(.el-input) {
+        width: 100% !important;
+      }
     }
+  }
+
+  .toolbar-divider {
+    display: none;
   }
 
   .content-actions,

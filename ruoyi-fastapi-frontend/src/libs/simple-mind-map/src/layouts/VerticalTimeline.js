@@ -83,7 +83,7 @@ class VerticalTimeline extends Base {
                   newNode.width
           }
         }
-        if (!cur.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(cur)) {
           return true
         }
       },
@@ -92,7 +92,9 @@ class VerticalTimeline extends Base {
         if (isRoot) {
           return
         }
-        let len = cur.data.expand === false ? 0 : cur._node.children.length
+        let len = this.renderer.isNodeExpandedForLayout(cur)
+          ? cur._node.children.length
+          : 0
         cur._node.childrenAreaHeight = len
           ? cur._node.children.reduce((h, item) => {
               return h + item.height
@@ -111,7 +113,11 @@ class VerticalTimeline extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex, index) => {
-        if (node.getData('expand') && node.children && node.children.length) {
+        if (
+          this.renderer.isNodeExpandedForLayout(node)
+          && node.children
+          && node.children.length
+        ) {
           let marginY = this.getMarginY(layerIndex + 1)
           // 定位二级节点的top
           if (isRoot) {
@@ -145,7 +151,7 @@ class VerticalTimeline extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (!node.getData('expand')) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return
         }
         if (isRoot) return

@@ -1381,6 +1381,44 @@ test('同步握手确认已覆盖来源并发送安全压缩检查点', () => {
   second.destroy()
 })
 
+test('明确使用云端版本时丢弃同 revision 协作缓存并替换其来源', () => {
+  const document = createDocument()
+  const remote = new Y.Doc()
+  const staleSync = new YjsMindmapSync(1, createMindmap(document), 6)
+  staleSync.initFromMindmap(document)
+  Y.applyUpdate(remote, Y.encodeStateAsUpdate(staleSync.doc))
+  remote.getMap('nodes').get('root').get('data').set('text', '已丢弃的协作缓存')
+
+  const sync = new YjsMindmapSync(1, createMindmap(document), 6, {
+    preferAuthoritativeDocument: true,
+    getDocumentData: () => document.documentData,
+  })
+  sync.serverCapabilities = new Set(['yjs-checkpoint-v1'])
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+
+  sync._handleSyncInit({
+    states: [sync._encodeUpdate(Y.encodeStateAsUpdate(remote))],
+    stateSources: ['stale-source'],
+  })
+
+  assert.equal(sync.yNodes.get('root').get('data').get('text'), '根节点')
+  assert.equal(sync.requiresAuthoritativeReconciliation(), false)
+  const checkpoint = sent.find(message => message.type === 'checkpoint')
+  assert.deepEqual(checkpoint.replacesSources, ['stale-source'])
+  const authoritative = new Y.Doc()
+  Y.applyUpdate(authoritative, sync._decodeUpdate(checkpoint.state))
+  assert.equal(authoritative.getMap('nodes').get('root').get('data').get('text'), '根节点')
+
+  authoritative.destroy()
+  sync.destroy({ flushCheckpoint: false })
+  staleSync.destroy({ flushCheckpoint: false })
+  remote.destroy()
+})
+
 test('同步握手隔离损坏来源并用有效状态生成修复检查点', () => {
   const validDoc = new Y.Doc()
   validDoc.getMap('proof').set('valid', '保留内容')

@@ -7,6 +7,10 @@ const nodeTagSourceUrl = new URL('../../components/MindMap/NodeTag.vue', import.
 test('字段标签使用可聚焦按钮并公开展开和选中状态', async () => {
   const source = await readFile(nodeTagSourceUrl, 'utf8')
 
+  assert.match(source, /class="mindmap-node-tag-dialog"/)
+  assert.match(source, /:z-index="4200"/)
+  assert.match(source, /max-height:\s*calc\(100dvh - 32px\)/)
+  assert.match(source, /\.mindmap-node-tag-dialog \.el-dialog__body[\s\S]*overflow-y:\s*auto/)
   assert.match(source, /class="fieldHeader"[\s\S]*:aria-expanded=/)
   assert.match(source, /:aria-controls="`field-options-\$\{field\.id\}`"/)
   assert.match(source, /class="optionBadge"[\s\S]*:aria-pressed=/)

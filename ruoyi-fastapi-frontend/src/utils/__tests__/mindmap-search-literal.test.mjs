@@ -6,6 +6,8 @@ import { replaceAllLiteralText } from '../../libs/simple-mind-map/src/utils/lite
 import {
   buildMindmapSearchHighlightSegments,
   buildMindmapTagFilterOptions,
+  isMindmapCaseTitleData,
+  matchesMindmapFilterText,
   resolveMindmapSearchNavigationIndex,
   resolveMindmapSearchResultListHeight,
 } from '../mindmap-search.js'
@@ -43,6 +45,22 @@ test('本地搜索高亮可保持与核心插件一致的大小写语义', () =>
     { text: 'Node', match: true },
     { text: ' node', match: false },
   ])
+})
+
+test('筛选文本运算符保持字面量且区分正向和否定条件', () => {
+  assert.equal(matchesMindmapFilterText('登录.P1', 'contains', '.P1'), true)
+  assert.equal(matchesMindmapFilterText('登录.P1', 'equals', '登录.P1'), true)
+  assert.equal(matchesMindmapFilterText('登录.P1', 'notContains', 'P2'), true)
+  assert.equal(matchesMindmapFilterText('登录.P1', 'notEquals', '登录'), true)
+  assert.equal(matchesMindmapFilterText('登录.P1', 'contains', 'p1'), false)
+})
+
+test('用例标题字段只识别明确标记的节点数据', () => {
+  assert.equal(isMindmapCaseTitleData({ tag: ['用例标题'] }), true)
+  assert.equal(isMindmapCaseTitleData({ tag: [{ text: '用例标题' }] }), true)
+  assert.equal(isMindmapCaseTitleData({ tag: [{ name: '用例标题' }] }), true)
+  assert.equal(isMindmapCaseTitleData({ tag: [{ text: 'P1' }] }), false)
+  assert.equal(isMindmapCaseTitleData({}), false)
 })
 
 test('纯文本和富文本替换共用字面量实现', async () => {

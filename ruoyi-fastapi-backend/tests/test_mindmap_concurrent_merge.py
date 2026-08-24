@@ -194,6 +194,25 @@ class MindmapConcurrentMergeTest(unittest.TestCase):
 
         self.assertEqual(merged['data']['associativeLineTargets'], ['a', 'b', 'c'])
 
+    def test_relation_uid_is_bounded_for_uuid_nodes(self) -> None:
+        source_uid = '11111111-1111-4111-8111-111111111111'
+        target_uid = '22222222-2222-4222-8222-222222222222'
+        tree = _node(source_uid, 'root', [_node(target_uid, 'target')])
+        relation_uid = f'assoc:{source_uid}:{target_uid}'
+
+        merged = merge_node_operations(tree, tree, [{
+            'type': 'relation.upsert',
+            'payload': {
+                'key': relation_uid,
+                'relationUid': relation_uid,
+                'relationType': 'associative_line',
+                'sourceUid': source_uid,
+                'targetUid': target_uid,
+            },
+        }])
+
+        self.assertEqual(merged['data']['associativeLineTargets'], [target_uid])
+
     def test_separated_text_update_preserves_server_relation_state(self) -> None:
         server = _node('root', 'server text', [_node('a', 'a'), _node('b', 'b')])
         server['data']['associativeLineTargets'] = ['b']
@@ -222,6 +241,30 @@ class MindmapConcurrentMergeTest(unittest.TestCase):
         merged = merge_node_operations(tree, tree, [_relation_operation('a', 'delete')])
 
         self.assertEqual(merged['data']['associativeLineTargets'], ['b'])
+
+    def test_relation_delete_accepts_legacy_key_only_payload(self) -> None:
+        tree = _node('root', 'root', [_node('a', 'a'), _node('b', 'b')])
+        tree['data']['associativeLineTargets'] = ['a', 'b']
+
+        merged = merge_node_operations(tree, tree, [{
+            'type': 'relation.delete',
+            'payload': {'key': 'assoc:root:a'},
+        }])
+
+        self.assertEqual(merged['data']['associativeLineTargets'], ['b'])
+
+    def test_relation_delete_normalizes_long_key_only_payload(self) -> None:
+        source_uid = 'source-' + ('s' * 57)
+        target_uid = 'target-' + ('t' * 57)
+        tree = _node(source_uid, 'root', [_node(target_uid, 'target')])
+        tree['data']['associativeLineTargets'] = [target_uid]
+
+        merged = merge_node_operations(tree, tree, [{
+            'type': 'relation.delete',
+            'payload': {'key': f'assoc:{source_uid}:{target_uid}'},
+        }])
+
+        self.assertEqual(merged['data'].get('associativeLineTargets'), None)
 
     def test_summary_group_and_asset_operations_materialize_independently(self) -> None:
         tree = _node('root', 'root', [_node('a', 'a'), _node('b', 'b')])
@@ -314,6 +357,38 @@ class MindmapConcurrentMergeTest(unittest.TestCase):
         ])
 
         self.assertEqual([child['data']['uid'] for child in merged['children']], ['a', 'c'])
+
+    def test_replayed_node_create_is_idempotent(self) -> None:
+        server = _node('root', 'root', [_node('a', 'a'), _node('c', 'already synced')])
+        client = _node('root', 'root', [_node('a', 'a'), _node('c', 'already synced')])
+
+        merged = merge_node_operations(server, client, [
+            _update('root', old_children=['a'], children=['a', 'c']),
+            {'type': 'node.create', 'nodeUid': 'c', 'payload': {'data': {'uid': 'c'}}},
+        ])
+
+        self.assertEqual([child['data']['uid'] for child in merged['children']], ['a', 'c'])
+
+    def test_client_root_alias_is_canonicalized_to_server_root(self) -> None:
+        server = _node('server-root', 'server', [_node('a', 'old')])
+        client = _node('draft-root', 'client root', [_node('a', 'updated')])
+
+        merged = merge_node_operations(server, client, [
+            _update('a', data_changed=True),
+        ])
+
+        self.assertEqual(merged['data']['uid'], 'server-root')
+        self.assertEqual(merged['data']['text'], 'server')
+        self.assertEqual(merged['children'][0]['data']['text'], 'updated')
+
+    def test_client_root_alias_cannot_overwrite_server_root(self) -> None:
+        server = _node('server-root', 'server')
+        client = _node('draft-root', 'stale draft')
+
+        with self.assertRaisesRegex(ValueError, '根节点不一致'):
+            merge_node_operations(server, client, [
+                _update('draft-root', data_changed=True),
+            ])
 
     def test_merge_node_delete_removes_subtree(self) -> None:
         server = _node('root', 'root', [_node('a', 'a', [_node('child', 'child')]), _node('b', 'b')])

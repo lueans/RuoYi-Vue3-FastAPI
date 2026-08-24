@@ -56,13 +56,15 @@ class LogicalStructure extends Base {
               this.getMarginX(layerIndex)
           }
         }
-        if (!cur.data.expand) {
+        if (!this.renderer.isNodeExpandedForLayout(cur)) {
           return true
         }
       },
       (cur, parent, isRoot, layerIndex) => {
         // 返回时计算节点的areaHeight，也就是子节点所占的高度之和，包括外边距
-        let len = cur.data.expand === false ? 0 : cur._node.children.length
+        let len = this.renderer.isNodeExpandedForLayout(cur)
+          ? cur._node.children.length
+          : 0
         cur._node.childrenAreaHeight = len
           ? cur._node.children.reduce((h, item) => {
               return h + item.height
@@ -90,7 +92,11 @@ class LogicalStructure extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (node.getData('expand') && node.children && node.children.length) {
+        if (
+          this.renderer.isNodeExpandedForLayout(node)
+          && node.children
+          && node.children.length
+        ) {
           let marginY = this.getMarginY(layerIndex + 1)
           // 第一个子节点的top值 = 该节点中心的top值 - 子节点的高度之和的一半
           let top = node.top + node.height / 2 - node.childrenAreaHeight / 2
@@ -112,7 +118,7 @@ class LogicalStructure extends Base {
       this.root,
       null,
       (node, parent, isRoot, layerIndex) => {
-        if (!node.getData('expand')) {
+        if (!this.renderer.isNodeExpandedForLayout(node)) {
           return
         }
         // 判断子节点所占的高度之和是否大于该节点自身，大于则需要调整位置

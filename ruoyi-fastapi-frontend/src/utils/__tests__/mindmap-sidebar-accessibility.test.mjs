@@ -4,7 +4,13 @@ import test from 'node:test'
 
 const componentRoot = new URL('../../components/MindMap/', import.meta.url)
 const sidebarSourceUrl = new URL('Sidebar.vue', componentRoot)
+const inspectorSourceUrl = new URL('PropertyInspector.vue', componentRoot)
+const styleSourceUrl = new URL('Style.vue', componentRoot)
+const baseStyleSourceUrl = new URL('BaseStyle.vue', componentRoot)
+const structureSourceUrl = new URL('Structure.vue', componentRoot)
+const themeSourceUrl = new URL('Theme.vue', componentRoot)
 const triggerSourceUrl = new URL('SidebarTrigger.vue', componentRoot)
+const storeSourceUrl = new URL('useStore.js', componentRoot)
 const searchSourceUrl = new URL('Search.vue', componentRoot)
 const toolbarSourceUrl = new URL('Toolbar.vue', componentRoot)
 const navigatorSourceUrl = new URL('NavigatorToolbar.vue', componentRoot)
@@ -23,8 +29,9 @@ test('隐藏侧栏从可访问树和焦点顺序隔离，并提供语义化关�
 })
 
 test('侧栏打开和关闭具备完整焦点生命周期，并同步全局激活状态', async () => {
-  const [sidebar, trigger] = await Promise.all([
+  const [sidebar, inspector, trigger] = await Promise.all([
     readFile(sidebarSourceUrl, 'utf8'),
+    readFile(inspectorSourceUrl, 'utf8'),
     readFile(triggerSourceUrl, 'utf8'),
   ])
 
@@ -35,6 +42,12 @@ test('侧栏打开和关闭具备完整焦点生命周期，并同步全局激�
   assert.match(sidebar, /focusReturnTarget = document\.activeElement/)
   assert.match(sidebar, /returnTarget\?\.isConnected && !returnTarget\.closest\?\.\('\[inert\]'\)/)
   assert.match(sidebar, /returnTarget\.focus\?\.\(\)/)
+  assert.match(inspector, /role="complementary"/)
+  assert.match(inspector, /@keydown\.esc\.stop="closeInspector"/)
+  assert.match(inspector, /bus\.on\('focusActiveSidebar', focusWhenOpen\)/)
+  assert.match(inspector, /closeButtonRef\.value\?\.focus\(\)/)
+  assert.match(inspector, /actions\.setActiveSidebar\(null\)/)
+  assert.match(inspector, /returnTarget\?\.isConnected && !returnTarget\.closest\?\.\('\[inert\]'\)/)
   assert.match(trigger, /:ref="el => setTriggerRef\(item\.value, el\)"/)
   assert.match(trigger, /triggerRefs\.get\(name\)\?\.focus\(\)/)
   assert.match(trigger, /bus\.on\('focusSidebarTrigger', focusTrigger\)/)
@@ -72,10 +85,6 @@ test('常规侧栏仅在激活时挂载，画布上下文侧栏保留事件监�
 
   const lazySidebarGuards = {
     OutlineSidebar: 'outline',
-    MmStyle: 'nodeStyle',
-    BaseStyle: 'baseStyle',
-    Theme: 'theme',
-    Structure: 'structure',
     ShortcutKey: 'shortcutKey',
     Setting: 'setting',
     FormulaSidebar: 'formulaSidebar',
@@ -83,6 +92,10 @@ test('常规侧栏仅在激活时挂载，画布上下文侧栏保留事件监�
     VersionHistory: 'versionHistory',
     CollaboratorManager: 'collaboratorManager',
   }
+
+  assert.match(source, /<PropertyInspector[\s\S]*?v-if="mindMap && hasPropertyInspector"/)
+  assert.match(source, /const propertySidebarNames = new Set\(\['nodeStyle', 'baseStyle', 'structure', 'theme'\]\)/)
+  assert.match(source, /const hasPropertyInspector = computed/)
   for (const [component, sidebarName] of Object.entries(lazySidebarGuards)) {
     assert.equal(
       source.includes(`<${component}`) && source.includes(`activeSidebar === '${sidebarName}'`),
@@ -102,10 +115,6 @@ test('图标侧栏只有一个按需实例，懒挂载面板声明首次打开�
   const editor = await readFile(editorSourceUrl, 'utf8')
   const sidebar = await readFile(sidebarSourceUrl, 'utf8')
   const lazySidebarFiles = [
-    'Style.vue',
-    'BaseStyle.vue',
-    'Theme.vue',
-    'Structure.vue',
     'OutlineSidebar.vue',
     'Setting.vue',
     'ShortcutKey.vue',
@@ -134,6 +143,128 @@ test('图标侧栏只有一个按需实例，懒挂载面板声明首次打开�
   assert.match(nodeIconSidebar, /getCommonNodeIcons/)
   assert.match(nodeIconSidebar, /activeNodes\.value\.length === 0[\s\S]*actions\.setActiveSidebar\(null\)/)
   assert.match(nodeIconSidebar, /:deep\(svg\)/)
+})
+
+test('统一属性检查器提供语义化页签、停靠布局和可撤销的节点样式重置入口', async () => {
+  const [inspector, editor, trigger] = await Promise.all([
+    readFile(inspectorSourceUrl, 'utf8'),
+    readFile(editorSourceUrl, 'utf8'),
+    readFile(triggerSourceUrl, 'utf8'),
+  ])
+
+  assert.match(inspector, /role="tablist"/)
+  assert.match(inspector, /role="tab"/)
+  assert.match(inspector, /role="tabpanel"/)
+  assert.match(inspector, /:aria-selected="activeTab === tab\.value"/)
+  assert.match(inspector, /event\.key === 'ArrowRight'/)
+  assert.match(inspector, /event\.key === 'ArrowLeft'/)
+  assert.match(inspector, /REMOVE_ALL_NODE_CUSTOM_STYLES/)
+  assert.match(inspector, /activeNodes\.length === 0 \|\| isReadonly/)
+  assert.match(inspector, /<MmStyle[\s\S]*?embedded/)
+  assert.match(inspector, /<Structure[\s\S]*?embedded/)
+  assert.match(inspector, /<BaseStyle[\s\S]*?embedded/)
+  assert.match(inspector, /<Theme[\s\S]*?embedded/)
+  assert.match(inspector, /class="applicationState" role="status" aria-live="polite"/)
+  assert.match(inspector, /v-show="feedbackActive" class="applicationState"/)
+  assert.match(inspector, /return `已选择 \$\{activeNodes\.value\.length\} 个节点`/)
+  assert.match(inspector, /width: var\(--mindmap-inspector-width, 348px\)/)
+  assert.match(inspector, /v-if="activeNodes\.length > 0"/)
+  assert.match(inspector, /class="nodeEmptyState"/)
+  assert.match(inspector, /@click="selectTab\('canvas', true\)"/)
+  assert.match(inspector, /@click="selectTab\('theme', true\)"/)
+  assert.match(inspector, /announceApplied\('节点样式已应用'\)/)
+  assert.match(inspector, /应用到整张脑图/)
+  assert.match(inspector, /需要恢复时可使用顶部撤销/)
+  assert.match(inspector, /ref="inspectorBodyRef" class="inspectorBody customScrollbar"/)
+  assert.match(inspector, /inspectorBodyRef\.value\.scrollTop = 0/)
+  assert.match(editor, /width: calc\(100% - var\(--mindmap-inspector-width\)\)/)
+  assert.match(editor, /mindMap\.value\?\.resize\?\.\(\)/)
+  assert.match(trigger, /isPropertyInspectorActive/)
+})
+
+test('节点属性分组可通过键盘折叠，文字快捷控件暴露原生按钮语义', async () => {
+  const source = await readFile(styleSourceUrl, 'utf8')
+
+  assert.match(source, /<details class="styleSection" open>/)
+  assert.match(source, /<summary class="title noTop">/)
+  assert.match(source, /<el-icon class="sectionChevron"><ArrowUp \/><\/el-icon>/)
+  assert.match(source, /role="group" aria-label="常用文字颜色"/)
+  assert.match(source, /<span>更多<\/span>\s*<el-icon><ArrowDown \/><\/el-icon>/)
+  assert.match(source, /class="quickColorButton"/)
+  assert.match(source, /:aria-pressed="normalizeColor\(style\.color\) === normalizeColor\(color\)"/)
+  assert.match(source, /type="button"[\s\S]*?aria-label="加粗"[\s\S]*?:aria-pressed="style\.fontWeight === 'bold'"/)
+  assert.match(source, /type="button"[\s\S]*?aria-label="斜体"[\s\S]*?:aria-pressed="style\.fontStyle === 'italic'"/)
+  assert.match(source, /role="group" aria-label="文字样式"/)
+  assert.match(source, /aria-label="下划线"[\s\S]*?:aria-pressed="style\.textDecoration === 'underline'"/)
+  assert.match(source, /aria-label="中划线"[\s\S]*?:aria-pressed="style\.textDecoration === 'line-through'"/)
+  assert.match(source, /aria-label="减小字号"[\s\S]*?@click="stepFontSize\(-1\)"/)
+  assert.match(source, /aria-label="增大字号"[\s\S]*?@click="stepFontSize\(1\)"/)
+  assert.match(source, /role="group" aria-label="文字对齐方式"/)
+  assert.match(source, /:aria-pressed="style\.textAlign === item\.value"/)
+  assert.match(source, /function toggleTextDecoration[\s\S]*?update\('textDecoration'\)/)
+  assert.match(source, /function setTextAlign[\s\S]*?update\('textAlign'\)/)
+  assert.equal((source.match(/class="fieldBlock fullSpanField"/g) || []).length >= 2, true)
+  assert.match(source, /:label="`\$\{item\}px`"/)
+  assert.match(source, /\.fullSpanField \{\s*grid-column: 1 \/ -1/)
+})
+
+test('画布属性与全局样式支持键盘折叠，布局卡片暴露当前选中状态', async () => {
+  const [inspector, baseStyle, structure] = await Promise.all([
+    readFile(inspectorSourceUrl, 'utf8'),
+    readFile(baseStyleSourceUrl, 'utf8'),
+    readFile(structureSourceUrl, 'utf8'),
+  ])
+
+  assert.match(inspector, /<details class="canvasSection" open>/)
+  assert.match(inspector, /<summary class="canvasSectionSummary">/)
+  assert.match(baseStyle, /<details class="baseStyleSection" open>/)
+  assert.equal((baseStyle.match(/<details class="baseStyleSection" open>/g) || []).length, 2)
+  assert.match(baseStyle, /<summary class="title noTop">/)
+  assert.match(baseStyle, /<el-icon class="sectionChevron"><ArrowUp \/><\/el-icon>/)
+  assert.match(structure, /<details ref="layoutPickerRef" class="layoutPicker"/)
+  assert.match(structure, /<summary ref="layoutSummaryRef" class="currentLayoutCard">/)
+  assert.match(structure, /当前布局 · 点击更换/)
+  assert.match(structure, /item !== currentLayout\.value/)
+  assert.match(structure, /layoutPickerRef\.value\.open = false/)
+  assert.match(structure, /layoutSummaryRef\.value\?\.focus\(\)/)
+  assert.match(structure, /class="layoutName"/)
+})
+
+test('格式入口优先服务当前选区，并保留最近一次全局设置上下文', async () => {
+  const [trigger, store] = await Promise.all([
+    readFile(triggerSourceUrl, 'utf8'),
+    readFile(storeSourceUrl, 'utf8'),
+  ])
+
+  assert.match(trigger, /item\.value === 'nodeStyle'[\s\S]*?resolveFormatSidebar\(\)/)
+  assert.match(trigger, /activeNodeList \|\| \[\]/)
+  assert.match(trigger, /if \(hasActiveNodes\) return 'nodeStyle'/)
+  assert.match(trigger, /\['baseStyle', 'structure', 'theme'\]\.includes\(store\.lastPropertySidebar\)/)
+  assert.match(store, /lastPropertySidebar: 'baseStyle'/)
+  assert.match(store, /GLOBAL_PROPERTY_SIDEBARS = new Set\(\['baseStyle', 'structure', 'theme'\]\)/)
+  assert.match(store, /if \(GLOBAL_PROPERTY_SIDEBARS\.has\(name\)\) state\.lastPropertySidebar = name/)
+  assert.doesNotMatch(store, /new Set\(\['nodeStyle', 'baseStyle', 'structure', 'theme'\]\)/)
+})
+
+test('桌面只读页去除与顶部导航重复的侧栏入口，窄屏仍保留完整访问路径', async () => {
+  const trigger = await readFile(triggerSourceUrl, 'utf8')
+
+  assert.match(trigger, /const readonlyHeaderSidebarNames = new Set\(\['outline', 'versionHistory'\]\)/)
+  assert.match(trigger, /if \(viewportWidth\.value > 760\)/)
+  assert.match(trigger, /!readonlyHeaderSidebarNames\.has\(item\.value\)/)
+  assert.match(trigger, /activeSidebar\.value === item\.value/)
+  assert.match(trigger, /viewportWidth\.value = window\.innerWidth/)
+})
+
+test('主题面板会定位当前主题分组，并为主题卡片提供可感知的选中态', async () => {
+  const source = await readFile(themeSourceUrl, 'utf8')
+
+  assert.match(source, /function syncActiveThemeGroup\(\)/)
+  assert.match(source, /group\.list\.some\(theme => theme\.value === currentTheme\.value\)/)
+  assert.match(source, /selectedTheme,[\s\S]*?group\.list\.filter\(item => item\.value !== currentTheme\.value\)/)
+  assert.match(source, /:aria-pressed="item\.value === currentTheme"/)
+  assert.match(source, /class="activeMark" aria-hidden="true"/)
+  assert.match(source, /<small v-if="item\.value === currentTheme">当前<\/small>/)
 })
 
 test('大纲与公式侧栏的高频条目使用原生键盘控件', async () => {

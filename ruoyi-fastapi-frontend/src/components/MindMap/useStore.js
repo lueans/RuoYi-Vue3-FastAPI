@@ -27,6 +27,7 @@ const READONLY_SAFE_SIDEBARS = new Set([
   'collaboratorManager',
   'noteSidebar',
 ])
+const GLOBAL_PROPERTY_SIDEBARS = new Set(['baseStyle', 'structure', 'theme'])
 
 export function isMindmapSidebarReadonlySafe(name) {
   return typeof name === 'string' && READONLY_SAFE_SIDEBARS.has(name)
@@ -35,6 +36,7 @@ export function isMindmapSidebarReadonlySafe(name) {
 const state = reactive({
   mindMap: null,
   activeSidebar: null,
+  lastPropertySidebar: 'baseStyle',
   isReadonly: false,
   canManageCollaborators: false,
   localConfig: { ...DEFAULT_MINDMAP_LOCAL_CONFIG },
@@ -50,6 +52,7 @@ function setActiveSidebar(name) {
     return false
   }
   state.activeSidebar = name
+  if (GLOBAL_PROPERTY_SIDEBARS.has(name)) state.lastPropertySidebar = name
   return true
 }
 
@@ -219,6 +222,7 @@ function nextSidebarZIndex() {
 function resetState() {
   state.mindMap = null
   state.activeSidebar = null
+  state.lastPropertySidebar = 'baseStyle'
   state.isReadonly = false
   state.canManageCollaborators = false
   state.sidebarZIndex = 2001

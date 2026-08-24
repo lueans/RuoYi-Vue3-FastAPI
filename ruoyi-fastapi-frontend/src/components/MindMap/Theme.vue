@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="主题" open-on-mount>
+  <div class="themePanel" :class="{ embedded: props.embedded }">
     <div class="themeGroupList" :class="{ isDark: isDark }">
       <el-tabs v-model="activeName" class="tabBox">
         <el-tab-pane
@@ -7,7 +7,14 @@
           :key="group.name"
           :label="group.name"
           :name="group.name"
-        ></el-tab-pane>
+        >
+          <template #label>
+            <span class="themeTabLabel">
+              {{ group.name }}
+              <small>{{ group.list.length }}</small>
+            </span>
+          </template>
+        </el-tab-pane>
       </el-tabs>
       <div class="themeListTheme customScrollbar">
         <button
@@ -23,16 +30,22 @@
         >
           <div class="imgBox">
             <img :src="item.img || themeImgMap[item.value]" :alt="`${item.name}主题预览`" />
+            <span v-if="item.value === currentTheme" class="activeMark" aria-hidden="true">
+              <el-icon><Check /></el-icon>
+            </span>
           </div>
-          <div class="name">{{ item.name }}</div>
+          <div class="name">
+            <span>{{ item.name }}</span>
+            <small v-if="item.value === currentTheme">当前</small>
+          </div>
         </button>
       </div>
     </div>
-  </Sidebar>
+  </div>
 </template>
 
 <script setup>
-import Sidebar from './Sidebar.vue'
+import { Check } from '@element-plus/icons-vue'
 import { store, actions } from './useStore'
 import { ElMessageBox } from 'element-plus'
 
@@ -44,11 +57,11 @@ const themeList = themeListRaw || []
 
 const props = defineProps({
   data: { type: [Object, null], default: null },
-  mindMap: { type: Object, default: null }
+  mindMap: { type: Object, default: null },
+  embedded: { type: Boolean, default: false }
 })
 const emit = defineEmits(['document-meta-change'])
 
-const sidebarRef = ref(null)
 const currentTheme = ref('default')
 const activeName = ref('')
 const isDark = computed(() => store.localConfig.isDark)
@@ -88,7 +101,13 @@ const groupList = computed(() => {
 
 const currentList = computed(() => {
   const group = groupList.value.find(item => item.name === activeName.value)
-  return group ? group.list : []
+  if (!group) return []
+  const selectedTheme = group.list.find(item => item.value === currentTheme.value)
+  if (!selectedTheme) return group.list
+  return [
+    selectedTheme,
+    ...group.list.filter(item => item.value !== currentTheme.value)
+  ]
 })
 
 // Initialize
@@ -99,7 +118,15 @@ if (groupList.value.length > 0) {
 function handleViewThemeChange() {
   if (!props.mindMap) return
   currentTheme.value = props.mindMap.getTheme()
+  syncActiveThemeGroup()
   handleDark()
+}
+
+function syncActiveThemeGroup() {
+  const selectedGroup = groupList.value.find(group => (
+    group.list.some(theme => theme.value === currentTheme.value)
+  ))
+  if (selectedGroup) activeName.value = selectedGroup.name
 }
 
 function handleDark() {
@@ -187,40 +214,88 @@ watch(() => props.mindMap, bindMindMap, { immediate: true })
 
 watch(() => store.activeSidebar, (val) => {
   if (val === 'theme') {
-    if (props.mindMap) currentTheme.value = props.mindMap.getTheme()
-    sidebarRef.value?.open()
-  } else {
-    sidebarRef.value?.close()
+    if (props.mindMap) {
+      currentTheme.value = props.mindMap.getTheme()
+      syncActiveThemeGroup()
+    }
   }
 }, { immediate: true })
 </script>
 
 <style lang="less" scoped>
+.themePanel {
+  width: 100%;
+  min-height: 100%;
+}
+
 .themeGroupList {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  height: 100%;
+  min-height: 100%;
 
   &.isDark {
     .name {
       color: #fff;
     }
+
+    .themeListTheme .themeItem {
+      border-color: #454950;
+      background: #2f3338;
+
+      &:hover {
+        border-color: #5b8def;
+      }
+
+      &.active {
+        background: rgba(51, 112, 255, 0.12);
+      }
+    }
   }
 
   .tabBox {
     flex-shrink: 0;
+    padding: 0 18px;
+
+    :deep(.el-tabs__header) {
+      margin-bottom: 14px;
+    }
 
     :deep(.el-tabs__nav-wrap) {
       display: flex;
       justify-content: center;
     }
+
+    :deep(.el-tabs__item) {
+      height: 42px;
+      padding: 0 15px;
+      font-size: 13px;
+    }
+
+    .themeTabLabel {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+
+      small {
+        min-width: 18px;
+        height: 18px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 4px;
+        border-radius: 9px;
+        color: #8f959e;
+        background: #f2f3f5;
+        font-size: 10px;
+      }
+    }
   }
 
   .themeListTheme {
-    height: 100%;
-    overflow-y: auto;
-    padding: 0 20px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    padding: 0 18px 24px;
 
     .themeItem {
       width: 100%;
@@ -230,12 +305,11 @@ watch(() => store.activeSidebar, (val) => {
       background: transparent;
       color: inherit;
       font: inherit;
-      border-bottom: 1px solid #e9e9e9;
-      margin-bottom: 20px;
-      padding-bottom: 20px;
+      border: 1px solid #e2e5ea;
+      margin: 0;
+      padding: 6px;
       transition: all 0.2s;
-      border: 3px solid transparent;
-      border-radius: 5px;
+      border-radius: 8px;
       overflow: hidden;
 
       &:disabled {
@@ -249,28 +323,72 @@ watch(() => store.activeSidebar, (val) => {
       }
 
       &:last-of-type {
-        border: none;
+        border: 1px solid #e2e5ea;
       }
 
       &:hover {
-        box-shadow: 0 1px 2px -2px rgba(0, 0, 0, 0.16),
-          0 3px 6px 0 rgba(0, 0, 0, 0.12), 0 5px 12px 4px rgba(0, 0, 0, 0.09);
+        border-color: #8fb0ff;
+        box-shadow: 0 4px 12px rgba(31, 35, 41, 0.08);
       }
 
       &.active {
-        border: 3px solid rgb(154, 198, 250);
+        border: 2px solid #3370ff;
+        padding: 5px;
+        background: #f7f9ff;
       }
 
       .imgBox {
+        position: relative;
         width: 100%;
+        aspect-ratio: 16 / 9;
+        overflow: hidden;
+        border-radius: 5px;
+        background: #f5f6f7;
 
         img {
           width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+
+        .activeMark {
+          position: absolute;
+          top: 6px;
+          right: 6px;
+          width: 20px;
+          height: 20px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 2px solid #fff;
+          border-radius: 50%;
+          color: #fff;
+          background: #3370ff;
+          font-size: 12px;
+          box-shadow: 0 2px 6px rgba(31, 35, 41, 0.22);
         }
       }
       .name {
-        text-align: center;
-        font-size: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 7px 2px 1px;
+        text-align: left;
+        font-size: 12px;
+        color: #4e5969;
+
+        span {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        small {
+          flex: 0 0 auto;
+          color: #3370ff;
+          font-size: 10px;
+        }
       }
     }
   }

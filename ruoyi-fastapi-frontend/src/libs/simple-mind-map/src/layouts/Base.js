@@ -273,7 +273,7 @@ class Base {
     // 根节点
     if (isRoot) {
       this.root = newNode
-    } else {
+    } else if (this.renderer.isNodeTransientlyVisible(newNode.uid)) {
       // 互相收集
       parent._node.addChildren(newNode)
     }

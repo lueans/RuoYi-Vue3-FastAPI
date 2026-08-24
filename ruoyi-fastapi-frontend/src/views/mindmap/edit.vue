@@ -2,14 +2,13 @@
   <div class="mindmap-edit-page" :class="{ 'has-command-bar': documentLoaded && !isZenMode && !isReadonly, 'is-dark': isDark }">
     <div class="mindmap-edit-header">
       <div class="header-left">
+        <div class="brand-mark" aria-hidden="true">
+          <span class="iconfont iconfuhao-dagangshu" />
+        </div>
         <button class="back-btn" @click="goBack" title="返回列表" type="button" aria-label="返回脑图列表">
-          <el-icon :size="18"><ArrowLeft /></el-icon>
+          <el-icon :size="20"><ArrowLeft /></el-icon>
         </button>
-        <div class="header-divider" />
         <div class="title-area">
-          <div class="document-mark" aria-hidden="true">
-            <span class="iconfont iconfuhao-dagangshu" />
-          </div>
           <div class="title-copy">
             <button
               class="mindmap-title"
@@ -21,7 +20,33 @@
               {{ mindmapName || '加载中...' }}
               <el-icon v-if="!isReadonly" class="edit-icon"><EditIcon /></el-icon>
             </button>
-            <span class="document-meta">{{ documentStatus === 1 ? '已归档 · 只读预览' : isReadonly ? '只读预览' : '在线脑图 · 自动保存' }}</span>
+            <span class="document-meta">
+              <template v-if="documentStatus === 1">已归档 · 只读预览</template>
+              <template v-else-if="isReadonly">
+                <span>只读预览</span>
+                <span class="meta-separator" aria-hidden="true">·</span>
+                <span>{{ documentNodeCount }} 个节点</span>
+                <span class="meta-separator" aria-hidden="true">·</span>
+                <span>{{ documentVersionCount }} 个版本</span>
+              </template>
+              <template v-else>
+                <span>我的脑图</span>
+                <span class="meta-separator" aria-hidden="true">·</span>
+                <span class="meta-save-status" :class="saveStatus" role="status" aria-live="polite" aria-atomic="true">
+                  {{ saveStatusText }}
+                </span>
+                <el-tooltip :content="realtimeStatusDetail" placement="bottom" :show-after="300">
+                  <span
+                    class="meta-realtime-status"
+                    :class="realtimeStatusClass"
+                    :aria-label="realtimeStatusText"
+                    role="status"
+                  >
+                    <span class="status-dot" aria-hidden="true" />
+                  </span>
+                </el-tooltip>
+              </template>
+            </span>
           </div>
           <el-tag v-if="isReadonly" type="info" size="small" effect="plain" class="readonly-tag">只读</el-tag>
           <Collaborators
@@ -32,30 +57,36 @@
           />
         </div>
       </div>
+      <div
+        v-if="documentLoaded && !isZenMode && !isReadonly"
+        ref="headerCommandCenterRef"
+        id="mindmap-mobile-command-sheet"
+        class="header-command-center"
+        :class="{ 'is-mobile-open': mobileCommandOpen }"
+        aria-label="脑图编辑命令"
+        :role="mobileCommandOpen ? 'dialog' : undefined"
+        :aria-modal="mobileCommandOpen ? 'true' : undefined"
+      >
+        <div class="mobile-command-sheet-header">
+          <div>
+            <strong>编辑命令</strong>
+            <span>添加节点、插入内容或撤销操作</span>
+          </div>
+          <button
+            ref="mobileCommandCloseRef"
+            class="mobile-command-close"
+            type="button"
+            aria-label="关闭编辑命令"
+            @click="closeMobileCommands"
+          >
+            <el-icon><Close /></el-icon>
+          </button>
+        </div>
+        <Toolbar embedded class="header-command-toolbar" />
+      </div>
       <div class="header-right">
         <div v-if="documentLoaded" class="header-actions">
-          <el-tooltip content="搜索节点（Ctrl / ⌘ + F）" placement="bottom" :show-after="300">
-            <button class="header-icon-btn" type="button" aria-label="搜索节点" @click="openSearch">
-              <el-icon><Search /></el-icon>
-            </button>
-          </el-tooltip>
-          <el-tooltip content="版本历史" placement="bottom" :show-after="300">
-            <button class="header-icon-btn" type="button" aria-label="版本历史" @click="openVersionHistory">
-              <el-icon><Clock /></el-icon>
-            </button>
-          </el-tooltip>
-          <el-tooltip content="协作者管理" placement="bottom" :show-after="300" v-if="serverIsOwner && !isReadonly">
-            <button class="header-icon-btn" type="button" aria-label="协作者管理" @click="openCollaboratorManager">
-              <el-icon><User /></el-icon>
-            </button>
-          </el-tooltip>
-          <div v-if="!isReadonly" class="realtime-status-group">
-            <el-tooltip :content="realtimeStatusDetail" placement="bottom" :show-after="300">
-              <span class="realtime-status" :class="realtimeStatusClass" role="status" aria-live="polite" aria-atomic="true">
-                <span class="status-dot" />
-                <span>{{ realtimeStatusText }}</span>
-              </span>
-            </el-tooltip>
+          <div v-if="!isReadonly && (canRetryRealtime || saveRecoveryAction)" class="header-recovery-actions">
             <el-tooltip v-if="canRetryRealtime" content="立即重新连接实时协作" placement="bottom" :show-after="300">
               <button
                 class="realtime-retry-btn"
@@ -67,28 +98,6 @@
                 <span>重连</span>
               </button>
             </el-tooltip>
-          </div>
-          <div v-if="!isReadonly" class="save-status-group">
-            <el-tooltip content="立即保存（Ctrl / ⌘ + S）" placement="bottom" :show-after="300">
-              <button
-                class="manual-save-btn"
-                type="button"
-                aria-label="立即保存脑图"
-                :disabled="manualSaveBusy || ['saving', 'syncing'].includes(saveStatus)"
-                @click="handleManualSave"
-              >
-                <el-icon v-if="manualSaveBusy" class="is-loading"><Loading /></el-icon>
-                <el-icon v-else><DocumentChecked /></el-icon>
-                <span class="manual-save-label">保存</span>
-              </button>
-            </el-tooltip>
-            <span class="save-status" :class="saveStatus" role="status" aria-live="polite" aria-atomic="true">
-              <el-icon v-if="['saving', 'retrying', 'syncing'].includes(saveStatus)" class="is-loading" :size="14"><Loading /></el-icon>
-              <el-icon v-else-if="['error', 'offline'].includes(saveStatus)" :size="14"><WarningFilled /></el-icon>
-              <el-icon v-else-if="saveStatus === 'pending'" :size="14"><Clock /></el-icon>
-              <el-icon v-else :size="14"><Check /></el-icon>
-              <span class="save-text">{{ saveStatusText }}</span>
-            </span>
             <button
               v-if="saveRecoveryAction"
               class="save-recovery-btn"
@@ -110,16 +119,107 @@
               </button>
             </el-tooltip>
           </template>
+          <div class="header-utility-group" aria-label="文档工具">
+            <el-tooltip content="编辑命令" placement="bottom" :show-after="300" v-if="!isReadonly">
+              <button
+                ref="mobileCommandTriggerRef"
+                class="header-icon-btn mobile-command-trigger"
+                :class="{ 'is-active': mobileCommandOpen }"
+                type="button"
+                aria-label="打开编辑命令"
+                aria-controls="mindmap-mobile-command-sheet"
+                :aria-expanded="mobileCommandOpen"
+                @click="toggleMobileCommands"
+              >
+                <el-icon><Operation /></el-icon>
+                <span class="header-action-label">编辑</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="立即保存（Ctrl / ⌘ + S）" placement="bottom" :show-after="300" v-if="!isReadonly">
+              <button
+                class="header-icon-btn save-action-btn"
+                type="button"
+                aria-label="立即保存脑图"
+                :disabled="manualSaveBusy || ['saving', 'syncing'].includes(saveStatus)"
+                @click="handleManualSave"
+              >
+                <el-icon v-if="manualSaveBusy" class="is-loading"><Loading /></el-icon>
+                <el-icon v-else><DocumentChecked /></el-icon>
+                <span class="header-action-label">保存</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip
+              v-if="isReadonly"
+              :content="activeSidebar === 'outline' ? '关闭节点大纲' : '查看节点大纲'"
+              placement="bottom"
+              :show-after="300"
+            >
+              <button
+                class="header-icon-btn outline-action-btn"
+                :class="{ 'is-active': activeSidebar === 'outline' }"
+                type="button"
+                :aria-label="activeSidebar === 'outline' ? '关闭脑图大纲' : '打开脑图大纲'"
+                :aria-pressed="activeSidebar === 'outline'"
+                @click="openOutline"
+              >
+                <el-icon><List /></el-icon>
+                <span class="header-action-label">大纲</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="搜索节点（Ctrl / ⌘ + F）" placement="bottom" :show-after="300">
+              <button class="header-icon-btn search-action-btn" type="button" aria-label="搜索节点" @click="openSearch">
+                <el-icon><Search /></el-icon>
+                <span class="header-action-label">搜索</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="仅显示符合条件的节点" placement="bottom" :show-after="300">
+              <button class="header-icon-btn filter-action-btn" type="button" aria-label="筛选画布节点" @click="openFilter">
+                <el-icon><Filter /></el-icon>
+                <span class="header-action-label">筛选</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip
+              :content="activeSidebar === 'versionHistory' ? '关闭版本历史' : '查看版本历史'"
+              placement="bottom"
+              :show-after="300"
+            >
+              <button
+                class="header-icon-btn history-action-btn"
+                :class="{ 'is-active': activeSidebar === 'versionHistory' }"
+                type="button"
+                :aria-label="activeSidebar === 'versionHistory' ? '关闭版本历史' : '打开版本历史'"
+                :aria-pressed="activeSidebar === 'versionHistory'"
+                @click="openVersionHistory"
+              >
+                <el-icon><Clock /></el-icon>
+                <span class="header-action-label">历史</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="协作者管理" placement="bottom" :show-after="300" v-if="serverIsOwner && !isReadonly">
+              <button
+                class="header-icon-btn collaborator-action-btn"
+                :class="{ 'is-active': activeSidebar === 'collaboratorManager' }"
+                type="button"
+                :aria-label="activeSidebar === 'collaboratorManager' ? '关闭协作者管理' : '打开协作者管理'"
+                :aria-pressed="activeSidebar === 'collaboratorManager'"
+                @click="openCollaboratorManager"
+              >
+                <el-icon><User /></el-icon>
+                <span class="header-action-label">协作</span>
+              </button>
+            </el-tooltip>
+          </div>
         </div>
       </div>
     </div>
-    <div v-if="documentLoaded && !isZenMode && !isReadonly" class="mindmap-command-bar">
-      <Toolbar class="command-toolbar" />
-      <div class="command-shortcuts" aria-label="常用快捷键提示">
-        <span><kbd>Tab</kbd> 子主题</span>
-        <span><kbd>Enter</kbd> 同级主题</span>
-      </div>
-    </div>
+    <button
+      v-if="mobileCommandOpen"
+      class="mobile-command-backdrop"
+      type="button"
+      aria-label="关闭编辑命令"
+      tabindex="-1"
+      @click="closeMobileCommands"
+    />
     <el-alert
       v-if="documentStatus === 1"
       class="content-state-alert"
@@ -155,6 +255,17 @@
           @access-revoked="onAccessRevoked"
           @session-ended="onSessionEnded"
         />
+        <div v-if="documentLoaded && isReadonly" class="readonly-canvas-context" aria-label="脑图文档摘要">
+          <strong>{{ mindmapName || '未命名脑图' }}</strong>
+          <span>
+            {{ documentNodeCount }} 个节点 · {{ documentVersionCount }} 个版本
+            <template v-if="documentUpdateTime"> · 更新于 {{ documentUpdateTime }}</template>
+          </span>
+        </div>
+        <div v-if="documentLoaded && isReadonly" class="readonly-mode-banner" role="group" aria-label="阅读模式">
+          <span>当前为只读预览</span>
+          <button v-if="canEnterEditMode" type="button" @click="enterEditMode">进入编辑</button>
+        </div>
         <div
           v-if="!editorReady"
           class="editor-loading"
@@ -212,7 +323,7 @@
 </template>
 
 <script setup name="MindmapEditorPage">
-import { ArrowLeft, Edit as EditIcon, Loading, Check, WarningFilled, Search, Clock, User, Refresh, DocumentChecked } from '@element-plus/icons-vue'
+import { ArrowLeft, Edit as EditIcon, Filter, Loading, Search, Clock, User, Refresh, DocumentChecked, List, Operation, Close } from '@element-plus/icons-vue'
 import Toolbar from '@/components/MindMap/Toolbar.vue'
 import MindMapEditor from '@/components/MindMap/Edit.vue'
 import NavigatorToolbar from '@/components/MindMap/NavigatorToolbar.vue'
@@ -235,10 +346,15 @@ import {
 } from '@/utils/mindmap-content-state'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
+import { parseTime } from '@/utils/ruoyi'
 
 const route = useRoute()
 const router = useRouter()
 const editRef = ref(null)
+const headerCommandCenterRef = ref(null)
+const mobileCommandTriggerRef = ref(null)
+const mobileCommandCloseRef = ref(null)
+const mobileCommandOpen = ref(false)
 const mindmapId = computed(() => parseMindmapRouteId(route.query.id))
 const hasValidMindmapId = computed(() => mindmapId.value !== null)
 const requestedReadonly = computed(() => route.query.readonly === '1')
@@ -271,11 +387,21 @@ const documentLoaded = computed(() => (
   && serverCanEdit.value !== null
   && editorReady.value
 ))
+const canEnterEditMode = computed(() => (
+  requestedReadonly.value
+  && serverCanEdit.value === true
+  && documentStatus.value !== 1
+  && contentState.value === 'ready'
+))
 const mindmapName = ref('')
 const mindmapDescription = ref('')
+const documentNodeCount = ref(0)
+const documentVersionCount = ref(0)
+const documentUpdateTime = ref('')
 const metadataDialogRef = ref(null)
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const isDark = computed(() => store.localConfig.isDark)
+const activeSidebar = computed(() => store.activeSidebar)
 const mindMapInstance = computed(() => editRef.value?.mindMap || null)
 const collaborators = computed(() => editRef.value?.getCollaborators?.() || [])
 const saveStatus = computed(() => {
@@ -348,6 +474,47 @@ function handleRealtimeRetry() {
   editRef.value?.retryCollaboration?.()
 }
 
+function closeMobileCommands({ restoreFocus = true } = {}) {
+  if (!mobileCommandOpen.value) return
+  mobileCommandOpen.value = false
+  if (restoreFocus) nextTick(() => mobileCommandTriggerRef.value?.focus?.())
+}
+
+function toggleMobileCommands() {
+  if (mobileCommandOpen.value) {
+    closeMobileCommands()
+    return
+  }
+  mobileCommandOpen.value = true
+  nextTick(() => mobileCommandCloseRef.value?.focus?.())
+}
+
+function handleMobileCommandKeydown(event) {
+  if (event.key === 'Escape' && mobileCommandOpen.value) {
+    event.preventDefault()
+    closeMobileCommands()
+    return
+  }
+  if (event.key !== 'Tab' || !mobileCommandOpen.value) return
+  const focusable = Array.from(headerCommandCenterRef.value?.querySelectorAll?.(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  ) || []).filter((element) => element.offsetParent !== null)
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+function handleMobileCommandResize() {
+  if (window.innerWidth > 760) closeMobileCommands({ restoreFocus: false })
+}
+
 async function handleSaveRecovery() {
   if (saveRecoveryBusy.value) return
   saveRecoveryBusy.value = true
@@ -380,18 +547,37 @@ function openSearch() {
   bus.emit('show_search')
 }
 
-function openVersionHistory() {
-  actions.setActiveSidebar('versionHistory')
+function openFilter() {
+  bus.emit('show_filter')
+}
+
+function toggleSidebar(sidebarName) {
+  const nextSidebar = activeSidebar.value === sidebarName ? null : sidebarName
+  if (!actions.setActiveSidebar(nextSidebar) || !nextSidebar) return
   nextTick(() => bus.emit('focusActiveSidebar'))
 }
 
+function openOutline() {
+  toggleSidebar('outline')
+}
+
+function openVersionHistory() {
+  toggleSidebar('versionHistory')
+}
+
 function openCollaboratorManager() {
-  actions.setActiveSidebar('collaboratorManager')
-  nextTick(() => bus.emit('focusActiveSidebar'))
+  toggleSidebar('collaboratorManager')
 }
 
 function goBack() {
   router.push(returnListRoute.value)
+}
+
+function enterEditMode() {
+  if (!canEnterEditMode.value) return
+  const query = { ...route.query }
+  delete query.readonly
+  router.push({ path: route.path, query })
 }
 
 function onNameChange(name) {
@@ -407,6 +593,9 @@ function onAccessChange(access) {
   documentStatus.value = Number(access?.status) === 1 ? 1 : 0
   contentStateMessage.value = access?.contentStateMessage || ''
   mindmapDescription.value = access?.description || ''
+  documentNodeCount.value = Math.max(0, Number(access?.nodeCount) || 0)
+  documentVersionCount.value = Math.max(0, Number(access?.versionCount) || 0)
+  documentUpdateTime.value = parseTime(access?.updateTime, '{y}-{m}-{d} {h}:{i}') || ''
 }
 
 function onEditorReady() {
@@ -437,6 +626,9 @@ function retryEditorLoad() {
   serverIsOwner.value = false
   mindmapName.value = ''
   mindmapDescription.value = ''
+  documentNodeCount.value = 0
+  documentVersionCount.value = 0
+  documentUpdateTime.value = ''
   contentState.value = 'ready'
   contentStateMessage.value = ''
   documentStatus.value = 0
@@ -525,7 +717,7 @@ function handleMetadataUpdated(metadata) {
 
 async function confirmEditorNavigation() {
   if (isReadonly.value) return true
-  const saved = await editRef.value?.flushBeforeLeave?.()
+  const saved = await editRef.value?.prepareForCloudExit?.()
   if (saved !== false) return true
   const protectedByLocalDraft = editRef.value?.isLocalDraftProtected?.() === true
   try {
@@ -564,12 +756,16 @@ onBeforeRouteUpdate((to) => {
 })
 
 watch(editorSessionKey, () => {
+  closeMobileCommands({ restoreFocus: false })
   manualSaveRequestId += 1
   manualSaveBusy.value = false
   editRef.value = null
   editorReady.value = false
   mindmapName.value = ''
   mindmapDescription.value = ''
+  documentNodeCount.value = 0
+  documentVersionCount.value = 0
+  documentUpdateTime.value = ''
   serverCanEdit.value = null
   serverIsOwner.value = false
   serverAccessType.value = route.query.from === 'shared' ? 'shared' : null
@@ -580,14 +776,25 @@ watch(editorSessionKey, () => {
   terminalDialogShown = false
 })
 
+watch([documentLoaded, isReadonly, isZenMode], ([loaded, readonly, zen]) => {
+  if (!loaded || readonly || zen) closeMobileCommands({ restoreFocus: false })
+})
+
+onMounted(() => {
+  window.addEventListener('keydown', handleMobileCommandKeydown)
+  window.addEventListener('resize', handleMobileCommandResize)
+})
+
 onBeforeUnmount(() => {
   manualSaveRequestId += 1
+  window.removeEventListener('keydown', handleMobileCommandKeydown)
+  window.removeEventListener('resize', handleMobileCommandResize)
 })
 </script>
 
 <style scoped lang="scss">
 .mindmap-edit-page {
-  --mindmap-shell-top: 60px;
+  --mindmap-shell-top: 80px;
   height: 100vh;
   display: flex;
   flex-direction: column;
@@ -596,7 +803,7 @@ onBeforeUnmount(() => {
   color: #1f2329;
 
   &.has-command-bar {
-    --mindmap-shell-top: 114px;
+    --mindmap-shell-top: 80px;
   }
 }
 
@@ -610,9 +817,10 @@ onBeforeUnmount(() => {
 }
 
 .mindmap-edit-header {
-  height: 60px;
-  padding: 0 16px;
-  background: rgba(255, 255, 255, 0.96);
+  height: 80px;
+  padding: 0 16px 0 0;
+  gap: 16px;
+  background: rgba(249, 250, 251, 0.98);
   border-bottom: 1px solid #e7eaf0;
   display: flex;
   align-items: center;
@@ -625,24 +833,25 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     min-width: 0;
-    flex: 1;
-    gap: 0;
+    flex: 0 1 304px;
+    max-width: 32%;
+    gap: 10px;
   }
 
   .header-right {
     display: flex;
     align-items: center;
     flex-shrink: 0;
-    gap: 0;
+    gap: 4px;
   }
 
   .back-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    border-radius: 9px;
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
     cursor: pointer;
     color: #646a73;
     transition: all 0.2s;
@@ -654,42 +863,32 @@ onBeforeUnmount(() => {
     &:hover {
       background: #f0f3f8;
       color: #1f2329;
-      transform: translateX(-1px);
     }
     &:focus-visible {
       box-shadow: 0 0 0 2px #3370ff40;
     }
   }
 
-  .header-divider {
-    width: 1px;
-    height: 24px;
-    background: #e5e8ed;
-    margin: 0 12px;
-    flex-shrink: 0;
-  }
-
   .title-area {
     display: flex;
     align-items: center;
     min-width: 0;
-    gap: 10px;
+    gap: 8px;
   }
 
-  .document-mark {
-    width: 34px;
-    height: 34px;
-    border-radius: 10px;
-    background: linear-gradient(145deg, #edf4ff 0%, #e7eeff 100%);
-    color: #3370ff;
+  .brand-mark {
+    width: 54px;
+    height: 80px;
+    flex: 0 0 54px;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: inset 0 0 0 1px rgba(51, 112, 255, 0.08);
-    flex-shrink: 0;
+    color: #3370ff;
+    background: rgba(255, 255, 255, 0.72);
+    border-right: 1px solid #e8eaed;
 
     .iconfont {
-      font-size: 18px;
+      font-size: 22px;
     }
   }
 
@@ -707,8 +906,8 @@ onBeforeUnmount(() => {
     background: transparent;
     font-family: inherit;
     text-align: left;
-    font-size: 15px;
-    line-height: 20px;
+    font-size: 16px;
+    line-height: 21px;
     font-weight: 600;
     color: #1f2329;
     cursor: pointer;
@@ -719,13 +918,18 @@ onBeforeUnmount(() => {
     margin-left: -5px;
     border-radius: 6px;
     transition: background 0.15s;
-    max-width: 280px;
+    max-width: 210px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     &:focus-visible {
       outline: none;
       box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.16);
+    }
+
+    &.is-active {
+      color: #245bdb;
+      background: #edf3ff;
     }
     &:disabled {
       cursor: default;
@@ -746,10 +950,55 @@ onBeforeUnmount(() => {
   }
 
   .document-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     color: #8f959e;
-    font-size: 11px;
-    line-height: 15px;
+    font-size: 12px;
+    line-height: 16px;
     white-space: nowrap;
+  }
+
+  .meta-separator {
+    color: #c2c6cc;
+  }
+
+  .meta-save-status {
+    &.error,
+    &.offline {
+      color: #b42318;
+    }
+
+    &.pending,
+    &.retrying,
+    &.saving,
+    &.syncing {
+      color: #8f6b20;
+    }
+  }
+
+  .meta-realtime-status {
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #f5a623;
+    }
+
+    &.online .status-dot {
+      background: #2fb66d;
+    }
+
+    &.error .status-dot {
+      background: #e5484d;
+    }
   }
 
   .readonly-tag {
@@ -764,21 +1013,32 @@ onBeforeUnmount(() => {
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
+  }
+
+  .header-utility-group {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-left: 6px;
+    padding-left: 8px;
+    border-left: 1px solid #e1e4e8;
   }
 
   .header-icon-btn {
-    width: 34px;
-    height: 34px;
+    width: 46px;
+    height: 58px;
     border: none;
-    border-radius: 9px;
+    border-radius: 8px;
     color: #646a73;
     background: transparent;
     display: inline-flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 4px;
     cursor: pointer;
-    font-size: 17px;
+    font-size: 18px;
     transition: background 0.16s ease, color 0.16s ease, transform 0.16s ease;
 
     &:hover {
@@ -791,56 +1051,19 @@ onBeforeUnmount(() => {
       outline: none;
       box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.16);
     }
+
+    .header-action-label {
+      font-size: 11px;
+      line-height: 13px;
+      font-weight: 400;
+      white-space: nowrap;
+    }
   }
 
-  .realtime-status-group {
+  .header-recovery-actions {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-  }
-
-  .realtime-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 30px;
-    padding: 0 9px;
-    color: #8f6b20;
-    background: #fff8e8;
-    border: 1px solid #f6dfae;
-    border-radius: 999px;
-    font-size: 12px;
-    white-space: nowrap;
-
-    .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #f5a623;
-      box-shadow: 0 0 0 3px rgba(245, 166, 35, 0.14);
-    }
-
-    &.online {
-      color: #257a4a;
-      background: #edfbf3;
-      border-color: #c9edd8;
-
-      .status-dot {
-        background: #2fb66d;
-        box-shadow: 0 0 0 3px rgba(47, 182, 109, 0.14);
-      }
-    }
-
-    &.error {
-      color: #b42318;
-      background: #fff1f0;
-      border-color: #ffc9c5;
-
-      .status-dot {
-        background: #e5484d;
-        box-shadow: 0 0 0 3px rgba(229, 72, 77, 0.12);
-      }
-    }
+    gap: 3px;
   }
 
   .realtime-retry-btn {
@@ -871,87 +1094,9 @@ onBeforeUnmount(() => {
     }
   }
 
-  .save-status-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-  }
-
-  .manual-save-btn {
-    display: inline-flex;
-    height: 30px;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    padding: 0 9px;
-    border: 1px solid #cddcff;
-    border-radius: 999px;
-    background: #f5f8ff;
-    color: #2f63dc;
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
-    font-weight: 600;
-    transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
-
-    &:hover:not(:disabled) {
-      border-color: #8eafff;
-      background: #edf3ff;
-      color: #2454c4;
-    }
-
-    &:focus-visible {
-      outline: none;
-      box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.16);
-    }
-
-    &:disabled {
-      cursor: wait;
-      opacity: 0.62;
-    }
-  }
-
-  .save-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 12px;
-    height: 30px;
-    color: #646a73;
-    background: #f6f7f9;
-    border: 1px solid #e7e9ed;
-    transition: all 0.2s;
-    padding: 0 9px;
-    border-radius: 999px;
-    &.saving {
-      color: #b56500;
-      background: #fff8e8;
-      border-color: #f6dfae;
-    }
-    &.pending,
-    &.retrying {
-      color: #8f6b20;
-      background: #fff8e8;
-      border-color: #f6dfae;
-    }
-    &.offline {
-      color: #9a3412;
-      background: #fff7ed;
-      border-color: #fed7aa;
-    }
-    &.saved {
-      color: #257a4a;
-      background: #edfbf3;
-      border-color: #c9edd8;
-    }
-    &.error {
-      color: #b42318;
-      background: #fff1f0;
-      border-color: #ffc9c5;
-    }
-    .save-text {
-      white-space: nowrap;
-    }
+  .save-action-btn:disabled {
+    cursor: wait;
+    opacity: 0.52;
   }
 
   .save-recovery-btn {
@@ -990,9 +1135,9 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    min-width: 72px;
-    height: 34px;
-    border-radius: 9px;
+    min-width: 68px;
+    height: 36px;
+    border-radius: 7px;
     cursor: pointer;
     color: #fff;
     transition: all 0.2s;
@@ -1001,14 +1146,13 @@ onBeforeUnmount(() => {
     gap: 6px;
     border: none;
     background: #3370ff;
-    padding: 0 13px;
-    box-shadow: 0 4px 10px rgba(51, 112, 255, 0.2);
+    padding: 0 14px;
+    box-shadow: 0 2px 7px rgba(51, 112, 255, 0.18);
     outline: none;
     &:hover {
       background: #2864e6;
       color: #fff;
-      transform: translateY(-1px);
-      box-shadow: 0 6px 14px rgba(51, 112, 255, 0.24);
+      box-shadow: 0 4px 10px rgba(51, 112, 255, 0.22);
     }
     &:focus-visible {
       box-shadow: 0 0 0 2px #3370ff40;
@@ -1020,136 +1164,27 @@ onBeforeUnmount(() => {
   }
 }
 
-.mindmap-command-bar {
-  height: 54px;
-  padding: 0 16px;
-  flex-shrink: 0;
+.header-command-center {
+  min-width: 220px;
+  height: 100%;
   display: flex;
   align-items: center;
-  gap: 16px;
-  background: #fff;
-  border-bottom: 1px solid #e9ebef;
-  box-shadow: 0 2px 8px rgba(31, 35, 41, 0.025);
-  z-index: 2050;
+  justify-content: center;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
 
-  .command-toolbar {
-    min-width: 0;
-    flex: 1;
-    position: static;
-    pointer-events: auto;
-    overflow: hidden;
+.header-command-toolbar {
+  min-width: 0;
+  flex: 1;
+  pointer-events: auto;
+  overflow: hidden;
+}
 
-    :deep(.toolbar) {
-      min-width: 0;
-      padding: 0;
-      justify-content: flex-start;
-    }
-
-    :deep(.toolbarBlock) {
-      background: transparent;
-      box-shadow: none;
-      border: none;
-      border-radius: 0;
-      margin-right: 8px;
-      padding: 0 8px 0 0;
-      gap: 2px;
-
-      &::after {
-        content: '';
-        position: absolute;
-        width: 1px;
-        height: 28px;
-        right: 0;
-        top: 50%;
-        transform: translateY(-50%);
-        background: #e7e9ed;
-      }
-
-      &:last-of-type::after {
-        display: none;
-      }
-    }
-
-    :deep(.toolbarBtn) {
-      min-width: 44px;
-      height: 44px;
-      margin-right: 2px;
-      padding: 4px 7px;
-      border-radius: 8px;
-      color: #646a73;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s ease, color 0.15s ease;
-
-      &:hover:not(.disabled) {
-        color: #1f2329;
-        background: #f2f5f9;
-      }
-
-      &.active {
-        color: #3370ff;
-        background: #edf4ff;
-      }
-
-      &.disabled {
-        color: #c5c8ce;
-      }
-
-      .icon {
-        height: 19px;
-        padding: 0;
-        border: 0;
-        background: transparent;
-        color: inherit;
-        font-size: 18px;
-      }
-
-      .text {
-        margin-top: 3px;
-        color: inherit;
-        font-size: 10px;
-        line-height: 12px;
-        white-space: nowrap;
-      }
-    }
-
-    :deep(.toolbarNodeBtnList.v .toolbarBtn) {
-      height: 34px;
-      min-width: 100%;
-      flex-direction: row;
-      justify-content: flex-start;
-    }
-  }
-
-  .command-shortcuts {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    color: #8f959e;
-    font-size: 11px;
-    white-space: nowrap;
-
-    span {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-    }
-
-    kbd {
-      min-width: 24px;
-      height: 20px;
-      padding: 0 5px;
-      border: 1px solid #dfe2e7;
-      border-bottom-width: 2px;
-      border-radius: 5px;
-      background: #f8f9fb;
-      color: #646a73;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font: inherit;
-    }
-  }
+.mobile-command-sheet-header,
+.mobile-command-trigger,
+.mobile-command-backdrop {
+  display: none;
 }
 
 .mindmap-edit-body {
@@ -1166,6 +1201,77 @@ onBeforeUnmount(() => {
   overflow: hidden;
   background: #fff;
   position: relative;
+}
+
+.readonly-canvas-context {
+  position: absolute;
+  top: 22px;
+  left: 24px;
+  z-index: 18;
+  display: flex;
+  max-width: min(420px, calc(100% - 120px));
+  flex-direction: column;
+  gap: 5px;
+  pointer-events: none;
+
+  strong,
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: #1f2329;
+    font-size: 16px;
+    font-weight: 650;
+    line-height: 22px;
+  }
+
+  span {
+    color: #8f959e;
+    font-size: 12px;
+    line-height: 18px;
+  }
+}
+
+.readonly-mode-banner {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 19;
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 4px 12px;
+  color: #646a73;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #e2e6ed;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(31, 35, 41, 0.08);
+  transform: translateX(-50%);
+  backdrop-filter: blur(10px);
+  white-space: nowrap;
+  font-size: 12px;
+
+  button {
+    height: 28px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 6px;
+    color: #245bdb;
+    background: #edf3ff;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+
+    &:hover { background: #dfeaff; }
+    &:focus-visible {
+      outline: 2px solid #3370ff;
+      outline-offset: 2px;
+    }
+  }
 }
 
 .load-error-actions {
@@ -1238,8 +1344,7 @@ onBeforeUnmount(() => {
 .mindmap-edit-page.is-dark {
   background: #17191d;
 
-  .mindmap-edit-header,
-  .mindmap-command-bar {
+  .mindmap-edit-header {
     background: rgba(35, 38, 43, 0.98);
     border-color: #363a41;
     color: #e5e6eb;
@@ -1248,26 +1353,14 @@ onBeforeUnmount(() => {
   .mindmap-edit-header {
     .mindmap-title { color: #f0f1f2; }
     .document-meta { color: #92979f; }
-    .header-divider { background: #3b3f46; }
+    .brand-mark {
+      background: rgba(29, 32, 37, 0.72);
+      border-right-color: #363a41;
+    }
     .header-icon-btn {
       color: #afb4bc;
       &:hover { color: #fff; background: #30343a; }
-    }
-    .save-status {
-      color: #b9bec6;
-      background: #2c3036;
-      border-color: #3b4047;
-    }
-    .manual-save-btn {
-      color: #9bb6ff;
-      background: #273248;
-      border-color: #3f5684;
-
-      &:hover:not(:disabled) {
-        color: #c7d5ff;
-        background: #303e59;
-        border-color: #6687cc;
-      }
+      &.is-active { color: #8daaff; background: rgba(51, 112, 255, 0.16); }
     }
     .save-recovery-btn {
       color: #ff8f87;
@@ -1293,27 +1386,35 @@ onBeforeUnmount(() => {
     }
   }
 
-  .mindmap-command-bar {
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
-
-    .command-toolbar {
-      :deep(.toolbarBlock::after) { background: #3b3f46; }
-      :deep(.toolbarBtn) {
-        color: #b9bec6;
-        &:hover:not(.disabled) { color: #fff; background: #30343a; }
-        &.active { color: #7da2ff; background: rgba(51, 112, 255, 0.16); }
-      }
-    }
-
-    .command-shortcuts kbd {
+  .header-command-toolbar {
+    :deep(.toolbarBlock::after) { background: #3b3f46; }
+    :deep(.toolbarBtn) {
       color: #b9bec6;
-      background: #2b2e33;
-      border-color: #454950;
+      &:hover:not(.disabled) { color: #fff; background: #30343a; }
+      &.active { color: #7da2ff; background: rgba(51, 112, 255, 0.16); }
     }
   }
 
   .mindmap-editor-container {
     background: #1e2024;
+  }
+
+  .readonly-canvas-context {
+    strong { color: #f0f1f2; }
+    span { color: #92979f; }
+  }
+
+  .readonly-mode-banner {
+    color: #b9bec6;
+    background: rgba(42, 45, 51, 0.96);
+    border-color: #3d4148;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+
+    button {
+      color: #a8bfff;
+      background: rgba(51, 112, 255, 0.18);
+      &:hover { background: rgba(51, 112, 255, 0.26); }
+    }
   }
 
   .editor-loading {
@@ -1340,39 +1441,71 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1180px) {
-  .mindmap-command-bar .command-shortcuts,
-  .mindmap-edit-header .realtime-status,
-  .mindmap-edit-header .save-status .save-text {
-    display: none;
-  }
+  .mindmap-edit-header {
+    .header-left {
+      flex-basis: 268px;
+    }
 
-  .mindmap-edit-header .save-status {
-    width: 30px;
-    justify-content: center;
-    padding: 0;
+    .meta-realtime-status {
+      display: none;
+    }
+  }
+}
+
+@media (max-width: 980px) {
+  .mindmap-edit-header {
+    gap: 10px;
+
+    .header-left {
+      flex-basis: 228px;
+    }
+
+    .header-icon-btn {
+      width: 34px;
+      height: 38px;
+
+      .header-action-label {
+        display: none;
+      }
+    }
   }
 }
 
 @media (max-width: 760px) {
   .mindmap-edit-page {
-    --mindmap-shell-top: 54px;
+    --mindmap-shell-top: 60px;
 
     &.has-command-bar {
-      --mindmap-shell-top: 104px;
+      --mindmap-shell-top: 60px;
     }
   }
 
   .mindmap-edit-header {
-    height: 54px;
+    height: 60px;
     padding: 0 10px;
+    gap: 8px;
 
-    .document-mark,
+    .header-left {
+      max-width: none;
+      flex: 1;
+    }
+
     .document-meta,
     .collaborators,
-    .header-divider,
-    .header-icon-btn:nth-of-type(2),
-    .header-icon-btn:nth-of-type(3) {
+    .history-action-btn,
+    .collaborator-action-btn {
       display: none;
+    }
+
+    .brand-mark {
+      width: 44px;
+      height: 60px;
+      flex-basis: 44px;
+    }
+
+    .header-utility-group {
+      margin-left: 2px;
+      padding-left: 4px;
     }
 
     .mindmap-title {
@@ -1399,15 +1532,6 @@ onBeforeUnmount(() => {
       }
     }
 
-    .manual-save-btn {
-      width: 30px;
-      padding: 0;
-
-      .manual-save-label {
-        display: none;
-      }
-    }
-
     .realtime-retry-btn {
       width: 30px;
       padding: 0;
@@ -1418,9 +1542,110 @@ onBeforeUnmount(() => {
     }
   }
 
-  .mindmap-command-bar {
-    height: 50px;
-    padding: 0 8px;
+  .header-command-center {
+    display: none;
+
+    &.is-mobile-open {
+      position: fixed;
+      z-index: 2201;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      display: flex;
+      height: auto;
+      max-height: min(70vh, 420px);
+      min-width: 0;
+      padding: 0 12px 14px;
+      flex-direction: column;
+      align-items: stretch;
+      overflow: visible;
+      border: 1px solid #e3e7ee;
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 18px 48px rgba(31, 35, 41, 0.2);
+    }
+  }
+
+  .mobile-command-trigger {
+    display: inline-flex;
+  }
+
+  .mobile-command-sheet-header {
+    display: flex;
+    min-height: 58px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid #eef0f3;
+
+    > div {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    strong {
+      color: #1f2329;
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    span {
+      overflow: hidden;
+      color: #8f959e;
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .mobile-command-close {
+    display: inline-flex;
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: #646a73;
+    cursor: pointer;
+
+    &:hover { background: #f2f3f5; }
+    &:focus-visible { outline: 2px solid #3370ff; outline-offset: 1px; }
+  }
+
+  .mobile-command-backdrop {
+    position: fixed;
+    z-index: 2200;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: rgba(15, 23, 42, 0.32);
+    cursor: default;
+  }
+
+  .header-command-toolbar {
+    width: 100%;
+    padding-top: 10px;
+  }
+
+  .readonly-canvas-context {
+    top: 16px;
+    left: 16px;
+    max-width: calc(100% - 88px);
+
+    strong { font-size: 14px; }
+  }
+
+  .readonly-mode-banner {
+    top: auto;
+    bottom: 64px;
   }
 
   .load-error-actions {

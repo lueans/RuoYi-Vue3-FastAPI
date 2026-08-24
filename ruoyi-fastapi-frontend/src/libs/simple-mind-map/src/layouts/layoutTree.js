@@ -2,6 +2,163 @@ const isObjectNode = node => Boolean(node && typeof node === 'object')
 
 const getChildren = node => Array.isArray(node?.children) ? node.children : []
 
+const getFiniteNumber = (value, fallback = 0) => {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+// 在所有相邻子树保持安全间距的前提下，求直属子节点中心的最小等距分布。
+// topOffset/bottomOffset 是子树边界相对直属子节点中心的偏移。
+export const calculateUniformSiblingCenterOffsets = (metrics, gap = 0) => {
+  const list = Array.isArray(metrics) ? metrics : []
+  if (list.length <= 0) return []
+  if (list.length === 1) return [0]
+
+  const safeGap = Math.max(0, getFiniteNumber(gap))
+  let step = 0
+  for (let index = 0; index < list.length - 1; index += 1) {
+    const currentBottom = getFiniteNumber(list[index]?.bottomOffset)
+    const nextTop = getFiniteNumber(list[index + 1]?.topOffset)
+    step = Math.max(step, currentBottom - nextTop + safeGap)
+  }
+
+  const centerIndex = (list.length - 1) / 2
+  return list.map((item, index) => (index - centerIndex) * step)
+}
+
+// 先自底向上计算每棵子树相对根节点中心的轮廓，再自顶向下一次性落位。
+// 每个节点只参与常数次计算，避免在每一层反复平移整棵后代树。
+export const balanceTreeChildrenVertically = (root, options = {}) => {
+  if (!isObjectNode(root)) {
+    return { balancedParentCount: 0 }
+  }
+
+  const resolveChildren = typeof options.getChildren === 'function'
+    ? options.getChildren
+    : getChildren
+  const getNodeTop = typeof options.getNodeTop === 'function'
+    ? options.getNodeTop
+    : node => node?.top
+  const setNodeTop = typeof options.setNodeTop === 'function'
+    ? options.setNodeTop
+    : (node, top) => {
+        node.top = top
+      }
+  const getNodeHeight = typeof options.getNodeHeight === 'function'
+    ? options.getNodeHeight
+    : node => node?.height
+  const getNodeExtentHeight = typeof options.getNodeExtentHeight === 'function'
+    ? options.getNodeExtentHeight
+    : getNodeHeight
+  const getGap = typeof options.getGap === 'function'
+    ? options.getGap
+    : () => 0
+  const hasCustomPosition = typeof options.hasCustomPosition === 'function'
+    ? options.hasCustomPosition
+    : node => Boolean(node?.hasCustomPosition?.())
+  const resolveNodeChildren = node => {
+    const children = resolveChildren(node)
+    return Array.isArray(children) ? children : []
+  }
+
+  const order = []
+  const discovered = new WeakSet()
+  const stack = [root]
+  let hasAnyCustomPosition = false
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (!isObjectNode(node) || discovered.has(node)) continue
+    discovered.add(node)
+    order.push(node)
+    if (hasCustomPosition(node)) hasAnyCustomPosition = true
+    const children = resolveNodeChildren(node)
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index])
+    }
+  }
+
+  // 手动定位表达的是整棵图的用户排版意图。只重排其中一部分会让普通分支
+  // 侵入固定分支，所以此时完整保留旧布局，而不是进行局部自动平衡。
+  if (hasAnyCustomPosition) {
+    return { balancedParentCount: 0 }
+  }
+
+  const metrics = new WeakMap()
+  const placements = new WeakMap()
+  let balancedParentCount = 0
+
+  for (let orderIndex = order.length - 1; orderIndex >= 0; orderIndex -= 1) {
+    const node = order[orderIndex]
+    const children = resolveNodeChildren(node).filter(child => metrics.has(child))
+    const height = Math.max(0, getFiniteNumber(getNodeHeight(node)))
+    const center = getFiniteNumber(getNodeTop(node)) + height / 2
+    const extentHeight = Math.max(
+      height,
+      getFiniteNumber(getNodeExtentHeight(node), height)
+    )
+    let topOffset = -extentHeight / 2
+    let bottomOffset = extentHeight / 2
+    const childMetrics = children.map(child => metrics.get(child))
+    const canBalanceChildren = children.length > 0
+    let childOffsets = children.map(child => {
+      const childHeight = Math.max(0, getFiniteNumber(getNodeHeight(child)))
+      return getFiniteNumber(getNodeTop(child)) + childHeight / 2 - center
+    })
+
+    if (canBalanceChildren) {
+      childOffsets = calculateUniformSiblingCenterOffsets(
+        childMetrics,
+        getGap(node)
+      )
+      balancedParentCount += 1
+    }
+
+    childMetrics.forEach((item, index) => {
+      topOffset = Math.min(topOffset, childOffsets[index] + item.topOffset)
+      bottomOffset = Math.max(
+        bottomOffset,
+        childOffsets[index] + item.bottomOffset
+      )
+    })
+
+    metrics.set(node, {
+      topOffset,
+      bottomOffset
+    })
+    placements.set(node, {
+      children,
+      childOffsets,
+      balanced: canBalanceChildren
+    })
+  }
+
+  const positioned = new WeakSet()
+  const positionStack = [root]
+  while (positionStack.length > 0) {
+    const node = positionStack.pop()
+    if (!isObjectNode(node) || positioned.has(node)) continue
+    positioned.add(node)
+    const placement = placements.get(node)
+    if (!placement) continue
+    const height = Math.max(0, getFiniteNumber(getNodeHeight(node)))
+    const center = getFiniteNumber(getNodeTop(node)) + height / 2
+
+    for (let index = placement.children.length - 1; index >= 0; index -= 1) {
+      const child = placement.children[index]
+      if (placement.balanced) {
+        const childHeight = Math.max(0, getFiniteNumber(getNodeHeight(child)))
+        setNodeTop(
+          child,
+          center + placement.childOffsets[index] - childHeight / 2
+        )
+      }
+      positionStack.push(child)
+    }
+  }
+
+  return { balancedParentCount }
+}
+
 // 沿 parent 链稳定向上访问。默认只处理存在父节点的项，和各布局原有
 // updateBrothers 递归边界一致；异常 parent 环只处理首次可达位置。
 export const walkLayoutAncestorChain = (

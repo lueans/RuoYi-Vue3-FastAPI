@@ -1,7 +1,10 @@
 import Base from './Base'
 import { walk, asyncRun, getNodeIndexInNodeList } from '../utils'
 import { CONSTANTS } from '../constants/constant'
-import { walkLayoutAncestorChain } from './layoutTree'
+import {
+  balanceTreeChildrenVertically,
+  walkLayoutAncestorChain
+} from './layoutTree'
 
 //  逻辑结构图
 class LogicalStructure extends Base {
@@ -22,6 +25,9 @@ class LogicalStructure extends Base {
       },
       () => {
         this.adjustTopValue()
+      },
+      () => {
+        this.balanceChildBranches()
       },
       () => {
         callback(this.root)
@@ -163,6 +169,19 @@ class LogicalStructure extends Base {
     })
   }
 
+  // 以直属子节点中心等距为约束，使用子树真实轮廓求最小安全间距。
+  // 后序度量、前序落位均为线性遍历，避免逐层重复平移整棵后代树。
+  balanceChildBranches() {
+    balanceTreeChildrenVertically(this.root, {
+      getChildren: node => (
+        this.renderer.isNodeExpandedForLayout(node) ? node.children : []
+      ),
+      getNodeExtentHeight: node => this.getNodeHeightWithGeneralization(node),
+      getGap: node => this.getMarginY(node.layerIndex + 1),
+      hasCustomPosition: node => node.hasCustomPosition()
+    })
+  }
+
   //  绘制连线，连接该节点到其子节点
   renderLine(node, lines, style, lineStyle) {
     if (lineStyle === 'curve') {
@@ -261,26 +280,16 @@ class LogicalStructure extends Base {
     if (!alwaysShowExpandBtn || notShowExpandBtn) {
       expandBtnSize = 0
     }
-    const {
-      nodeUseLineStyle,
-      rootLineStartPositionKeepSameInCurve,
-      rootLineKeepSameInCurve
-    } = this.mindMap.themeConfig
+    const { nodeUseLineStyle } = this.mindMap.themeConfig
     node.children.forEach((item, index) => {
       if (node.layerIndex === 0) {
         expandBtnSize = 0
       }
       let x1
       if (this.isUseLeft) {
-        x1 =
-          node.layerIndex === 0 && !rootLineStartPositionKeepSameInCurve
-            ? left + width / 2
-            : left - expandBtnSize - (expandBtnSize > 0 ? gap : 0)
+        x1 = left - expandBtnSize - (expandBtnSize > 0 ? gap : 0)
       } else {
-        x1 =
-          node.layerIndex === 0 && !rootLineStartPositionKeepSameInCurve
-            ? left + width / 2
-            : left + width + expandBtnSize + (expandBtnSize > 0 ? gap : 0)
+        x1 = left + width + expandBtnSize + (expandBtnSize > 0 ? gap : 0)
       }
       let y1 = top + height / 2
       let x2 = this.isUseLeft ? item.left + item.width : item.left
@@ -297,11 +306,7 @@ class LogicalStructure extends Base {
           ? ` L ${item.left + item.width},${y2}`
           : ''
       }
-      if (node.isRoot && !rootLineKeepSameInCurve) {
-        path = this.quadraticCurvePath(x1, y1, x2, y2) + nodeUseLineStylePath
-      } else {
-        path = this.cubicBezierPath(x1, y1, x2, y2) + nodeUseLineStylePath
-      }
+      path = this.cubicBezierPath(x1, y1, x2, y2) + nodeUseLineStylePath
       this.setLineStyle(style, lines[index], path, item)
     })
   }

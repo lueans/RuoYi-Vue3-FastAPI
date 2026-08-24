@@ -323,7 +323,7 @@ export const supportNodeUseLineStyleLayouts = [
 ]
 
 export const supportRootLineKeepSameInCurveLayouts = [
-  'logicalStructure', 'logicalStructureLeft', 'mindMap', 'organizationStructure'
+  'mindMap', 'organizationStructure'
 ]
 
 export const formulaList = [

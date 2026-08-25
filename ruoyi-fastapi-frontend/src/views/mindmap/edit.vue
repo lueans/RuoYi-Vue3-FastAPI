@@ -4,7 +4,8 @@
     :class="{
       'has-command-bar': documentLoaded && !isZenMode && !isReadonly,
       'has-search-panel': searchPanelOpen,
-      'has-right-panel': Boolean(activeSidebar),
+      'has-left-panel': activeSidebar === 'outline',
+      'has-right-panel': Boolean(activeSidebar && activeSidebar !== 'outline'),
       'is-dark': isDark,
     }"
   >
@@ -831,6 +832,10 @@ onBeforeUnmount(() => {
     --mindmap-workspace-left: calc(var(--mindmap-activity-width) + 280px);
   }
 
+  &.has-left-panel {
+    --mindmap-workspace-left: calc(var(--mindmap-activity-width) + var(--mindmap-side-panel-width));
+  }
+
   &.has-right-panel {
     --mindmap-workspace-right: calc(var(--mindmap-activity-width) + var(--mindmap-side-panel-width));
   }
@@ -1484,6 +1489,10 @@ onBeforeUnmount(() => {
   .mindmap-edit-page.has-right-panel {
     --mindmap-workspace-right: var(--mindmap-activity-width);
   }
+
+  .mindmap-edit-page.has-left-panel {
+    --mindmap-workspace-left: var(--mindmap-activity-width);
+  }
 }
 
 @media (max-width: 1180px) {
@@ -1530,6 +1539,7 @@ onBeforeUnmount(() => {
     }
 
     &.has-search-panel,
+    &.has-left-panel,
     &.has-right-panel {
       --mindmap-workspace-left: 0px;
       --mindmap-workspace-right: 0px;

@@ -2,7 +2,7 @@
   <div
     class="sidebarContainer"
     @click.stop
-    :class="{ show: show, isDark: isDark }"
+    :class="{ show: show, isDark: isDark, isLeft }"
     :style="{ zIndex: zIndex }"
     :inert="!show"
     :aria-hidden="show ? undefined : 'true'"
@@ -37,6 +37,11 @@ import bus from './useEventBus'
 const props = defineProps({
   title: { type: String, default: '' },
   openOnMount: { type: Boolean, default: false },
+  placement: {
+    type: String,
+    default: 'right',
+    validator: value => ['left', 'right'].includes(value),
+  },
 })
 
 const show = ref(false)
@@ -45,6 +50,7 @@ const bodyRef = ref(null)
 const closeButtonRef = ref(null)
 const titleId = `mindmap-sidebar-title-${Math.random().toString(36).slice(2, 10)}`
 const isDark = computed(() => store.localConfig.isDark)
+const isLeft = computed(() => props.placement === 'left')
 let focusReturnTarget = null
 
 function open() {
@@ -148,6 +154,23 @@ defineExpose({ show, open, close, bodyRef, getEl })
     right: var(--mindmap-activity-width, 44px);
   }
 
+  &.isLeft {
+    right: auto;
+    left: calc(-1 * var(--mindmap-side-panel-width, 300px));
+    border-right: 1px solid #e2e5ea;
+    border-left: 0;
+    transition: left 0.25s ease;
+
+    &.show {
+      right: auto;
+      left: var(--mindmap-activity-width, 44px);
+    }
+
+    &.isDark {
+      border-right-color: #3d4046;
+    }
+  }
+
   .closeBtn {
     position: absolute;
     right: 10px;
@@ -216,6 +239,10 @@ defineExpose({ show, open, close, bodyRef, getEl })
   .sidebarContainer.show {
     box-shadow: -8px 0 24px rgba(31, 35, 41, 0.1);
   }
+
+  .sidebarContainer.isLeft.show {
+    box-shadow: 8px 0 24px rgba(31, 35, 41, 0.1);
+  }
 }
 
 @media (max-width: 760px) {
@@ -226,6 +253,16 @@ defineExpose({ show, open, close, bodyRef, getEl })
 
     &.show {
       right: 0;
+    }
+
+    &.isLeft {
+      right: auto;
+      left: -100%;
+
+      &.show {
+        right: auto;
+        left: 0;
+      }
     }
   }
 }

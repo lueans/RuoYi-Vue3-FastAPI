@@ -5,6 +5,41 @@ function normalizeCollapsedKeys(collapsedKeys) {
   return collapsedKeys instanceof Set ? collapsedKeys : new Set(collapsedKeys || [])
 }
 
+const OUTLINE_HTML_ENTITY_MAP = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  nbsp: ' ',
+  quot: '"',
+}
+
+function decodeOutlineHtmlEntities(value) {
+  return value.replace(/&(#x[\da-f]+|#\d+|amp|apos|gt|lt|nbsp|quot);/gi, (entity, code) => {
+    const normalizedCode = code.toLowerCase()
+    if (normalizedCode[0] !== '#') return OUTLINE_HTML_ENTITY_MAP[normalizedCode] ?? entity
+    const radix = normalizedCode[1] === 'x' ? 16 : 10
+    const numericCode = Number.parseInt(normalizedCode.slice(radix === 16 ? 2 : 1), radix)
+    if (!Number.isFinite(numericCode) || numericCode < 0 || numericCode > 0x10FFFF) return entity
+    try {
+      return String.fromCodePoint(numericCode)
+    } catch {
+      return entity
+    }
+  })
+}
+
+function normalizeOutlineText(data) {
+  const rawText = String(data?.text ?? '')
+  if (!data?.richText && !/<\/?[a-z][^>]*>/i.test(rawText)) return rawText
+  return decodeOutlineHtmlEntities(
+    rawText
+      .replace(/<br\s*\/?>/gi, ' ')
+      .replace(/<\/(?:div|h[1-6]|li|p)>/gi, ' ')
+      .replace(/<[^>]*>/g, ''),
+  ).replace(/\s+/g, ' ').trim()
+}
+
 export function flattenMindmapOutline(root, collapsedKeys = new Set()) {
   if (!root || typeof root !== 'object') return []
 
@@ -40,7 +75,7 @@ export function flattenMindmapOutline(root, collapsedKeys = new Set()) {
     result.push({
       key,
       uid,
-      text: String(node.data?.text ?? ''),
+      text: normalizeOutlineText(node.data),
       level: frame.level,
       parentKey: frame.parentKey,
       positionInSet: frame.positionInSet,

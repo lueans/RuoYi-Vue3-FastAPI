@@ -700,6 +700,9 @@ function showSearch() {
   if (!show.value) {
     focusReturnTarget = document.activeElement
   }
+  if (store.activeSidebar === 'outline') {
+    actions.setActiveSidebar(null)
+  }
   if (window.innerWidth <= 760 && store.activeSidebar) {
     actions.setActiveSidebar(null)
   }
@@ -1141,7 +1144,7 @@ watch(isReadonly, (readonly) => {
 watch(() => store.activeSidebar, (sidebarName) => {
   if (
     sidebarName
-    && window.innerWidth <= 760
+    && (sidebarName === 'outline' || window.innerWidth <= 760)
     && show.value
     && panelMode.value === 'search'
   ) {

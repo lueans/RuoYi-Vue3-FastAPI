@@ -46,6 +46,23 @@ test('大纲对重复标识、空标识、共享对象和循环旧数据确定�
   assert.equal(result[2].text, '共享')
 })
 
+test('大纲将富文本节点规范为可读纯文本', () => {
+  const root = {
+    data: {
+      uid: 'root',
+      richText: true,
+      text: '<p><span>根&nbsp;节点</span><br>第二行 &amp; &#x8BA1;&#21010;</p>',
+    },
+    children: [
+      { data: { uid: 'child', text: '<p><span>旧数据节点</span></p>' }, children: [] },
+    ],
+  }
+
+  const outline = flattenMindmapOutline(root)
+  assert.equal(outline[0].text, '根 节点 第二行 & 计划')
+  assert.equal(outline[1].text, '旧数据节点')
+})
+
 test('二万层无标识大纲保持线性键空间且窗口渲染为常数级 DOM 数量', () => {
   const root = node('', '0')
   let current = root

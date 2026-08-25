@@ -1,5 +1,5 @@
 <template>
-  <Sidebar ref="sidebarRef" title="大纲" open-on-mount>
+  <Sidebar ref="sidebarRef" title="大纲" placement="left" open-on-mount>
     <div class="outline-shell">
       <div class="outline-actions">
         <span class="outline-count" aria-live="polite">{{ flatOutline.length }} 个可见节点</span>

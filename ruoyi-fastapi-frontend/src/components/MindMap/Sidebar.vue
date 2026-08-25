@@ -107,13 +107,13 @@ defineExpose({ show, open, close, bodyRef, getEl })
 <style lang="less" scoped>
 .sidebarContainer {
   position: fixed;
-  right: -348px;
-  top: var(--mindmap-shell-top, 80px);
-  bottom: 0;
-  width: 348px;
-  background-color: #fcfcfd;
+  right: calc(-1 * var(--mindmap-side-panel-width, 300px));
+  top: var(--mindmap-shell-top, 52px);
+  bottom: var(--mindmap-workspace-bottom, 30px);
+  width: var(--mindmap-side-panel-width, 300px);
+  background-color: #fff;
   border-left: 1px solid #e2e5ea;
-  box-shadow: -4px 0 14px rgba(31, 35, 41, 0.035);
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   transition: right 0.25s ease;
@@ -122,7 +122,7 @@ defineExpose({ show, open, close, bodyRef, getEl })
   &.isDark {
     background-color: #2a2d32;
     border-left-color: #3d4046;
-    box-shadow: -4px 0 16px rgba(0, 0, 0, 0.2);
+    box-shadow: none;
 
     .sidebarHeader {
       border-bottom-color: #3d4046;
@@ -145,13 +145,13 @@ defineExpose({ show, open, close, bodyRef, getEl })
   }
 
   &.show {
-    right: 0;
+    right: var(--mindmap-activity-width, 44px);
   }
 
   .closeBtn {
     position: absolute;
-    right: 14px;
-    top: 10px;
+    right: 10px;
+    top: 6px;
     width: 28px;
     height: 28px;
     display: flex;
@@ -178,15 +178,15 @@ defineExpose({ show, open, close, bodyRef, getEl })
 
   .sidebarHeader {
     width: 100%;
-    height: 50px;
+    height: 40px;
     border-bottom: 1px solid #eef0f3;
     display: flex;
     justify-content: flex-start;
     align-items: center;
     flex-grow: 0;
     flex-shrink: 0;
-    padding: 0 52px 0 18px;
-    font-size: 14px;
+    padding: 0 46px 0 14px;
+    font-size: 13px;
     font-weight: 600;
     color: #1f2329;
     letter-spacing: 0.2px;
@@ -212,10 +212,17 @@ defineExpose({ show, open, close, bodyRef, getEl })
   }
 }
 
-@media (max-width: 420px) {
+@media (max-width: 1439px) and (min-width: 761px) {
+  .sidebarContainer.show {
+    box-shadow: -8px 0 24px rgba(31, 35, 41, 0.1);
+  }
+}
+
+@media (max-width: 760px) {
   .sidebarContainer {
     right: -100%;
-    width: min(100%, 348px);
+    bottom: 52px;
+    width: min(100%, 300px);
 
     &.show {
       right: 0;

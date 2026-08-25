@@ -11,6 +11,7 @@ from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
 from module_mindmap.entity.do.mindmap_content_do import MindmapNode, MindmapNodeTag
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
+from module_mindmap.service.mindmap_marker_tags import promote_legacy_marker_tags
 from module_mindmap.service.mindmap_tag_identity import build_custom_tag_key
 from module_mindmap.service.simple_mind_document_codec import (
     ENGINE_VERSION,
@@ -88,6 +89,7 @@ class MindmapDocumentService:
         allow_disabled_bindings: bool = False,
     ) -> dict[str, Any]:
         encoded = SimpleMindDocumentCodec.encode(root)
+        await promote_legacy_marker_tags(db, encoded)
         existing_bindings = await cls._load_existing_tag_bindings(db, file_id)
         old_tag_ids = set((await db.execute(
             select(MindmapNodeTag.tag_id).where(MindmapNodeTag.file_id == file_id).distinct()
@@ -118,6 +120,7 @@ class MindmapDocumentService:
     ) -> dict[str, Any]:
         """增量物化文档并保留节点、关系等已有主键。"""
         encoded = SimpleMindDocumentCodec.encode(root)
+        await promote_legacy_marker_tags(db, encoded)
         existing_bindings = await cls._load_existing_tag_bindings(db, file_id)
         old_tag_ids = set((await db.execute(
             select(MindmapNodeTag.tag_id).where(MindmapNodeTag.file_id == file_id).distinct()

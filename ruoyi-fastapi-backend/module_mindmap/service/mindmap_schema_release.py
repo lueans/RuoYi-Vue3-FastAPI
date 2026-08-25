@@ -92,6 +92,11 @@ MANUAL_REVIEW_MIGRATIONS = (
         'migration': '20260818_mindmap_permission_namespace.sql',
         'reason': '该迁移只调整权限业务数据，不能通过结构元数据判断是否需要执行，必须由运维核对权限清单。',
     },
+    {
+        'migration': '20260825_mindmap_markers_to_tags.sql',
+        'postgresqlMigration': '20260825_mindmap_markers_to_tags_postgresql.sql',
+        'reason': '该迁移写入 61 个内置标记标签并改写现有节点绑定，结构元数据无法判断是否已完成，发布时必须执行。',
+    },
 )
 
 

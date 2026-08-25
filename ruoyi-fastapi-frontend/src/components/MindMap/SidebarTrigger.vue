@@ -79,6 +79,11 @@ const triggerList = computed(() => {
 
 function triggerClick(item) {
   if (isReadonly.value && !isMindmapSidebarReadonlySafe(item?.value)) return
+  if (item?.action) {
+    actions.setActiveSidebar(null)
+    bus.emit(item.action)
+    return
+  }
   if (isTriggerActive(item)) {
     actions.setActiveSidebar(null)
   } else {
@@ -99,6 +104,7 @@ function resolveFormatSidebar() {
 }
 
 function isTriggerActive(item) {
+  if (item?.action) return false
   if (item?.value === 'nodeStyle') return isPropertyInspectorActive.value
   return activeSidebar.value === item?.value
 }
@@ -123,9 +129,14 @@ function updateSize() {
       ? getComputedStyle(editorShell).getPropertyValue('--mindmap-shell-top')
       : ''
   )
-  const topMargin = (Number.isFinite(shellTop) ? shellTop : 80) + 24
-  const bottomMargin = 36
-  maxHeight.value = Math.max(0, window.innerHeight - topMargin - bottomMargin)
+  const workspaceBottom = Number.parseFloat(
+    editorShell
+      ? getComputedStyle(editorShell).getPropertyValue('--mindmap-workspace-bottom')
+      : ''
+  )
+  const resolvedTop = Number.isFinite(shellTop) ? shellTop : 52
+  const resolvedBottom = Number.isFinite(workspaceBottom) ? workspaceBottom : 30
+  maxHeight.value = Math.max(0, window.innerHeight - resolvedTop - resolvedBottom)
 }
 
 function onResize() {
@@ -157,20 +168,24 @@ onBeforeUnmount(() => {
 <style lang="less" scoped>
 .sidebarTriggerContainer {
   position: fixed;
-  top: calc(var(--mindmap-shell-top, 80px) + 12px);
-  bottom: 18px;
-  right: -72px;
+  top: var(--mindmap-shell-top, 52px);
+  bottom: var(--mindmap-workspace-bottom, 30px);
+  right: calc(-1 * var(--mindmap-activity-width, 44px));
   z-index: 2000;
-  transition: all 0.3s ease;
+  width: var(--mindmap-activity-width, 44px);
+  transition: right 0.2s ease;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
+  background: #f4f5f7;
+  border-left: 1px solid #e3e6ea;
+  box-sizing: border-box;
 
   &.isDark {
     .trigger {
-      background-color: #2a2d32;
+      background-color: #25282d;
       border-color: #3d4046;
-      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+      box-shadow: none;
 
       .triggerItem {
         color: hsla(0, 0%, 100%, 0.6);
@@ -192,35 +207,19 @@ onBeforeUnmount(() => {
   }
 
   &.show {
-    right: 12px;
+    right: 0;
   }
 
   &.hasActive {
-    right: 360px;
+    right: 0;
   }
 
   &.hasInspector {
-    display: none;
+    display: flex;
   }
 
   .toggleShowBtn {
-    position: absolute;
-    left: -6px;
-    width: 30px;
-    height: 52px;
-    background: #3370ff;
-    top: 50%;
-    transform: translateY(-50%);
-    cursor: pointer;
-    transition: left 0.15s ease;
-    z-index: 0;
-    border-top-left-radius: 10px;
-    border-bottom-left-radius: 10px;
-    display: flex;
-    align-items: center;
-    padding-left: 4px;
-    box-shadow: -2px 0 8px rgba(51, 112, 255, 0.2);
-    border: 0;
+    display: none;
 
     &.hide {
       left: -8px;
@@ -248,11 +247,13 @@ onBeforeUnmount(() => {
 
   .trigger {
     position: relative;
-    width: 62px;
-    border: 1px solid #e2e5ea;
-    background-color: rgba(255, 255, 255, 0.97);
-    box-shadow: 0 8px 24px rgba(31, 35, 41, 0.09), 0 1px 3px rgba(31, 35, 41, 0.06);
-    border-radius: 12px;
+    width: 100%;
+    height: 100%;
+    padding-top: 6px;
+    border: 0;
+    background-color: transparent;
+    box-shadow: none;
+    border-radius: 0;
     max-height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
@@ -271,9 +272,9 @@ onBeforeUnmount(() => {
       border: 0;
       background: transparent;
       font: inherit;
-      height: 52px;
+      height: 40px;
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
       justify-content: center;
       align-items: center;
       cursor: pointer;
@@ -284,7 +285,7 @@ onBeforeUnmount(() => {
       position: relative;
 
       &:hover {
-        background-color: #f5f6f7;
+        background-color: #fff;
         color: #1f2329;
       }
 
@@ -296,30 +297,42 @@ onBeforeUnmount(() => {
       &.active {
         color: #3370ff;
         font-weight: 600;
-        background: linear-gradient(90deg, #edf4ff 0%, #f4f7ff 100%);
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(31, 35, 41, 0.08);
 
         &::before {
           content: '';
           position: absolute;
-          left: 0;
-          top: 12px;
-          bottom: 12px;
-          width: 3px;
-          border-radius: 0 3px 3px 0;
+          right: 0;
+          left: auto;
+          top: 9px;
+          bottom: 9px;
+          width: 2px;
+          border-radius: 3px 0 0 3px;
           background: #3370ff;
         }
       }
 
       .triggerIcon {
         font-size: 17px;
-        margin-bottom: 3px;
+        margin-bottom: 0;
       }
 
       .triggerName {
-        font-size: 10px;
-        line-height: 1;
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
       }
     }
+  }
+}
+
+@media (max-width: 760px) {
+  .sidebarTriggerContainer {
+    display: none;
   }
 }
 

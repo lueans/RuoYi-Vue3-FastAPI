@@ -1,5 +1,13 @@
 <template>
-  <div class="mindmap-edit-page" :class="{ 'has-command-bar': documentLoaded && !isZenMode && !isReadonly, 'is-dark': isDark }">
+  <div
+    class="mindmap-edit-page"
+    :class="{
+      'has-command-bar': documentLoaded && !isZenMode && !isReadonly,
+      'has-search-panel': searchPanelOpen,
+      'has-right-panel': Boolean(activeSidebar),
+      'is-dark': isDark,
+    }"
+  >
     <div class="mindmap-edit-header">
       <div class="header-left">
         <div class="brand-mark" aria-hidden="true">
@@ -355,6 +363,7 @@ const headerCommandCenterRef = ref(null)
 const mobileCommandTriggerRef = ref(null)
 const mobileCommandCloseRef = ref(null)
 const mobileCommandOpen = ref(false)
+const searchPanelOpen = ref(false)
 const mindmapId = computed(() => parseMindmapRouteId(route.query.id))
 const hasValidMindmapId = computed(() => mindmapId.value !== null)
 const requestedReadonly = computed(() => route.query.readonly === '1')
@@ -549,6 +558,10 @@ function openSearch() {
 
 function openFilter() {
   bus.emit('show_filter')
+}
+
+function handleSearchPanelVisibilityChange(visible) {
+  searchPanelOpen.value = visible === true
 }
 
 function toggleSidebar(sidebarName) {
@@ -783,27 +796,43 @@ watch([documentLoaded, isReadonly, isZenMode], ([loaded, readonly, zen]) => {
 onMounted(() => {
   window.addEventListener('keydown', handleMobileCommandKeydown)
   window.addEventListener('resize', handleMobileCommandResize)
+  bus.on('searchPanelVisibilityChange', handleSearchPanelVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   manualSaveRequestId += 1
   window.removeEventListener('keydown', handleMobileCommandKeydown)
   window.removeEventListener('resize', handleMobileCommandResize)
+  bus.off('searchPanelVisibilityChange', handleSearchPanelVisibilityChange)
 })
 </script>
 
 <style scoped lang="scss">
 .mindmap-edit-page {
-  --mindmap-shell-top: 80px;
+  --mindmap-shell-top: 52px;
+  --mindmap-activity-width: 44px;
+  --mindmap-side-panel-width: 300px;
+  --mindmap-workspace-bottom: 30px;
+  --mindmap-canvas-gap: 8px;
+  --mindmap-workspace-left: var(--mindmap-activity-width);
+  --mindmap-workspace-right: var(--mindmap-activity-width);
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #f6f8fb;
+  background: #f4f5f7;
   overflow: hidden;
   color: #1f2329;
 
   &.has-command-bar {
-    --mindmap-shell-top: 80px;
+    --mindmap-shell-top: 52px;
+  }
+
+  &.has-search-panel {
+    --mindmap-workspace-left: calc(var(--mindmap-activity-width) + 280px);
+  }
+
+  &.has-right-panel {
+    --mindmap-workspace-right: calc(var(--mindmap-activity-width) + var(--mindmap-side-panel-width));
   }
 }
 
@@ -817,11 +846,11 @@ onBeforeUnmount(() => {
 }
 
 .mindmap-edit-header {
-  height: 80px;
-  padding: 0 16px 0 0;
-  gap: 16px;
-  background: rgba(249, 250, 251, 0.98);
-  border-bottom: 1px solid #e7eaf0;
+  height: 52px;
+  padding: 0 8px 0 0;
+  gap: 8px;
+  background: #f4f5f7;
+  border-bottom: 1px solid #e3e6ea;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -833,9 +862,9 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     min-width: 0;
-    flex: 0 1 304px;
-    max-width: 32%;
-    gap: 10px;
+    flex: 0 1 264px;
+    max-width: 30%;
+    gap: 4px;
   }
 
   .header-right {
@@ -849,9 +878,9 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
-    height: 38px;
-    border-radius: 8px;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
     cursor: pointer;
     color: #646a73;
     transition: all 0.2s;
@@ -861,8 +890,9 @@ onBeforeUnmount(() => {
     padding: 0;
     outline: none;
     &:hover {
-      background: #f0f3f8;
+      background: #fff;
       color: #1f2329;
+      box-shadow: 0 1px 3px rgba(31, 35, 41, 0.08);
     }
     &:focus-visible {
       box-shadow: 0 0 0 2px #3370ff40;
@@ -877,18 +907,18 @@ onBeforeUnmount(() => {
   }
 
   .brand-mark {
-    width: 54px;
-    height: 80px;
-    flex: 0 0 54px;
+    width: 44px;
+    height: 52px;
+    flex: 0 0 44px;
     display: flex;
     align-items: center;
     justify-content: center;
     color: #3370ff;
-    background: rgba(255, 255, 255, 0.72);
-    border-right: 1px solid #e8eaed;
+    background: #f4f5f7;
+    border-right: 1px solid #e3e6ea;
 
     .iconfont {
-      font-size: 22px;
+      font-size: 19px;
     }
   }
 
@@ -906,8 +936,8 @@ onBeforeUnmount(() => {
     background: transparent;
     font-family: inherit;
     text-align: left;
-    font-size: 16px;
-    line-height: 21px;
+    font-size: 14px;
+    line-height: 19px;
     font-weight: 600;
     color: #1f2329;
     cursor: pointer;
@@ -918,7 +948,7 @@ onBeforeUnmount(() => {
     margin-left: -5px;
     border-radius: 6px;
     transition: background 0.15s;
-    max-width: 210px;
+    max-width: 184px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -954,8 +984,8 @@ onBeforeUnmount(() => {
     align-items: center;
     gap: 5px;
     color: #8f959e;
-    font-size: 12px;
-    line-height: 16px;
+    font-size: 11px;
+    line-height: 14px;
     white-space: nowrap;
   }
 
@@ -1020,31 +1050,37 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     gap: 0;
-    margin-left: 6px;
-    padding-left: 8px;
+    margin-left: 4px;
+    padding-left: 6px;
     border-left: 1px solid #e1e4e8;
   }
 
   .header-icon-btn {
-    width: 46px;
-    height: 58px;
+    width: 32px;
+    height: 32px;
     border: none;
-    border-radius: 8px;
+    border-radius: 7px;
     color: #646a73;
     background: transparent;
     display: inline-flex;
-    flex-direction: column;
+    flex-direction: row;
     align-items: center;
     justify-content: center;
-    gap: 4px;
+    gap: 0;
     cursor: pointer;
     font-size: 18px;
     transition: background 0.16s ease, color 0.16s ease, transform 0.16s ease;
 
     &:hover {
-      background: #f0f3f8;
+      background: #fff;
       color: #3370ff;
-      transform: translateY(-1px);
+      box-shadow: 0 1px 3px rgba(31, 35, 41, 0.08);
+    }
+
+    &.is-active {
+      color: #245bdb;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(31, 35, 41, 0.08);
     }
 
     &:focus-visible {
@@ -1053,9 +1089,11 @@ onBeforeUnmount(() => {
     }
 
     .header-action-label {
-      font-size: 11px;
-      line-height: 13px;
-      font-weight: 400;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
       white-space: nowrap;
     }
   }
@@ -1135,24 +1173,25 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    min-width: 68px;
-    height: 36px;
-    border-radius: 7px;
+    min-width: 64px;
+    height: 32px;
+    border-radius: 6px;
     cursor: pointer;
-    color: #fff;
+    color: #1f2329;
     transition: all 0.2s;
     font-size: 13px;
     font-weight: 500;
     gap: 6px;
-    border: none;
-    background: #3370ff;
-    padding: 0 14px;
-    box-shadow: 0 2px 7px rgba(51, 112, 255, 0.18);
+    border: 1px solid #dfe3e8;
+    background: #fff;
+    padding: 0 12px;
+    box-shadow: 0 1px 3px rgba(31, 35, 41, 0.08);
     outline: none;
     &:hover {
-      background: #2864e6;
-      color: #fff;
-      box-shadow: 0 4px 10px rgba(51, 112, 255, 0.22);
+      border-color: #b9c9eb;
+      background: #f8faff;
+      color: #245bdb;
+      box-shadow: 0 2px 6px rgba(31, 35, 41, 0.1);
     }
     &:focus-visible {
       box-shadow: 0 0 0 2px #3370ff40;
@@ -1160,12 +1199,13 @@ onBeforeUnmount(() => {
     .svg-icon {
       width: 15px;
       height: 15px;
+      color: #3370ff;
     }
   }
 }
 
 .header-command-center {
-  min-width: 220px;
+  min-width: 160px;
   height: 100%;
   display: flex;
   align-items: center;
@@ -1345,7 +1385,7 @@ onBeforeUnmount(() => {
   background: #17191d;
 
   .mindmap-edit-header {
-    background: rgba(35, 38, 43, 0.98);
+    background: #23262b;
     border-color: #363a41;
     color: #e5e6eb;
   }
@@ -1354,7 +1394,7 @@ onBeforeUnmount(() => {
     .mindmap-title { color: #f0f1f2; }
     .document-meta { color: #92979f; }
     .brand-mark {
-      background: rgba(29, 32, 37, 0.72);
+      background: #23262b;
       border-right-color: #363a41;
     }
     .header-icon-btn {
@@ -1440,10 +1480,16 @@ onBeforeUnmount(() => {
   }
 }
 
+@media (max-width: 1439px) and (min-width: 761px) {
+  .mindmap-edit-page.has-right-panel {
+    --mindmap-workspace-right: var(--mindmap-activity-width);
+  }
+}
+
 @media (max-width: 1180px) {
   .mindmap-edit-header {
     .header-left {
-      flex-basis: 268px;
+      flex-basis: 252px;
     }
 
     .meta-realtime-status {
@@ -1457,12 +1503,12 @@ onBeforeUnmount(() => {
     gap: 10px;
 
     .header-left {
-      flex-basis: 228px;
+      flex-basis: 216px;
     }
 
     .header-icon-btn {
-      width: 34px;
-      height: 38px;
+      width: 32px;
+      height: 34px;
 
       .header-action-label {
         display: none;
@@ -1474,9 +1520,19 @@ onBeforeUnmount(() => {
 @media (max-width: 760px) {
   .mindmap-edit-page {
     --mindmap-shell-top: 60px;
+    --mindmap-workspace-left: 0px;
+    --mindmap-workspace-right: 0px;
+    --mindmap-workspace-bottom: 52px;
+    --mindmap-canvas-gap: 6px;
 
     &.has-command-bar {
       --mindmap-shell-top: 60px;
+    }
+
+    &.has-search-panel,
+    &.has-right-panel {
+      --mindmap-workspace-left: 0px;
+      --mindmap-workspace-right: 0px;
     }
   }
 

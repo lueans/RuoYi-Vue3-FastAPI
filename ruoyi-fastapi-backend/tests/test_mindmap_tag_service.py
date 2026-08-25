@@ -162,6 +162,83 @@ class MindmapTagServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn('不属于当前标签作用域', context.exception.message)
 
+    async def test_create_rejects_duplicate_active_marker_icon(self) -> None:
+        model = MindmapTagModel(
+            tagKey='custom_priority',
+            name='重复优先级',
+            ownerId=0,
+            status=0,
+            style={'iconKey': 'priority_1'},
+        )
+        with (
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.check_key_unique',
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.check_marker_icon_unique',
+                new=AsyncMock(return_value=False),
+            ),
+            self.assertRaises(ServiceException) as context,
+        ):
+            await MindmapTagService.add_tag(
+                SimpleNamespace(), model, user_id=1, user_name='admin',
+            )
+
+        self.assertIn('已被其他启用标签使用', context.exception.message)
+
+    async def test_builtin_marker_key_must_match_immutable_icon_mapping(self) -> None:
+        tag = SimpleNamespace(
+            id=8,
+            owner_id=0,
+            tag_key='builtin_marker_priority_1',
+            status=0,
+        )
+        model = MindmapTagModel(
+            id=8,
+            tagKey='builtin_marker_priority_1',
+            name='优先级 1',
+            ownerId=0,
+            status=0,
+            style={'iconKey': 'priority_2'},
+        )
+        with (
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.get_tag_by_id',
+                new=AsyncMock(return_value=tag),
+            ),
+            self.assertRaises(ServiceException) as context,
+        ):
+            await MindmapTagService.update_tag(SimpleNamespace(), model, user_id=1)
+
+        self.assertIn('必须与节点标记图标保持一致', context.exception.message)
+
+    async def test_builtin_marker_cannot_leave_global_reserved_identity(self) -> None:
+        tag = SimpleNamespace(
+            id=8,
+            owner_id=0,
+            tag_key='builtin_marker_priority_1',
+            status=0,
+        )
+        model = MindmapTagModel(
+            id=8,
+            tagKey='renamed_priority',
+            name='优先级 1',
+            ownerId=42,
+            status=0,
+            style={'iconKey': 'priority_1'},
+        )
+        with (
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.get_tag_by_id',
+                new=AsyncMock(return_value=tag),
+            ),
+            self.assertRaises(ServiceException) as context,
+        ):
+            await MindmapTagService.update_tag(SimpleNamespace(), model, user_id=1)
+
+        self.assertIn('Key 和全局作用域不可修改', context.exception.message)
+
     async def test_list_forwards_unified_tag_filters(self) -> None:
         page = PageModel(
             rows=[{'id': 11, 'style': {'color': '#111'}}],

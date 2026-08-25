@@ -1,7 +1,7 @@
 <template>
   <div
     class="editContainer"
-    :class="{ hasPropertyInspector }"
+    :class="{ hasPropertyInspector, isDark: store.localConfig.isDark }"
     ref="editContainerRef"
     @dragenter.stop.prevent="onDragenter"
     @dragleave.stop.prevent
@@ -16,6 +16,7 @@
       :aria-label="isReadonly ? '脑图只读画布' : '脑图编辑画布'"
       tabindex="0"
     ></div>
+    <WorkspaceActivityBar v-if="!isZenMode" />
     <Navigator v-if="mindMap" :mindMap="mindMap" />
     <OutlineSidebar v-if="mindMap && activeSidebar === 'outline'" :mindMap="mindMap" />
     <AssociativeLineStyle v-if="mindMap" :mindMap="mindMap" />
@@ -26,8 +27,8 @@
     />
     <ShortcutKey v-if="mindMap && activeSidebar === 'shortcutKey'" />
     <Contextmenu v-if="mindMap" :mindMap="mindMap" />
-    <NodeIconSidebar
-      v-if="mindMap && activeSidebar === 'nodeIconSidebar'"
+    <NodeTagSidebar
+      v-if="mindMap && activeSidebar === 'nodeTagSidebar'"
       :mindMap="mindMap"
     />
     <Search v-if="mindMap" :mindMap="mindMap" :mindmapId="props.mindmapId" />
@@ -40,7 +41,6 @@
     />
     <RichTextToolbar v-if="mindMap" :mindMap="mindMap" />
     <NodeTagStyle v-if="mindMap" :mindMap="mindMap" />
-    <NodeIconToolbar v-if="mindMap" :mindMap="mindMap" />
     <NodeAttachment v-if="mindMap" :readonly="isReadonly" />
     <NodeImgPlacementToolbar v-if="mindMap" :mindMap="mindMap" />
     <NodeOuterFrame v-if="mindMap" :mindMap="mindMap" />
@@ -147,16 +147,16 @@ import './styles/markdown.scss'
 import Contextmenu from './Contextmenu.vue'
 import Navigator from './Navigator.vue'
 import Search from './Search.vue'
+import WorkspaceActivityBar from './WorkspaceActivityBar.vue'
 import SidebarTrigger from './SidebarTrigger.vue'
 import PropertyInspector from './PropertyInspector.vue'
 import ShortcutKey from './ShortcutKey.vue'
 import OutlineSidebar from './OutlineSidebar.vue'
-import NodeIconSidebar from './NodeIconSidebar.vue'
+import NodeTagSidebar from './NodeIconSidebar.vue'
 import AssociativeLineStyle from './AssociativeLineStyle.vue'
 import Setting from './Setting.vue'
 import RichTextToolbar from './RichTextToolbar.vue'
 import NodeTagStyle from './NodeTagStyle.vue'
-import NodeIconToolbar from './NodeIconToolbar.vue'
 import NodeAttachment from './NodeAttachment.vue'
 import NodeImgPlacementToolbar from './NodeImgPlacementToolbar.vue'
 import NodeOuterFrame from './NodeOuterFrame.vue'
@@ -730,11 +730,12 @@ const isZenMode = computed(() => store.localConfig.isZenMode)
 const activeSidebar = computed(() => store.activeSidebar)
 const propertySidebarNames = new Set(['nodeStyle', 'baseStyle', 'structure', 'theme'])
 const hasPropertyInspector = computed(() => propertySidebarNames.has(activeSidebar.value))
+const hasSearchPanel = ref(false)
 const openNodeRichText = computed(() => store.localConfig.openNodeRichText)
 const isShowScrollbar = computed(() => store.localConfig.isShowScrollbar)
 const useLeftKeySelectionRightKeyDrag = computed(() => store.localConfig.useLeftKeySelectionRightKeyDrag)
 
-watch(hasPropertyInspector, async () => {
+watch([activeSidebar, hasSearchPanel], async () => {
   await nextTick()
   mindMap.value?.resize?.()
 })
@@ -2205,6 +2206,10 @@ function onToggleOpenNodeRichText(val) {
   actions.setLocalConfig({ openNodeRichText: !!val })
 }
 
+function onSearchPanelVisibilityChange(visible) {
+  hasSearchPanel.value = visible === true
+}
+
 function onOpenSidebar(sidebarName) {
   if (
     !sidebarName
@@ -2223,6 +2228,7 @@ function bindBusEvents() {
   bus.on('createAssociativeLine', onCreateAssociativeLine)
   bus.on('startPainter', onStartPainter)
   bus.on('openSidebar', onOpenSidebar)
+  bus.on('searchPanelVisibilityChange', onSearchPanelVisibilityChange)
   bus.on('toggleOpenNodeRichText', onToggleOpenNodeRichText)
 }
 
@@ -2235,6 +2241,7 @@ function unbindBusEvents() {
   bus.off('createAssociativeLine', onCreateAssociativeLine)
   bus.off('startPainter', onStartPainter)
   bus.off('openSidebar', onOpenSidebar)
+  bus.off('searchPanelVisibilityChange', onSearchPanelVisibilityChange)
   bus.off('data_change', onBusDataChange)
   bus.off('view_data_change', onBusViewDataChange)
   bus.off('toggleOpenNodeRichText', onToggleOpenNodeRichText)
@@ -2325,21 +2332,30 @@ defineExpose({
 
 <style lang="scss" scoped>
 .editContainer {
-  --mindmap-inspector-width: 348px;
-  --mindmap-inspector-compact-width: 324px;
+  --mindmap-inspector-width: var(--mindmap-side-panel-width, 300px);
+  --mindmap-inspector-compact-width: 300px;
   position: relative;
   flex: 1;
   overflow: hidden;
 
   .mindMapContainer {
-    width: 100%;
-    height: 100%;
+    position: absolute;
+    top: var(--mindmap-canvas-gap, 8px);
+    right: calc(var(--mindmap-workspace-right, var(--mindmap-activity-width, 44px)) + var(--mindmap-canvas-gap, 8px));
+    bottom: calc(var(--mindmap-workspace-bottom, 30px) + var(--mindmap-canvas-gap, 8px));
+    left: calc(var(--mindmap-workspace-left, var(--mindmap-activity-width, 44px)) + var(--mindmap-canvas-gap, 8px));
+    width: auto;
+    height: auto;
+    overflow: hidden;
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 0 0 1px rgba(31, 35, 41, 0.06), 0 2px 8px rgba(31, 35, 41, 0.025);
+    transition: left 0.2s ease, right 0.2s ease;
   }
 
-  &.hasPropertyInspector {
-    .mindMapContainer {
-      width: calc(100% - var(--mindmap-inspector-width));
-    }
+  &.isDark .mindMapContainer {
+    background: #25282d;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 2px 10px rgba(0, 0, 0, 0.14);
   }
 
   .dragMask {
@@ -2363,19 +2379,9 @@ defineExpose({
   }
 }
 
-@media (max-width: 1180px) {
-  .editContainer.hasPropertyInspector {
-    .mindMapContainer {
-      width: calc(100% - var(--mindmap-inspector-compact-width));
-    }
-  }
-}
-
-@media (max-width: 720px) {
-  .editContainer.hasPropertyInspector {
-    .mindMapContainer {
-      width: 100%;
-    }
+@media (max-width: 760px) {
+  .editContainer .mindMapContainer {
+    border-radius: 8px;
   }
 }
 </style>

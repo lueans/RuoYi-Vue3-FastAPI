@@ -153,6 +153,9 @@ cython_debug/
 .qoder/
 .trae/
 
+# Local design-tool working files
+.superdesign/
+
 # macOS Finder metadata
 .DS_Store
 

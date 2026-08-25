@@ -354,6 +354,8 @@ psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
   -f ruoyi-fastapi-backend/migrations/20260820_mindmap_postgresql.sql
 psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
   -f ruoyi-fastapi-backend/migrations/20260824_mindmap_unified_tags_postgresql.sql
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
+  -f ruoyi-fastapi-backend/migrations/20260825_mindmap_markers_to_tags_postgresql.sql
 ```
 
 迁移成功后继续保持 `DB_AUTO_CREATE_TABLES=false`，再启动服务：
@@ -361,6 +363,21 @@ psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
 ```bash
 docker compose -f docker-compose.pg.yml up -d --build
 ```
+
+#### 脑图系统标签初始化
+
+标签表结构已就绪且无需迁移历史节点标记时，可单独初始化 4 个系统分组和 61 个内置标记标签。脚本可重复执行，不会改写节点绑定或清理协作缓存：
+
+```bash
+# MySQL 8+
+mysql -u root -p ruoyi-fastapi < sql/mindmap_system_tags.sql
+
+# PostgreSQL
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
+  -f sql/mindmap_system_tags_postgresql.sql
+```
+
+已有脑图仍包含历史 `content_data.icon` 数据时，不要只执行初始化脚本；应执行对应的 `20260825_mindmap_markers_to_tags*.sql` 数据迁移，以建立节点标签绑定。
 
 ## 交流与赞助
 

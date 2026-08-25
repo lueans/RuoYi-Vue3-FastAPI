@@ -204,6 +204,25 @@ class MindmapTagDao:
         return result is None
 
     @classmethod
+    async def check_marker_icon_unique(
+        cls,
+        db: AsyncSession,
+        owner_id: int,
+        icon_key: str,
+        exclude_id: int | None = None,
+    ) -> bool:
+        """同一标签作用域内，一个启用标记图标只能对应一个标签。"""
+        query = select(MindmapTag.id).where(
+            MindmapTag.owner_id == owner_id,
+            MindmapTag.status == 0,
+            MindmapTag.style.is_not(None),
+            MindmapTag.style['iconKey'].as_string() == icon_key,
+        )
+        if exclude_id is not None:
+            query = query.where(MindmapTag.id != exclude_id)
+        return (await db.execute(query.limit(1))).scalar_one_or_none() is None
+
+    @classmethod
     async def add_tag(cls, db: AsyncSession, data: dict) -> MindmapTag:
         tag = MindmapTag(**data)
         db.add(tag)

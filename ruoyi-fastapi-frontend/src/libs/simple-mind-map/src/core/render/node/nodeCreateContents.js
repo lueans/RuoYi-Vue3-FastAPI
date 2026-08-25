@@ -375,7 +375,20 @@ function createTagNode() {
   let { maxTag, tagsColorMap } = this.mindMap.opt
   tagsColorMap = tagsColorMap || {}
   const nodes = []
-  tagData.slice(0, maxTag).forEach((item, index) => {
+  let textTagCount = 0
+  const visibleTagData = []
+  tagData.forEach((item, index) => {
+    const itemStyle = typeof item === 'object' && item !== null
+      ? item.style
+      : null
+    const markerSrc = typeof itemStyle?.iconKey === 'string'
+      ? iconsSvg.getNodeIconListIcon(itemStyle.iconKey, this.mindMap.opt.iconList || [])
+      : ''
+    if (!markerSrc && textTagCount >= maxTag) return
+    if (!markerSrc) textTagCount += 1
+    visibleTagData.push({ item, index, markerSrc })
+  })
+  visibleTagData.forEach(({ item, index, markerSrc }) => {
     let str = ''
     let placement = null
     let align = null
@@ -399,6 +412,25 @@ function createTagNode() {
     tag.on('click', () => {
       this.mindMap.emit('node_tag_click', this, item, index, tag)
     })
+    // 内置标记已纳入统一标签定义。数据库仅保存受控 iconKey，渲染时再从
+    // simple-mind-map 自带图标表解析，避免把任意 SVG/URL 带入文档数据。
+    if (markerSrc) {
+      const iconSize = this.mindMap.themeConfig.iconSize
+      const markerNode = /^<svg/.test(markerSrc)
+        ? SVG(markerSrc)
+        : new SVGImage().load(markerSrc)
+      markerNode.size(iconSize, iconSize)
+      tag.add(markerNode)
+      if (str) addSafeSvgTitle(tag, str)
+      nodes.push({
+        node: tag,
+        width: iconSize,
+        height: iconSize,
+        placement,
+        align
+      })
+      return
+    }
     // 标签文本
     const text = new Text().text(str)
     this.style.tagText(text, style)

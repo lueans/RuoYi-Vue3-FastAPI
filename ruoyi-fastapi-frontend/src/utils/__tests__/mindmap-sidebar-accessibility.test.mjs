@@ -71,11 +71,15 @@ test('服务端锁定的只读文件不会暴露可执行的整理布局命令',
   assert.match(source, /if \(props\.lockedReadonly\) return[\s\S]*?bus\.emit\('execCommand', 'RESET_LAYOUT'\)/)
 })
 
-test('搜索面板打开时关闭侧栏，退出搜索后恢复有效的原焦点', async () => {
+test('搜索面板可与右侧栏并存，筛选弹窗仍收起侧栏且退出后恢复原焦点', async () => {
   const source = await readFile(searchSourceUrl, 'utf8')
+  const showSearchBlock = source.match(/function showSearch\(\) \{[\s\S]*?\n\}/)?.[0] || ''
+  const showFilterBlock = source.match(/function showFilter\(\) \{[\s\S]*?\n\}/)?.[0] || ''
 
   assert.match(source, /focusReturnTarget = document\.activeElement/)
-  assert.match(source, /bus\.emit\('closeSideBar'\)/)
+  assert.doesNotMatch(showSearchBlock, /closeSideBar/)
+  assert.match(showFilterBlock, /bus\.emit\('closeSideBar'\)/)
+  assert.match(source, /bus\.emit\('searchPanelVisibilityChange', visible && mode === 'search'\)/)
   assert.match(source, /returnTarget\?\.isConnected && !returnTarget\.closest\?\.\('\[inert\]'\)/)
   assert.match(source, /returnTarget\.focus\?\.\(\)/)
 })
@@ -88,7 +92,7 @@ test('常规侧栏仅在激活时挂载，画布上下文侧栏保留事件监�
     ShortcutKey: 'shortcutKey',
     Setting: 'setting',
     FormulaSidebar: 'formulaSidebar',
-    NodeIconSidebar: 'nodeIconSidebar',
+    NodeTagSidebar: 'nodeTagSidebar',
     VersionHistory: 'versionHistory',
     CollaboratorManager: 'collaboratorManager',
   }
@@ -107,10 +111,10 @@ test('常规侧栏仅在激活时挂载，画布上下文侧栏保留事件监�
   assert.match(source, /<AssociativeLineStyle v-if="mindMap"/)
   assert.match(source, /<NodeOuterFrame v-if="mindMap"/)
   assert.match(source, /<NodeNoteSidebar v-if="mindMap"/)
-  assert.equal((source.match(/<NodeIconSidebar/g) || []).length, 1)
+  assert.doesNotMatch(source, /<NodeIconSidebar|NodeIconToolbar/)
 })
 
-test('图标侧栏只有一个按需实例，懒挂载面板声明首次打开契约', async () => {
+test('节点标记入口迁移到标签弹窗，其他懒挂载面板保留首次打开契约', async () => {
   const toolbar = await readFile(toolbarSourceUrl, 'utf8')
   const editor = await readFile(editorSourceUrl, 'utf8')
   const sidebar = await readFile(sidebarSourceUrl, 'utf8')
@@ -125,8 +129,9 @@ test('图标侧栏只有一个按需实例，懒挂载面板声明首次打开�
   ]
 
   assert.equal(toolbar.includes("import NodeIcon from './NodeIconSidebar.vue'"), false)
-  assert.match(toolbar, /event: 'openSidebar', args: \['nodeIconSidebar'\]/)
-  assert.match(editor, /<NodeIconSidebar[\s\S]*?activeSidebar === 'nodeIconSidebar'/)
+  assert.match(toolbar, /tag: \{ icon: 'iconbiaoqian', event: 'openSidebar', args: \['nodeTagSidebar'\] \}/)
+  assert.match(editor, /<NodeTagSidebar[\s\S]*activeSidebar === 'nodeTagSidebar'/)
+  assert.doesNotMatch(editor, /<NodeIconSidebar|NodeIconToolbar/)
   assert.match(editor, /bus\.on\('openSidebar', onOpenSidebar\)/)
   assert.match(sidebar, /openOnMount: \{ type: Boolean, default: false \}/)
   assert.match(sidebar, /if \(props\.openOnMount\) open\(\)/)
@@ -136,13 +141,11 @@ test('图标侧栏只有一个按需实例，懒挂载面板声明首次打开�
   )
   assert.equal(sources.every(source => source.includes('open-on-mount')), true)
   assert.equal(sources.every(source => source.includes('{ immediate: true }')), true)
-  const nodeIconSidebar = sources[lazySidebarFiles.indexOf('NodeIconSidebar.vue')]
-  assert.match(nodeIconSidebar, /const props = defineProps\(\{[\s\S]*mindMap:/)
-  assert.match(nodeIconSidebar, /<button v-for="item in group\.list"[\s\S]*:aria-pressed="isSelected/)
-  assert.match(nodeIconSidebar, /toggleNodeIconAcrossLists/)
-  assert.match(nodeIconSidebar, /getCommonNodeIcons/)
-  assert.match(nodeIconSidebar, /activeNodes\.value\.length === 0[\s\S]*actions\.setActiveSidebar\(null\)/)
-  assert.match(nodeIconSidebar, /:deep\(svg\)/)
+  const nodeTagSidebar = sources[lazySidebarFiles.indexOf('NodeIconSidebar.vue')]
+  assert.match(nodeTagSidebar, /listTags\(\{/)
+  assert.match(nodeTagSidebar, /keyword: 'builtin_marker_'/)
+  assert.match(nodeTagSidebar, /node\.setTag\(nextTags/)
+  assert.doesNotMatch(nodeTagSidebar, /node\.setIcon\(/)
 })
 
 test('统一属性检查器提供语义化页签、停靠布局和可撤销的节点样式重置入口', async () => {
@@ -167,7 +170,8 @@ test('统一属性检查器提供语义化页签、停靠布局和可撤销的�
   assert.match(inspector, /class="applicationState" role="status" aria-live="polite"/)
   assert.match(inspector, /v-show="feedbackActive" class="applicationState"/)
   assert.match(inspector, /return `已选择 \$\{activeNodes\.value\.length\} 个节点`/)
-  assert.match(inspector, /width: var\(--mindmap-inspector-width, 348px\)/)
+  assert.match(inspector, /width: var\(--mindmap-inspector-width, 300px\)/)
+  assert.match(inspector, /margin: 0;\s*padding: 0;/)
   assert.match(inspector, /v-if="activeNodes\.length > 0"/)
   assert.match(inspector, /class="nodeEmptyState"/)
   assert.match(inspector, /@click="selectTab\('canvas', true\)"/)
@@ -177,9 +181,28 @@ test('统一属性检查器提供语义化页签、停靠布局和可撤销的�
   assert.match(inspector, /需要恢复时可使用顶部撤销/)
   assert.match(inspector, /ref="inspectorBodyRef" class="inspectorBody customScrollbar"/)
   assert.match(inspector, /inspectorBodyRef\.value\.scrollTop = 0/)
-  assert.match(editor, /width: calc\(100% - var\(--mindmap-inspector-width\)\)/)
+  assert.match(editor, /left: calc\(var\(--mindmap-workspace-left/)
+  assert.match(editor, /right: calc\(var\(--mindmap-workspace-right/)
+  assert.match(editor, /watch\(\[activeSidebar, hasSearchPanel\]/)
   assert.match(editor, /mindMap\.value\?\.resize\?\.\(\)/)
   assert.match(trigger, /isPropertyInspectorActive/)
+})
+
+test('中屏覆盖右侧面板且移动端统一收口到 760px 断点', async () => {
+  const [edit, sidebar, inspector, search, navigator] = await Promise.all([
+    readFile(editSourceUrl, 'utf8'),
+    readFile(sidebarSourceUrl, 'utf8'),
+    readFile(inspectorSourceUrl, 'utf8'),
+    readFile(searchSourceUrl, 'utf8'),
+    readFile(navigatorSourceUrl, 'utf8'),
+  ])
+
+  assert.match(edit, /@media \(max-width: 1439px\) and \(min-width: 761px\)[\s\S]*?--mindmap-workspace-right: var\(--mindmap-activity-width\)/)
+  assert.match(sidebar, /@media \(max-width: 1439px\) and \(min-width: 761px\)/)
+  assert.match(inspector, /@media \(max-width: 1439px\) and \(min-width: 761px\)/)
+  assert.match(inspector, /@media \(max-width: 760px\)[\s\S]*?right: 0;[\s\S]*?bottom: 52px;/)
+  assert.match(search, /@media \(max-width: 760px\)[\s\S]*?\.searchContainer:not\(\.filterDialog\)/)
+  assert.match(navigator, /@media screen and \(max-width: 760px\)/)
 })
 
 test('节点属性分组可通过键盘折叠，文字快捷控件暴露原生按钮语义', async () => {
@@ -247,13 +270,20 @@ test('格式入口优先服务当前选区，并保留最近一次全局设置�
 })
 
 test('桌面只读页去除与顶部导航重复的侧栏入口，窄屏仍保留完整访问路径', async () => {
-  const trigger = await readFile(triggerSourceUrl, 'utf8')
+  const [trigger, navigator] = await Promise.all([
+    readFile(triggerSourceUrl, 'utf8'),
+    readFile(navigatorSourceUrl, 'utf8'),
+  ])
 
   assert.match(trigger, /const readonlyHeaderSidebarNames = new Set\(\['outline', 'versionHistory'\]\)/)
   assert.match(trigger, /if \(viewportWidth\.value > 760\)/)
   assert.match(trigger, /!readonlyHeaderSidebarNames\.has\(item\.value\)/)
   assert.match(trigger, /activeSidebar\.value === item\.value/)
   assert.match(trigger, /viewportWidth\.value = window\.innerWidth/)
+  assert.match(navigator, /command="format"[\s\S]*?>[\s\S]*?格式/)
+  assert.match(navigator, /command="formulaSidebar"[\s\S]*?>[\s\S]*?公式/)
+  assert.match(navigator, /command === 'format'[\s\S]*?actions\.setActiveSidebar\(targetSidebar\)/)
+  assert.match(navigator, /command === 'formulaSidebar'[\s\S]*?actions\.setActiveSidebar\('formulaSidebar'\)/)
 })
 
 test('主题面板会定位当前主题分组，并为主题卡片提供可感知的选中态', async () => {

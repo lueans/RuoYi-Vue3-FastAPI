@@ -12,6 +12,7 @@ export const MINDMAP_TAG_STYLE_BOUNDS = Object.freeze({
 })
 export const MINDMAP_TAG_STYLE_PLACEMENTS = Object.freeze(['left', 'right', 'top', 'bottom'])
 export const MINDMAP_TAG_STYLE_ALIGNS = Object.freeze(['left', 'right', 'top', 'bottom', 'center'])
+export const MINDMAP_TAG_MARKER_ICON_PATTERN = /^(?:priority_(?:10|[1-9])|progress_[1-8]|expression_(?:20|1[0-9]|[1-9])|sign_(?:2[0-3]|1[0-9]|[1-9]))$/u
 
 const TAG_STYLE_COLOR_KEYS = new Set(['fill', 'color'])
 const TAG_STYLE_NUMBER_KEYS = new Set(Object.keys(MINDMAP_TAG_STYLE_BOUNDS))
@@ -20,6 +21,7 @@ const TAG_STYLE_KEYS = new Set([
   ...TAG_STYLE_NUMBER_KEYS,
   'placement',
   'align',
+  'iconKey',
 ])
 
 export function validateMindmapTagIdentifier(value, { label = '标签 Key' } = {}) {
@@ -177,6 +179,11 @@ export function validateMindmapTagStyle(style) {
     } else if (key === 'align') {
       if (!MINDMAP_TAG_STYLE_ALIGNS.includes(raw)) {
         return { valid: false, value: null, message: '标签对齐方式不合法' }
+      }
+      value[key] = raw
+    } else if (key === 'iconKey') {
+      if (typeof raw !== 'string' || !MINDMAP_TAG_MARKER_ICON_PATTERN.test(raw)) {
+        return { valid: false, value: null, message: '节点标记图标不在内置图标范围内' }
       }
       value[key] = raw
     }

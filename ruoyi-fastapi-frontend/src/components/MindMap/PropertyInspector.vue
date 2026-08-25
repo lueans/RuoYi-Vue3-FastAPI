@@ -330,16 +330,18 @@ onBeforeUnmount(() => {
   --inspector-accent: #3370ff;
   position: absolute;
   top: 0;
-  right: 0;
-  bottom: 0;
+  right: var(--mindmap-activity-width, 44px);
+  bottom: var(--mindmap-workspace-bottom, 30px);
   z-index: 2001;
-  width: var(--mindmap-inspector-width, 348px);
+  width: var(--mindmap-inspector-width, 300px);
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
   color: #1f2329;
-  background: #fcfcfd;
+  background: #fff;
   border-left: 1px solid #e8eaed;
-  box-shadow: -4px 0 14px rgba(31, 35, 41, 0.035);
+  box-shadow: none;
 
   &.isDark {
     color: #e5e6eb;
@@ -424,10 +426,10 @@ onBeforeUnmount(() => {
 
 .inspectorHeader {
   position: relative;
-  flex: 0 0 54px;
+  flex: 0 0 40px;
   display: flex;
   align-items: stretch;
-  padding: 0 48px 0 12px;
+  padding: 0 42px 0 10px;
   border-bottom: 1px solid #eef0f3;
 }
 
@@ -446,7 +448,7 @@ onBeforeUnmount(() => {
   background: transparent;
   color: #4e5969;
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
 
@@ -487,10 +489,10 @@ onBeforeUnmount(() => {
 
 .inspectorClose {
   position: absolute;
-  top: 12px;
-  right: 14px;
-  width: 30px;
-  height: 30px;
+  top: 6px;
+  right: 9px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -513,12 +515,12 @@ onBeforeUnmount(() => {
 }
 
 .inspectorContext {
-  flex: 0 0 58px;
+  flex: 0 0 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 20px;
+  padding: 0 14px;
   border-bottom: 1px solid #eef0f3;
   background: #fff;
 }
@@ -533,7 +535,7 @@ onBeforeUnmount(() => {
 .contextLabel {
   overflow: hidden;
   color: #8f959e;
-  font-size: 13px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -560,18 +562,18 @@ onBeforeUnmount(() => {
 }
 
 .nodeEmptyState {
-  min-height: 420px;
+  min-height: 320px;
   display: flex;
   align-items: center;
   flex-direction: column;
   justify-content: center;
-  padding: 36px 34px;
+  padding: 28px 24px;
   text-align: center;
 
   .emptyStateIcon {
-    margin-bottom: 16px;
+    margin-bottom: 12px;
     color: #8fb0ff;
-    font-size: 46px;
+    font-size: 40px;
   }
 
   h3 {
@@ -593,7 +595,7 @@ onBeforeUnmount(() => {
 .emptyStateActions {
   display: flex;
   gap: 10px;
-  margin-top: 22px;
+  margin-top: 18px;
 }
 
 .emptyStatePrimary,
@@ -644,7 +646,7 @@ onBeforeUnmount(() => {
 }
 
 .canvasPanel {
-  padding: 0 18px 24px;
+  padding: 0 14px 18px;
 }
 
 .canvasSection {
@@ -665,7 +667,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   margin: 0 -8px;
-  padding: 18px 8px 14px;
+  padding: 14px 8px 12px;
   border-radius: 8px;
   list-style: none;
   cursor: pointer;
@@ -700,7 +702,7 @@ onBeforeUnmount(() => {
 
   strong {
     color: #1f2329;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
   }
 
@@ -712,14 +714,14 @@ onBeforeUnmount(() => {
 }
 
 .canvasSectionBody {
-  padding-bottom: 18px;
+  padding-bottom: 14px;
 }
 
 .inspectorFooter {
-  flex: 0 0 66px;
+  flex: 0 0 56px;
   display: flex;
   align-items: center;
-  padding: 11px 20px;
+  padding: 8px 14px;
   border-top: 1px solid #eef0f3;
   background: inherit;
 }
@@ -764,7 +766,7 @@ onBeforeUnmount(() => {
 
 .resetStyleButton {
   width: 100%;
-  height: 42px;
+  height: 38px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -774,7 +776,7 @@ onBeforeUnmount(() => {
   color: #1f2329;
   background: #fff;
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
   cursor: pointer;
   transition: 0.16s ease;
 
@@ -807,15 +809,18 @@ onBeforeUnmount(() => {
   border: 0;
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 1439px) and (min-width: 761px) {
   .propertyInspector {
-    width: var(--mindmap-inspector-compact-width, 324px);
+    width: var(--mindmap-inspector-compact-width, 300px);
+    box-shadow: -8px 0 24px rgba(31, 35, 41, 0.1);
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   .propertyInspector {
-    width: min(100%, 348px);
+    right: 0;
+    bottom: 52px;
+    width: min(100%, 300px);
   }
 }
 </style>

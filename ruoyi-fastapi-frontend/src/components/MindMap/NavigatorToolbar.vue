@@ -1,5 +1,10 @@
 <template>
   <div class="navigatorContainer customScrollbar" :class="{ isDark: isDark }">
+    <div class="workspaceTab" aria-current="page">
+      <span class="workspaceTabIcon iconfont iconfuhao-dagangshu" aria-hidden="true" />
+      <span>主画布</span>
+    </div>
+    <div class="navigatorActions" role="toolbar" aria-label="画布视图控制">
     <div class="item">
       <el-tooltip effect="dark" content="回到根节点" placement="top">
         <button class="btn iconfont icondingwei" type="button" aria-label="回到根节点" @click="backToRoot"></button>
@@ -72,6 +77,14 @@
         </button>
         <template #dropdown>
           <el-dropdown-menu>
+            <el-dropdown-item command="format" :disabled="isReadonly">
+              <span class="iconfont iconzhuti"></span>
+              格式
+            </el-dropdown-item>
+            <el-dropdown-item command="formulaSidebar" :disabled="isReadonly">
+              <span class="iconfont icongongshi"></span>
+              公式
+            </el-dropdown-item>
             <el-dropdown-item command="shortcutKey">
               <span class="iconfont iconjianpan"></span>
               快捷键
@@ -90,6 +103,7 @@
           </el-dropdown-menu>
         </template>
       </el-dropdown>
+    </div>
     </div>
   </div>
 </template>
@@ -145,6 +159,24 @@ function toggleDark() {
 }
 
 function handleCommand(command) {
+  if (command === 'format') {
+    if (isReadonly.value) return
+    const hasActiveNodes = (store.mindMap?.renderer?.activeNodeList || []).length > 0
+    const targetSidebar = hasActiveNodes
+      ? 'nodeStyle'
+      : (['baseStyle', 'structure', 'theme'].includes(store.lastPropertySidebar)
+          ? store.lastPropertySidebar
+          : 'baseStyle')
+    actions.setActiveSidebar(targetSidebar)
+    nextTick(() => bus.emit('focusActiveSidebar'))
+    return
+  }
+  if (command === 'formulaSidebar') {
+    if (isReadonly.value) return
+    actions.setActiveSidebar('formulaSidebar')
+    nextTick(() => bus.emit('focusActiveSidebar'))
+    return
+  }
   if (command === 'shortcutKey') {
     actions.setActiveSidebar('shortcutKey')
     nextTick(() => bus.emit('focusActiveSidebar'))
@@ -168,19 +200,22 @@ function backToRoot() {
 
 <style lang="less" scoped>
 .navigatorContainer {
-  padding: 0 7px;
+  padding: 0 6px 0 8px;
   position: fixed;
-  left: 16px;
-  bottom: 16px;
+  right: var(--mindmap-workspace-right, 44px);
+  bottom: 0;
+  left: var(--mindmap-workspace-left, 44px);
   z-index: 2000;
-  background: #fff;
-  border-radius: 11px;
-  box-shadow: 0 8px 24px rgba(31, 35, 41, 0.1), 0 1px 3px rgba(31, 35, 41, 0.06);
-  border: 1px solid #e2e5ea;
-  height: 42px;
-  font-size: 12px;
+  background: #f4f5f7;
+  border-top: 1px solid #e3e6ea;
+  border-radius: 0;
+  box-shadow: none;
+  height: var(--mindmap-workspace-bottom, 30px);
+  font-size: 11px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  transition: left 0.2s ease, right 0.2s ease;
 
   &.isDark {
     background: #2a2d32;
@@ -197,6 +232,37 @@ function backToRoot() {
         &:hover { color: hsla(0, 0%, 100%, 0.9); background: hsla(0, 0%, 100%, 0.08); }
       }
     }
+
+    .workspaceTab {
+      color: #dfe1e6;
+      background: #363a41;
+    }
+  }
+
+  .workspaceTab {
+    position: relative;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 8px;
+    color: #1f2329;
+    background: #e5e8ed;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+
+  }
+
+  .workspaceTabIcon {
+    font-size: 12px;
+    color: #3370ff;
+  }
+
+  .navigatorActions {
+    display: flex;
+    align-items: center;
   }
 
   .item {
@@ -213,9 +279,9 @@ function backToRoot() {
         content: '';
         position: absolute;
         left: -5px;
-        top: 7px;
+        top: 6px;
         width: 1px;
-        height: 18px;
+        height: 16px;
         background: #e4e7eb;
       }
     }
@@ -233,17 +299,17 @@ function backToRoot() {
       background: transparent;
       font-family: inherit;
       cursor: pointer;
-      font-size: 18px;
-      width: 28px;
-      height: 28px;
+      font-size: 15px;
+      width: 24px;
+      height: 24px;
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 7px;
+      border-radius: 6px;
       transition: all 0.15s;
       color: #646a73;
       &:hover {
-        background: #f5f6f7;
+        background: #fff;
         color: #1f2329;
       }
       &:focus-visible {
@@ -258,12 +324,18 @@ function backToRoot() {
   }
 }
 
-@media screen and (max-width: 700px) {
+@media screen and (max-width: 760px) {
   .navigatorContainer {
-    left: 16px;
+    right: 0;
+    left: 0;
+    padding-left: 8px;
     overflow-x: auto;
     overflow-y: hidden;
     height: 52px;
+
+    .workspaceTab {
+      display: none;
+    }
   }
 }
 </style>

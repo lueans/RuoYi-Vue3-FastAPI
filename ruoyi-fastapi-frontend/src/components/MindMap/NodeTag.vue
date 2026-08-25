@@ -86,6 +86,12 @@
                 @click="toggleSuggestion(tag)"
               >
                 <el-icon v-if="isSelected(tag.id)"><Check /></el-icon>
+                <span
+                  v-if="getMindmapMarkerTagIconKey(tag)"
+                  class="managedMarkerIcon"
+                  aria-hidden="true"
+                  v-html="getMindmapMarkerIconMarkup(getMindmapMarkerTagIconKey(tag))"
+                />
                 <span>{{ tag.name }}</span>
               </button>
             </div>
@@ -120,7 +126,13 @@
         effect="dark"
         @close="removeTag(index)"
       >
-        {{ typeof tag === 'object' ? tag.text : tag }}
+        <span
+          v-if="getMindmapMarkerTagIconKey(tag)"
+          class="managedMarkerIcon selectedMarkerIcon"
+          aria-hidden="true"
+          v-html="getMindmapMarkerIconMarkup(getMindmapMarkerTagIconKey(tag))"
+        />
+        <span>{{ typeof tag === 'object' ? tag.text : tag }}</span>
       </el-tag>
     </div>
     <div v-else class="emptySelection">暂无标签</div>
@@ -156,6 +168,11 @@ import {
   validateMindmapTagDisplayName,
   validateMindmapTagSearchKeyword,
 } from '@/utils/mindmap-tag-governance'
+import {
+  getMindmapMarkerIconMarkup,
+  getMindmapMarkerTagIconKey,
+  replaceMindmapMarkerInTagList,
+} from '@/utils/mindmap-marker-tags'
 import bus from './useEventBus'
 import { store } from './useStore'
 import { useMindMapActiveNodes } from './useMindMapActiveNodes'
@@ -354,11 +371,12 @@ function toggleSuggestion(tag) {
     tagArr.value.splice(index, 1)
     return
   }
-  if (tagArr.value.length >= MAX_NODE_TAG_COUNT) {
+  const nextTags = replaceMindmapMarkerInTagList(tagArr.value, toNodeTag(tag))
+  if (nextTags.length > MAX_NODE_TAG_COUNT) {
     ElMessage.warning(`最多添加 ${MAX_NODE_TAG_COUNT} 个标签`)
     return
   }
-  tagArr.value.push(toNodeTag(tag))
+  tagArr.value = nextTags
 }
 
 async function createAndSelectTag() {
@@ -697,6 +715,26 @@ onBeforeUnmount(() => {
 
 .suggestionTag.selected {
   box-shadow: 0 0 0 2px rgb(77 115 255 / 24%);
+}
+
+.managedMarkerIcon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+
+  :deep(svg),
+  :deep(img) {
+    display: block;
+    width: 18px;
+    height: 18px;
+  }
+}
+
+.selectedMarkerIcon {
+  margin-right: 4px;
 }
 
 .createTagButton {

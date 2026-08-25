@@ -6,6 +6,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from module_mindmap.service.mindmap_schema_release import (
+    MANUAL_REVIEW_MIGRATIONS,
     MINDMAP_SCHEMA_MIGRATIONS,
     build_mindmap_migration_plan,
 )
@@ -212,6 +213,7 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
 
         self.assertIn('zz-mindmap-postgresql.sql', compose_source)
         self.assertIn('zzz-mindmap-unified-tags-postgresql.sql', compose_source)
+        self.assertIn('zzzz-mindmap-markers-to-tags-postgresql.sql', compose_source)
         for table in REQUIRED_TABLES:
             self.assertIn(f'CREATE TABLE IF NOT EXISTS {table}', migration_source)
         self.assertNotIn('CREATE TABLE IF NOT EXISTS mindmap_tag_field', migration_source)
@@ -222,6 +224,18 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
         self.assertNotIn('DELIMITER', migration_source)
         self.assertNotIn('AUTO_INCREMENT', migration_source)
         self.assertNotIn('`', migration_source)
+
+    def test_marker_data_migration_is_exposed_for_manual_release_review(self) -> None:
+        marker_migration = next(
+            item for item in MANUAL_REVIEW_MIGRATIONS
+            if item['migration'] == '20260825_mindmap_markers_to_tags.sql'
+        )
+
+        self.assertEqual(
+            marker_migration['postgresqlMigration'],
+            '20260825_mindmap_markers_to_tags_postgresql.sql',
+        )
+        self.assertIn('61 个内置标记标签', marker_migration['reason'])
 
 
 if __name__ == '__main__':

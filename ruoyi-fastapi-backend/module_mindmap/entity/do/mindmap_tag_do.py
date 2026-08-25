@@ -62,7 +62,7 @@ class MindmapTag(Base):
     style = Column(
         JSON_TYPE,
         nullable=True,
-        comment='标签样式JSON {fill,color,fontSize,radius,paddingX,placement,align}',
+        comment='标签样式JSON {fill,color,fontSize,radius,paddingX,placement,align,iconKey}',
     )
     description = Column(String(500), nullable=True, comment='标签描述')
     status = Column(SmallInteger, nullable=False, server_default='0', comment='状态:0启用 1停用 2归档')

@@ -30,11 +30,16 @@ MINDMAP_TAG_STYLE_NUMBER_BOUNDS = {
 MINDMAP_TAG_STYLE_COLOR_KEYS = frozenset({'fill', 'color'})
 MINDMAP_TAG_STYLE_PLACEMENTS = frozenset({'left', 'right', 'top', 'bottom'})
 MINDMAP_TAG_STYLE_ALIGNS = frozenset({'left', 'right', 'top', 'bottom', 'center'})
+MINDMAP_TAG_MARKER_ICON_PATTERN = re.compile(
+    r'^(?:priority_(?:10|[1-9])|progress_[1-8]|'
+    r'expression_(?:20|1[0-9]|[1-9])|sign_(?:2[0-3]|1[0-9]|[1-9]))$'
+)
 MINDMAP_TAG_STYLE_KEYS = frozenset({
     *MINDMAP_TAG_STYLE_COLOR_KEYS,
     *MINDMAP_TAG_STYLE_NUMBER_BOUNDS,
     'placement',
     'align',
+    'iconKey',
 })
 MINDMAP_TAG_COLOR_PATTERN = re.compile(r'^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$')
 MINDMAP_TAG_RGB_COLOR_PATTERN = re.compile(
@@ -156,8 +161,12 @@ def _normalize_mindmap_tag_style_value(key: str, raw: Any) -> Any:
         if not isinstance(raw, str) or raw not in MINDMAP_TAG_STYLE_PLACEMENTS:
             raise ValueError('标签位置必须是 left、right、top 或 bottom')
         return raw
-    if not isinstance(raw, str) or raw not in MINDMAP_TAG_STYLE_ALIGNS:
-        raise ValueError('标签对齐方式不合法')
+    if key == 'align':
+        if not isinstance(raw, str) or raw not in MINDMAP_TAG_STYLE_ALIGNS:
+            raise ValueError('标签对齐方式不合法')
+        return raw
+    if not isinstance(raw, str) or not MINDMAP_TAG_MARKER_ICON_PATTERN.fullmatch(raw):
+        raise ValueError('节点标记图标不在内置图标范围内')
     return raw
 
 

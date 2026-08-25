@@ -63,6 +63,7 @@ class MindmapTagDefinitionModelTest(unittest.TestCase):
                 'paddingX': 8,
                 'placement': 'right',
                 'align': 'center',
+                'iconKey': 'priority_10',
             },
         )
 
@@ -74,6 +75,7 @@ class MindmapTagDefinitionModelTest(unittest.TestCase):
             'paddingX': 8,
             'placement': 'right',
             'align': 'center',
+            'iconKey': 'priority_10',
         })
 
     def test_tag_style_rejects_unknown_unsafe_or_out_of_range_values(self) -> None:
@@ -86,6 +88,8 @@ class MindmapTagDefinitionModelTest(unittest.TestCase):
             {'paddingX': float('inf')},
             {'placement': 'near'},
             {'placement': 'top', 'align': 'top'},
+            {'iconKey': 'priority_11'},
+            {'iconKey': '<svg onload=alert(1)>'},
         )
         for style in invalid_styles:
             with self.subTest(style=style), self.assertRaises(ValidationError):

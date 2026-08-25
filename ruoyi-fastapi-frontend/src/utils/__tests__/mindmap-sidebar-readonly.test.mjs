@@ -52,8 +52,10 @@ test('节点样式类侧栏在直接写入边界重新校验只读状态', async
     readComponent('BaseStyle.vue'),
   ])
 
-  assert.match(nodeIcon, /:disabled="isReadonly"/)
-  assert.match(nodeIcon, /function setIcon[\s\S]*if \(isReadonly\.value\) return[\s\S]*node\.setIcon/)
+  assert.match(nodeIcon, /:disabled="iconControlsDisabled \|\| !item\.tag"/)
+  assert.match(nodeIcon, /const iconControlsDisabled = computed\(\(\) => isReadonly\.value \|\| activeNodes\.value\.length === 0\)/)
+  assert.match(nodeIcon, /function setTag[\s\S]*if \(iconControlsDisabled\.value\) return[\s\S]*node\.setTag/)
+  assert.doesNotMatch(nodeIcon, /node\.setIcon/)
 
   assert.match(formula, /:disabled="!canInsertFormula"/)
   assert.match(formula, /const canInsertFormula = computed[\s\S]*!isReadonly\.value[\s\S]*store\.activeSidebar === 'formulaSidebar'[\s\S]*node\?\.mindMap === activeMindMap/)

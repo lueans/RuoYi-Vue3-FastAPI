@@ -146,7 +146,6 @@ const btnLabels = {
   childNode: '子主题',
   deleteNode: '删除',
   image: '图片',
-  icon: '图标',
   link: '超链接',
   attachment: '附件',
   note: '备注',
@@ -166,11 +165,10 @@ const toolbarItemDefinitions = Object.freeze({
   childNode: { icon: 'icontianjiazijiedian', command: 'INSERT_CHILD_NODE' },
   deleteNode: { icon: 'iconshanchu', command: 'REMOVE_NODE' },
   image: { icon: 'iconimage', event: 'showNodeImage' },
-  icon: { icon: 'iconxiaolian', event: 'openSidebar', args: ['nodeIconSidebar'] },
   link: { icon: 'iconchaolianjie', event: 'showNodeLink' },
   attachment: { icon: 'iconfujian', event: 'showNodeAttachment' },
   note: { icon: 'iconflow-Mark', event: 'showNodeNote' },
-  tag: { icon: 'iconbiaoqian', event: 'showNodeTag' },
+  tag: { icon: 'iconbiaoqian', event: 'openSidebar', args: ['nodeTagSidebar'] },
   summary: { icon: 'icongaikuozonglan', command: 'ADD_GENERALIZATION' },
   associativeLine: { icon: 'iconlianjiexian', event: 'createAssociativeLine' },
   outerFrame: { icon: 'iconwaikuang', command: 'ADD_OUTER_FRAME' },
@@ -187,7 +185,6 @@ const defaultBtnList = [
   'forward',
   'painter',
   'deleteNode',
-  'icon',
   'link',
   'attachment',
   'note',
@@ -238,7 +235,7 @@ function isButtonDisabled(item) {
   if (['siblingNode', 'summary'].includes(item)) {
     return noActive.value || hasRoot.value || hasGeneralization.value
   }
-  return ['deleteNode', 'image', 'icon', 'link', 'attachment', 'note', 'tag'].includes(item)
+  return ['deleteNode', 'image', 'link', 'attachment', 'note', 'tag'].includes(item)
     ? noActive.value
     : false
 }
@@ -413,8 +410,8 @@ onBeforeUnmount(() => {
 
       .toolbarBlock {
         gap: 0;
-        margin-right: 7px;
-        padding: 0 8px 0 0;
+        margin-right: 4px;
+        padding: 0 5px 0 0;
         border: 0;
         border-radius: 0;
         background: transparent;
@@ -426,7 +423,7 @@ onBeforeUnmount(() => {
           top: 50%;
           right: 0;
           width: 1px;
-          height: 28px;
+          height: 20px;
           background: #e1e4e8;
           transform: translateY(-50%);
         }
@@ -443,14 +440,16 @@ onBeforeUnmount(() => {
 
       .toolbarBtn {
         position: relative;
-        min-width: 50px;
-        height: 58px;
+        min-width: 0;
+        height: 32px;
         margin-right: 1px;
-        padding: 7px 7px 5px;
-        border-radius: 8px;
+        padding: 0 6px;
+        border-radius: 6px;
         color: #646a73;
+        flex-direction: row;
         align-items: center;
         justify-content: center;
+        gap: 4px;
         transition: background 0.15s ease, color 0.15s ease;
 
         &:hover:not(.disabled) {
@@ -473,35 +472,35 @@ onBeforeUnmount(() => {
 
         &.disabled,
         &:disabled {
-          color: #c5c8ce;
+          color: #aeb4bd;
         }
 
         .icon {
-          height: 21px;
+          height: 18px;
           padding: 0;
           border: 0;
           background: transparent;
           color: inherit;
-          font-size: 19px;
+          font-size: 15px;
         }
 
         .text {
-          margin-top: 4px;
+          margin-top: 0;
           color: inherit;
           font-size: 11px;
-          line-height: 13px;
+          line-height: 16px;
           white-space: nowrap;
         }
 
         &.dividerBefore {
-          margin-left: 9px;
+          margin-left: 7px;
 
           &::before {
             content: '';
             position: absolute;
-            top: 15px;
-            bottom: 15px;
-            left: -5px;
+            top: 7px;
+            bottom: 7px;
+            left: -4px;
             width: 1px;
             background: #e1e4e8;
           }
@@ -679,6 +678,22 @@ onBeforeUnmount(() => {
       margin-top: 10px;
       padding-top: 10px;
       border-top: 1px solid #eef0f3;
+    }
+  }
+}
+
+@media (max-width: 1600px) {
+  .toolbarContainer.embedded .toolbar .toolbarBtn {
+    width: 32px;
+    padding: 0;
+
+    .text {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
     }
   }
 }

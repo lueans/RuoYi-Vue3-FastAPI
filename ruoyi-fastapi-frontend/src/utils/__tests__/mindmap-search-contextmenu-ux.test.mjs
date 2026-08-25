@@ -68,9 +68,19 @@ test('节点搜索结果支持组合框关联、漫游焦点和完整方向键�
   }
   assert.match(source, /option\?\.scrollIntoView\?\.\(\{ block: 'nearest' \}\)/)
   assert.match(source, /if \(focus\) option\?\.focus\?\.\(\)/)
+  assert.match(source, /pathText: getMindmapNodePathText\(item, treeIndex\)/)
+  assert.match(source, /treeIndex\?\.parentUidByUid\?\.get\(uid\)/)
 })
 
-test('搜索结果高度跟随面板和短视口且卸载释放观察器', async () => {
+test('移动宽度下搜索与右侧面板互斥，避免完全遮挡画布', async () => {
+  const source = await readFile(searchSourceUrl, 'utf8')
+
+  assert.match(source, /function showSearch\(\)[\s\S]*window\.innerWidth <= 760[\s\S]*actions\.setActiveSidebar\(null\)/)
+  assert.match(source, /function handleSearchPanelResize\(\)[\s\S]*window\.innerWidth <= 760[\s\S]*actions\.setActiveSidebar\(null\)/)
+  assert.match(source, /watch\(\(\) => store\.activeSidebar,[\s\S]*window\.innerWidth <= 760[\s\S]*close\(\{ restoreFocus: false \}\)/)
+})
+
+test('搜索结果占满停靠面板并在短视口下保持可滚动且卸载释放观察器', async () => {
   const source = await readFile(searchSourceUrl, 'utf8')
 
   assert.match(source, /const panelBottom = searchContainerRef\.value\?\.getBoundingClientRect/)
@@ -78,7 +88,9 @@ test('搜索结果高度跟随面板和短视口且卸载释放观察器', async
   assert.match(source, /new ResizeObserver\(setSearchResultListHeight\)/)
   assert.match(source, /searchPanelResizeObserver\?\.disconnect\(\)/)
   assert.match(source, /@media \(max-height: 520px\)/)
-  assert.match(source, /width: min\(296px, calc\(100vw - 24px\)\)/)
+  assert.match(source, /width: 280px/)
+  assert.match(source, /bottom: var\(--mindmap-workspace-bottom, 30px\)/)
+  assert.match(source, /height: auto !important/)
 })
 
 test('搜索请求绑定脑图实例、文件和查询条件并在切换时失效', async () => {
@@ -93,7 +105,7 @@ test('搜索请求绑定脑图实例、文件和查询条件并在切换时失�
   assert.match(source, /close\(\{ mindMap: oldMm, restoreFocus: false, forceReset: true \}\)/)
   assert.match(source, /watch\(\(\) => props\.mindmapId,[\s\S]*close\(\{ restoreFocus: false, forceReset: true \}\)/)
   assert.match(source, /onDocumentReplace\(\)[\s\S]*close\(\{ restoreFocus: false, forceReset: true \}\)/)
-  assert.match(source, /function resetSearchResults\(mindMap = props\.mindMap\)[\s\S]*restoreCanvasVisibility\(\{ mindMap \}\)/)
+  assert.match(source, /function resetSearchResults\(mindMap = props\.mindMap, \{ preserveCanvasFilter = false \} = \{\}\)[\s\S]*restoreCanvasVisibility\(\{ mindMap \}\)/)
 })
 
 test('搜索替换在界面与核心插件边界都重新校验只读状态', async () => {
@@ -105,7 +117,7 @@ test('搜索替换在界面与核心插件边界都重新校验只读状态', as
     ),
   ])
 
-  assert.match(source, /:disabled="isReadonly" @click="showReplaceInput = true"/)
+  assert.match(source, /:disabled="isReadonly \|\| serverSearchMode"[\s\S]*?@click="showReplaceInput = true"/)
   assert.equal((source.match(/if \(isReadonly\.value \|\| !show\.value/g) || []).length, 2)
   assert.match(source, /watch\(isReadonly,[\s\S]*hideReplaceInput\(\)/)
   assert.match(plugin, /rejectReadonlyReplace\('SEARCH_REPLACE'\)/)
@@ -144,7 +156,8 @@ test('画布筛选从完整文档树计算命中节点并保留祖先路径', as
   assert.match(source, /function applyCanvasFilter\(\)/)
   assert.match(source, /function getDocumentFilterMatches\(keyword = searchText\.value\.trim\(\)\)/)
   assert.match(source, /const root = props\.mindMap\?\.renderer\?\.renderTree/)
-  assert.match(source, /node\?\.group\?\.node\?\.textContent/)
+  assert.match(source, /data\.text !== undefined && data\.text !== null/)
+  assert.match(source, /return String\(node\?\.group\?\.node\?\.textContent \?\? ''\)\.trim\(\)/)
   assert.doesNotMatch(source, /syncRuntimeKeywordResults/)
   assert.match(source, /function createDocumentTreeIndex\(root\)/)
   assert.match(source, /parentUidByUid\.set\(uid, parentUid\)/)
@@ -161,11 +174,36 @@ test('画布筛选从完整文档树计算命中节点并保留祖先路径', as
   assert.doesNotMatch(source, /node\.parent\._lines\?\.\[childIndex\]/)
   assert.match(source, /setTransientVisibleNodeUids\?\.\(visibleNodeUids\)/)
   assert.match(source, /clearTransientVisibleNodeUids\?\.\(clearElements\)/)
-  assert.match(source, /restoreCanvasVisibility\(\{ deactivate: false, relayout: false \}\)/)
+  const applyFilterSource = source.slice(
+    source.indexOf('function applyCanvasFilter()'),
+    source.indexOf('function toggleCanvasFilter()'),
+  )
+  assert.match(applyFilterSource, /filteredMatchCount\.value = 0/)
+  assert.doesNotMatch(applyFilterSource, /restoreCanvasVisibility/)
   assert.match(source, /mm\.on\('node_tree_render_end', reapplyCanvasFilter\)/)
   assert.doesNotMatch(source, /renderer\?\.setData|mindMap\?\.setData/)
   assert.match(source, /nodeHasSelectedTag\(node\)[\s\S]*Number\(tag\.tagId\) === tagId/)
   assert.doesNotMatch(source, /searchResultList\.value\.map\(resolveResultRuntimeNode\)/)
+})
+
+test('搜索筛选不会在重排后清空隐藏标记，修改关键词时保持筛选状态', async () => {
+  const source = await readFile(searchSourceUrl, 'utf8')
+
+  assert.match(source, /const activeCanvasFilterSource = ref\(null\)/)
+  assert.match(source, /const searchCanvasFilterActive = computed\(\(\) => \([\s\S]*activeCanvasFilterSource\.value === 'search'/)
+  assert.match(source, /function resetSearchResults\(mindMap = props\.mindMap, \{ preserveCanvasFilter = false \} = \{\}\)/)
+  assert.match(source, /preserveCanvasFilter && filterActive\.value[\s\S]*reapplyCanvasFilter\(\)/)
+  assert.match(source, /String\(val \|\| ''\)\.trim\(\) !== activeLocalKeyword[\s\S]*preserveCanvasFilter: filterActive\.value/)
+})
+
+test('普通搜索与高级条件筛选使用独立来源，互不抢占匹配规则', async () => {
+  const source = await readFile(searchSourceUrl, 'utf8')
+
+  assert.match(source, /activeCanvasFilterSource\.value === 'search' && selectedTagId\.value/)
+  assert.match(source, /if \(activeCanvasFilterSource\.value === 'search'\) \{[\s\S]*getMindmapNodeText\(node\)\.includes\(keyword\)/)
+  assert.match(source, /if \(activeCanvasFilterSource\.value !== 'conditions'\) return \[\]/)
+  assert.match(source, /activeCanvasFilterSource\.value = 'conditions'[\s\S]*filterActive\.value = true/)
+  assert.match(source, /activeCanvasFilterSource\.value = 'search'[\s\S]*filterActive\.value = true/)
 })
 
 test('画布筛选以临时可见集合局部刷新布局并对重复集合去重', async () => {

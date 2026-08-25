@@ -114,7 +114,15 @@
             <el-table-column label="标签" min-width="210" fixed="left">
               <template #default="{ row }">
                 <div class="tagCell">
-                  <span class="tagPreview" :style="tagStyle(row)">{{ row.name }}</span>
+                  <span class="tagPreview" :style="tagStyle(row)">
+                    <span
+                      v-if="getMindmapMarkerTagIconKey(row)"
+                      class="tagMarkerIcon"
+                      aria-hidden="true"
+                      v-html="getMindmapMarkerIconMarkup(getMindmapMarkerTagIconKey(row))"
+                    />
+                    <span>{{ row.name }}</span>
+                  </span>
                   <span v-if="row.description" class="tagDescription" :title="row.description">{{ row.description }}</span>
                 </div>
               </template>
@@ -185,9 +193,9 @@
     >
       <el-form label-width="88px">
         <el-form-item label="名称"><el-input v-model="editDialog.name" :maxlength="MAX_MINDMAP_TAG_NAME_LENGTH" show-word-limit /></el-form-item>
-        <el-form-item label="Key"><el-input v-model="editDialog.tagKey" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="Boolean(editDialog.id) && !isAdmin" /></el-form-item>
+        <el-form-item label="Key"><el-input v-model="editDialog.tagKey" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="isEditingBuiltinMarker || (Boolean(editDialog.id) && !isAdmin)" /></el-form-item>
         <el-form-item v-if="isAdmin" label="范围">
-          <el-radio-group v-model="editDialog.ownerScope">
+          <el-radio-group v-model="editDialog.ownerScope" :disabled="isEditingBuiltinMarker">
             <el-radio value="mine">私有</el-radio>
             <el-radio value="global">全局</el-radio>
           </el-radio-group>
@@ -211,6 +219,18 @@
             <span id="tagStyleSectionTitle">标签样式</span>
             <span>调整节点中标签的展示效果</span>
           </div>
+          <el-form-item label="节点标记" label-width="68px">
+            <el-select v-model="editDialog.iconKey" clearable filterable placeholder="普通文字标签" style="width: 100%" :disabled="isEditingBuiltinMarker">
+              <el-option-group v-for="group in MINDMAP_MARKER_GROUPS" :key="group.type" :label="group.label">
+                <el-option v-for="option in group.options" :key="option.iconKey" :label="option.label" :value="option.iconKey">
+                  <span class="markerOption">
+                    <span class="tagMarkerIcon" aria-hidden="true" v-html="option.markup" />
+                    <span>{{ option.label }}</span>
+                  </span>
+                </el-option>
+              </el-option-group>
+            </el-select>
+          </el-form-item>
           <div class="tagStyleColorGrid">
             <el-form-item label="背景色" label-width="56px">
               <el-color-picker v-model="editDialog.fill" show-alpha />
@@ -421,6 +441,12 @@ import {
 import useUserStore from '@/store/modules/user'
 import { createLatestRequestTracker, isElementDialogDismissal } from '@/utils/mindmap-async'
 import {
+  getMindmapMarkerIconMarkup,
+  getMindmapMarkerTagIconKey,
+  MINDMAP_MARKER_GROUPS,
+  MINDMAP_MARKER_TAG_KEY_PREFIX,
+} from '@/utils/mindmap-marker-tags'
+import {
   isCompatibleTagReplacement,
   MAX_MINDMAP_TAG_BATCH_SIZE,
   MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
@@ -483,6 +509,7 @@ const editDialog = reactive({
   paddingX: 8,
   placement: 'right',
   align: 'center',
+  iconKey: '',
   ownerScope: 'mine',
   categoryId: null,
   description: '',
@@ -490,6 +517,10 @@ const editDialog = reactive({
   source: null,
   impact: null,
 })
+const isEditingBuiltinMarker = computed(() => (
+  Boolean(editDialog.id)
+  && String(editDialog.source?.tagKey || '').startsWith(MINDMAP_MARKER_TAG_KEY_PREFIX)
+))
 const editSubmitting = ref(false)
 const replaceDialog = reactive({
   visible: false,
@@ -733,7 +764,7 @@ function openCreateTag() {
   const categoryId = Number(query.categoryId) > 0 ? query.categoryId : null
   Object.assign(editDialog, {
     visible: true, id: null, name: '', tagKey: '', fill: '#409eff', color: '#ffffff',
-    fontSize: 12, radius: 3, paddingX: 8, placement: 'right', align: 'center',
+    fontSize: 12, radius: 3, paddingX: 8, placement: 'right', align: 'center', iconKey: '',
     ownerScope: 'mine', categoryId,
     description: '', status: 0, source: null, impact: null,
   })
@@ -748,7 +779,7 @@ async function openEditTag(row) {
       visible: true, id: row.id, name: row.name, tagKey: row.tagKey,
       fill: style.fill || '#409eff', color: style.color || '#ffffff',
       fontSize: style.fontSize || 12, radius: style.radius ?? 3, paddingX: style.paddingX ?? 8,
-      placement: style.placement || 'right', align: style.align || 'center',
+      placement: style.placement || 'right', align: style.align || 'center', iconKey: style.iconKey || '',
       ownerScope: Number(row.ownerId) === 0 ? 'global' : 'mine', categoryId: row.categoryId || null,
       description: row.description || '', status: row.status ?? 0, source: row, impact,
     })
@@ -772,6 +803,7 @@ async function saveTag() {
     paddingX: editDialog.paddingX,
     placement: editDialog.placement,
     align: editDialog.align,
+    iconKey: editDialog.iconKey,
   })
   const invalid = [name, tagKey, description, style].find(item => !item.valid)
   if (invalid) return ElMessage.warning(invalid.message)
@@ -1257,7 +1289,31 @@ onBeforeUnmount(() => {
 
 .tagPreview {
   display: inline-flex;
+  align-items: center;
+  gap: 6px;
   line-height: 1.5;
+}
+
+.tagMarkerIcon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+
+  :deep(svg),
+  :deep(img) {
+    display: block;
+    width: 20px;
+    height: 20px;
+  }
+}
+
+.markerOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tagDescription {

@@ -60,33 +60,40 @@
       </footer>
     </template>
     <template v-else>
-    <button class="closeBtnBox" type="button" aria-label="关闭搜索" @click="close()">
-      <el-icon><Close /></el-icon>
-    </button>
-    <el-select
-      v-model="selectedTagId" clearable filterable size="small"
-      aria-label="按统一标签筛选节点"
-      placeholder="按统一标签筛选（可选）" style="width: 100%; margin-top: 10px"
-      :loading="tagOptionsLoading"
-      :disabled="tagOptionsLoading && normalizedTagOptions.length === 0"
-      :no-data-text="tagOptionsError ? '标签加载失败' : '暂无可用标签'"
-      @change="onFilterChange"
-    >
-      <el-option
-        v-for="tag in normalizedTagOptions" :key="tag.id"
-        :label="tag.optionLabel" :value="tag.id"
-      />
-    </el-select>
-    <div v-if="tagOptionsError" class="tagFilterState" role="alert">
-      <span>{{ tagOptionsError }}</span>
-      <el-button link type="primary" size="small" :loading="tagOptionsLoading" @click="loadTagOptions">
-        重新加载标签
-      </el-button>
+    <header class="searchPanelHeader">
+      <div class="searchPanelHeading">
+        <strong>搜索与替换</strong>
+        <span>在当前脑图中定位节点</span>
+      </div>
+      <button class="closeBtnBox" type="button" aria-label="关闭搜索" @click="close()">
+        <el-icon><Close /></el-icon>
+      </button>
+    </header>
+    <div class="searchModeTabs" role="tablist" aria-label="搜索模式">
+      <button
+        type="button"
+        role="tab"
+        :aria-selected="!showReplaceInput"
+        :class="{ active: !showReplaceInput }"
+        @click="hideReplaceInput"
+      >
+        搜索
+      </button>
+      <button
+        type="button"
+        role="tab"
+        :aria-selected="showReplaceInput"
+        :class="{ active: showReplaceInput }"
+        :disabled="isReadonly || serverSearchMode"
+        @click="showReplaceInput = true"
+      >
+        替换
+      </button>
     </div>
     <div class="searchInputBox">
       <el-input
         ref="searchInputRef"
-        placeholder="回车下一个，Shift+回车上一个"
+        placeholder="搜索节点"
         aria-label="节点搜索关键词"
         role="combobox"
         aria-controls="mindmap-search-results"
@@ -104,9 +111,6 @@
         <template #prefix>
           <el-icon><Search /></el-icon>
         </template>
-        <template #append v-if="searchText && !selectedTagId">
-          <el-button size="small" :disabled="isReadonly" @click="showReplaceInput = true">替换</el-button>
-        </template>
       </el-input>
       <div
         class="searchInfo"
@@ -117,19 +121,39 @@
         {{ currentIndex }} / {{ total }}
       </div>
     </div>
+    <el-select
+      v-model="selectedTagId" clearable filterable size="small"
+      aria-label="按统一标签筛选节点"
+      placeholder="按标签缩小范围（可选）" class="tagFilterSelect"
+      :loading="tagOptionsLoading"
+      :disabled="tagOptionsLoading && normalizedTagOptions.length === 0"
+      :no-data-text="tagOptionsError ? '标签加载失败' : '暂无可用标签'"
+      @change="onFilterChange"
+    >
+      <el-option
+        v-for="tag in normalizedTagOptions" :key="tag.id"
+        :label="tag.optionLabel" :value="tag.id"
+      />
+    </el-select>
+    <div v-if="tagOptionsError" class="tagFilterState" role="alert">
+      <span>{{ tagOptionsError }}</span>
+      <el-button link type="primary" size="small" :loading="tagOptionsLoading" @click="loadTagOptions">
+        重新加载标签
+      </el-button>
+    </div>
     <div class="canvasFilterBar" role="group" aria-label="画布节点筛选">
       <el-button
         size="small"
-        :type="filterActive ? 'primary' : 'default'"
+        :type="searchCanvasFilterActive ? 'primary' : 'default'"
         :disabled="!hasFilterCriteria"
-        :aria-pressed="filterActive"
+        :aria-pressed="searchCanvasFilterActive"
         @click="toggleCanvasFilter"
       >
         <el-icon><Filter /></el-icon>
-        {{ filterActive ? '退出筛选' : '筛选画布' }}
+        {{ searchCanvasFilterActive ? '退出筛选' : '筛选画布' }}
       </el-button>
-      <span :class="{ active: filterActive }">
-        {{ filterActive ? `已显示 ${filteredMatchCount} 个匹配节点及其路径` : '仅保留匹配节点及其路径' }}
+      <span :class="{ active: searchCanvasFilterActive }">
+        {{ searchCanvasFilterActive ? `已显示 ${filteredMatchCount} 个匹配节点及其路径` : '仅保留匹配节点及其路径' }}
       </span>
     </div>
     <el-input
@@ -156,11 +180,15 @@
       <el-button size="small" :disabled="isReadonly" @click="doReplace">替换</el-button>
       <el-button size="small" :disabled="isReadonly" @click="doReplaceAll">全部替换</el-button>
     </div>
+    <div v-if="showSearchResultList" class="searchResultSummary">
+      <strong>{{ total }} 个结果</strong>
+      <span>回车切换，点击定位</span>
+    </div>
     <div
       id="mindmap-search-results"
       ref="searchResultListRef"
       class="searchResultList"
-      :style="{ height: searchResultListHeight + 'px' }"
+      :style="{ '--search-result-fallback-height': searchResultListHeight + 'px' }"
       v-if="showSearchResultList"
       role="listbox"
       aria-label="节点搜索结果"
@@ -194,7 +222,7 @@
               :class="{ match: segment.match }"
             >{{ segment.text }}</span>
           </div>
-          <div v-if="item.pathText" class="resultPath">{{ item.pathText }}</div>
+          <div v-if="item.pathText" class="resultPath" :title="item.pathText">{{ item.pathText }}</div>
         </button>
       </template>
       <div class="searchState error" v-if="!searching && searchError" role="alert">
@@ -224,7 +252,7 @@
 <script setup>
 import { CirclePlusFilled, Close, Edit, Filter, Loading, RemoveFilled, Search } from '@element-plus/icons-vue'
 import bus from './useEventBus'
-import { store } from './useStore'
+import { actions, store } from './useStore'
 import { getTagSuggestions } from '@/api/mindmap/tag'
 import { searchMindmapNodes } from '@/api/mindmap/mindmap'
 import {
@@ -282,6 +310,7 @@ const loadingMore = ref(false)
 const searchError = ref('')
 const serverPageNum = ref(0)
 const filterActive = ref(false)
+const activeCanvasFilterSource = ref(null)
 const filteredMatchCount = ref(0)
 let searchRequestId = 0
 let tagOptionsRequestId = 0
@@ -301,6 +330,9 @@ const hasMoreServerResults = computed(() => (
   serverSearchMode.value && searchResultList.value.length < total.value
 ))
 const hasFilterCriteria = computed(() => Boolean(searchText.value.trim() || selectedTagId.value))
+const searchCanvasFilterActive = computed(() => (
+  filterActive.value && activeCanvasFilterSource.value === 'search'
+))
 const activeSearchResultId = computed(() => {
   const index = currentIndex.value - 1
   return index >= 0 && index < searchResultList.value.length
@@ -364,7 +396,10 @@ function restoreCanvasVisibility({
   mindMap = props.mindMap,
 } = {}) {
   filteredMatchCount.value = 0
-  if (deactivate) filterActive.value = false
+  if (deactivate) {
+    filterActive.value = false
+    activeCanvasFilterSource.value = null
+  }
   const clearElements = () => clearFilteredCanvasElements()
   const relayoutScheduled = relayout
     && mindMap?.renderer?.clearTransientVisibleNodeUids?.(clearElements)
@@ -417,13 +452,41 @@ function getMindmapNodeUid(node) {
 
 function getMindmapNodeText(node) {
   const data = getMindmapNodeData(node)
-  const renderedText = String(node?.group?.node?.textContent ?? '').trim()
-  if (renderedText) return renderedText
-  const rawText = String(data.text ?? '')
-  if (!data.richText) return rawText
-  const template = document.createElement('template')
-  template.innerHTML = rawText
-  return template.content.textContent || ''
+  if (data.text !== undefined && data.text !== null) {
+    const rawText = String(data.text)
+    if (!data.richText) return rawText
+    const template = document.createElement('template')
+    template.innerHTML = rawText
+    return template.content.textContent || ''
+  }
+  // 仅在数据节点没有 text 字段时才回退到渲染文本。节点容器中还会包含
+  // 标签、优先级等后缀，优先读取整组 textContent 会让路径和搜索条件误命中。
+  return String(node?.group?.node?.textContent ?? '').trim()
+}
+
+function getMindmapNodePathText(node, treeIndex) {
+  const path = []
+  const visited = new WeakSet()
+  let current = node?.parent || null
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current)
+    const text = getMindmapNodeText(current).trim()
+    if (text) path.unshift(text)
+    current = current.parent || null
+  }
+  if (path.length > 0) return path.join(' / ')
+
+  const uid = getMindmapNodeUid(node)
+  const visitedUids = new Set()
+  let parentUid = uid === null ? null : treeIndex?.parentUidByUid?.get(uid)
+  while (parentUid !== null && parentUid !== undefined && !visitedUids.has(parentUid)) {
+    visitedUids.add(parentUid)
+    const parentNode = treeIndex?.nodeByUid?.get(parentUid)
+    const text = getMindmapNodeText(parentNode).trim()
+    if (text) path.unshift(text)
+    parentUid = treeIndex?.parentUidByUid?.get(parentUid)
+  }
+  return path.join(' / ')
 }
 
 function nodeHasSelectedTag(node) {
@@ -440,7 +503,7 @@ function nodeHasSelectedTag(node) {
 function getDocumentFilterMatches(keyword = searchText.value.trim()) {
   const root = props.mindMap?.renderer?.renderTree
   if (!root) return []
-  if (selectedTagId.value) {
+  if (activeCanvasFilterSource.value === 'search' && selectedTagId.value) {
     const matches = []
     walkDocumentNodeTree(root, node => {
       if (
@@ -452,8 +515,17 @@ function getDocumentFilterMatches(keyword = searchText.value.trim()) {
     })
     return matches
   }
+  if (activeCanvasFilterSource.value === 'search') {
+    if (!keyword) return []
+    const matches = []
+    walkDocumentNodeTree(root, node => {
+      if (getMindmapNodeText(node).includes(keyword)) matches.push(node)
+    })
+    return matches
+  }
+  if (activeCanvasFilterSource.value !== 'conditions') return []
   const activeRows = confirmedFilterRows.value
-  if (filterActive.value && activeRows.length > 0) {
+  if (activeRows.length > 0) {
     const titleRows = activeRows.filter(row => row.field === 'title')
     const anyNodeRows = activeRows.filter(row => row.field !== 'title')
     const matchesAnyNodeRows = node => {
@@ -496,12 +568,7 @@ function getDocumentFilterMatches(keyword = searchText.value.trim()) {
     })
     return Array.from(matches)
   }
-  if (!keyword) return []
-  const matches = []
-  walkDocumentNodeTree(root, node => {
-    if (getMindmapNodeText(node).includes(keyword)) matches.push(node)
-  })
-  return matches
+  return []
 }
 
 function createDocumentTreeIndex(root) {
@@ -517,7 +584,9 @@ function createDocumentTreeIndex(root) {
 }
 
 function applyCanvasFilter() {
-  restoreCanvasVisibility({ deactivate: false, relayout: false })
+  // 不要在筛选重排前清空旧节点的隐藏标记。重排后的 runtime tree 只包含
+  // 当前可见节点，若先清空，已经被裁掉的旧 SVG 节点将无法再次遍历并隐藏。
+  filteredMatchCount.value = 0
   if (!filterActive.value) return
   const renderer = props.mindMap?.renderer
   const runtimeRoot = renderer?.root
@@ -587,12 +656,13 @@ function applyCanvasFilter() {
 
 function toggleCanvasFilter() {
   if (!hasFilterCriteria.value) return
-  filterActive.value = !filterActive.value
-  if (filterActive.value) {
-    applyCanvasFilter()
-  } else {
+  if (searchCanvasFilterActive.value) {
     restoreCanvasVisibility()
+    return
   }
+  activeCanvasFilterSource.value = 'search'
+  filterActive.value = true
+  applyCanvasFilter()
 }
 
 function reapplyCanvasFilter() {
@@ -630,7 +700,9 @@ function showSearch() {
   if (!show.value) {
     focusReturnTarget = document.activeElement
   }
-  bus.emit('closeSideBar')
+  if (window.innerWidth <= 760 && store.activeSidebar) {
+    actions.setActiveSidebar(null)
+  }
   panelMode.value = 'search'
   show.value = true
   nextTick(() => {
@@ -669,6 +741,7 @@ function confirmFilterConditions() {
   if (confirmedFilterRows.value.length === 0) {
     restoreCanvasVisibility()
   } else {
+    activeCanvasFilterSource.value = 'conditions'
     filterActive.value = true
     applyCanvasFilter()
   }
@@ -911,7 +984,7 @@ function doReplaceAll() {
   props.mindMap?.search?.replaceAll(replaceText.value)
 }
 
-function resetSearchResults(mindMap = props.mindMap) {
+function resetSearchResults(mindMap = props.mindMap, { preserveCanvasFilter = false } = {}) {
   clearTimeout(liveSearchTimer)
   liveSearchTimer = null
   searchRequestId += 1
@@ -927,7 +1000,11 @@ function resetSearchResults(mindMap = props.mindMap) {
   searchResultList.value = []
   activeServerCriteriaKey = ''
   activeLocalKeyword = ''
-  restoreCanvasVisibility({ mindMap })
+  if (preserveCanvasFilter && filterActive.value) {
+    reapplyCanvasFilter()
+  } else {
+    restoreCanvasVisibility({ mindMap })
+  }
   mindMap?.search?.endSearch()
 }
 
@@ -952,7 +1029,9 @@ function close(options = {}) {
   selectedTagId.value = null
   hideReplaceInput()
   restoreAutoEnterTextEdit()
-  resetSearchResults(searchMindMap)
+  resetSearchResults(searchMindMap, {
+    preserveCanvasFilter: activeCanvasFilterSource.value === 'conditions',
+  })
   if (wasShown && restoreFocus) {
     nextTick(() => {
       if (returnTarget?.isConnected && !returnTarget.closest?.('[inert]')) {
@@ -971,6 +1050,7 @@ function onSearchMatchNodeListChange(list) {
   ) return
   searching.value = false
   searchError.value = ''
+  const treeIndex = createDocumentTreeIndex(props.mindMap?.renderer?.renderTree)
   searchResultList.value = (Array.isArray(list) ? list : []).map((item, index) => {
     const data = item?.data || item?.nodeData?.data || {}
     let name = String(data.text ?? '')
@@ -983,7 +1063,13 @@ function onSearchMatchNodeListChange(list) {
     const segments = buildMindmapSearchHighlightSegments(name, searchText.value, {
       caseSensitive: true,
     })
-    return { data: item, id, segments, name }
+    return {
+      data: item,
+      id,
+      segments,
+      name,
+      pathText: getMindmapNodePathText(item, treeIndex),
+    }
   })
   total.value = searchResultList.value.length
   showSearchInfo.value = true
@@ -999,13 +1085,27 @@ function setSearchResultListHeight() {
   )
 }
 
+function handleSearchPanelResize() {
+  setSearchResultListHeight()
+  if (
+    window.innerWidth <= 760
+    && show.value
+    && panelMode.value === 'search'
+    && store.activeSidebar
+  ) {
+    actions.setActiveSidebar(null)
+  }
+}
+
 function onSearchResultItemClick(index) {
   activateSearchResult(index)
 }
 
 watch(searchText, (val) => {
   if (isUndef(val) && !selectedTagId.value) {
-    resetSearchResults()
+    resetSearchResults(props.mindMap, {
+      preserveCanvasFilter: activeCanvasFilterSource.value === 'conditions',
+    })
     return
   }
   if (
@@ -1027,7 +1127,9 @@ watch(searchText, (val) => {
     && activeLocalKeyword
     && String(val || '').trim() !== activeLocalKeyword
   ) {
-    resetSearchResults()
+    resetSearchResults(props.mindMap, {
+      preserveCanvasFilter: filterActive.value,
+    })
   }
   scheduleLiveSearch(String(val || '').trim())
 })
@@ -1036,6 +1138,21 @@ watch(isReadonly, (readonly) => {
   if (readonly) hideReplaceInput()
 })
 
+watch(() => store.activeSidebar, (sidebarName) => {
+  if (
+    sidebarName
+    && window.innerWidth <= 760
+    && show.value
+    && panelMode.value === 'search'
+  ) {
+    close({ restoreFocus: false })
+  }
+})
+
+watch([show, panelMode], ([visible, mode]) => {
+  bus.emit('searchPanelVisibilityChange', visible && mode === 'search')
+}, { immediate: true })
+
 onMounted(() => {
   setSearchResultListHeight()
   if (typeof ResizeObserver !== 'undefined' && searchContainerRef.value) {
@@ -1043,9 +1160,10 @@ onMounted(() => {
     searchPanelResizeObserver.observe(searchContainerRef.value)
   }
   bus.on('show_search', showSearch)
+  bus.on('hide_search', close)
   bus.on('show_filter', showFilter)
   bus.on('setData', onDocumentReplace)
-  window.addEventListener('resize', setSearchResultListHeight)
+  window.addEventListener('resize', handleSearchPanelResize)
   window.addEventListener('keydown', handleGlobalSearchShortcut, true)
 })
 
@@ -1092,9 +1210,11 @@ onBeforeUnmount(() => {
   searchPanelResizeObserver = null
   restoreAutoEnterTextEdit()
   bus.off('show_search', showSearch)
+  bus.off('hide_search', close)
+  bus.emit('searchPanelVisibilityChange', false)
   bus.off('show_filter', showFilter)
   bus.off('setData', onDocumentReplace)
-  window.removeEventListener('resize', setSearchResultListHeight)
+  window.removeEventListener('resize', handleSearchPanelResize)
   window.removeEventListener('keydown', handleGlobalSearchShortcut, true)
   props.mindMap?.off?.('search_info_change', handleSearchInfoChange)
   props.mindMap?.off?.('node_click', blur)
@@ -1109,23 +1229,124 @@ onBeforeUnmount(() => {
 
 <style lang="less" scoped>
 .searchContainer {
-  position: relative;
-  background-color: #fff;
-  padding: 16px;
-  width: min(296px, calc(100vw - 24px));
-  box-sizing: border-box;
-  border-radius: 12px;
-  box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1);
   position: fixed;
-  top: 110px;
-  left: clamp(12px, 2vw, 20px);
-  transition: all 0.3s;
+  top: var(--mindmap-shell-top, 52px);
+  bottom: var(--mindmap-workspace-bottom, 30px);
+  left: var(--mindmap-activity-width, 44px);
+  z-index: 2001;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px 12px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border-right: 1px solid #e5e8ed;
+  border-radius: 0;
+  background-color: #fff;
+  box-shadow: none;
+
+  .searchPanelHeader {
+    min-height: 40px;
+    display: flex;
+    flex: 0 0 40px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 0 -12px;
+    padding: 0 8px 0 12px;
+    border-bottom: 1px solid #eef0f3;
+  }
+
+  .searchPanelHeading {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+
+    strong {
+      color: #1f2329;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 18px;
+    }
+
+    span {
+      overflow: hidden;
+      color: #8f959e;
+      font-size: 10px;
+      line-height: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .searchModeTabs {
+    height: 36px;
+    display: grid;
+    flex: 0 0 36px;
+    grid-template-columns: 1fr 1fr;
+    border-bottom: 1px solid #eef0f3;
+
+    button {
+      position: relative;
+      padding: 0;
+      border: 0;
+      color: #646a73;
+      background: transparent;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+
+      &::after {
+        position: absolute;
+        right: 16px;
+        bottom: -1px;
+        left: 16px;
+        height: 2px;
+        border-radius: 2px 2px 0 0;
+        background: #3370ff;
+        content: '';
+        opacity: 0;
+        transform: scaleX(0.6);
+        transition: 0.15s ease;
+      }
+
+      &:hover:not(:disabled),
+      &.active {
+        color: #245bdb;
+      }
+
+      &.active {
+        font-weight: 600;
+
+        &::after {
+          opacity: 1;
+          transform: scaleX(1);
+        }
+      }
+
+      &:disabled {
+        color: #c5c8ce;
+        cursor: not-allowed;
+      }
+
+      &:focus-visible {
+        outline: 2px solid #3370ff;
+        outline-offset: -3px;
+      }
+    }
+  }
 
   &.filterDialog {
     top: 88px;
+    right: auto;
+    bottom: auto;
     left: 50%;
+    z-index: 2200;
     width: min(625px, calc(100vw - 32px));
+    display: block;
     padding: 18px 24px 16px;
+    overflow: visible;
     border: 1px solid #dee0e3;
     border-radius: 6px;
     box-shadow: 0 6px 24px rgba(31, 35, 41, 0.14);
@@ -1236,6 +1457,15 @@ onBeforeUnmount(() => {
   &.isDark {
     background-color: #363b3f;
 
+    .searchPanelHeader,
+    .searchModeTabs {
+      border-color: #4a4f55;
+    }
+
+    .searchPanelHeading strong {
+      color: #f2f3f5;
+    }
+
     .closeBtnBox {
       color: #fff;
       background-color: #363b3f;
@@ -1281,16 +1511,20 @@ onBeforeUnmount(() => {
   .btnList {
     display: flex;
     justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+
+    :deep(.el-button + .el-button) {
+      margin-left: 0;
+    }
   }
 
   .closeBtnBox {
-    position: absolute;
-    right: -5px;
-    top: -5px;
-    width: 20px;
-    height: 20px;
-    background-color: #fff;
-    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    background-color: transparent;
+    border-radius: 6px;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -1298,7 +1532,12 @@ onBeforeUnmount(() => {
     border: 0;
     color: inherit;
     cursor: pointer;
-    box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1);
+    transition: color 0.15s ease, background 0.15s ease;
+
+    &:hover {
+      color: #1f2329;
+      background: #f0f2f5;
+    }
 
     &:focus-visible {
       outline: 2px solid #3370ff;
@@ -1308,10 +1547,22 @@ onBeforeUnmount(() => {
 
   .searchInputBox {
     position: relative;
+    flex: 0 0 auto;
+    margin-top: 10px;
+
+    :deep(.el-input__wrapper) {
+      min-height: 32px;
+      border-radius: 6px;
+      box-shadow: 0 0 0 1px #dfe3e8 inset;
+    }
+
+    :deep(.el-input__wrapper.is-focus) {
+      box-shadow: 0 0 0 1px #3370ff inset, 0 0 0 3px rgba(51, 112, 255, 0.1);
+    }
 
     .searchInfo {
       position: absolute;
-      right: 70px;
+      right: 9px;
       top: 50%;
       transform: translateY(-50%);
       color: #909090;
@@ -1319,11 +1570,32 @@ onBeforeUnmount(() => {
     }
   }
 
+  .tagFilterSelect {
+    width: 100%;
+    flex: 0 0 auto;
+    margin-top: 6px;
+
+    :deep(.el-select__wrapper) {
+      min-height: 30px;
+      border-radius: 6px;
+      background: #f6f7f9;
+      box-shadow: none;
+    }
+  }
+
   .canvasFilterBar {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
     gap: 8px;
-    margin-top: 10px;
+    flex: 0 0 auto;
+    margin-top: 6px;
+
+    :deep(.el-button) {
+      min-height: 30px;
+      margin: 0;
+      border-radius: 7px;
+    }
 
     > span {
       min-width: 0;
@@ -1335,17 +1607,43 @@ onBeforeUnmount(() => {
     }
   }
 
+  .searchResultSummary {
+    min-height: 34px;
+    display: flex;
+    flex: 0 0 34px;
+    align-items: end;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 2px 6px;
+
+    strong {
+      color: #1f2329;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    span {
+      color: #a2a7ae;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+  }
+
   .searchResultList {
-    position: absolute;
-    left: 0;
-    top: 100%;
-    width: 100%;
+    position: relative;
+    left: auto;
+    top: auto;
+    width: auto;
+    height: auto !important;
+    min-height: min(96px, var(--search-result-fallback-height));
+    flex: 1 1 auto;
     background-color: #fff;
-    box-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.1);
-    border-radius: 12px;
-    margin-top: 5px;
+    box-shadow: none;
+    border-top: 1px solid #eef0f3;
+    border-radius: 0;
+    margin: 0 -12px -12px;
     overflow-y: auto;
-    padding: 12px 0;
+    padding: 4px 6px 8px;
 
     .searchResultItem {
       width: 100%;
@@ -1354,18 +1652,18 @@ onBeforeUnmount(() => {
       background: transparent;
       text-align: left;
       font-family: inherit;
-      min-height: 36px;
+      min-height: 44px;
       overflow: hidden;
-      padding: 7px 12px 7px 22px;
-      font-size: 14px;
+      padding: 6px 10px 6px 20px;
+      border-radius: 6px;
+      font-size: 13px;
       cursor: pointer;
       position: relative;
-      padding-left: 22px;
 
       &::before {
         content: '';
         position: absolute;
-        left: 10px;
+        left: 9px;
         top: 50%;
         transform: translateY(-50%);
         width: 5px;
@@ -1380,6 +1678,17 @@ onBeforeUnmount(() => {
 
       &[aria-selected='true'] {
         background-color: #edf4ff;
+
+        &::after {
+          position: absolute;
+          top: 6px;
+          bottom: 6px;
+          left: 0;
+          width: 2px;
+          border-radius: 0 3px 3px 0;
+          background: #3370ff;
+          content: '';
+        }
 
         &::before {
           background-color: #3370ff;
@@ -1400,15 +1709,16 @@ onBeforeUnmount(() => {
       .resultText,
       .resultPath {
         overflow: hidden;
-        line-height: 20px;
+        line-height: 18px;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
 
       .resultPath {
         color: #909399;
-        font-size: 11px;
-        line-height: 16px;
+        margin-top: 2px;
+        font-size: 10px;
+        line-height: 14px;
       }
     }
 
@@ -1454,12 +1764,21 @@ onBeforeUnmount(() => {
 }
 
 @media (max-height: 520px) {
-  .searchContainer {
+  .searchContainer.filterDialog {
     top: 12px;
   }
 }
 
-@media (max-width: 680px) {
+@media (max-width: 760px) {
+  .searchContainer:not(.filterDialog) {
+    top: var(--mindmap-shell-top, 60px);
+    right: 0;
+    bottom: 52px;
+    left: 0;
+    width: min(100%, 300px);
+    box-shadow: 8px 0 24px rgba(31, 35, 41, 0.12);
+  }
+
   .searchContainer.filterDialog {
     top: 12px;
     padding: 16px;

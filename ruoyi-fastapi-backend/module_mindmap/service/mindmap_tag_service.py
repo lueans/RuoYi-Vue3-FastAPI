@@ -23,6 +23,10 @@ from module_mindmap.entity.vo.mindmap_tag_vo import (
     MindmapTagModel,
     MindmapTagQueryModel,
 )
+from module_mindmap.service.mindmap_marker_tags import (
+    MINDMAP_MARKER_TAG_KEY_PREFIX,
+    marker_icon_key_from_tag_key,
+)
 from module_mindmap.service.mindmap_metrics import (
     observe_mindmap_operation,
     record_mindmap_event,
@@ -79,6 +83,35 @@ async def _validate_category_assignment(
         raise ServiceException(message='标签分组不存在')
     if category.owner_id not in (0, tag_owner_id):
         raise ServiceException(message='标签分组不属于当前标签作用域')
+
+
+async def _validate_marker_tag_mapping(
+    db: AsyncSession,
+    *,
+    owner_id: int,
+    tag_key: str,
+    style: dict | None,
+    status: int,
+    exclude_id: int | None = None,
+) -> None:
+    """保证内置标记身份稳定，并阻止启用标签复用同一个图标。"""
+    icon_key = str((style or {}).get('iconKey') or '').strip()
+    if tag_key.startswith(MINDMAP_MARKER_TAG_KEY_PREFIX):
+        if owner_id != 0:
+            raise ServiceException(message='内置标记标签必须保留在全局作用域')
+        expected_icon_key = marker_icon_key_from_tag_key(tag_key)
+        if expected_icon_key is None or icon_key != expected_icon_key:
+            raise ServiceException(message='内置标记标签 Key 必须与节点标记图标保持一致')
+    if not icon_key or status != TAG_STATUS_ACTIVE:
+        return
+    is_unique = await MindmapTagDao.check_marker_icon_unique(
+        db,
+        owner_id,
+        icon_key,
+        exclude_id=exclude_id,
+    )
+    if not is_unique:
+        raise ServiceException(message=f'节点标记图标 "{icon_key}" 已被其他启用标签使用')
 
 
 class MindmapTagService:
@@ -355,6 +388,13 @@ class MindmapTagService:
         is_unique = await MindmapTagDao.check_key_unique(db, owner_id, model.tag_key)
         if not is_unique:
             raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')
+        await _validate_marker_tag_mapping(
+            db,
+            owner_id=owner_id,
+            tag_key=model.tag_key,
+            style=model.style,
+            status=model.status if model.status is not None else TAG_STATUS_ACTIVE,
+        )
 
         try:
             tag = await MindmapTagDao.add_tag(db, {
@@ -401,6 +441,10 @@ class MindmapTagService:
         if model.owner_id is not None and model.owner_id != tag.owner_id and user_id == 1:
             new_owner_id = model.owner_id
             # 非管理员忽略 owner_id 变更请求
+        if tag.tag_key.startswith(MINDMAP_MARKER_TAG_KEY_PREFIX) and (
+            model.tag_key != tag.tag_key or new_owner_id != tag.owner_id
+        ):
+            raise ServiceException(message='内置标记标签的 Key 和全局作用域不可修改')
         await _validate_category_assignment(db, model.category_id, new_owner_id)
 
         if new_owner_id not in (tag.owner_id, 0):
@@ -430,13 +474,22 @@ class MindmapTagService:
             if not is_unique:
                 raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')
 
+        new_status = model.status if model.status is not None else tag.status
+        await _validate_marker_tag_mapping(
+            db,
+            owner_id=new_owner_id,
+            tag_key=model.tag_key,
+            style=model.style,
+            status=new_status,
+            exclude_id=model.id,
+        )
+
         try:
             affected_file_ids = list((await db.execute(
                 select(distinct(MindmapNodeTag.file_id)).where(MindmapNodeTag.tag_id == model.id)
             )).scalars())
             own_style = dict(model.style or {})
             new_revision = (tag.definition_revision or 1) + 1
-            new_status = model.status if model.status is not None else tag.status
             definition = {
                 'tagId': model.id,
                 'uuid': tag.uuid,

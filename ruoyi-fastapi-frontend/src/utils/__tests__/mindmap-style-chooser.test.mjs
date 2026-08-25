@@ -53,11 +53,11 @@ test('基础样式颜色和彩虹线方案不再依赖鼠标点击容器', async
 })
 
 test('所有脑图颜色弹层复用统一的具名触发器', async () => {
-  const files = ['BaseStyle.vue', 'Style.vue', 'NodeOuterFrame.vue', 'NodeTagStyle.vue']
+  const files = ['BaseStyle.vue', 'Style.vue', 'NodeOuterFrame.vue']
   const sources = await Promise.all(files.map(file => readFile(new URL(file, componentRoot), 'utf8')))
   const triggerSource = await readFile(new URL('ColorTrigger.vue', componentRoot), 'utf8')
 
-  assert.equal(sources.reduce((count, source) => count + (source.match(/<ColorTrigger/g) || []).length, 0), 15)
+  assert.equal(sources.reduce((count, source) => count + (source.match(/<ColorTrigger/g) || []).length, 0), 13)
   assert.equal(sources.every(source => source.includes("import ColorTrigger from './ColorTrigger.vue'")), true)
   assert.equal(sources.every(source => !/class="block"/.test(source)), true)
   assert.match(triggerSource, /<button[\s\S]*type="button"[\s\S]*:disabled="disabled"/)

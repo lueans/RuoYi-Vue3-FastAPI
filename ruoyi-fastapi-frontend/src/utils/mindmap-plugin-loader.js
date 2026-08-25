@@ -9,6 +9,8 @@ const featurePluginLoaders = Object.freeze({
   [MINDMAP_PREVIEW_FEATURES.outerFrame]: () => import('@mind-map/src/plugins/OuterFrame.js'),
   [MINDMAP_PREVIEW_FEATURES.formula]: () => import('@mind-map/src/plugins/Formula.js'),
   [MINDMAP_PREVIEW_FEATURES.mindMapLayoutPro]: () => import('@mind-map/src/plugins/MindMapLayoutPro.js'),
+  [MINDMAP_PREVIEW_FEATURES.richText]: () => import('@mind-map/src/plugins/RichTextViewer.js'),
+  [MINDMAP_PREVIEW_FEATURES.watermark]: () => import('@mind-map/src/plugins/Watermark.js'),
 })
 
 const featurePluginInstanceNames = Object.freeze({
@@ -16,6 +18,8 @@ const featurePluginInstanceNames = Object.freeze({
   [MINDMAP_PREVIEW_FEATURES.outerFrame]: 'outerFrame',
   [MINDMAP_PREVIEW_FEATURES.formula]: 'formula',
   [MINDMAP_PREVIEW_FEATURES.mindMapLayoutPro]: 'mindMapLayoutPro',
+  [MINDMAP_PREVIEW_FEATURES.richText]: 'richTextViewer',
+  [MINDMAP_PREVIEW_FEATURES.watermark]: 'watermark',
 })
 
 const featurePluginPromises = new Map()

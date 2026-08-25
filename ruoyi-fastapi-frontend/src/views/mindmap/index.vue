@@ -411,44 +411,46 @@
               </el-table-column>
               <el-table-column label="操作" width="190" align="center" fixed="right" class-name="small-padding fixed-width">
                 <template #default="scope">
-                  <template v-if="listScope === 'trash'">
-                    <el-button v-if="canEditMindmaps" link type="primary" icon="RefreshLeft" :loading="operationType === `restore:${scope.row.id}`" :disabled="isOperating" @click="handleRestore(scope.row)">恢复</el-button>
-                    <el-button v-if="canRemoveMindmaps" link type="danger" icon="Delete" :loading="operationType === `purge:${scope.row.id}`" :disabled="isOperating" @click="handlePermanentDelete(scope.row)">永久删除</el-button>
-                  </template>
-                  <template v-else>
-                  <el-button link type="primary" icon="View" :disabled="isOperating" @click="handleView(scope.row)">查看</el-button>
-                  <el-button v-if="canEditMindmap(scope.row)" link type="primary" icon="Edit" :disabled="isOperating" @click="handleEdit(scope.row)">编辑</el-button>
-                  <el-dropdown
-                    trigger="click"
-                    placement="bottom-end"
-                    :disabled="isOperating"
-                    @command="command => handleMindmapCommand(command, scope.row)"
-                  >
-                    <el-button link type="primary" :disabled="isOperating" :aria-label="`更多操作：${scope.row.name}`">
-                      更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
-                    </el-button>
-                    <template #dropdown>
-                      <el-dropdown-menu>
-                        <el-dropdown-item v-if="canEditMindmap(scope.row)" command="metadata">
-                          <el-icon><Edit /></el-icon>编辑信息
-                        </el-dropdown-item>
-                        <el-dropdown-item command="copy" :disabled="!canCreateMindmaps">
-                          <el-icon><CopyDocument /></el-icon>复制
-                        </el-dropdown-item>
-                        <el-dropdown-item v-if="isOwnedMindmap(scope.row) && canEditMindmaps" command="move">
-                          <el-icon><Rank /></el-icon>移动
-                        </el-dropdown-item>
-                        <el-dropdown-item v-if="isOwnedMindmap(scope.row) && canEditMindmaps" command="status">
-                          <el-icon><RefreshLeft v-if="scope.row.status === 1" /><Box v-else /></el-icon>
-                          {{ scope.row.status === 1 ? '恢复' : '归档' }}
-                        </el-dropdown-item>
-                        <el-dropdown-item v-if="isOwnedMindmap(scope.row) && canRemoveMindmaps" command="delete" divided>
-                          <el-icon><Delete /></el-icon><span class="delete-text">删除</span>
-                        </el-dropdown-item>
-                      </el-dropdown-menu>
+                  <div class="mindmap-table-actions">
+                    <template v-if="listScope === 'trash'">
+                      <el-button v-if="canEditMindmaps" link type="primary" icon="RefreshLeft" :loading="operationType === `restore:${scope.row.id}`" :disabled="isOperating" @click="handleRestore(scope.row)">恢复</el-button>
+                      <el-button v-if="canRemoveMindmaps" link type="danger" icon="Delete" :loading="operationType === `purge:${scope.row.id}`" :disabled="isOperating" @click="handlePermanentDelete(scope.row)">永久删除</el-button>
                     </template>
-                  </el-dropdown>
-                  </template>
+                    <template v-else>
+                      <el-button link type="primary" icon="View" :disabled="isOperating" @click="handleView(scope.row)">查看</el-button>
+                      <el-button v-if="canEditMindmap(scope.row)" link type="primary" icon="Edit" :disabled="isOperating" @click="handleEdit(scope.row)">编辑</el-button>
+                      <el-dropdown
+                        trigger="click"
+                        placement="bottom-end"
+                        :disabled="isOperating"
+                        @command="command => handleMindmapCommand(command, scope.row)"
+                      >
+                        <el-button link type="primary" :disabled="isOperating" :aria-label="`更多操作：${scope.row.name}`">
+                          更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                        </el-button>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item v-if="canEditMindmap(scope.row)" command="metadata">
+                              <el-icon><Edit /></el-icon>编辑信息
+                            </el-dropdown-item>
+                            <el-dropdown-item command="copy" :disabled="!canCreateMindmaps">
+                              <el-icon><CopyDocument /></el-icon>复制
+                            </el-dropdown-item>
+                            <el-dropdown-item v-if="isOwnedMindmap(scope.row) && canEditMindmaps" command="move">
+                              <el-icon><Rank /></el-icon>移动
+                            </el-dropdown-item>
+                            <el-dropdown-item v-if="isOwnedMindmap(scope.row) && canEditMindmaps" command="status">
+                              <el-icon><RefreshLeft v-if="scope.row.status === 1" /><Box v-else /></el-icon>
+                              {{ scope.row.status === 1 ? '恢复' : '归档' }}
+                            </el-dropdown-item>
+                            <el-dropdown-item v-if="isOwnedMindmap(scope.row) && canRemoveMindmaps" command="delete" divided>
+                              <el-icon><Delete /></el-icon><span class="delete-text">删除</span>
+                            </el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
+                    </template>
+                  </div>
                 </template>
               </el-table-column>
             </el-table>
@@ -2546,6 +2548,27 @@ async function submitMove() {
     padding-right: 3px;
     padding-left: 3px;
     font-size: 12px;
+  }
+}
+
+.mindmap-table-actions {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+
+  :deep(.el-button) {
+    min-height: 24px;
+    margin: 0;
+  }
+
+  :deep(.el-dropdown) {
+    display: inline-flex;
+    min-height: 24px;
+    align-items: center;
+    vertical-align: middle;
   }
 }
 

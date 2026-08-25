@@ -40,7 +40,6 @@
       @document-config-change="onDocumentConfigChange"
     />
     <RichTextToolbar v-if="mindMap" :mindMap="mindMap" />
-    <NodeTagStyle v-if="mindMap" :mindMap="mindMap" />
     <NodeAttachment v-if="mindMap" :readonly="isReadonly" />
     <NodeImgPlacementToolbar v-if="mindMap" :mindMap="mindMap" />
     <NodeOuterFrame v-if="mindMap" :mindMap="mindMap" />
@@ -96,7 +95,6 @@ import { batchUpdateMindmapContent, getMindmap } from '@/api/mindmap/mindmap'
 import { YjsMindmapSync } from '@/utils/yjs-sync'
 import { resolveMindmapPerformanceOptions } from '@/utils/mindmap-performance'
 import { ensureMindmapDocumentPlugins } from '@/utils/mindmap-plugin-loader'
-import { MINDMAP_PREVIEW_FEATURES, detectMindmapDocumentFeatures } from '@/utils/mindmap-preview'
 import {
   calculateMindmapWheelScale,
   clampMindmapScale,
@@ -156,7 +154,6 @@ import NodeTagSidebar from './NodeIconSidebar.vue'
 import AssociativeLineStyle from './AssociativeLineStyle.vue'
 import Setting from './Setting.vue'
 import RichTextToolbar from './RichTextToolbar.vue'
-import NodeTagStyle from './NodeTagStyle.vue'
 import NodeAttachment from './NodeAttachment.vue'
 import NodeImgPlacementToolbar from './NodeImgPlacementToolbar.vue'
 import NodeOuterFrame from './NodeOuterFrame.vue'
@@ -658,16 +655,11 @@ function createYjsSyncInstance() {
       avatar: userStore.avatar,
     },
     getDocumentData: () => normalizeMindmapDocumentData(documentData.value),
-    prepareDocument: (document, targetMindMap) => {
-      const features = detectMindmapDocumentFeatures(document)
-      if (
-        features.includes(MINDMAP_PREVIEW_FEATURES.formula)
-        && !targetMindMap?.formula
-      ) {
-        return ensureMindmapDocumentPlugins(document, targetMindMap)
-      }
-      return undefined
-    },
+    // 协作更新可能首次引入富文本、公式等渲染能力。统一加载实际缺失的
+    // 插件，避免当前客户端是否曾打开编辑器侧栏影响远端内容显示。
+    prepareDocument: (document, targetMindMap) => (
+      ensureMindmapDocumentPlugins(document, targetMindMap)
+    ),
     onDocumentPrepareError: (error) => {
       console.error('协作内容渲染能力加载失败:', error)
       if (documentPrepareFailureNotified) return
@@ -748,6 +740,7 @@ const forwardEvents = [
   'back_forward',
   'node_contextmenu',
   'node_click',
+  'node_tag_click',
   'draw_click',
   'expand_btn_click',
   'svg_mousedown',
@@ -942,7 +935,11 @@ async function initMindMap(signal) {
     }
   }
 
-  await ensureMindmapDocumentPlugins({ root, layout })
+  await ensureMindmapDocumentPlugins({
+    root,
+    layout,
+    documentData: documentData.value,
+  })
   if (sessionCancelled(signal)) return
 
   const container = await waitForMindMapContainer()
@@ -1493,6 +1490,7 @@ async function saveToBackend() {
           layout: response.data.layout || mutation.document.layout,
           theme: response.data.theme || mutation.document.theme,
           view: response.data.viewData ?? mutation.document.view,
+          documentData: documentData.value,
         }
         try {
           await ensureMindmapDocumentPlugins(mergedDocument, activeMindMap)
@@ -1758,6 +1756,7 @@ async function reloadLatestServerDocument({ preserveLocalDraft = false, requireC
     layout: data.layout || 'logicalStructure',
     theme: data.theme || {},
     view: data.viewData || null,
+    documentData: nextDocumentData,
   }
   await ensureMindmapDocumentPlugins(serverDocument, activeMindMap)
   if (sessionCancelled(signal) || mindMap.value !== activeMindMap) return false
@@ -1874,6 +1873,7 @@ async function performContentConflictResolution(localFullData, conflictData) {
       layout: data.layout || 'logicalStructure',
       theme: data.theme || {},
       view: data.viewData || null,
+      documentData: nextDocumentData,
     }
     await ensureMindmapDocumentPlugins(serverDocument, activeMindMap)
     if (sessionCancelled(signal) || mindMap.value !== activeMindMap) return false
@@ -2219,6 +2219,18 @@ function onOpenSidebar(sidebarName) {
   nextTick(() => bus.emit('focusActiveSidebar'))
 }
 
+function onNodeTagClick(node, _tag, _index, _element, sourceMindMap) {
+  const activeMindMap = mindMap.value
+  if (
+    isReadonly.value
+    || !activeMindMap
+    || !node
+    || sourceMindMap !== activeMindMap
+    || (node.mindMap && node.mindMap !== activeMindMap)
+  ) return
+  onOpenSidebar('nodeTagSidebar')
+}
+
 function bindBusEvents() {
   bus.on('execCommand', onExecCommand)
   bus.on('exportRequest', onExportRequest)
@@ -2228,6 +2240,7 @@ function bindBusEvents() {
   bus.on('createAssociativeLine', onCreateAssociativeLine)
   bus.on('startPainter', onStartPainter)
   bus.on('openSidebar', onOpenSidebar)
+  bus.on('node_tag_click', onNodeTagClick)
   bus.on('searchPanelVisibilityChange', onSearchPanelVisibilityChange)
   bus.on('toggleOpenNodeRichText', onToggleOpenNodeRichText)
 }
@@ -2241,6 +2254,7 @@ function unbindBusEvents() {
   bus.off('createAssociativeLine', onCreateAssociativeLine)
   bus.off('startPainter', onStartPainter)
   bus.off('openSidebar', onOpenSidebar)
+  bus.off('node_tag_click', onNodeTagClick)
   bus.off('searchPanelVisibilityChange', onSearchPanelVisibilityChange)
   bus.off('data_change', onBusDataChange)
   bus.off('view_data_change', onBusViewDataChange)

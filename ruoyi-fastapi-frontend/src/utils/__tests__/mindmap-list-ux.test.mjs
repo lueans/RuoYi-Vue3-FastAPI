@@ -203,6 +203,9 @@ test('脑图管理页采用高密度表格并通过详情抽屉衔接沉浸式�
   ])
 
   assert.match(source, /class="mindmap-dense-table"/)
+  assert.match(source, /class="mindmap-table-actions"/)
+  assert.match(source, /\.mindmap-table-actions \{[\s\S]*?display: flex;[\s\S]*?align-items: center;[\s\S]*?justify-content: center;[\s\S]*?gap: 6px;/)
+  assert.match(source, /\.mindmap-table-actions[\s\S]*?:deep\(\.el-dropdown\) \{[\s\S]*?align-items: center;[\s\S]*?vertical-align: middle;/)
   assert.match(source, /<el-table-column type="index" label="序号"/)
   assert.match(source, /label="节点数"[\s\S]*prop="nodeCount"/)
   assert.match(source, /label="版本数"[\s\S]*prop="versionCount"/)

@@ -121,6 +121,7 @@ async function loadShare() {
     await registerPreviewPlugins({
       root: data.nodeTree,
       layout: data.layout,
+      documentData: data.documentData,
     })
     if (!isShareSessionCurrent(session, signal)) return false
 

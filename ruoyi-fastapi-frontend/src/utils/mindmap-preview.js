@@ -1,14 +1,26 @@
+import { getMindmapDocumentConfig } from './mindmap-document-config.js'
+
 export const MINDMAP_PREVIEW_FEATURES = Object.freeze({
   associativeLine: 'associativeLine',
   outerFrame: 'outerFrame',
   formula: 'formula',
   mindMapLayoutPro: 'mindMapLayoutPro',
+  richText: 'richText',
+  watermark: 'watermark',
 })
 
-export function detectMindmapDocumentFeatures({ root, layout } = {}) {
+export function detectMindmapDocumentFeatures({ root, layout, documentData } = {}) {
   const features = new Set()
   if (layout === 'mindMap') {
     features.add(MINDMAP_PREVIEW_FEATURES.mindMapLayoutPro)
+  }
+  const watermarkConfig = getMindmapDocumentConfig(documentData).watermarkConfig
+  if (
+    typeof watermarkConfig?.text === 'string'
+    && watermarkConfig.text.length > 0
+    && watermarkConfig.onlyExport !== true
+  ) {
+    features.add(MINDMAP_PREVIEW_FEATURES.watermark)
   }
   if (!root || typeof root !== 'object') return [...features]
 
@@ -23,6 +35,9 @@ export function detectMindmapDocumentFeatures({ root, layout } = {}) {
     }
     if (node.outerFrame && typeof node.outerFrame === 'object') {
       features.add(MINDMAP_PREVIEW_FEATURES.outerFrame)
+    }
+    if (node.richText === true || node.richText === 1) {
+      features.add(MINDMAP_PREVIEW_FEATURES.richText)
     }
     if (
       typeof node.text === 'string'

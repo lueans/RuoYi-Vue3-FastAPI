@@ -128,7 +128,11 @@ async function loadTemplate() {
     if (!document?.nodeTree || typeof document.nodeTree !== 'object') {
       throw new Error('模板内容为空或格式不正确')
     }
-    await registerPreviewPlugins({ root: document.nodeTree, layout: document.layout })
+    await registerPreviewPlugins({
+      root: document.nodeTree,
+      layout: document.layout,
+      documentData: document.documentData,
+    })
     if (!requestTracker.isCurrent(requestId)) return
     template.value = document
     loading.value = false

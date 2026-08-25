@@ -34,6 +34,7 @@ test('公开分享预览隔离路由切换、插件加载和实例构造的迟�
   assert.ok(loadBlock.indexOf('cancelShareLoad()') < loadBlock.indexOf('shareSession.activate(token)'))
   assert.match(loadBlock, /viewByShareToken\(token, \{ signal \}\)/)
   assert.match(loadBlock, /const data = res\.data[\s\S]*?registerPreviewPlugins/)
+  assert.match(loadBlock, /documentData: data\.documentData/)
   assert.ok((loadBlock.match(/isShareSessionCurrent\(session, signal\)/g) || []).length >= 5)
   assert.match(loadBlock, /await nextTick\(\)[\s\S]*?isShareSessionCurrent\(session, signal\)/)
   assert.match(loadBlock, /catch \(e\) \{\s*if \(!isShareSessionCurrent\(session, signal\)\) return false/)

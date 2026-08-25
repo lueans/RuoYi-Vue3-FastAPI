@@ -25,16 +25,20 @@ test('重型公式引擎按需加载且文档能力使用统一加载边界', as
   ])
 
   assert.doesNotMatch(pluginSource, /import\s+Formula\s+from/)
-  for (const plugin of ['Formula', 'AssociativeLine', 'OuterFrame', 'MindMapLayoutPro']) {
+  for (const plugin of [
+    'Formula', 'AssociativeLine', 'OuterFrame', 'MindMapLayoutPro', 'RichTextViewer', 'Watermark',
+  ]) {
     assert.match(loaderSource, new RegExp(`import\\(['"]@mind-map/src/plugins/${plugin}(?:\\.js)?['"]\\)`))
   }
+  assert.doesNotMatch(loaderSource, /plugins\/RichText\.js/)
   // 这三项需要同步处理 Yjs 增量，因此编辑器常驻；只读预览仍通过统一加载器按需加载。
   for (const plugin of ['AssociativeLine', 'OuterFrame', 'MindMapLayoutPro']) {
     assert.match(pluginSource, new RegExp(`import\\s+${plugin}\\s+from`))
   }
-  const ensureIndex = editorSource.indexOf('await ensureMindmapDocumentPlugins({ root, layout })')
+  const ensureIndex = editorSource.indexOf('await ensureMindmapDocumentPlugins({')
   const createIndex = editorSource.indexOf('new MindMap({', ensureIndex)
   assert.ok(ensureIndex > 0 && createIndex > ensureIndex)
+  assert.match(editorSource.slice(ensureIndex, createIndex), /documentData: documentData\.value/)
   assert.match(loaderSource, /featurePluginPromises\.delete\(feature\)/)
   assert.match(formulaSource, /const activeMindMap = props\.mindMap[\s\S]*await ensureFormulaPlugin\(activeMindMap\)/)
   assert.match(formulaSource, /role="status" aria-live="polite"/)
@@ -61,8 +65,8 @@ test('运行期替换文档会先补齐插件且拒绝迟到会话', async () =>
   assert.match(editorSource, /服务端已经提交本批操作，渲染插件失败不能把同一批操作当成网络失败重试/)
   assert.match(editorSource, /blockedConflictData = \{ currentRevision: contentRevision \}/)
   assert.match(editorSource, /云端已保存，但画布刷新失败/)
-  assert.match(editorSource, /prepareDocument: \(document, targetMindMap\) => \{/)
-  assert.match(editorSource, /features\.includes\(MINDMAP_PREVIEW_FEATURES\.formula\)[\s\S]*!targetMindMap\?\.formula/)
+  assert.match(editorSource, /prepareDocument: \(document, targetMindMap\) => \(/)
+  assert.match(editorSource, /prepareDocument:[\s\S]*ensureMindmapDocumentPlugins\(document, targetMindMap\)/)
   assert.match(editorSource, /onDocumentPrepareExhausted:/)
 })
 

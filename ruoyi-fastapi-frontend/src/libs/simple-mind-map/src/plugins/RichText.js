@@ -15,6 +15,7 @@ import {
 import { richTextSupportStyleList } from '../constants/constant'
 import MindMapNode from '../core/render/node/MindMapNode'
 import { Scope } from 'parchment'
+import { RICH_TEXT_NODE_CSS } from './RichTextStyle'
 
 let extended = false
 
@@ -93,43 +94,7 @@ class RichText {
 
   // 插入样式
   appendCss() {
-    this.mindMap.appendCss(
-      'richText',
-      `
-      .smm-richtext-node-wrap {
-        word-break: break-all;
-        user-select: none;
-      }
-
-      .smm-richtext-node-wrap p,
-      .smm-richtext-node-wrap h1,
-      .smm-richtext-node-wrap h2,
-      .smm-richtext-node-wrap h3,
-      .smm-richtext-node-wrap h4,
-      .smm-richtext-node-wrap h5,
-      .smm-richtext-node-wrap h6,
-      .smm-richtext-node-wrap ol,
-      .smm-richtext-node-wrap ul,
-      .smm-richtext-node-wrap blockquote,
-      .smm-richtext-node-wrap pre {
-        margin: 0;
-        padding: 0;
-      }
-
-      .ql-editor .ql-align-left,
-      .smm-richtext-node-wrap .ql-align-left {
-        text-align: left;
-      }
-
-      .smm-richtext-node-wrap .ql-align-right {
-        text-align: right;
-      }
-
-      .smm-richtext-node-wrap .ql-align-center {
-        text-align: center;
-      }
-      `
-    )
+    this.mindMap.appendCss('richText', RICH_TEXT_NODE_CSS)
     let cssText = `
       .${RICH_TEXT_EDIT_WRAP} {
         overflow: hidden;

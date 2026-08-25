@@ -13,7 +13,6 @@ test('常驻上下文编辑器在只读切换时关闭并禁用交互控件', as
     'NodeIconToolbar.vue',
     'NodeImgPlacementToolbar.vue',
     'RichTextToolbar.vue',
-    'NodeTagStyle.vue',
     'AssociativeLineStyle.vue',
     'NodeOuterFrame.vue',
   ]
@@ -28,17 +27,15 @@ test('常驻上下文编辑器在只读切换时关闭并禁用交互控件', as
   assert.match(sources[0], /watch\(isReadonly,[\s\S]*if \(readonly\) close\(\)/)
   assert.match(sources[1], /watch\(isReadonly,[\s\S]*if \(readonly\) close\(\)/)
   assert.match(sources[2], /watch\(isReadonly,[\s\S]*if \(readonly\) closeToolbar\(\)/)
-  assert.match(sources[3], /watch\(isReadonly,[\s\S]*if \(readonly && show\.value\) hide\(\)/)
-  assert.match(sources[4], /watch\(isReadonly,[\s\S]*onLineDeactivate\(\)/)
-  assert.match(sources[5], /watch\(isReadonly,[\s\S]*onFrameDeactivate\(\)/)
+  assert.match(sources[3], /watch\(isReadonly,[\s\S]*onLineDeactivate\(\)/)
+  assert.match(sources[4], /watch\(isReadonly,[\s\S]*onFrameDeactivate\(\)/)
 })
 
 test('上下文写操作在执行边界重新校验只读状态', async () => {
-  const [icon, imagePlacement, richText, tagStyle, lineStyle, outerFrame] = await Promise.all([
+  const [icon, imagePlacement, richText, lineStyle, outerFrame] = await Promise.all([
     readComponent('NodeIconToolbar.vue'),
     readComponent('NodeImgPlacementToolbar.vue'),
     readComponent('RichTextToolbar.vue'),
-    readComponent('NodeTagStyle.vue'),
     readComponent('AssociativeLineStyle.vue'),
     readComponent('NodeOuterFrame.vue'),
   ])
@@ -50,20 +47,16 @@ test('上下文写操作在执行边界重新校验只读状态', async () => {
   assert.match(imagePlacement, /function setPlacement\(val\)[\s\S]*?isReadonly\.value[\s\S]*?\) return/)
   assert.match(richText, /function getCurrentRichTextPlugin\(\)[\s\S]*isReadonly\.value[\s\S]*currentMindMap !== props\.mindMap[\s\S]*return currentMindMap\.richText/)
   assert.equal((richText.match(/getCurrentRichTextPlugin\(\)\?\./g) || []).length >= 6, true)
-  assert.match(tagStyle, /async function onTagClick\(node, tag, index, el\)[\s\S]*isReadonly\.value[\s\S]*node\.mindMap !== activeMindMap[\s\S]*\) return/)
-  assert.match(tagStyle, /isReadonly\.value \|\| !hasCurrentTagTarget\(\) \|\| !isCurrent\(\)/)
-  assert.match(tagStyle, /if \(isReadonly\.value \|\| !hasCurrentTagTarget\(\) \|\| !isCurrent\(\)\) return\s*await updateTag/)
   assert.match(lineStyle, /function updateStyle\(prop\)[\s\S]*?isReadonly\.value[\s\S]*?\) return/)
   assert.match(outerFrame, /function updateFrame\(key, val\) \{\s*if \(isReadonly\.value \|\|/)
   assert.match(outerFrame, /function removeFrame\(\) \{\s*if \(isReadonly\.value \|\|/)
 })
 
 test('实例绑定浮层在首次挂载和切换脑图时成对订阅并清理旧目标', async () => {
-  const [icon, imagePlacement, richText, tagStyle, lineStyle, outerFrame, editor] = await Promise.all([
+  const [icon, imagePlacement, richText, lineStyle, outerFrame, editor] = await Promise.all([
     readComponent('NodeIconToolbar.vue'),
     readComponent('NodeImgPlacementToolbar.vue'),
     readComponent('RichTextToolbar.vue'),
-    readComponent('NodeTagStyle.vue'),
     readComponent('AssociativeLineStyle.vue'),
     readComponent('NodeOuterFrame.vue'),
     readComponent('Edit.vue'),
@@ -82,10 +75,6 @@ test('实例绑定浮层在首次挂载和切换脑图时成对订阅并清理�
   assert.match(richText, /activeMindMap !== props\.mindMap/)
   assert.match(richText, /watch\(\(\) => props\.mindMap,[\s\S]*closeToolbar\(\)/)
   assert.match(richText, /onBeforeUnmount\(\(\) => \{\s*closeToolbar\(\)/)
-
-  assert.match(tagStyle, /function hasCurrentTagTarget\(\)[\s\S]*currentMindMap === props\.mindMap[\s\S]*currentNode\.mindMap === currentMindMap/)
-  assert.match(tagStyle, /watch\(\(\) => props\.mindMap,[\s\S]*oldMm\?\.off\?\.[\s\S]*hideWithoutFocusRestore\(\)[\s\S]*mm\?\.on\?\./)
-  assert.match(tagStyle, /function getEditableTagList\(\)[\s\S]*return tags\.map[\s\S]*style: \{ \.\.\.\(tag\.style \|\| \{\}\) \}/)
 
   assert.match(lineStyle, /watch\(\(\) => props\.mindMap,[\s\S]*if \(mm !== oldMm\) onLineDeactivate\(\)[\s\S]*\{ immediate: true \}/)
   assert.match(lineStyle, /activeLineNode\.mindMap !== activeMindMap[\s\S]*activeLineToNode\.mindMap !== activeMindMap/)

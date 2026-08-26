@@ -144,6 +144,67 @@ test('uniform sibling centers use the minimum safe equal interval', () => {
   assert.equal(offsets[1] - offsets[0], 270)
 })
 
+test('sibling centers keep compact intervals before a taller trailing subtree', () => {
+  const offsets = calculateUniformSiblingCenterOffsets([
+    { topOffset: -20, bottomOffset: 20 },
+    { topOffset: -20, bottomOffset: 20 },
+    { topOffset: -20, bottomOffset: 20 },
+    { topOffset: -20, bottomOffset: 20 },
+    { topOffset: -80, bottomOffset: 80 }
+  ], 20)
+
+  assert.deepEqual(offsets, [-120, -60, 0, 60, 180])
+  assert.deepEqual(
+    offsets.slice(1, 4).map((offset, index) => offset - offsets[index]),
+    [60, 60, 60]
+  )
+  assert.equal(offsets[4] - offsets[3], 120)
+})
+
+test('balanced vertical layout separates a taller trailing branch without stretching earlier siblings', () => {
+  const compact = Array.from({ length: 4 }, () => createLayoutNode({
+    width: 100,
+    height: 40
+  }))
+  const trailing = createLayoutNode({
+    width: 100,
+    height: 40,
+    children: Array.from({ length: 3 }, () => createLayoutNode({
+      width: 100,
+      height: 40
+    }))
+  })
+  const root = createLayoutNode({
+    width: 100,
+    height: 40,
+    children: [...compact, trailing]
+  })
+
+  balanceTreeChildrenVertically(root, { getGap: () => 20 })
+
+  const childCenters = root.children.map(node => node.top + node.height / 2)
+  const trailingChildCenters = trailing.children.map(
+    node => node.top + node.height / 2
+  )
+  assert.deepEqual(
+    childCenters.slice(1, 4).map((center, index) => (
+      center - childCenters[index]
+    )),
+    [60, 60, 60]
+  )
+  assert.equal(childCenters[4] - childCenters[3], 120)
+  assert.deepEqual(
+    trailingChildCenters.slice(1).map((center, index) => (
+      center - trailingChildCenters[index]
+    )),
+    [60, 60]
+  )
+  assert.equal(
+    trailing.children[0].top - (compact[3].top + compact[3].height),
+    20
+  )
+})
+
 test('balanced vertical layout keeps unequal subtrees clear and branch centers symmetric', () => {
   const single = createLayoutNode({ top: 130, width: 100, height: 40 })
   const multiple = createLayoutNode({

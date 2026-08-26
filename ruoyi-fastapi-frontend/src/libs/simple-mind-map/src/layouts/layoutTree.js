@@ -7,26 +7,35 @@ const getFiniteNumber = (value, fallback = 0) => {
   return Number.isFinite(number) ? number : fallback
 }
 
-// 在所有相邻子树保持安全间距的前提下，求直属子节点中心的最小等距分布。
-// topOffset/bottomOffset 是子树边界相对直属子节点中心的偏移。
+// 相邻子树只使用各自需要的安全间距，不把最高子树所需的间距广播给
+// 整组兄弟节点；这样普通连续分支保持紧凑，复杂分支仍不会互相覆盖。
 export const calculateUniformSiblingCenterOffsets = (metrics, gap = 0) => {
   const list = Array.isArray(metrics) ? metrics : []
   if (list.length <= 0) return []
   if (list.length === 1) return [0]
 
   const safeGap = Math.max(0, getFiniteNumber(gap))
-  let step = 0
-  for (let index = 0; index < list.length - 1; index += 1) {
-    const currentBottom = getFiniteNumber(list[index]?.bottomOffset)
-    const nextTop = getFiniteNumber(list[index + 1]?.topOffset)
-    step = Math.max(step, currentBottom - nextTop + safeGap)
+  const offsets = [0]
+  for (let index = 1; index < list.length; index += 1) {
+    const previousBottom = getFiniteNumber(list[index - 1]?.bottomOffset)
+    const currentTop = getFiniteNumber(list[index]?.topOffset)
+    const distance = Math.max(
+      0,
+      previousBottom - currentTop + safeGap
+    )
+    offsets.push(offsets[index - 1] + distance)
   }
 
   const centerIndex = (list.length - 1) / 2
-  return list.map((item, index) => (index - centerIndex) * step)
+  const lowerCenter = Math.floor(centerIndex)
+  const upperCenter = Math.ceil(centerIndex)
+  const centerOffset = (
+    offsets[lowerCenter] + offsets[upperCenter]
+  ) / 2
+  return offsets.map(offset => offset - centerOffset)
 }
 
-// 先自底向上计算每棵子树相对根节点中心的轮廓，再自顶向下一次性落位。
+// 先自底向上计算每棵子树相对根节点中心的边界，再自顶向下一次性落位。
 // 每个节点只参与常数次计算，避免在每一层反复平移整棵后代树。
 export const balanceTreeChildrenVertically = (root, options = {}) => {
   if (!isObjectNode(root)) {

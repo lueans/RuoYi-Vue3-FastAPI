@@ -36,6 +36,7 @@ from module_admin.entity.vo.user_vo import (
     UserDetailModel,
     UserInfoModel,
     UserModel,
+    UserOptionModel,
     UserPageQueryModel,
     UserProfileModel,
     UserRoleQueryModel,
@@ -78,7 +79,7 @@ async def get_system_dept_tree(
 @user_controller.get(
     '/optionSelect',
     summary='获取用户下拉选项列表接口',
-    response_model=DataResponseModel[list[UserModel]],
+    response_model=DataResponseModel[list[UserOptionModel]],
 )
 async def get_system_user_option_select(
     request: Request,

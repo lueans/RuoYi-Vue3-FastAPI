@@ -1,10 +1,9 @@
 from collections.abc import Sequence
 from datetime import datetime, time
-from typing import Any, Union
+from typing import Any
 
 from sqlalchemy import ColumnElement, and_, delete, desc, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from common.vo import PageModel
 from module_admin.entity.do.dept_do import SysDept
@@ -84,7 +83,7 @@ class UserDao:
     @classmethod
     async def get_user_by_openid_and_tenant(
         cls, db: AsyncSession, user_source: int, user_openid: str, user_tenant_id: str
-    ) -> Union[SysUser, None]:
+    ) -> SysUser | None:
         query_user_info = (
             (
                 await db.execute(
@@ -354,7 +353,7 @@ class UserDao:
         return user_list
 
     @classmethod
-    async def get_user_option_list(cls, db: AsyncSession) -> Sequence[SysUser]:
+    async def get_user_option_list(cls, db: AsyncSession) -> Sequence[dict[str, Any]]:
         """
         获取所有在用用户的基本信息（用于下拉选择）
 
@@ -362,18 +361,19 @@ class UserDao:
         :return: 在用用户列表
         """
         result = (
-            (
-                await db.execute(
-                    select(SysUser)
-                    .where(SysUser.del_flag == '0', SysUser.status == '0')
-                    .order_by(SysUser.user_id)
+            await db.execute(
+                select(
+                    SysUser.user_id,
+                    SysUser.user_name,
+                    SysUser.nick_name,
+                    SysUser.avatar,
                 )
+                .where(SysUser.del_flag == '0', SysUser.status == '0')
+                .order_by(SysUser.user_id)
             )
-            .scalars()
-            .all()
-        )
+        ).mappings().all()
 
-        return result
+        return [dict(row) for row in result]
 
     @classmethod
     async def add_user_dao(cls, db: AsyncSession, user: UserModel) -> SysUser:

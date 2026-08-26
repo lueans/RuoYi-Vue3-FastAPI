@@ -20,7 +20,7 @@
         </el-avatar>
         <div style="margin-left: 10px; line-height: 1.3; overflow: hidden;">
           <div style="font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ user.nickName }}</div>
-          <div style="font-size: 11px; color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ user.email || '-' }}</div>
+          <div style="font-size: 11px; color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ user.userName }}</div>
         </div>
       </div>
     </el-option>
@@ -67,8 +67,7 @@ function filterUsers(query) {
   const keyword = query.toLowerCase();
   filteredUsers.value = userList.value.filter(user =>
     (user.userName && user.userName.toLowerCase().includes(keyword)) ||
-    (user.nickName && user.nickName.toLowerCase().includes(keyword)) ||
-    (user.email && user.email.toLowerCase().includes(keyword))
+    (user.nickName && user.nickName.toLowerCase().includes(keyword))
   );
 }
 

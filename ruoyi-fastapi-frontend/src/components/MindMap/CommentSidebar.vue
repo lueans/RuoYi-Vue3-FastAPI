@@ -248,6 +248,7 @@ import {
 } from '@/api/mindmap/comment'
 import { createCommentMutationTracker } from '@/utils/mindmap-comment-mutation'
 import { createLatestRequestTracker } from '@/utils/mindmap-async'
+import { getTextFromHtml } from '@/libs/simple-mind-map/src/utils'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
@@ -321,9 +322,7 @@ const commandKey = /Mac|iPhone|iPad/i.test(navigator.platform) ? '⌘' : 'Ctrl'
 
 function stripHtml(value) {
   if (!value) return ''
-  const container = document.createElement('div')
-  container.innerHTML = String(value)
-  return (container.textContent || '').replace(/\s+/g, ' ').trim()
+  return (getTextFromHtml(String(value)) || '').replace(/\s+/g, ' ').trim()
 }
 
 function getNodeLabel(node) {

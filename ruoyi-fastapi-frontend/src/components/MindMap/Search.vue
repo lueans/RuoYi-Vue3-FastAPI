@@ -300,6 +300,7 @@ import bus from './useEventBus'
 import { actions, store } from './useStore'
 import { getTagSuggestions } from '@/api/mindmap/tag'
 import { searchMindmapNodes } from '@/api/mindmap/mindmap'
+import { getTextFromHtml } from '@/libs/simple-mind-map/src/utils'
 import {
   buildMindmapSearchHighlightSegments,
   buildMindmapTagFilterOptions,
@@ -532,9 +533,7 @@ function getMindmapNodeText(node) {
   if (data.text !== undefined && data.text !== null) {
     const rawText = String(data.text)
     if (!data.richText) return rawText
-    const template = document.createElement('template')
-    template.innerHTML = rawText
-    return template.content.textContent || ''
+    return getTextFromHtml(rawText) || ''
   }
   // 仅在数据节点没有 text 字段时才回退到渲染文本。节点容器中还会包含
   // 标签、优先级等后缀，优先读取整组 textContent 会让路径和搜索条件误命中。
@@ -1247,9 +1246,7 @@ function onSearchMatchNodeListChange(list) {
     let name = String(data.text ?? '')
     const id = data.uid || `local-search-result-${index}`
     if (data.richText) {
-      const template = document.createElement('template')
-      template.innerHTML = name
-      name = template.content.textContent || ''
+      name = getTextFromHtml(name) || ''
     }
     const segments = buildMindmapSearchHighlightSegments(name, searchText.value, {
       caseSensitive: true,

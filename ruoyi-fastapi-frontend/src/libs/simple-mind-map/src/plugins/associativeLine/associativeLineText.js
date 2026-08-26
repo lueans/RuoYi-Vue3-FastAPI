@@ -2,7 +2,8 @@ import { Text } from '@svgdotjs/svg.js'
 import {
   getStrWithBrFromHtml,
   focusInput,
-  selectAllInput
+  selectAllInput,
+  htmlEscape
 } from '../../utils/index'
 
 const ASSOCIATIVE_LINE_TEXT_EDIT_WRAP = 'associative-line-text-edit-warp'
@@ -66,7 +67,9 @@ function showEditTextBox(g) {
   let { defaultAssociativeLineText, nodeTextEditZIndex } = this.mindMap.opt
   let scale = this.mindMap.view.scale
   let text = this.getText(node, toNode)
-  let textLines = (text || defaultAssociativeLineText).split(/\n/gim)
+  let textLines = (text || defaultAssociativeLineText)
+    .split(/\n/gim)
+    .map(htmlEscape)
   this.textEditNode.style.fontFamily = associativeLineTextFontFamily
   this.textEditNode.style.fontSize = associativeLineTextFontSize * scale + 'px'
   this.textEditNode.style.lineHeight =

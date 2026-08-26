@@ -26,6 +26,7 @@ import {
   removeDomElements,
   replaceDomTextNodes
 } from './domTree'
+import { sanitizeRichTextHtml } from './richText'
 
 export { walk } from './treeWalk'
 export { bfsWalk } from './treeBfs'
@@ -33,6 +34,7 @@ export { materializeObjectSubtree } from './treeData'
 export { walkNodeForest } from './nodeForest'
 export { stringifyJsonValueIterative } from './jsonClone'
 export { throttle, debounce } from './timing'
+export { sanitizeRichTextHtml, sanitizeRichTextStyle } from './richText'
 export const isSameObject = isSameObjectValue
 
 export {
@@ -125,7 +127,7 @@ export const resizeImg = (imgUrl, maxWidth, maxHeight) => {
 export const getStrWithBrFromHtml = str => {
   str = str.replace(/<br>/gim, '\n')
   let el = document.createElement('div')
-  el.innerHTML = str
+  el.innerHTML = sanitizeRichTextHtml(str)
   str = el.textContent
   return str
 }
@@ -390,7 +392,7 @@ export const getTextFromHtml = html => {
   if (!getTextFromHtmlEl) {
     getTextFromHtmlEl = document.createElement('div')
   }
-  getTextFromHtmlEl.innerHTML = html
+  getTextFromHtmlEl.innerHTML = sanitizeRichTextHtml(html)
   return getTextFromHtmlEl.textContent
 }
 
@@ -492,7 +494,7 @@ export const addHtmlStyle = (html, tag, style) => {
   if (!addHtmlStyleEl) {
     addHtmlStyleEl = document.createElement('div')
   }
-  addHtmlStyleEl.innerHTML = html
+  addHtmlStyleEl.innerHTML = sanitizeRichTextHtml(html)
   applyStyleToDomTags(addHtmlStyleEl, tag, style)
   return addHtmlStyleEl.innerHTML
 }
@@ -503,7 +505,7 @@ export const checkIsRichText = str => {
   if (!checkIsRichTextEl) {
     checkIsRichTextEl = document.createElement('div')
   }
-  checkIsRichTextEl.innerHTML = str
+  checkIsRichTextEl.innerHTML = sanitizeRichTextHtml(str)
   for (let c = checkIsRichTextEl.childNodes, i = c.length; i--; ) {
     if (c[i].nodeType == 1) return true
   }
@@ -516,7 +518,7 @@ export const replaceHtmlText = (html, searchText, replaceText) => {
   if (!replaceHtmlTextEl) {
     replaceHtmlTextEl = document.createElement('div')
   }
-  replaceHtmlTextEl.innerHTML = html
+  replaceHtmlTextEl.innerHTML = sanitizeRichTextHtml(html)
   replaceDomTextNodes(replaceHtmlTextEl, value => (
     replaceAllLiteralText(value, searchText, replaceText)
   ))
@@ -529,7 +531,7 @@ export const removeHtmlNodeByClass = (html, selector) => {
   if (!removeHtmlNodeByClassEl) {
     removeHtmlNodeByClassEl = document.createElement('div')
   }
-  removeHtmlNodeByClassEl.innerHTML = html
+  removeHtmlNodeByClassEl.innerHTML = sanitizeRichTextHtml(html)
   const node = removeHtmlNodeByClassEl.querySelector(selector)
   if (node) {
     node.parentNode.removeChild(node)
@@ -590,7 +592,7 @@ export const nodeRichTextToTextWithWrap = html => {
   if (!nodeRichTextToTextWithWrapEl) {
     nodeRichTextToTextWithWrapEl = document.createElement('div')
   }
-  nodeRichTextToTextWithWrapEl.innerHTML = html
+  nodeRichTextToTextWithWrapEl.innerHTML = sanitizeRichTextHtml(html)
   const childNodes = nodeRichTextToTextWithWrapEl.childNodes
   let res = ''
   for (let i = 0; i < childNodes.length; i++) {
@@ -617,7 +619,7 @@ export const textToNodeRichTextWithWrap = html => {
   if (!textToNodeRichTextWithWrapEl) {
     textToNodeRichTextWithWrapEl = document.createElement('div')
   }
-  textToNodeRichTextWithWrapEl.innerHTML = html
+  textToNodeRichTextWithWrapEl.innerHTML = sanitizeRichTextHtml(html)
   const childNodes = textToNodeRichTextWithWrapEl.childNodes
   let list = []
   let str = ''
@@ -653,7 +655,7 @@ export const removeRichTextStyes = html => {
   if (!removeRichTextStyesEl) {
     removeRichTextStyesEl = document.createElement('div')
   }
-  removeRichTextStyesEl.innerHTML = html
+  removeRichTextStyesEl.innerHTML = sanitizeRichTextHtml(html)
   // 首先用占位文本替换掉所有的公式
   const formulaList = removeRichTextStyesEl.querySelectorAll('.ql-formula')
   Array.from(formulaList).forEach(el => {

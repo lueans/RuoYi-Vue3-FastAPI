@@ -10,7 +10,8 @@ import {
   nodeRichTextToTextWithWrap,
   getNodeRichTextStyles,
   htmlEscape,
-  compareVersion
+  compareVersion,
+  sanitizeRichTextHtml
 } from '../utils'
 import { richTextSupportStyleList } from '../constants/constant'
 import MindMapNode from '../core/render/node/MindMapNode'
@@ -271,13 +272,16 @@ class RichText {
       this.textEditNode.innerHTML = ''
     } else if (noneEmptyNoneRichText) {
       // 还不是富文本
-      let text = String(nodeText).split(/\n/gim).join('<br>')
+      let text = htmlEscape(String(nodeText)).split(/\n/gim).join('<br>')
       let html = `<p>${text}</p>`
-      this.textEditNode.innerHTML = this.cacheEditingText || html
+      this.textEditNode.innerHTML = sanitizeRichTextHtml(
+        this.cacheEditingText || html
+      )
     } else {
       // 已经是富文本
-      this.textEditNode.innerHTML =
+      this.textEditNode.innerHTML = sanitizeRichTextHtml(
         this.cacheEditingText || (isUndef(nodeText) ? '' : nodeText)
+      )
     }
     this.initQuillEditor()
     this.setQuillContainerMinHeight(originHeight)
@@ -344,8 +348,10 @@ class RichText {
   // 获取当前正在编辑的内容
   getEditText() {
     // https://github.com/slab/quill/issues/4509
-    return this.quill.container.firstChild.innerHTML.replace(/  +/g, match =>
-      '&nbsp;'.repeat(match.length)
+    return sanitizeRichTextHtml(
+      this.quill.container.firstChild.innerHTML.replace(/  +/g, match =>
+        '&nbsp;'.repeat(match.length)
+      )
     )
     // 去除ql-cursor节点
     // https://github.com/wanglin2/mind-map/commit/138cc4b3e824671143f0bf70e5c46796f48520d0

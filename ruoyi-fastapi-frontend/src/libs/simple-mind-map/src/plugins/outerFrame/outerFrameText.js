@@ -2,7 +2,8 @@ import { Text, Rect, G } from '@svgdotjs/svg.js'
 import {
   getStrWithBrFromHtml,
   focusInput,
-  selectAllInput
+  selectAllInput,
+  htmlEscape
 } from '../../utils/index'
 
 const OUTER_FRAME_TEXT_EDIT_WRAP = 'outer-frame-text-edit-warp'
@@ -62,7 +63,9 @@ function showEditTextBox(g) {
   let { defaultOuterFrameText, nodeTextEditZIndex } = this.mindMap.opt
   let scale = this.mindMap.view.scale
   let text = this.getText(this.getNodeRangeFirstNode(node, range))
-  let textLines = (text || defaultOuterFrameText).split(/\n/gim)
+  let textLines = (text || defaultOuterFrameText)
+    .split(/\n/gim)
+    .map(htmlEscape)
   this.textEditNode.style.padding = `${pl}px ${pt}px ${pr}px ${pb}px`
   this.textEditNode.style.fontFamily = style.fontFamily
   this.textEditNode.style.fontSize = style.fontSize * scale + 'px'

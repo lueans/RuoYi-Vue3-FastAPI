@@ -94,6 +94,22 @@ class UserModel(BaseModel):
         self.get_phonenumber()
 
 
+class UserOptionModel(BaseModel):
+    """
+    用户下拉选项响应模型。
+
+    下拉接口只暴露渲染和提交所需字段，避免复用包含密码、联系方式和
+    登录信息的完整用户模型。
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
+
+    user_id: int = Field(description='用户ID')
+    user_name: str = Field(description='用户账号')
+    nick_name: str = Field(description='用户昵称')
+    avatar: str | None = Field(default=None, description='头像地址')
+
+
 class UserRowModel(UserModel):
     """
     用户列表行数据模型

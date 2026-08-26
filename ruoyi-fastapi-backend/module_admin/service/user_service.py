@@ -24,6 +24,7 @@ from module_admin.entity.vo.user_vo import (
     UserDetailModel,
     UserInfoModel,
     UserModel,
+    UserOptionModel,
     UserPageQueryModel,
     UserPostModel,
     UserProfileModel,
@@ -79,7 +80,7 @@ class UserService:
         return user_list_result
 
     @classmethod
-    async def get_user_option_services(cls, query_db: AsyncSession) -> list[dict]:
+    async def get_user_option_services(cls, query_db: AsyncSession) -> list[UserOptionModel]:
         """
         获取用户下拉选项列表service
 
@@ -87,7 +88,7 @@ class UserService:
         :return: 用户选项列表
         """
         user_list = await UserDao.get_user_option_list(query_db)
-        return CamelCaseUtil.transform_result(user_list)
+        return [UserOptionModel.model_validate(user) for user in user_list]
 
     @classmethod
     async def check_user_allowed_services(cls, check_user: UserModel) -> CrudResponseModel:

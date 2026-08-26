@@ -306,6 +306,7 @@ function layout() {
   this.renderExpandBtnPlaceholderRect()
   // 创建协同头像节点
   if (this.createUserListNode) this.createUserListNode()
+  if (this.createCommentNode) this.createCommentNode()
   // 概要节点添加一个带所属节点id的类名
   if (this.isGeneralization && this.generalizationBelongNode) {
     this.group.addClass('generalization_' + this.generalizationBelongNode.uid)

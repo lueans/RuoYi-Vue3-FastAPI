@@ -26,6 +26,7 @@ const READONLY_SAFE_SIDEBARS = new Set([
   'versionHistory',
   'collaboratorManager',
   'noteSidebar',
+  'comments',
 ])
 const GLOBAL_PROPERTY_SIDEBARS = new Set(['baseStyle', 'structure', 'theme'])
 

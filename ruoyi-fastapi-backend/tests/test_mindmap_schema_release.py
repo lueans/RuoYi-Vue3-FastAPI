@@ -160,6 +160,11 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
                 'DROP COLUMN `option_id`',
                 'DROP TABLE IF EXISTS `mindmap_tag_field`',
             ),
+            '20260826_mindmap_comment_idempotency.sql': (
+                'client_request_id',
+                'uk_mindmap_comment_author_request',
+                'ADD UNIQUE INDEX',
+            ),
         }
 
         for filename, markers in contracts.items():
@@ -236,6 +241,18 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
             '20260825_mindmap_markers_to_tags_postgresql.sql',
         )
         self.assertIn('61 个内置标记标签', marker_migration['reason'])
+
+    def test_postgresql_comment_idempotency_migration_repairs_only_wrong_index(self) -> None:
+        sql = (
+            self.MIGRATIONS_DIR / '20260826_mindmap_comment_idempotency_postgresql.sql'
+        ).read_text(encoding='utf-8')
+
+        self.assertIn("existing_columns = ARRAY['created_by', 'client_request_id']::TEXT[]", sql)
+        self.assertIn('IF existing_columns IS NOT NULL AND NOT', sql)
+        self.assertIn(
+            'CREATE UNIQUE INDEX IF NOT EXISTS uk_mindmap_comment_author_request',
+            sql,
+        )
 
 
 if __name__ == '__main__':

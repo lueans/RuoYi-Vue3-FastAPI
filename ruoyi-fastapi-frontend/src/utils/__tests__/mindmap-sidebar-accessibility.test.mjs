@@ -15,6 +15,7 @@ const searchSourceUrl = new URL('Search.vue', componentRoot)
 const toolbarSourceUrl = new URL('Toolbar.vue', componentRoot)
 const navigatorSourceUrl = new URL('NavigatorToolbar.vue', componentRoot)
 const outlineSourceUrl = new URL('OutlineSidebar.vue', componentRoot)
+const shortcutSourceUrl = new URL('ShortcutKey.vue', componentRoot)
 const editSourceUrl = new URL('../../views/mindmap/edit.vue', import.meta.url)
 const editorSourceUrl = new URL('Edit.vue', componentRoot)
 
@@ -85,10 +86,11 @@ test('搜索面板可与右侧栏并存，筛选弹窗仍收起侧栏且退出�
   assert.match(source, /returnTarget\.focus\?\.\(\)/)
 })
 
-test('节点大纲停靠左侧并与左侧搜索面板互斥', async () => {
-  const [sidebar, outline, search, edit] = await Promise.all([
+test('节点大纲和快捷键停靠左侧并与左侧搜索面板互斥', async () => {
+  const [sidebar, outline, shortcut, search, edit] = await Promise.all([
     readFile(sidebarSourceUrl, 'utf8'),
     readFile(outlineSourceUrl, 'utf8'),
+    readFile(shortcutSourceUrl, 'utf8'),
     readFile(searchSourceUrl, 'utf8'),
     readFile(editSourceUrl, 'utf8'),
   ])
@@ -98,10 +100,12 @@ test('节点大纲停靠左侧并与左侧搜索面板互斥', async () => {
   assert.match(sidebar, /&\.isLeft \{[\s\S]*?left: calc\(-1 \* var\(--mindmap-side-panel-width/)
   assert.match(sidebar, /&\.isLeft[\s\S]*?&\.show \{[\s\S]*?left: var\(--mindmap-activity-width/)
   assert.match(outline, /<Sidebar[^>]*placement="left"/)
-  assert.match(search, /store\.activeSidebar === 'outline'[\s\S]*?actions\.setActiveSidebar\(null\)/)
-  assert.match(search, /sidebarName === 'outline' \|\| window\.innerWidth <= 760/)
-  assert.match(edit, /'has-left-panel': activeSidebar === 'outline'/)
-  assert.match(edit, /'has-right-panel': Boolean\(activeSidebar && activeSidebar !== 'outline'\)/)
+  assert.match(shortcut, /<Sidebar[^>]*placement="left"/)
+  assert.match(search, /leftSidebarNames\.has\(store\.activeSidebar\)[\s\S]*?actions\.setActiveSidebar\(null\)/)
+  assert.match(search, /leftSidebarNames\.has\(sidebarName\) \|\| window\.innerWidth <= 760/)
+  assert.match(edit, /const leftSidebarNames = new Set\(\['outline', 'shortcutKey'\]\)/)
+  assert.match(edit, /'has-left-panel': isLeftSidebarActive/)
+  assert.match(edit, /'has-right-panel': Boolean\(activeSidebar && !isLeftSidebarActive\)/)
   assert.match(edit, /&\.has-left-panel \{[\s\S]*?--mindmap-workspace-left:/)
 })
 

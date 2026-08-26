@@ -4,8 +4,8 @@
     :class="{
       'has-command-bar': documentLoaded && !isZenMode && !isReadonly,
       'has-search-panel': searchPanelOpen,
-      'has-left-panel': activeSidebar === 'outline',
-      'has-right-panel': Boolean(activeSidebar && activeSidebar !== 'outline'),
+      'has-left-panel': isLeftSidebarActive,
+      'has-right-panel': Boolean(activeSidebar && !isLeftSidebarActive),
       'is-dark': isDark,
     }"
   >
@@ -188,6 +188,23 @@
               </button>
             </el-tooltip>
             <el-tooltip
+              :content="activeSidebar === 'comments' ? '关闭评论' : '查看节点评论'"
+              placement="bottom"
+              :show-after="300"
+            >
+              <button
+                class="header-icon-btn comment-action-btn"
+                :class="{ 'is-active': activeSidebar === 'comments' }"
+                type="button"
+                :aria-label="activeSidebar === 'comments' ? '关闭脑图评论' : '打开脑图评论'"
+                :aria-pressed="activeSidebar === 'comments'"
+                @click="openComments"
+              >
+                <el-icon><ChatDotRound /></el-icon>
+                <span class="header-action-label">评论</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip
               :content="activeSidebar === 'versionHistory' ? '关闭版本历史' : '查看版本历史'"
               placement="bottom"
               :show-after="300"
@@ -332,7 +349,7 @@
 </template>
 
 <script setup name="MindmapEditorPage">
-import { ArrowLeft, Edit as EditIcon, Filter, Loading, Search, Clock, User, Refresh, DocumentChecked, List, Operation, Close } from '@element-plus/icons-vue'
+import { ArrowLeft, Edit as EditIcon, Filter, Loading, Search, Clock, User, Refresh, DocumentChecked, List, Operation, Close, ChatDotRound } from '@element-plus/icons-vue'
 import Toolbar from '@/components/MindMap/Toolbar.vue'
 import MindMapEditor from '@/components/MindMap/Edit.vue'
 import NavigatorToolbar from '@/components/MindMap/NavigatorToolbar.vue'
@@ -412,6 +429,8 @@ const metadataDialogRef = ref(null)
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const isDark = computed(() => store.localConfig.isDark)
 const activeSidebar = computed(() => store.activeSidebar)
+const leftSidebarNames = new Set(['outline', 'shortcutKey'])
+const isLeftSidebarActive = computed(() => leftSidebarNames.has(activeSidebar.value))
 const mindMapInstance = computed(() => editRef.value?.mindMap || null)
 const collaborators = computed(() => editRef.value?.getCollaborators?.() || [])
 const saveStatus = computed(() => {
@@ -577,6 +596,10 @@ function openOutline() {
 
 function openVersionHistory() {
   toggleSidebar('versionHistory')
+}
+
+function openComments() {
+  toggleSidebar('comments')
 }
 
 function openCollaboratorManager() {

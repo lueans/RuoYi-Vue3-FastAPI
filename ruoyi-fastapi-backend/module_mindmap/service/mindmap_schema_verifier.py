@@ -17,6 +17,8 @@ RETENTION_INDEX_MIGRATION = '20260819_mindmap_retention_indexes.sql'
 TAG_CATEGORY_INTEGRITY_MIGRATION = '20260819_mindmap_tag_category_integrity.sql'
 NODE_TAG_INTEGRITY_MIGRATION = '20260820_mindmap_node_tag_integrity.sql'
 UNIFIED_TAG_MIGRATION = '20260824_mindmap_unified_tags.sql'
+COMMENT_MIGRATION = '20260825_mindmap_comments.sql'
+COMMENT_IDEMPOTENCY_MIGRATION = '20260826_mindmap_comment_idempotency.sql'
 
 REQUIRED_TABLES = dict.fromkeys(
     (
@@ -33,6 +35,8 @@ REQUIRED_TABLES = dict.fromkeys(
 ) | {
     'mindmap_change_log': INCREMENTAL_MIGRATION,
     'mindmap_creation_request': CREATION_IDEMPOTENCY_MIGRATION,
+    'mindmap_comment_thread': COMMENT_MIGRATION,
+    'mindmap_comment': COMMENT_MIGRATION,
 }
 
 REQUIRED_COLUMNS = {
@@ -55,6 +59,7 @@ REQUIRED_COLUMNS = {
     ('mindmap_version', 'tag_snapshots'): VERSION_MIGRATION,
     ('mindmap_folder', 'active_name'): FOLDER_MIGRATION,
     ('mindmap_tag_category', 'category_type'): UNIFIED_TAG_MIGRATION,
+    ('mindmap_comment', 'client_request_id'): COMMENT_IDEMPOTENCY_MIGRATION,
 } | {
     ('mindmap_creation_request', column): CREATION_IDEMPOTENCY_MIGRATION
     for column in (
@@ -83,6 +88,14 @@ REQUIRED_INDEXES = {
     ('mindmap_creation_request', 'idx_mindmap_creation_created'): CREATION_IDEMPOTENCY_MIGRATION,
     ('mindmap_creation_request', 'idx_mindmap_creation_retention'): RETENTION_INDEX_MIGRATION,
     ('mindmap_change_log', 'idx_mindmap_change_retention'): RETENTION_INDEX_MIGRATION,
+    ('mindmap_comment_thread', 'idx_mindmap_comment_thread_file'): COMMENT_MIGRATION,
+    ('mindmap_comment_thread', 'idx_mindmap_comment_thread_node'): COMMENT_MIGRATION,
+    ('mindmap_comment', 'idx_mindmap_comment_thread'): COMMENT_MIGRATION,
+    ('mindmap_comment', 'idx_mindmap_comment_author'): COMMENT_MIGRATION,
+    (
+        'mindmap_comment',
+        'uk_mindmap_comment_author_request',
+    ): COMMENT_IDEMPOTENCY_MIGRATION,
     (
         'mindmap_tag_category',
         'uq_mindmap_tag_category_owner_name',
@@ -129,6 +142,26 @@ REQUIRED_INDEX_DEFINITIONS = {
     ),
     ('mindmap_tag_category', 'uq_mindmap_tag_category_owner_name'): (
         ('owner_id', 'name'),
+        True,
+    ),
+    ('mindmap_comment_thread', 'idx_mindmap_comment_thread_file'): (
+        ('mindmap_id', 'status', 'last_comment_time'),
+        False,
+    ),
+    ('mindmap_comment_thread', 'idx_mindmap_comment_thread_node'): (
+        ('mindmap_id', 'node_uid', 'status'),
+        False,
+    ),
+    ('mindmap_comment', 'idx_mindmap_comment_thread'): (
+        ('thread_id', 'created_time'),
+        False,
+    ),
+    ('mindmap_comment', 'idx_mindmap_comment_author'): (
+        ('created_by', 'created_time'),
+        False,
+    ),
+    ('mindmap_comment', 'uk_mindmap_comment_author_request'): (
+        ('created_by', 'client_request_id'),
         True,
     ),
 }
@@ -232,22 +265,25 @@ def inspect_mindmap_schema(connection: Connection) -> dict[str, Any]:
     }
 
 
-def find_mindmap_schema_issues(snapshot: dict[str, Any]) -> list[MindmapSchemaIssue]:
-    """返回缺失迁移产物；不检查或输出任何业务数据。"""
-    tables = set(snapshot.get('tables') or ())
+def _find_required_schema_issues(snapshot: dict[str, Any], tables: set[str]) -> list[MindmapSchemaIssue]:
     columns = snapshot.get('columns') or {}
+    issues = [
+        MindmapSchemaIssue('table', table, migration)
+        for table, migration in REQUIRED_TABLES.items()
+        if table not in tables
+    ]
+    issues.extend(
+        MindmapSchemaIssue('column', f'{table}.{column}', migration)
+        for (table, column), migration in REQUIRED_COLUMNS.items()
+        if table in tables and column not in set(columns.get(table) or ())
+    )
+    return issues
+
+
+def _find_required_index_issues(snapshot: dict[str, Any], tables: set[str]) -> list[MindmapSchemaIssue]:
     indexes = snapshot.get('indexes') or {}
     index_definitions = snapshot.get('indexDefinitions')
-    foreign_keys = snapshot.get('foreignKeys') or {}
-    foreign_key_definitions = snapshot.get('foreignKeyDefinitions')
     issues: list[MindmapSchemaIssue] = []
-
-    for table, migration in REQUIRED_TABLES.items():
-        if table not in tables:
-            issues.append(MindmapSchemaIssue('table', table, migration))
-    for (table, column), migration in REQUIRED_COLUMNS.items():
-        if table in tables and column not in set(columns.get(table) or ()):
-            issues.append(MindmapSchemaIssue('column', f'{table}.{column}', migration))
     for (table, index), migration in REQUIRED_INDEXES.items():
         if table in tables and index not in set(indexes.get(table) or ()):
             issues.append(MindmapSchemaIssue('index', f'{table}.{index}', migration))
@@ -259,6 +295,13 @@ def find_mindmap_schema_issues(snapshot: dict[str, Any]) -> list[MindmapSchemaIs
                 or bool(actual.get('unique')) != expected_unique
             ):
                 issues.append(MindmapSchemaIssue('index_definition', f'{table}.{index}', migration))
+    return issues
+
+
+def _find_required_foreign_key_issues(snapshot: dict[str, Any], tables: set[str]) -> list[MindmapSchemaIssue]:
+    foreign_keys = snapshot.get('foreignKeys') or {}
+    foreign_key_definitions = snapshot.get('foreignKeyDefinitions')
+    issues: list[MindmapSchemaIssue] = []
     for (table, foreign_key), migration in REQUIRED_FOREIGN_KEYS.items():
         if table in tables and foreign_key not in set(foreign_keys.get(table) or ()):
             issues.append(MindmapSchemaIssue('foreign_key', f'{table}.{foreign_key}', migration))
@@ -275,9 +318,17 @@ def find_mindmap_schema_issues(snapshot: dict[str, Any]) -> list[MindmapSchemaIs
                 issues.append(
                     MindmapSchemaIssue('foreign_key_definition', f'{table}.{foreign_key}', migration)
                 )
+    return issues
 
-    for table in FORBIDDEN_TABLES & tables:
-        issues.append(MindmapSchemaIssue('legacy_table', table, UNIFIED_TAG_MIGRATION))
+
+def _find_forbidden_schema_issues(snapshot: dict[str, Any], tables: set[str]) -> list[MindmapSchemaIssue]:
+    columns = snapshot.get('columns') or {}
+    indexes = snapshot.get('indexes') or {}
+    foreign_keys = snapshot.get('foreignKeys') or {}
+    issues = [
+        MindmapSchemaIssue('legacy_table', table, UNIFIED_TAG_MIGRATION)
+        for table in FORBIDDEN_TABLES & tables
+    ]
     for table, column in FORBIDDEN_COLUMNS:
         if table in tables and column in set(columns.get(table) or ()):
             issues.append(MindmapSchemaIssue('legacy_column', f'{table}.{column}', UNIFIED_TAG_MIGRATION))
@@ -289,5 +340,15 @@ def find_mindmap_schema_issues(snapshot: dict[str, Any]) -> list[MindmapSchemaIs
             issues.append(MindmapSchemaIssue(
                 'legacy_foreign_key', f'{table}.{foreign_key}', UNIFIED_TAG_MIGRATION,
             ))
+    return issues
+
+
+def find_mindmap_schema_issues(snapshot: dict[str, Any]) -> list[MindmapSchemaIssue]:
+    """返回缺失迁移产物；不检查或输出任何业务数据。"""
+    tables = set(snapshot.get('tables') or ())
+    issues = _find_required_schema_issues(snapshot, tables)
+    issues.extend(_find_required_index_issues(snapshot, tables))
+    issues.extend(_find_required_foreign_key_issues(snapshot, tables))
+    issues.extend(_find_forbidden_schema_issues(snapshot, tables))
 
     return sorted(issues, key=lambda item: (item.migration, item.kind, item.object_name))

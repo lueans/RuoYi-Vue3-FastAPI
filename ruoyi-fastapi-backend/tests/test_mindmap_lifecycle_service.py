@@ -186,7 +186,7 @@ class MindmapLifecycleServiceTest(unittest.IsolatedAsyncioTestCase):
         locked = MagicMock()
         locked.scalars.return_value = [SimpleNamespace(id=8, owner_id=42)]
         db = SimpleNamespace(
-            execute=AsyncMock(side_effect=[locked, *(MagicMock() for _ in range(6))]),
+            execute=AsyncMock(side_effect=[locked, *(MagicMock() for _ in range(8))]),
             commit=AsyncMock(),
             rollback=AsyncMock(),
         )
@@ -205,7 +205,14 @@ class MindmapLifecycleServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.message, '已永久删除')
-        self.assertEqual(db.execute.await_count, 7)
+        self.assertEqual(db.execute.await_count, 9)
+        dependency_deletes = [
+            call.args[0].table.name for call in db.execute.await_args_list[1:]
+        ]
+        self.assertEqual(
+            dependency_deletes[:2],
+            ['mindmap_comment', 'mindmap_comment_thread'],
+        )
         delete_files_mock.assert_awaited_once_with(db, [8])
         permanent_delete_mock.assert_awaited_once_with(db, [8], 42)
         db.commit.assert_awaited_once()

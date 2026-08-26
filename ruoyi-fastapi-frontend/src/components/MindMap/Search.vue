@@ -247,10 +247,55 @@
     </div>
     </template>
   </div>
+  <aside
+    v-if="showCaseReviewToolbar"
+    class="caseReviewToolbar"
+    :class="{ isDark }"
+    aria-label="用例评审导航"
+  >
+    <div class="caseReviewStatus" role="status" aria-live="polite">
+      <span>{{ caseReviewProgressText }}</span>
+      <strong v-if="currentReviewCaseTitle" :title="currentReviewCaseTitle">
+        {{ currentReviewCaseTitle }}
+      </strong>
+    </div>
+    <div class="caseReviewActions" role="toolbar" aria-label="切换评审用例">
+      <el-button
+        size="small"
+        :disabled="reviewCaseNodes.length === 0"
+        @click="startCaseReview"
+      >
+        <el-icon><RefreshLeft /></el-icon>
+        从头查看用例
+      </el-button>
+      <el-button
+        type="primary"
+        size="small"
+        :disabled="!canViewNextCase"
+        @click="viewNextCase"
+      >
+        查看下一个用例
+        <el-icon><ArrowRight /></el-icon>
+      </el-button>
+      <el-button v-if="isCaseReviewing" text size="small" @click="exitCaseReview">
+        返回筛选结果
+      </el-button>
+    </div>
+  </aside>
 </template>
 
 <script setup>
-import { CirclePlusFilled, Close, Edit, Filter, Loading, RemoveFilled, Search } from '@element-plus/icons-vue'
+import {
+  ArrowRight,
+  CirclePlusFilled,
+  Close,
+  Edit,
+  Filter,
+  Loading,
+  RefreshLeft,
+  RemoveFilled,
+  Search,
+} from '@element-plus/icons-vue'
 import bus from './useEventBus'
 import { actions, store } from './useStore'
 import { getTagSuggestions } from '@/api/mindmap/tag'
@@ -258,8 +303,10 @@ import { searchMindmapNodes } from '@/api/mindmap/mindmap'
 import {
   buildMindmapSearchHighlightSegments,
   buildMindmapTagFilterOptions,
+  collectMindmapCaseReviewNodes,
   isMindmapCaseTitleData,
   matchesMindmapFilterText,
+  resolveMindmapCaseReviewIndex,
   resolveMindmapSearchNavigationIndex,
   resolveMindmapSearchResultListHeight,
 } from '@/utils/mindmap-search'
@@ -271,6 +318,7 @@ const props = defineProps({
 
 const isDark = computed(() => store.localConfig.isDark)
 const isReadonly = computed(() => store.isReadonly)
+const leftSidebarNames = new Set(['outline', 'shortcutKey'])
 
 const show = ref(false)
 const panelMode = ref('search')
@@ -312,6 +360,8 @@ const serverPageNum = ref(0)
 const filterActive = ref(false)
 const activeCanvasFilterSource = ref(null)
 const filteredMatchCount = ref(0)
+const reviewCaseNodes = shallowRef([])
+const reviewCaseIndex = ref(-1)
 let searchRequestId = 0
 let tagOptionsRequestId = 0
 let focusReturnTarget = null
@@ -333,6 +383,33 @@ const hasFilterCriteria = computed(() => Boolean(searchText.value.trim() || sele
 const searchCanvasFilterActive = computed(() => (
   filterActive.value && activeCanvasFilterSource.value === 'search'
 ))
+const isCaseReviewing = computed(() => (
+  filterActive.value
+  && activeCanvasFilterSource.value === 'review'
+  && reviewCaseIndex.value >= 0
+  && reviewCaseIndex.value < reviewCaseNodes.value.length
+))
+const showCaseReviewToolbar = computed(() => (
+  filterActive.value
+  && confirmedFilterRows.value.length > 0
+  && ['conditions', 'review'].includes(activeCanvasFilterSource.value)
+  && !(show.value && panelMode.value === 'filter')
+))
+const canViewNextCase = computed(() => (
+  isCaseReviewing.value
+  && reviewCaseIndex.value < reviewCaseNodes.value.length - 1
+))
+const currentReviewCaseTitle = computed(() => (
+  isCaseReviewing.value
+    ? getMindmapNodeText(reviewCaseNodes.value[reviewCaseIndex.value]).trim()
+    : ''
+))
+const caseReviewProgressText = computed(() => {
+  const count = reviewCaseNodes.value.length
+  if (!count) return '未找到可评审用例'
+  if (!isCaseReviewing.value) return `共 ${count} 个用例`
+  return `第 ${reviewCaseIndex.value + 1} / ${count} 个用例`
+})
 const activeSearchResultId = computed(() => {
   const index = currentIndex.value - 1
   return index >= 0 && index < searchResultList.value.length
@@ -523,6 +600,13 @@ function getDocumentFilterMatches(keyword = searchText.value.trim()) {
     })
     return matches
   }
+  if (activeCanvasFilterSource.value === 'review') {
+    const currentCase = reviewCaseNodes.value[reviewCaseIndex.value]
+    if (!currentCase) return []
+    const matches = []
+    walkDocumentNodeTree(currentCase, node => matches.push(node))
+    return matches
+  }
   if (activeCanvasFilterSource.value !== 'conditions') return []
   const activeRows = confirmedFilterRows.value
   if (activeRows.length > 0) {
@@ -571,6 +655,95 @@ function getDocumentFilterMatches(keyword = searchText.value.trim()) {
   return []
 }
 
+function getMatchingCaseTitleNodes() {
+  const root = props.mindMap?.renderer?.renderTree
+  return collectMindmapCaseReviewNodes(root, confirmedFilterRows.value, {
+    getChildren: node => (
+      Array.isArray(node?.nodeData?.children) ? node.nodeData.children : node?.children
+    ),
+    getData: getMindmapNodeData,
+    getText: getMindmapNodeText,
+  })
+}
+
+function refreshReviewCaseNodes({ preserveCurrent = false } = {}) {
+  const previousIndex = reviewCaseIndex.value
+  const previousUid = preserveCurrent && previousIndex >= 0
+    ? getMindmapNodeUid(reviewCaseNodes.value[previousIndex])
+    : null
+  const nextCases = getMatchingCaseTitleNodes()
+  reviewCaseNodes.value = nextCases
+
+  if (!preserveCurrent || previousUid === null) {
+    reviewCaseIndex.value = -1
+    return
+  }
+  const currentIndex = nextCases.findIndex(node => getMindmapNodeUid(node) === previousUid)
+  if (currentIndex >= 0) {
+    reviewCaseIndex.value = currentIndex
+    return
+  }
+  if (activeCanvasFilterSource.value === 'review' && nextCases.length > 0) {
+    reviewCaseIndex.value = Math.min(previousIndex, nextCases.length - 1)
+    return
+  }
+  reviewCaseIndex.value = -1
+  if (activeCanvasFilterSource.value === 'review') {
+    activeCanvasFilterSource.value = 'conditions'
+  }
+}
+
+function focusReviewCase(index) {
+  const nodeUid = getMindmapNodeUid(reviewCaseNodes.value[index])
+  if (nodeUid === null) return
+  nextTick(() => {
+    props.mindMap?.execCommand?.('GO_TARGET_NODE', nodeUid)
+    props.mindMap?.renderer?.findNodeByUid?.(nodeUid)?.active?.()
+  })
+}
+
+function activateCaseReview(index) {
+  if (index < 0 || index >= reviewCaseNodes.value.length) return false
+  reviewCaseIndex.value = index
+  activeCanvasFilterSource.value = 'review'
+  filterActive.value = true
+  applyCanvasFilter(() => focusReviewCase(index))
+  return true
+}
+
+function startCaseReview() {
+  refreshReviewCaseNodes()
+  const firstIndex = resolveMindmapCaseReviewIndex(
+    reviewCaseIndex.value,
+    reviewCaseNodes.value.length,
+    'restart',
+  )
+  activateCaseReview(firstIndex)
+}
+
+function viewNextCase() {
+  if (!isCaseReviewing.value) return
+  const nextIndex = resolveMindmapCaseReviewIndex(
+    reviewCaseIndex.value,
+    reviewCaseNodes.value.length,
+    'next',
+  )
+  if (nextIndex === reviewCaseIndex.value) return
+  activateCaseReview(nextIndex)
+}
+
+function exitCaseReview() {
+  if (!isCaseReviewing.value) return
+  reviewCaseIndex.value = -1
+  activeCanvasFilterSource.value = 'conditions'
+  applyCanvasFilter()
+}
+
+function resetCaseReview() {
+  reviewCaseNodes.value = []
+  reviewCaseIndex.value = -1
+}
+
 function createDocumentTreeIndex(root) {
   const parentUidByUid = new Map()
   const nodeByUid = new Map()
@@ -583,15 +756,21 @@ function createDocumentTreeIndex(root) {
   return { parentUidByUid, nodeByUid }
 }
 
-function applyCanvasFilter() {
+function applyCanvasFilter(afterRender) {
   // 不要在筛选重排前清空旧节点的隐藏标记。重排后的 runtime tree 只包含
   // 当前可见节点，若先清空，已经被裁掉的旧 SVG 节点将无法再次遍历并隐藏。
   filteredMatchCount.value = 0
-  if (!filterActive.value) return
+  if (!filterActive.value) {
+    afterRender?.()
+    return
+  }
   const renderer = props.mindMap?.renderer
   const runtimeRoot = renderer?.root
   const documentRoot = renderer?.renderTree
-  if (!runtimeRoot || !documentRoot) return
+  if (!runtimeRoot || !documentRoot) {
+    afterRender?.()
+    return
+  }
 
   const { parentUidByUid } = createDocumentTreeIndex(documentRoot)
   const rootUid = getMindmapNodeUid(documentRoot) || String(runtimeRoot.uid)
@@ -651,7 +830,8 @@ function applyCanvasFilter() {
       setCanvasElementFiltered(item?.generalizationNode?.group || item?.generalizationNode, hidden)
     })
   })
-  renderer.setTransientVisibleNodeUids?.(visibleNodeUids)
+  const renderScheduled = renderer.setTransientVisibleNodeUids?.(visibleNodeUids, afterRender)
+  if (!renderScheduled) afterRender?.()
 }
 
 function toggleCanvasFilter() {
@@ -666,7 +846,11 @@ function toggleCanvasFilter() {
 }
 
 function reapplyCanvasFilter() {
-  if (filterActive.value) nextTick(applyCanvasFilter)
+  if (!filterActive.value) return
+  if (['conditions', 'review'].includes(activeCanvasFilterSource.value)) {
+    refreshReviewCaseNodes({ preserveCurrent: true })
+  }
+  nextTick(applyCanvasFilter)
 }
 
 function navigateSearchResults(key, { focus = false } = {}) {
@@ -700,7 +884,7 @@ function showSearch() {
   if (!show.value) {
     focusReturnTarget = document.activeElement
   }
-  if (store.activeSidebar === 'outline') {
+  if (leftSidebarNames.has(store.activeSidebar)) {
     actions.setActiveSidebar(null)
   }
   if (window.innerWidth <= 760 && store.activeSidebar) {
@@ -734,6 +918,7 @@ function removeFilterCondition(index) {
 function clearFilterConditions() {
   filterRows.value = [createFilterRow('title'), createFilterRow('any')]
   confirmedFilterRows.value = []
+  resetCaseReview()
   restoreCanvasVisibility()
 }
 
@@ -742,10 +927,12 @@ function confirmFilterConditions() {
     .map(row => ({ ...row, value: String(row.value || '').trim() }))
     .filter(row => row.value)
   if (confirmedFilterRows.value.length === 0) {
+    resetCaseReview()
     restoreCanvasVisibility()
   } else {
     activeCanvasFilterSource.value = 'conditions'
     filterActive.value = true
+    refreshReviewCaseNodes()
     applyCanvasFilter()
   }
   show.value = false
@@ -1017,6 +1204,7 @@ function close(options = {}) {
   const restoreFocus = options?.restoreFocus !== false
   const forceReset = options?.forceReset === true
   const searchMindMap = options?.mindMap || props.mindMap
+  if (forceReset) resetCaseReview()
   if (panelMode.value === 'filter' && !forceReset) {
     focusReturnTarget = null
     show.value = false
@@ -1033,7 +1221,7 @@ function close(options = {}) {
   hideReplaceInput()
   restoreAutoEnterTextEdit()
   resetSearchResults(searchMindMap, {
-    preserveCanvasFilter: activeCanvasFilterSource.value === 'conditions',
+    preserveCanvasFilter: ['conditions', 'review'].includes(activeCanvasFilterSource.value),
   })
   if (wasShown && restoreFocus) {
     nextTick(() => {
@@ -1107,7 +1295,7 @@ function onSearchResultItemClick(index) {
 watch(searchText, (val) => {
   if (isUndef(val) && !selectedTagId.value) {
     resetSearchResults(props.mindMap, {
-      preserveCanvasFilter: activeCanvasFilterSource.value === 'conditions',
+      preserveCanvasFilter: ['conditions', 'review'].includes(activeCanvasFilterSource.value),
     })
     return
   }
@@ -1144,7 +1332,7 @@ watch(isReadonly, (readonly) => {
 watch(() => store.activeSidebar, (sidebarName) => {
   if (
     sidebarName
-    && (sidebarName === 'outline' || window.innerWidth <= 760)
+    && (leftSidebarNames.has(sidebarName) || window.innerWidth <= 760)
     && show.value
     && panelMode.value === 'search'
   ) {
@@ -1762,6 +1950,71 @@ onBeforeUnmount(() => {
   }
 }
 
+.caseReviewToolbar {
+  position: fixed;
+  top: calc(var(--mindmap-shell-top, 52px) + 12px);
+  left: 50%;
+  z-index: 2000;
+  display: flex;
+  max-width: min(760px, calc(100vw - 120px));
+  min-height: 44px;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 9px 7px 14px;
+  transform: translateX(-50%);
+  border: 1px solid #dfe3e8;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(31, 35, 41, 0.14);
+  backdrop-filter: blur(10px);
+
+  .caseReviewStatus {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+
+    span {
+      color: #646a73;
+      font-size: 11px;
+      line-height: 15px;
+      white-space: nowrap;
+    }
+
+    strong {
+      overflow: hidden;
+      max-width: 230px;
+      color: #1f2329;
+      font-size: 13px;
+      line-height: 18px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .caseReviewActions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+
+    :deep(.el-button) {
+      min-height: 32px;
+      margin: 0;
+      border-radius: 7px;
+    }
+  }
+
+  &.isDark {
+    border-color: #4b5057;
+    background: rgba(37, 40, 45, 0.96);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+
+    .caseReviewStatus span { color: #a6abb3; }
+    .caseReviewStatus strong { color: #f2f3f5; }
+  }
+}
+
 :global(.smm-filter-hidden) {
   display: none !important;
 }
@@ -1773,6 +2026,25 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 760px) {
+  .caseReviewToolbar {
+    top: calc(var(--mindmap-shell-top, 60px) + 8px);
+    right: 8px;
+    left: 8px;
+    max-width: none;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+    transform: none;
+
+    .caseReviewStatus strong { max-width: none; }
+    .caseReviewActions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+
+      :deep(.el-button:last-child) { grid-column: 1 / -1; }
+    }
+  }
+
   .searchContainer:not(.filterDialog) {
     top: var(--mindmap-shell-top, 60px);
     right: 0;

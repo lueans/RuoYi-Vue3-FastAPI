@@ -153,7 +153,7 @@ test('画布筛选从完整文档树计算命中节点并保留祖先路径', as
   ])
 
   assert.match(source, /aria-label="画布节点筛选"/)
-  assert.match(source, /function applyCanvasFilter\(\)/)
+  assert.match(source, /function applyCanvasFilter\(afterRender\)/)
   assert.match(source, /function getDocumentFilterMatches\(keyword = searchText\.value\.trim\(\)\)/)
   assert.match(source, /const root = props\.mindMap\?\.renderer\?\.renderTree/)
   assert.match(source, /data\.text !== undefined && data\.text !== null/)
@@ -172,10 +172,10 @@ test('画布筛选从完整文档树计算命中节点并保留祖先路径', as
   assert.match(source, /lineRenderVersion === node\._lineRenderVersion/)
   assert.match(source, /isSharedBranchLine[\s\S]*?Boolean\(node\.children\?\.length\)[\s\S]*?visibleNodeUids\.has\(targetUid\)/)
   assert.doesNotMatch(source, /node\.parent\._lines\?\.\[childIndex\]/)
-  assert.match(source, /setTransientVisibleNodeUids\?\.\(visibleNodeUids\)/)
+  assert.match(source, /setTransientVisibleNodeUids\?\.\(visibleNodeUids, afterRender\)/)
   assert.match(source, /clearTransientVisibleNodeUids\?\.\(clearElements\)/)
   const applyFilterSource = source.slice(
-    source.indexOf('function applyCanvasFilter()'),
+    source.indexOf('function applyCanvasFilter(afterRender)'),
     source.indexOf('function toggleCanvasFilter()'),
   )
   assert.match(applyFilterSource, /filteredMatchCount\.value = 0/)
@@ -250,6 +250,23 @@ test('筛选面板复刻飞书的条件行、增删清空与确认结构', async
   assert.match(source, /const anyNodeRows = activeRows\.filter\(row => row\.field !== 'title'\)/)
   assert.match(source, /isMindmapCaseTitleData\(data\)[\s\S]*?titleRows\.every/)
   assert.match(source, /matchedCaseTitleNodes\.forEach\(caseTitleNode => \{[\s\S]*?walkDocumentNodeTree\(caseTitleNode/)
+})
+
+test('筛选结果提供从头与下一用例评审导航并展示完整用例子树', async () => {
+  const source = await readFile(searchSourceUrl, 'utf8')
+
+  assert.match(source, /aria-label="用例评审导航"/)
+  assert.match(source, /从头查看用例/)
+  assert.match(source, /查看下一个用例/)
+  assert.match(source, /返回筛选结果/)
+  assert.match(source, /function getMatchingCaseTitleNodes\(\)/)
+  assert.match(source, /activeCanvasFilterSource\.value === 'review'[\s\S]*?walkDocumentNodeTree\(currentCase, node => matches\.push\(node\)\)/)
+  assert.match(source, /function startCaseReview\(\)[\s\S]*?'restart'/)
+  assert.match(source, /function viewNextCase\(\)[\s\S]*?'next'/)
+  assert.match(source, /reviewCaseIndex\.value < reviewCaseNodes\.value\.length - 1/)
+  assert.match(source, /setTransientVisibleNodeUids\?\.\(visibleNodeUids, afterRender\)/)
+  assert.match(source, /execCommand\?\.\('GO_TARGET_NODE', nodeUid\)/)
+  assert.match(source, /showCaseReviewToolbar[\s\S]*!\(show\.value && panelMode\.value === 'filter'\)/)
 })
 
 test('上下文菜单使用数据驱动定义、原生禁用和标准键盘导航', async () => {

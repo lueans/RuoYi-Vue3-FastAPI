@@ -123,6 +123,26 @@ class MindmapSchemaVerifierTest(unittest.TestCase):
             [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
         )
 
+    def test_comment_idempotency_column_and_unique_key_are_release_blocking(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['columns']['mindmap_comment'].remove('client_request_id')
+        snapshot['indexDefinitions']['mindmap_comment'][
+            'uk_mindmap_comment_author_request'
+        ]['unique'] = False
+
+        issues = [item.to_dict() for item in find_mindmap_schema_issues(snapshot)]
+
+        self.assertIn({
+            'kind': 'column',
+            'object_name': 'mindmap_comment.client_request_id',
+            'migration': '20260826_mindmap_comment_idempotency.sql',
+        }, issues)
+        self.assertIn({
+            'kind': 'index_definition',
+            'object_name': 'mindmap_comment.uk_mindmap_comment_author_request',
+            'migration': '20260826_mindmap_comment_idempotency.sql',
+        }, issues)
+
     def test_retention_index_column_order_is_release_blocking(self) -> None:
         snapshot = complete_snapshot()
         snapshot['indexDefinitions']['mindmap_change_log'][

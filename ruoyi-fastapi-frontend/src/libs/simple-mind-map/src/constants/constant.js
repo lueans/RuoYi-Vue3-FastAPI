@@ -236,7 +236,9 @@ export const cssContent = `
     display: block;
   }
 
-  .smm-node.active .smm-hover-node, .smm-node-highlight .smm-hover-node{
+  .smm-node.active .smm-hover-node,
+  .smm-node-highlight .smm-hover-node,
+  .smm-node-comment-target .smm-hover-node{
     display: block;
     opacity: 1;
     stroke-width: 2;

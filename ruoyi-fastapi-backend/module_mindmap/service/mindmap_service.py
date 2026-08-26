@@ -2292,10 +2292,20 @@ class MindmapService:
 
         try:
             from module_mindmap.entity.do.mindmap_collaborator_do import MindmapCollaborator  # noqa: PLC0415
+            from module_mindmap.entity.do.mindmap_comment_do import (  # noqa: PLC0415
+                MindmapComment,
+                MindmapCommentThread,
+            )
             from module_mindmap.entity.do.mindmap_share_do import MindmapShare  # noqa: PLC0415
             from module_mindmap.entity.do.mindmap_version_do import MindmapVersion  # noqa: PLC0415
             from module_mindmap.entity.do.mindmap_ws_state_do import MindmapWsState  # noqa: PLC0415
 
+            await query_db.execute(sa_delete(MindmapComment).where(
+                MindmapComment.mindmap_id.in_(id_list)
+            ))
+            await query_db.execute(sa_delete(MindmapCommentThread).where(
+                MindmapCommentThread.mindmap_id.in_(id_list)
+            ))
             for model in (MindmapVersion, MindmapShare, MindmapCollaborator, MindmapWsState):
                 await query_db.execute(sa_delete(model).where(model.mindmap_id.in_(id_list)))
             await MindmapDocumentService.delete_files(query_db, id_list)

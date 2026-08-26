@@ -31,6 +31,7 @@
       v-if="mindMap && activeSidebar === 'nodeTagSidebar'"
       :mindMap="mindMap"
     />
+    <CommentSidebar v-if="mindMap && props.mindmapId" :mindMap="mindMap" :mindmapId="props.mindmapId" />
     <Search v-if="mindMap" :mindMap="mindMap" :mindmapId="props.mindmapId" />
     <SidebarTrigger v-if="!isZenMode" />
     <Setting
@@ -164,6 +165,7 @@ import FormulaSidebar from './FormulaSidebar.vue'
 import OutlineEdit from './OutlineEdit.vue'
 import VersionHistory from './VersionHistory.vue'
 import CollaboratorManager from './CollaboratorManager.vue'
+import CommentSidebar from './CommentSidebar.vue'
 
 // Register all plugins and themes
 registerPlugins('full')
@@ -707,6 +709,9 @@ function createYjsSyncInstance() {
     },
     onTagDefinitionChanged: (data) => {
       bus.emit('managed_tag_definition_changed', data)
+    },
+    onCommentChanged: (data) => {
+      bus.emit('comment_changed', data)
     },
     onDocumentApplied: (root, meta) => {
       crossNodeOperationSnapshot = extractCrossNodeState(root)

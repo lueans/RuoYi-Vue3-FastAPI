@@ -6,8 +6,10 @@ import { replaceAllLiteralText } from '../../libs/simple-mind-map/src/utils/lite
 import {
   buildMindmapSearchHighlightSegments,
   buildMindmapTagFilterOptions,
+  collectMindmapCaseReviewNodes,
   isMindmapCaseTitleData,
   matchesMindmapFilterText,
+  resolveMindmapCaseReviewIndex,
   resolveMindmapSearchNavigationIndex,
   resolveMindmapSearchResultListHeight,
 } from '../mindmap-search.js'
@@ -63,6 +65,33 @@ test('用例标题字段只识别明确标记的节点数据', () => {
   assert.equal(isMindmapCaseTitleData({}), false)
 })
 
+test('用例评审按标题和用例子树条件筛选并保持文档顺序', () => {
+  const caseA = {
+    data: { text: '登录成功', tag: ['用例标题'] },
+    children: [{ data: { text: '优先级 P0' }, children: [] }],
+  }
+  const caseB = {
+    data: { text: '登录失败', tag: [{ text: '用例标题' }] },
+    children: [{ data: { text: '优先级 P1' }, children: [] }],
+  }
+  const root = { data: { text: '登录评审' }, children: [caseA, caseB] }
+  const options = {
+    getData: node => node.data,
+    getText: node => node.data.text,
+  }
+
+  assert.deepEqual(collectMindmapCaseReviewNodes(root, [
+    { field: 'title', operator: 'contains', value: '登录' },
+  ], options), [caseA, caseB])
+  assert.deepEqual(collectMindmapCaseReviewNodes(root, [
+    { field: 'title', operator: 'contains', value: '登录' },
+    { field: 'any', operator: 'contains', value: 'P1' },
+  ], options), [caseB])
+  assert.deepEqual(collectMindmapCaseReviewNodes(root, [
+    { field: 'any', operator: 'contains', value: 'P0' },
+  ], options), [caseA])
+})
+
 test('纯文本和富文本替换共用字面量实现', async () => {
   const plugin = await readFile(
     new URL('../../libs/simple-mind-map/src/plugins/Search.js', import.meta.url),
@@ -113,6 +142,16 @@ test('搜索结果方向导航对空列表和非法当前项安全降级', () =>
   assert.equal(resolveMindmapSearchNavigationIndex(99, 3, 'ArrowDown'), 0)
   assert.equal(resolveMindmapSearchNavigationIndex(99, 3, 'ArrowUp'), 2)
   assert.equal(resolveMindmapSearchNavigationIndex(1, 3, 'PageDown'), 1)
+})
+
+test('用例评审支持从头开始并在最后一条停止', () => {
+  assert.equal(resolveMindmapCaseReviewIndex(-1, 3, 'restart'), 0)
+  assert.equal(resolveMindmapCaseReviewIndex(0, 3, 'next'), 1)
+  assert.equal(resolveMindmapCaseReviewIndex(1, 3, 'next'), 2)
+  assert.equal(resolveMindmapCaseReviewIndex(2, 3, 'next'), 2)
+  assert.equal(resolveMindmapCaseReviewIndex(-1, 3, 'next'), 0)
+  assert.equal(resolveMindmapCaseReviewIndex(0, 0, 'restart'), -1)
+  assert.equal(resolveMindmapCaseReviewIndex(99, 3, 'noop'), -1)
 })
 
 test('搜索结果高度使用面板下方真实空间并保持可用边界', () => {

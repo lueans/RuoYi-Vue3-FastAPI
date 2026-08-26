@@ -326,6 +326,7 @@ export class YjsMindmapSync {
       tag_definition_changed: (data) => this._handleTagDefinitionChanged(data),
       tag_replaced: (data) => this._handleTagReplaced(data),
       tag_unbound: (data) => this._handleTagUnbound(data),
+      comment_changed: (data) => this.options.onCommentChanged?.(data),
     })
   }
 

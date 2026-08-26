@@ -71,6 +71,62 @@ export function isMindmapCaseTitleData(data) {
   })
 }
 
+export function collectMindmapCaseReviewNodes(root, rows, options = {}) {
+  if (!root || typeof root !== 'object') return []
+  const activeRows = (Array.isArray(rows) ? rows : [])
+    .filter(row => row && String(row.value ?? '').trim())
+  if (activeRows.length === 0) return []
+
+  const getChildren = typeof options.getChildren === 'function'
+    ? options.getChildren
+    : node => node?.children
+  const getData = typeof options.getData === 'function'
+    ? options.getData
+    : node => node?.data || {}
+  const getText = typeof options.getText === 'function'
+    ? options.getText
+    : node => String(node?.text ?? getData(node)?.text ?? '')
+  const walk = (start, visit) => {
+    const visited = new WeakSet()
+    const stack = [start]
+    while (stack.length > 0) {
+      const node = stack.pop()
+      if (!node || typeof node !== 'object' || visited.has(node)) continue
+      visited.add(node)
+      visit(node)
+      const rawChildren = getChildren(node)
+      const children = Array.isArray(rawChildren) ? rawChildren : []
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        stack.push(children[index])
+      }
+    }
+  }
+
+  const titleRows = activeRows.filter(row => row.field === 'title')
+  const anyNodeRows = activeRows.filter(row => row.field !== 'title')
+  const candidates = []
+  walk(root, node => {
+    if (!isMindmapCaseTitleData(getData(node))) return
+    const title = getText(node)
+    if (titleRows.every(row => matchesMindmapFilterText(title, row.operator, row.value))) {
+      candidates.push(node)
+    }
+  })
+  if (anyNodeRows.length === 0) return candidates
+
+  return candidates.filter(caseTitleNode => {
+    let matched = false
+    walk(caseTitleNode, node => {
+      if (matched) return
+      const text = getText(node)
+      matched = anyNodeRows.every(row => (
+        matchesMindmapFilterText(text, row.operator, row.value)
+      ))
+    })
+    return matched
+  })
+}
+
 export function resolveMindmapSearchNavigationIndex(currentIndex, resultCount, key) {
   const count = Number(resultCount)
   if (!Number.isSafeInteger(count) || count <= 0) return -1
@@ -88,6 +144,24 @@ export function resolveMindmapSearchNavigationIndex(currentIndex, resultCount, k
   }
   if (key === 'ArrowUp') {
     return normalizedCurrent < 0 ? count - 1 : (normalizedCurrent - 1 + count) % count
+  }
+  return normalizedCurrent
+}
+
+export function resolveMindmapCaseReviewIndex(currentIndex, caseCount, action) {
+  const count = Number(caseCount)
+  if (!Number.isSafeInteger(count) || count <= 0) return -1
+
+  const normalizedCurrent = Number.isSafeInteger(currentIndex)
+    && currentIndex >= 0
+    && currentIndex < count
+    ? currentIndex
+    : -1
+
+  if (action === 'restart') return 0
+  if (action === 'next') {
+    if (normalizedCurrent < 0) return 0
+    return Math.min(normalizedCurrent + 1, count - 1)
   }
   return normalizedCurrent
 }

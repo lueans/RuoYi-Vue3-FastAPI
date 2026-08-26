@@ -73,10 +73,22 @@ MINDMAP_SCHEMA_MIGRATIONS = (
         '20260824_mindmap_unified_tags.sql',
         '把历史标签字段选项迁移为统一标签并删除旧字段模型',
     ),
+    MindmapMigrationDefinition(
+        '20260825_mindmap_comments.sql',
+        '建立节点评论线程、回复消息和评论状态索引',
+    ),
+    MindmapMigrationDefinition(
+        '20260826_mindmap_comment_idempotency.sql',
+        '建立评论写入幂等键，避免超时重试产生重复评论',
+    ),
 )
 
 POSTGRESQL_MIGRATION_OVERRIDES = {
     '20260824_mindmap_unified_tags.sql': '20260824_mindmap_unified_tags_postgresql.sql',
+    '20260825_mindmap_comments.sql': '20260825_mindmap_comments_postgresql.sql',
+    '20260826_mindmap_comment_idempotency.sql': (
+        '20260826_mindmap_comment_idempotency_postgresql.sql'
+    ),
 }
 
 

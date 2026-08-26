@@ -255,6 +255,32 @@ CREATE TABLE IF NOT EXISTS mindmap_creation_request (
     completed_time TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS mindmap_comment_thread (
+    id BIGSERIAL PRIMARY KEY,
+    mindmap_id BIGINT NOT NULL,
+    node_uid VARCHAR(64) NOT NULL,
+    node_text VARCHAR(500),
+    status SMALLINT NOT NULL DEFAULT 0,
+    created_by BIGINT NOT NULL,
+    created_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_comment_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_by BIGINT,
+    resolved_time TIMESTAMP,
+    del_flag CHAR(1) NOT NULL DEFAULT '0'
+);
+
+CREATE TABLE IF NOT EXISTS mindmap_comment (
+    id BIGSERIAL PRIMARY KEY,
+    thread_id BIGINT NOT NULL,
+    mindmap_id BIGINT NOT NULL,
+    content TEXT NOT NULL,
+    created_by BIGINT NOT NULL,
+    client_request_id VARCHAR(100),
+    created_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP,
+    del_flag CHAR(1) NOT NULL DEFAULT '0'
+);
+
 CREATE TABLE IF NOT EXISTS mindmap_tag_category (
     id BIGSERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
@@ -456,6 +482,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_mindmap_creation_owner_request ON mindmap_c
 CREATE INDEX IF NOT EXISTS idx_mindmap_creation_created ON mindmap_creation_request(created_time);
 CREATE INDEX IF NOT EXISTS idx_mindmap_creation_result ON mindmap_creation_request(result_file_id);
 CREATE INDEX IF NOT EXISTS idx_mindmap_creation_retention ON mindmap_creation_request(completed_time, id);
+CREATE INDEX IF NOT EXISTS idx_mindmap_comment_thread_file
+    ON mindmap_comment_thread(mindmap_id, status, last_comment_time);
+CREATE INDEX IF NOT EXISTS idx_mindmap_comment_thread_node
+    ON mindmap_comment_thread(mindmap_id, node_uid, status);
+CREATE INDEX IF NOT EXISTS idx_mindmap_comment_thread
+    ON mindmap_comment(thread_id, created_time);
+CREATE INDEX IF NOT EXISTS idx_mindmap_comment_author
+    ON mindmap_comment(created_by, created_time);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_mindmap_comment_author_request
+    ON mindmap_comment(created_by, client_request_id);
 CREATE INDEX IF NOT EXISTS idx_tag_cat_owner ON mindmap_tag_category(owner_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_mindmap_tag_category_owner_name ON mindmap_tag_category(owner_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_owner_key ON mindmap_tag(owner_id, tag_key);

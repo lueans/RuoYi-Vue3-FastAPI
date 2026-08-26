@@ -16,7 +16,7 @@ test('只读侧栏白名单由状态层统一执行且禅模式不再绕过关�
   ])
 
   assert.match(store, /const READONLY_SAFE_SIDEBARS = new Set\(\[/)
-  for (const sidebar of ['outline', 'shortcutKey', 'versionHistory', 'collaboratorManager', 'noteSidebar']) {
+  for (const sidebar of ['outline', 'shortcutKey', 'versionHistory', 'collaboratorManager', 'noteSidebar', 'comments']) {
     assert.match(store, new RegExp(`'${sidebar}'`))
   }
   assert.doesNotMatch(store, /'ai'/)
@@ -34,6 +34,8 @@ test('只读状态允许查看节点备注但继续拒绝写入型侧栏', async
   actions.resetState()
   try {
     actions.setIsReadonly(true)
+    assert.equal(actions.setActiveSidebar('comments'), true)
+    assert.equal(store.activeSidebar, 'comments')
     assert.equal(actions.setActiveSidebar('noteSidebar'), true)
     assert.equal(store.activeSidebar, 'noteSidebar')
     assert.equal(actions.setActiveSidebar('style'), false)

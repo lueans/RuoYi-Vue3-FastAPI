@@ -8,6 +8,7 @@ import nodeCreateContentsMethods from './nodeCreateContents'
 import nodeExpandBtnPlaceholderRectMethods from './nodeExpandBtnPlaceholderRect'
 import nodeModifyWidthMethods from './nodeModifyWidth'
 import nodeCooperateMethods from './nodeCooperate'
+import nodeCommentMethods from './nodeComment'
 import quickCreateChildBtnMethods from './quickCreateChildBtn'
 import nodeLayoutMethods from './nodeLayout'
 import { CONSTANTS } from '../../../constants/constant'
@@ -77,6 +78,7 @@ class MindMapNode {
     this.children = opt.children || []
     // 当前同时操作该节点的用户列表
     this.userList = []
+    this.commentCount = 0
     // 节点内容的容器
     this.group = null
     this.shapeNode = null // 节点形状节点
@@ -101,6 +103,7 @@ class MindMapNode {
     this._closeExpandNode = null
     this._fillExpandNode = null
     this._userListGroup = null
+    this._commentGroup = null
     this._lines = []
     this._lineRenderVersion = 0
     this._generalizationList = []
@@ -156,6 +159,9 @@ class MindMapNode {
           proto[item] = nodeCooperateMethods[item]
         })
       }
+      Object.keys(nodeCommentMethods).forEach(item => {
+        proto[item] = nodeCommentMethods[item]
+      })
       // 拖拽调整节点宽度
       Object.keys(nodeModifyWidthMethods).forEach(item => {
         proto[item] = nodeModifyWidthMethods[item]
@@ -538,6 +544,7 @@ class MindMapNode {
     this.renderGeneralization(forceRender)
     // 更新协同头像
     if (this.updateUserListNode) this.updateUserListNode()
+    if (this.updateCommentNode) this.updateCommentNode()
     // 更新节点位置
     const t = this.group.transform()
     // 保存一份当前节点数据快照 - 延迟序列化避免每次渲染都执行

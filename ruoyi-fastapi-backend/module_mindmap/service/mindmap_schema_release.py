@@ -50,10 +50,6 @@ MINDMAP_SCHEMA_MIGRATIONS = (
         '修复目录历史数据并建立活动目录唯一约束和列表索引',
     ),
     MindmapMigrationDefinition(
-        '20260818_mindmap_template_workflow.sql',
-        '合并模板重复分类并建立唯一约束、外键和市场索引',
-    ),
-    MindmapMigrationDefinition(
         '20260819_mindmap_creation_idempotency.sql',
         '建立脑图创建请求幂等记录，保证响应丢失与并发重试只创建一个文件',
     ),
@@ -81,6 +77,10 @@ MINDMAP_SCHEMA_MIGRATIONS = (
         '20260826_mindmap_comment_idempotency.sql',
         '建立评论写入幂等键，避免超时重试产生重复评论',
     ),
+    MindmapMigrationDefinition(
+        '20260827_remove_mindmap_template_feature.sql',
+        '清理脑图模板数据、菜单和专属数据库结构',
+    ),
 )
 
 POSTGRESQL_MIGRATION_OVERRIDES = {
@@ -88,6 +88,9 @@ POSTGRESQL_MIGRATION_OVERRIDES = {
     '20260825_mindmap_comments.sql': '20260825_mindmap_comments_postgresql.sql',
     '20260826_mindmap_comment_idempotency.sql': (
         '20260826_mindmap_comment_idempotency_postgresql.sql'
+    ),
+    '20260827_remove_mindmap_template_feature.sql': (
+        '20260827_remove_mindmap_template_feature_postgresql.sql'
     ),
 }
 

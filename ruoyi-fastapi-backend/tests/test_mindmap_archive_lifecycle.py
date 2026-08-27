@@ -24,7 +24,6 @@ def mindmap(*, status: int, owner_id: int = 7, mindmap_id: int = 9) -> SimpleNam
         id=mindmap_id,
         owner_id=owner_id,
         status=status,
-        is_template=0,
     )
 
 

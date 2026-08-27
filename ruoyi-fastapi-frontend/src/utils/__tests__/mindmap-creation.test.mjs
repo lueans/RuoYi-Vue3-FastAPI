@@ -164,16 +164,14 @@ test('列表新建流程把服务端创建与后续导航分成独立结果阶�
   assert.match(source, /脑图已创建，但未能自动打开/)
 })
 
-test('新建与模板 API 把服务端幂等键作为显式协议发送', async () => {
-  const [mindmapApi, templateApi] = await Promise.all([
-    readFile(new URL('../../api/mindmap/mindmap.js', import.meta.url), 'utf8'),
-    readFile(new URL('../../api/mindmap/template.js', import.meta.url), 'utf8'),
-  ])
+test('新建、复制与导入 API 把服务端幂等键作为显式协议发送', async () => {
+  const mindmapApi = await readFile(
+    new URL('../../api/mindmap/mindmap.js', import.meta.url),
+    'utf8',
+  )
 
-  for (const source of [mindmapApi, templateApi]) {
-    assert.match(source, /'Idempotency-Key': idempotencyKey/)
-    assert.match(source, /repeatSubmit: false/)
-  }
+  assert.match(mindmapApi, /'Idempotency-Key': idempotencyKey/)
+  assert.match(mindmapApi, /repeatSubmit: false/)
   assert.match(mindmapApi, /export function copyMindmap\(mindmapId, idempotencyKey\)/)
   assert.match(mindmapApi, /export function importMindmap\(data, idempotencyKey\)/)
 })

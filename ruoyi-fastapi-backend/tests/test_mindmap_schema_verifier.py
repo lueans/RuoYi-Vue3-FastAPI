@@ -9,6 +9,7 @@ from module_mindmap.service.mindmap_schema_verifier import (
     REQUIRED_INDEX_DEFINITIONS,
     REQUIRED_INDEXES,
     REQUIRED_TABLES,
+    TEMPLATE_REMOVAL_MIGRATION,
     UNIFIED_TAG_MIGRATION,
     find_mindmap_schema_issues,
 )
@@ -67,7 +68,7 @@ class MindmapSchemaVerifierTest(unittest.TestCase):
         snapshot['tables'].remove('mindmap_change_log')
         snapshot['columns']['mindmap_folder'].remove('active_name')
         snapshot['indexes']['mindmap'].remove('idx_mindmap_owner_status')
-        snapshot['foreignKeys']['mindmap'].remove('fk_mindmap_template_category')
+        snapshot['foreignKeys']['mindmap_tag'].remove('fk_mindmap_tag_category')
 
         issues = find_mindmap_schema_issues(snapshot)
         issue_data = [item.to_dict() for item in issues]
@@ -176,21 +177,26 @@ class MindmapSchemaVerifierTest(unittest.TestCase):
             [item.to_dict() for item in issues],
         )
 
-    def test_same_name_with_wrong_foreign_key_target_is_not_ready(self) -> None:
+    def test_retired_template_schema_requires_removal_migration(self) -> None:
         snapshot = complete_snapshot()
-        snapshot['foreignKeyDefinitions']['mindmap']['fk_mindmap_template_category'][
-            'referredTable'
-        ] = 'wrong_category'
+        snapshot['tables'].add('mindmap_template_category')
+        snapshot['columns']['mindmap'].update({'is_template', 'template_category_id'})
+        snapshot['indexes']['mindmap'].add('idx_mindmap_template_market')
+        snapshot['foreignKeys']['mindmap'].add('fk_mindmap_template_category')
 
-        issues = find_mindmap_schema_issues(snapshot)
+        issues = [item.to_dict() for item in find_mindmap_schema_issues(snapshot)]
 
         self.assertIn(
             {
-                'kind': 'foreign_key_definition',
-                'object_name': 'mindmap.fk_mindmap_template_category',
-                'migration': '20260818_mindmap_template_workflow.sql',
+                'kind': 'legacy_table',
+                'object_name': 'mindmap_template_category',
+                'migration': TEMPLATE_REMOVAL_MIGRATION,
             },
-            [item.to_dict() for item in issues],
+            issues,
+        )
+        self.assertEqual(
+            {item['migration'] for item in issues},
+            {TEMPLATE_REMOVAL_MIGRATION},
         )
 
     def test_tag_category_integrity_definitions_are_release_blocking(self) -> None:

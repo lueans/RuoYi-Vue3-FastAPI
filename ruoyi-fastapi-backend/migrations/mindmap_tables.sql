@@ -10,7 +10,6 @@ CREATE TABLE `mindmap` (
     `node_tree`       LONGTEXT     NOT NULL COMMENT '完整节点树JSON',
     `view_data`       JSON         DEFAULT NULL COMMENT '视图状态JSON',
     `cover_image`     VARCHAR(500) DEFAULT NULL COMMENT '封面图片URL',
-    `is_template`     SMALLINT     NOT NULL DEFAULT 0 COMMENT '是否模板（0否 1是）',
     `last_version_id` BIGINT       DEFAULT NULL COMMENT '最新版本ID',
     `version_count`   INT          NOT NULL DEFAULT 1 COMMENT '版本总数',
     `status`          SMALLINT     NOT NULL DEFAULT 0 COMMENT '状态（0正常 1归档）',
@@ -22,7 +21,7 @@ CREATE TABLE `mindmap` (
     `remark`          VARCHAR(500) DEFAULT NULL COMMENT '备注',
     PRIMARY KEY (`id`),
     INDEX `idx_mindmap_owner` (`owner_id`, `del_flag`),
-    INDEX `idx_mindmap_owner_status` (`owner_id`, `status`, `del_flag`, `is_template`, `update_time`),
+    INDEX `idx_mindmap_owner_status` (`owner_id`, `status`, `del_flag`, `update_time`),
     INDEX `idx_mindmap_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='思维导图主表';
 

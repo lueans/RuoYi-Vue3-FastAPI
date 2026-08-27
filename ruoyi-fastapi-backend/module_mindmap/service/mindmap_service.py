@@ -1223,7 +1223,6 @@ class MindmapService:
             .where(
                 or_(Mindmap.owner_id == user_id, MindmapCollaborator.user_id == user_id),
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
                 Mindmap.status.in_([0, 1]),
                 MindmapNode.is_deleted == 0,
                 MindmapNode.text_plain.contains(normalized_keyword, autoescape=True),
@@ -1340,7 +1339,6 @@ class MindmapService:
             if key in MINDMAP_CREATION_ALLOWED_FIELDS
         }
         insert_data['status'] = 0
-        insert_data['is_template'] = 0
         if isinstance(insert_data.get('node_tree'), dict):
             insert_data['node_tree'] = json.dumps(insert_data['node_tree'], ensure_ascii=False)
         insert_data.pop('id', None)
@@ -1415,7 +1413,7 @@ class MindmapService:
     ) -> CrudResponseModel:
         """新增思维导图"""
         # Only creation-safe fields cross the service boundary. Derived
-        # revision/root/count/template/ownership fields must not be assigned by
+        # revision/root/count/ownership fields must not be assigned by
         # an untrusted create payload.
         insert_data = cls._prepare_mindmap_insert_data(page_object)
         context, replay = await cls._resolve_mindmap_creation_context(
@@ -1504,7 +1502,7 @@ class MindmapService:
                     'schema_version', 'engine_name', 'engine_version',
                     'document_data', 'node_revisions',
                     'owner_id',                      # 所有权：只能由 add_mindmap 设置
-                    'is_template', 'status',         # 管理员控制的状态标记
+                    'status',                        # 状态只能通过归档接口修改
                     'version_count', 'last_version_id',  # 由版本服务维护
                     'create_by', 'create_time',      # 审计字段：创建时一次性写入
                     'folder_id',                     # 文件夹归属：仅通过 /mindmap/move 端点修改
@@ -2020,7 +2018,7 @@ class MindmapService:
     ) -> CrudResponseModel:
         """归档或恢复所有者的脑图，并终止归档文件的在线写入会话。"""
         mindmap = await MindmapDao.get_mindmap_for_update(query_db, page_object.id)
-        if not mindmap or mindmap.owner_id != user_id or mindmap.is_template != 0:
+        if not mindmap or mindmap.owner_id != user_id:
             await query_db.rollback()
             raise ServiceException(message='脑图不存在或无归档权限')
         if mindmap.status == page_object.status:
@@ -2083,7 +2081,6 @@ class MindmapService:
                 Mindmap.id.in_(requested_ids),
                 Mindmap.owner_id == user_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             ).order_by(Mindmap.id).with_for_update()
         )).scalars())
         if len(rows) != len(requested_ids):
@@ -2169,7 +2166,6 @@ class MindmapService:
                 Mindmap.id.in_(id_list),
                 Mindmap.owner_id == user_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             ).with_for_update()
         )).scalars())
         if len(rows) != len(id_list) or any(row.owner_id != user_id for row in rows):
@@ -2221,7 +2217,6 @@ class MindmapService:
                 Mindmap.id.in_(id_list),
                 Mindmap.owner_id == user_id,
                 Mindmap.del_flag == '2',
-                Mindmap.is_template == 0,
             ).with_for_update()
         )).scalars())
         if len(rows) != len(id_list) or any(row.owner_id != user_id for row in rows):
@@ -2312,7 +2307,6 @@ class MindmapService:
                 Mindmap.id.in_(id_list),
                 Mindmap.owner_id == user_id,
                 Mindmap.del_flag == '2',
-                Mindmap.is_template == 0,
             ).with_for_update()
         )).scalars())
         if len(rows) != len(id_list) or any(row.owner_id != user_id for row in rows):

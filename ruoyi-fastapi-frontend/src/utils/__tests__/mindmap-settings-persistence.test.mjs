@@ -42,16 +42,11 @@ test('编辑器将 documentData 纳入草稿、自动保存、冲突快照和 Yj
   assert.match(source, /shouldZoomMindmapWheel\(e, mm\.opt\)/)
 })
 
-test('公开分享和模板预览应用与编辑器一致的文档展示设置', async () => {
-  const [shareView, templatePreview] = await Promise.all([
-    readFile(new URL('view.vue', viewRoot), 'utf8'),
-    readFile(new URL('TemplatePreviewDialog.vue', componentRoot), 'utf8'),
-  ])
+test('公开分享应用与编辑器一致的文档展示设置', async () => {
+  const shareView = await readFile(new URL('view.vue', viewRoot), 'utf8')
 
-  for (const source of [shareView, templatePreview]) {
-    assert.match(source, /getMindmapDocumentConfig/)
-    assert.match(source, /applyMindmapDocumentConfig/)
-  }
+  assert.match(shareView, /getMindmapDocumentConfig/)
+  assert.match(shareView, /applyMindmapDocumentConfig/)
 })
 
 test('布局和主题元数据由编辑器按文件类型统一持久化', async () => {

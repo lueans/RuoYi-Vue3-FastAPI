@@ -106,7 +106,7 @@ SET @mindmap_owner_folder_index_matches = (
       AND index_name = 'idx_mindmap_owner_folder'
     GROUP BY index_name
     HAVING GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') =
-             'owner_id,folder_id,del_flag,is_template'
+             'owner_id,folder_id,del_flag'
        AND MIN(non_unique) = 1
   ) AS matching_index
 );
@@ -120,7 +120,7 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 SET @mindmap_owner_folder_index_sql = IF(
   @mindmap_owner_folder_index_matches = 0,
-  'ALTER TABLE mindmap ADD INDEX idx_mindmap_owner_folder (owner_id, folder_id, del_flag, is_template)',
+  'ALTER TABLE mindmap ADD INDEX idx_mindmap_owner_folder (owner_id, folder_id, del_flag)',
   'SELECT ''idx_mindmap_owner_folder already exists'''
 );
 PREPARE stmt FROM @mindmap_owner_folder_index_sql;

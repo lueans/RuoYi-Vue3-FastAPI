@@ -11,7 +11,6 @@ INCREMENTAL_MIGRATION = '20260817_mindmap_incremental_changes.sql'
 VERSION_MIGRATION = '20260817_mindmap_version_tag_snapshots.sql'
 FOLDER_MIGRATION = '20260818_mindmap_folder_lifecycle.sql'
 ARCHIVE_MIGRATION = '20260818_mindmap_archive_lifecycle.sql'
-TEMPLATE_MIGRATION = '20260818_mindmap_template_workflow.sql'
 CREATION_IDEMPOTENCY_MIGRATION = '20260819_mindmap_creation_idempotency.sql'
 RETENTION_INDEX_MIGRATION = '20260819_mindmap_retention_indexes.sql'
 TAG_CATEGORY_INTEGRITY_MIGRATION = '20260819_mindmap_tag_category_integrity.sql'
@@ -19,6 +18,7 @@ NODE_TAG_INTEGRITY_MIGRATION = '20260820_mindmap_node_tag_integrity.sql'
 UNIFIED_TAG_MIGRATION = '20260824_mindmap_unified_tags.sql'
 COMMENT_MIGRATION = '20260825_mindmap_comments.sql'
 COMMENT_IDEMPOTENCY_MIGRATION = '20260826_mindmap_comment_idempotency.sql'
+TEMPLATE_REMOVAL_MIGRATION = '20260827_remove_mindmap_template_feature.sql'
 
 REQUIRED_TABLES = dict.fromkeys(
     (
@@ -78,8 +78,6 @@ REQUIRED_INDEXES = {
     ('mindmap_folder', 'uq_mindmap_folder_active_sibling'): FOLDER_MIGRATION,
     ('mindmap', 'idx_mindmap_owner_folder'): FOLDER_MIGRATION,
     ('mindmap', 'idx_mindmap_owner_status'): ARCHIVE_MIGRATION,
-    ('mindmap_template_category', 'uq_mindmap_template_category_name'): TEMPLATE_MIGRATION,
-    ('mindmap', 'idx_mindmap_template_market'): TEMPLATE_MIGRATION,
     (
         'mindmap_creation_request',
         'uk_mindmap_creation_owner_request',
@@ -108,16 +106,11 @@ REQUIRED_INDEX_DEFINITIONS = {
         True,
     ),
     ('mindmap', 'idx_mindmap_owner_folder'): (
-        ('owner_id', 'folder_id', 'del_flag', 'is_template'),
+        ('owner_id', 'folder_id', 'del_flag'),
         False,
     ),
     ('mindmap', 'idx_mindmap_owner_status'): (
-        ('owner_id', 'status', 'del_flag', 'is_template', 'update_time'),
-        False,
-    ),
-    ('mindmap_template_category', 'uq_mindmap_template_category_name'): (('name',), True),
-    ('mindmap', 'idx_mindmap_template_market'): (
-        ('is_template', 'del_flag', 'template_category_id', 'create_time'),
+        ('owner_id', 'status', 'del_flag', 'update_time'),
         False,
     ),
     ('mindmap_creation_request', 'uk_mindmap_creation_owner_request'): (
@@ -167,16 +160,10 @@ REQUIRED_INDEX_DEFINITIONS = {
 }
 
 REQUIRED_FOREIGN_KEYS = {
-    ('mindmap', 'fk_mindmap_template_category'): TEMPLATE_MIGRATION,
     ('mindmap_tag', 'fk_mindmap_tag_category'): TAG_CATEGORY_INTEGRITY_MIGRATION,
 }
 
 REQUIRED_FOREIGN_KEY_DEFINITIONS = {
-    ('mindmap', 'fk_mindmap_template_category'): (
-        ('template_category_id',),
-        'mindmap_template_category',
-        ('id',),
-    ),
     ('mindmap_tag', 'fk_mindmap_tag_category'): (
         ('category_id',),
         'mindmap_tag_category',
@@ -185,19 +172,24 @@ REQUIRED_FOREIGN_KEY_DEFINITIONS = {
 }
 
 FORBIDDEN_TABLES = {
-    'mindmap_tag_field',
-    'mindmap_tag_field_option',
+    'mindmap_tag_field': UNIFIED_TAG_MIGRATION,
+    'mindmap_tag_field_option': UNIFIED_TAG_MIGRATION,
+    'mindmap_template_category': TEMPLATE_REMOVAL_MIGRATION,
 }
 FORBIDDEN_COLUMNS = {
-    ('mindmap_node_tag', 'field_id'),
-    ('mindmap_node_tag', 'option_id'),
+    ('mindmap_node_tag', 'field_id'): UNIFIED_TAG_MIGRATION,
+    ('mindmap_node_tag', 'option_id'): UNIFIED_TAG_MIGRATION,
+    ('mindmap', 'is_template'): TEMPLATE_REMOVAL_MIGRATION,
+    ('mindmap', 'template_category_id'): TEMPLATE_REMOVAL_MIGRATION,
 }
 FORBIDDEN_INDEXES = {
-    ('mindmap_node_tag', 'idx_mindmap_node_tag_option'),
+    ('mindmap_node_tag', 'idx_mindmap_node_tag_option'): UNIFIED_TAG_MIGRATION,
+    ('mindmap', 'idx_mindmap_template_market'): TEMPLATE_REMOVAL_MIGRATION,
 }
 FORBIDDEN_FOREIGN_KEYS = {
-    ('mindmap_node_tag', 'fk_mindmap_node_tag_field'),
-    ('mindmap_node_tag', 'fk_mindmap_node_tag_option'),
+    ('mindmap_node_tag', 'fk_mindmap_node_tag_field'): UNIFIED_TAG_MIGRATION,
+    ('mindmap_node_tag', 'fk_mindmap_node_tag_option'): UNIFIED_TAG_MIGRATION,
+    ('mindmap', 'fk_mindmap_template_category'): TEMPLATE_REMOVAL_MIGRATION,
 }
 
 
@@ -220,7 +212,7 @@ def inspect_mindmap_schema(connection: Connection) -> dict[str, Any]:
         | {table for table, _ in REQUIRED_COLUMNS}
         | {table for table, _ in REQUIRED_INDEXES}
         | {table for table, _ in REQUIRED_FOREIGN_KEYS}
-        | FORBIDDEN_TABLES
+        | set(FORBIDDEN_TABLES)
         | {table for table, _ in FORBIDDEN_COLUMNS}
         | {table for table, _ in FORBIDDEN_INDEXES}
         | {table for table, _ in FORBIDDEN_FOREIGN_KEYS}
@@ -326,19 +318,19 @@ def _find_forbidden_schema_issues(snapshot: dict[str, Any], tables: set[str]) ->
     indexes = snapshot.get('indexes') or {}
     foreign_keys = snapshot.get('foreignKeys') or {}
     issues = [
-        MindmapSchemaIssue('legacy_table', table, UNIFIED_TAG_MIGRATION)
-        for table in FORBIDDEN_TABLES & tables
+        MindmapSchemaIssue('legacy_table', table, FORBIDDEN_TABLES[table])
+        for table in set(FORBIDDEN_TABLES) & tables
     ]
-    for table, column in FORBIDDEN_COLUMNS:
+    for (table, column), migration in FORBIDDEN_COLUMNS.items():
         if table in tables and column in set(columns.get(table) or ()):
-            issues.append(MindmapSchemaIssue('legacy_column', f'{table}.{column}', UNIFIED_TAG_MIGRATION))
-    for table, index in FORBIDDEN_INDEXES:
+            issues.append(MindmapSchemaIssue('legacy_column', f'{table}.{column}', migration))
+    for (table, index), migration in FORBIDDEN_INDEXES.items():
         if table in tables and index in set(indexes.get(table) or ()):
-            issues.append(MindmapSchemaIssue('legacy_index', f'{table}.{index}', UNIFIED_TAG_MIGRATION))
-    for table, foreign_key in FORBIDDEN_FOREIGN_KEYS:
+            issues.append(MindmapSchemaIssue('legacy_index', f'{table}.{index}', migration))
+    for (table, foreign_key), migration in FORBIDDEN_FOREIGN_KEYS.items():
         if table in tables and foreign_key in set(foreign_keys.get(table) or ()):
             issues.append(MindmapSchemaIssue(
-                'legacy_foreign_key', f'{table}.{foreign_key}', UNIFIED_TAG_MIGRATION,
+                'legacy_foreign_key', f'{table}.{foreign_key}', migration,
             ))
     return issues
 

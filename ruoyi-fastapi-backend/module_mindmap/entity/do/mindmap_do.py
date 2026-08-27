@@ -16,8 +16,8 @@ class Mindmap(Base):
     __tablename__ = 'mindmap'
     __table_args__ = (
         Index('idx_mindmap_owner', 'owner_id', 'del_flag'),
-        Index('idx_mindmap_owner_folder', 'owner_id', 'folder_id', 'del_flag', 'is_template'),
-        Index('idx_mindmap_owner_status', 'owner_id', 'status', 'del_flag', 'is_template', 'update_time'),
+        Index('idx_mindmap_owner_folder', 'owner_id', 'folder_id', 'del_flag'),
+        Index('idx_mindmap_owner_status', 'owner_id', 'status', 'del_flag', 'update_time'),
         Index('idx_mindmap_name', 'name'),
         {'comment': '思维导图主表'},
     )
@@ -63,8 +63,6 @@ class Mindmap(Base):
         server_default=SqlalchemyUtil.get_server_default_null(DataBaseConfig.db_type),
         comment='封面图片URL',
     )
-    is_template = Column(SmallInteger, nullable=False, server_default='0', comment='是否模板（0否 1是）')
-    template_category_id = Column(BigInteger, nullable=True, comment='模板分类ID')
     last_version_id = Column(
         BigInteger, nullable=True,
         server_default=SqlalchemyUtil.get_server_default_null(DataBaseConfig.db_type),

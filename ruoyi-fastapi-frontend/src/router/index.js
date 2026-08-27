@@ -82,34 +82,6 @@ export const constantRoutes = [
       }
     ]
   },
-  // 模板市场（需要登录）
-  {
-    path: '/mindmap/templates',
-    component: Layout,
-    hidden: true,
-    children: [
-      {
-        path: '',
-        component: () => import('@/views/mindmap/templates'),
-        name: 'TemplateMarket',
-        meta: { title: '模板市场' }
-      }
-    ]
-  },
-  // 模板管理（管理员，需要登录+权限）
-  {
-    path: '/mindmap/templateAdmin',
-    component: Layout,
-    hidden: true,
-    children: [
-      {
-        path: '',
-        component: () => import('@/views/mindmap/templateAdmin'),
-        name: 'TemplateAdmin',
-        meta: { title: '模板管理' }
-      }
-    ]
-  },
   // 标签管理（需要登录+权限）
   {
     path: '/mindmap/tags',

@@ -21,7 +21,7 @@ SET @mindmap_archive_index_matches = (
       AND index_name = 'idx_mindmap_owner_status'
     GROUP BY index_name
     HAVING GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') =
-             'owner_id,status,del_flag,is_template,update_time'
+             'owner_id,status,del_flag,update_time'
        AND MIN(non_unique) = 1
   ) AS matching_index
 );
@@ -35,7 +35,7 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 SET @mindmap_archive_index_sql = IF(
   @mindmap_archive_index_matches = 0,
-  'ALTER TABLE mindmap ADD INDEX idx_mindmap_owner_status (owner_id, status, del_flag, is_template, update_time)',
+  'ALTER TABLE mindmap ADD INDEX idx_mindmap_owner_status (owner_id, status, del_flag, update_time)',
   'SELECT ''idx_mindmap_owner_status already exists'''
 );
 PREPARE stmt FROM @mindmap_archive_index_sql;

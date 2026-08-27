@@ -25,7 +25,7 @@ class MindmapCreationRequest(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     owner_id = Column(BigInteger, nullable=False)
     request_id = Column(String(100), nullable=False, comment='客户端创建请求幂等键')
-    operation = Column(String(32), nullable=False, comment='blank/template/copy/import')
+    operation = Column(String(32), nullable=False, comment='blank/copy/import')
     request_fingerprint = Column(String(64), nullable=False, comment='规范化创建意图SHA-256')
     result_file_id = Column(BigInteger, nullable=True, comment='成功创建的脑图文件ID')
     created_by = Column(String(64), nullable=True)

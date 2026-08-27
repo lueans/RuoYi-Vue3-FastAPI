@@ -91,7 +91,6 @@ class MindmapFolderDao:
             Mindmap.id.in_(mindmap_ids),
             Mindmap.owner_id == owner_id,
             Mindmap.del_flag == '0',
-            Mindmap.is_template == 0,
         )
         if for_update:
             query = query.with_for_update()
@@ -108,7 +107,6 @@ class MindmapFolderDao:
                 Mindmap.id.in_(mindmap_ids),
                 Mindmap.owner_id == owner_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             )
             .values(folder_id=folder_id)
         )
@@ -125,7 +123,6 @@ class MindmapFolderDao:
                 Mindmap.folder_id.in_(folder_ids),
                 Mindmap.owner_id == owner_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             )
             .values(folder_id=None)
         )
@@ -142,7 +139,6 @@ class MindmapFolderDao:
                 Mindmap.folder_id.in_(folder_ids),
                 Mindmap.owner_id == owner_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             )
         )).scalar_one())
 

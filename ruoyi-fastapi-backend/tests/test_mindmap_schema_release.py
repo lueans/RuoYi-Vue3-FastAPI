@@ -11,11 +11,15 @@ from module_mindmap.service.mindmap_schema_release import (
     build_mindmap_migration_plan,
 )
 from module_mindmap.service.mindmap_schema_verifier import (
+    FORBIDDEN_COLUMNS,
+    FORBIDDEN_FOREIGN_KEYS,
+    FORBIDDEN_INDEXES,
+    FORBIDDEN_TABLES,
     REQUIRED_COLUMNS,
     REQUIRED_FOREIGN_KEYS,
     REQUIRED_INDEXES,
     REQUIRED_TABLES,
-    UNIFIED_TAG_MIGRATION,
+    TEMPLATE_REMOVAL_MIGRATION,
     MindmapSchemaIssue,
 )
 
@@ -29,7 +33,10 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
             | set(REQUIRED_COLUMNS.values())
             | set(REQUIRED_INDEXES.values())
             | set(REQUIRED_FOREIGN_KEYS.values())
-            | {UNIFIED_TAG_MIGRATION}
+            | set(FORBIDDEN_TABLES.values())
+            | set(FORBIDDEN_COLUMNS.values())
+            | set(FORBIDDEN_INDEXES.values())
+            | set(FORBIDDEN_FOREIGN_KEYS.values())
         )
 
         self.assertEqual(
@@ -47,9 +54,9 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
                 (migration_dir / definition.filename).write_bytes(content)
             issues = [
                 MindmapSchemaIssue(
-                    'index',
-                    'mindmap.idx_mindmap_template_market',
-                    '20260818_mindmap_template_workflow.sql',
+                    'legacy_column',
+                    'mindmap.is_template',
+                    TEMPLATE_REMOVAL_MIGRATION,
                 ),
                 MindmapSchemaIssue(
                     'column',
@@ -69,7 +76,7 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
                 [item.migration for item in plan],
                 [
                     '20260818_mindmap_folder_lifecycle.sql',
-                    '20260818_mindmap_template_workflow.sql',
+                    TEMPLATE_REMOVAL_MIGRATION,
                 ],
             )
             self.assertEqual(plan[0].sha256, sha256(contents[plan[0].migration]).hexdigest())
@@ -121,20 +128,23 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
                 'DROP INDEX',
             ),
             '20260818_mindmap_archive_lifecycle.sql': (
-                'owner_id,status,del_flag,is_template,update_time',
+                'owner_id,status,del_flag,update_time',
                 'DROP INDEX idx_mindmap_owner_status',
             ),
             '20260818_mindmap_folder_lifecycle.sql': (
                 'owner_id,parent_id,active_name',
                 'DROP INDEX uq_mindmap_folder_active_sibling',
-                'owner_id,folder_id,del_flag,is_template',
+                'owner_id,folder_id,del_flag',
                 'DROP INDEX idx_mindmap_owner_folder',
             ),
-            '20260818_mindmap_template_workflow.sql': (
-                'DROP INDEX uq_mindmap_template_category_name',
-                'is_template,del_flag,template_category_id,create_time',
+            TEMPLATE_REMOVAL_MIGRATION: (
+                "WHERE is_template = 1",
+                "request_row.operation = 'template'",
                 'DROP INDEX idx_mindmap_template_market',
                 'DROP FOREIGN KEY fk_mindmap_template_category',
+                'DROP COLUMN template_category_id',
+                'DROP COLUMN is_template',
+                'DROP TABLE IF EXISTS mindmap_template_category',
             ),
             '20260819_mindmap_retention_indexes.sql': (
                 'completed_time',
@@ -173,12 +183,15 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
                 for marker in markers:
                     self.assertIn(marker, sql)
 
-    def test_template_data_normalization_commits_before_non_temporary_ddl(self) -> None:
-        sql = (self.MIGRATIONS_DIR / '20260818_mindmap_template_workflow.sql').read_text(
+    def test_template_data_is_deleted_before_retired_columns_are_dropped(self) -> None:
+        sql = (self.MIGRATIONS_DIR / TEMPLATE_REMOVAL_MIGRATION).read_text(
             encoding='utf-8'
         )
 
-        self.assertLess(sql.index('COMMIT;'), sql.index('ALTER TABLE mindmap_template_category'))
+        self.assertLess(
+            sql.index('DELETE file_row FROM mindmap AS file_row'),
+            sql.index('ALTER TABLE mindmap DROP COLUMN is_template'),
+        )
 
     def test_tag_category_data_convergence_commits_before_constraints(self) -> None:
         sql = (
@@ -222,6 +235,9 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
         for table in REQUIRED_TABLES:
             self.assertIn(f'CREATE TABLE IF NOT EXISTS {table}', migration_source)
         self.assertNotIn('CREATE TABLE IF NOT EXISTS mindmap_tag_field', migration_source)
+        self.assertNotIn('CREATE TABLE IF NOT EXISTS mindmap_template_category', migration_source)
+        self.assertNotIn('is_template SMALLINT', migration_source)
+        self.assertNotIn('template_category_id BIGINT', migration_source)
         self.assertNotIn('field_id BIGINT', migration_source)
         self.assertNotIn('option_id BIGINT', migration_source)
         self.assertIn('DROP TABLE IF EXISTS mindmap_tag_field', unified_source)

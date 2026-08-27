@@ -62,7 +62,6 @@ class MindmapDao:
             Mindmap.layout,
             Mindmap.cover_image,
             Mindmap.folder_id,
-            Mindmap.is_template,
             Mindmap.version_count,
             Mindmap.node_count,
             Mindmap.content_revision,
@@ -118,7 +117,6 @@ class MindmapDao:
                 Mindmap.del_flag == ('2' if is_trash else '0'),
                 file_keyword_condition,
                 Mindmap.status == query_object.status if query_object.status is not None else True,
-                Mindmap.is_template == query_object.is_template if query_object.is_template is not None else True,
                 Mindmap.folder_id == query_object.folder_id if query_object.folder_id is not None else True,
                 Mindmap.create_time >= query_object.begin_time if query_object.begin_time else True,
                 Mindmap.create_time <= query_object.end_time if query_object.end_time else True,
@@ -182,14 +180,13 @@ class MindmapDao:
         status: int,
         update_by: str,
     ) -> int:
-        """仅更新所有者的有效非模板脑图状态。"""
+        """仅更新所有者的有效脑图状态。"""
         result = await db.execute(
             update(Mindmap)
             .where(
                 Mindmap.id == mindmap_id,
                 Mindmap.owner_id == owner_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             )
             .values(status=status, update_by=update_by, update_time=datetime.now())
         )
@@ -204,7 +201,7 @@ class MindmapDao:
         status: int,
         update_by: str,
     ) -> int:
-        """批量更新所有者的有效非模板脑图状态。"""
+        """批量更新所有者的有效脑图状态。"""
         if not mindmap_ids:
             return 0
         result = await db.execute(
@@ -213,7 +210,6 @@ class MindmapDao:
                 Mindmap.id.in_(mindmap_ids),
                 Mindmap.owner_id == owner_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             )
             .values(status=status, update_by=update_by, update_time=datetime.now())
         )
@@ -257,7 +253,6 @@ class MindmapDao:
                 Mindmap.id.in_(mindmap_ids),
                 Mindmap.owner_id == owner_id,
                 Mindmap.del_flag == '0',
-                Mindmap.is_template == 0,
             )
             .values(del_flag='2', update_by=update_by, update_time=datetime.now())
         )
@@ -284,7 +279,6 @@ class MindmapDao:
                     Mindmap.id.in_(root_ids),
                     Mindmap.owner_id == owner_id,
                     Mindmap.del_flag == '2',
-                    Mindmap.is_template == 0,
                 )
                 .values(
                     del_flag='0',
@@ -301,7 +295,6 @@ class MindmapDao:
                     Mindmap.id.in_(retained_folder_ids),
                     Mindmap.owner_id == owner_id,
                     Mindmap.del_flag == '2',
-                    Mindmap.is_template == 0,
                 )
                 .values(del_flag='0', update_by=update_by, update_time=now)
             )
@@ -316,7 +309,6 @@ class MindmapDao:
                 Mindmap.id.in_(mindmap_ids),
                 Mindmap.owner_id == owner_id,
                 Mindmap.del_flag == '2',
-                Mindmap.is_template == 0,
             )
         )
         return int(result.rowcount or 0)

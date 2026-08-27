@@ -23,8 +23,6 @@ CREATE TABLE IF NOT EXISTS mindmap (
     document_data JSONB,
     view_data JSONB,
     cover_image VARCHAR(500),
-    is_template SMALLINT NOT NULL DEFAULT 0,
-    template_category_id BIGINT,
     last_version_id BIGINT,
     version_count INTEGER NOT NULL DEFAULT 1,
     status SMALLINT NOT NULL DEFAULT 0,
@@ -46,8 +44,6 @@ ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS engine_name VARCHAR(50) NOT NULL DE
 ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS engine_version VARCHAR(100);
 ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS document_data JSONB;
 ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS view_data JSONB;
-ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS is_template SMALLINT NOT NULL DEFAULT 0;
-ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS template_category_id BIGINT;
 ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS last_version_id BIGINT;
 ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS version_count INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE mindmap ADD COLUMN IF NOT EXISTS status SMALLINT NOT NULL DEFAULT 0;
@@ -89,13 +85,6 @@ CREATE TABLE IF NOT EXISTS mindmap_folder (
 );
 ALTER TABLE mindmap_folder ADD COLUMN IF NOT EXISTS active_name VARCHAR(100)
     GENERATED ALWAYS AS (CASE WHEN del_flag = '0' THEN name ELSE NULL END) STORED;
-
-CREATE TABLE IF NOT EXISTS mindmap_template_category (
-    id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    sort_order INTEGER DEFAULT 0,
-    created_time TIMESTAMP
-);
 
 CREATE TABLE IF NOT EXISTS mindmap_version (
     id BIGSERIAL PRIMARY KEY,
@@ -385,28 +374,6 @@ SET name = LEFT(folder.name, 70) || '〔迁移去重-' || folder.id || '〕'
 FROM ranked
 WHERE ranked.id = folder.id AND ranked.position > 1;
 
-UPDATE mindmap_template_category SET name = '未命名分类-' || id WHERE BTRIM(name) = '';
-WITH canonical AS (
-    SELECT BTRIM(name) AS normalized_name, MIN(id) AS keep_id
-    FROM mindmap_template_category GROUP BY BTRIM(name)
-)
-UPDATE mindmap AS template_file
-SET template_category_id = canonical.keep_id
-FROM mindmap_template_category AS category, canonical
-WHERE template_file.template_category_id = category.id
-  AND canonical.normalized_name = BTRIM(category.name)
-  AND category.id <> canonical.keep_id;
-DELETE FROM mindmap_template_category AS category
-USING (
-    SELECT BTRIM(name) AS normalized_name, MIN(id) AS keep_id
-    FROM mindmap_template_category GROUP BY BTRIM(name)
-) AS canonical
-WHERE canonical.normalized_name = BTRIM(category.name) AND category.id <> canonical.keep_id;
-UPDATE mindmap_template_category SET name = BTRIM(name);
-UPDATE mindmap SET template_category_id = NULL
-WHERE template_category_id IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM mindmap_template_category c WHERE c.id = template_category_id);
-
 UPDATE mindmap_tag SET category_id = NULL
 WHERE category_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM mindmap_tag_category c WHERE c.id = category_id);
@@ -434,18 +401,14 @@ UPDATE mindmap_tag_category SET name = BTRIM(name);
 
 -- Recreate named constraints so an existing constraint with the wrong target or
 -- delete policy is repaired rather than silently accepted.
-ALTER TABLE mindmap DROP CONSTRAINT IF EXISTS fk_mindmap_template_category;
-ALTER TABLE mindmap ADD CONSTRAINT fk_mindmap_template_category
-    FOREIGN KEY (template_category_id) REFERENCES mindmap_template_category(id) ON DELETE RESTRICT;
 ALTER TABLE mindmap_tag DROP CONSTRAINT IF EXISTS fk_mindmap_tag_category;
 ALTER TABLE mindmap_tag ADD CONSTRAINT fk_mindmap_tag_category
     FOREIGN KEY (category_id) REFERENCES mindmap_tag_category(id) ON DELETE RESTRICT;
 
 CREATE INDEX IF NOT EXISTS idx_mindmap_name ON mindmap(name);
 CREATE INDEX IF NOT EXISTS idx_mindmap_owner ON mindmap(owner_id, del_flag);
-CREATE INDEX IF NOT EXISTS idx_mindmap_owner_folder ON mindmap(owner_id, folder_id, del_flag, is_template);
-CREATE INDEX IF NOT EXISTS idx_mindmap_owner_status ON mindmap(owner_id, status, del_flag, is_template, update_time);
-CREATE INDEX IF NOT EXISTS idx_mindmap_template_market ON mindmap(is_template, del_flag, template_category_id, create_time);
+CREATE INDEX IF NOT EXISTS idx_mindmap_owner_folder ON mindmap(owner_id, folder_id, del_flag);
+CREATE INDEX IF NOT EXISTS idx_mindmap_owner_status ON mindmap(owner_id, status, del_flag, update_time);
 CREATE INDEX IF NOT EXISTS idx_mindmap_archive_cleanup ON mindmap(status, update_time, id);
 CREATE INDEX IF NOT EXISTS idx_mindmap_deleted_cleanup ON mindmap(del_flag, update_time, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_unique ON mindmap_collaborator(mindmap_id, user_id);
@@ -455,7 +418,6 @@ CREATE INDEX IF NOT EXISTS idx_share_token ON mindmap_share(share_token);
 CREATE INDEX IF NOT EXISTS idx_folder_owner ON mindmap_folder(owner_id, del_flag);
 CREATE INDEX IF NOT EXISTS idx_folder_parent ON mindmap_folder(parent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_mindmap_folder_active_sibling ON mindmap_folder(owner_id, parent_id, active_name);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_mindmap_template_category_name ON mindmap_template_category(name);
 CREATE INDEX IF NOT EXISTS idx_version_mindmap ON mindmap_version(mindmap_id, version_type);
 CREATE INDEX IF NOT EXISTS idx_version_time ON mindmap_version(mindmap_id, created_time);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_mindmap_node_uid ON mindmap_node(file_id, node_uid);

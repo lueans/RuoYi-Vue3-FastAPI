@@ -33,7 +33,7 @@ DEALLOCATE PREPARE stmt;
 SET @owner_folder_idx_exists = (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mindmap' AND INDEX_NAME = 'idx_mindmap_owner_folder');
 SET @sql = IF(@owner_folder_idx_exists = 0,
-  'ALTER TABLE mindmap ADD INDEX idx_mindmap_owner_folder (owner_id, folder_id, del_flag, is_template)',
+  'ALTER TABLE mindmap ADD INDEX idx_mindmap_owner_folder (owner_id, folder_id, del_flag)',
   'SELECT ''owner folder index already exists''');
 PREPARE stmt FROM @sql;
 EXECUTE stmt;

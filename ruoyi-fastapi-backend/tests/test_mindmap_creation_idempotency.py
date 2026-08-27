@@ -26,21 +26,21 @@ class MindmapCreationRuleTest(unittest.TestCase):
             'blank',
             {'theme': {'a': 1, 'b': 2}, 'name': '规划'},
         )
-        template = MindmapCreationService.build_context(
+        copied = MindmapCreationService.build_context(
             'request-key-1234567890',
-            'template',
+            'copy',
             {'theme': {'a': 1, 'b': 2}, 'name': '规划'},
         )
 
         self.assertEqual(first.request_fingerprint, reordered.request_fingerprint)
-        self.assertNotEqual(first.request_fingerprint, template.request_fingerprint)
+        self.assertNotEqual(first.request_fingerprint, copied.request_fingerprint)
 
     def test_replay_rejects_same_key_for_different_intent(self) -> None:
         context = MindmapCreationService.build_context(
-            'request-key-1234567890', 'template', {'templateId': 8},
+            'request-key-1234567890', 'copy', {'sourceMindmapId': 8},
         )
         record = SimpleNamespace(
-            operation='template',
+            operation='copy',
             request_fingerprint='different',
             result_file_id=88,
         )
@@ -51,7 +51,7 @@ class MindmapCreationRuleTest(unittest.TestCase):
 
     def test_replay_returns_original_file_id(self) -> None:
         context = MindmapCreationService.build_context(
-            'request-key-1234567890', 'template', {'templateId': 8},
+            'request-key-1234567890', 'copy', {'sourceMindmapId': 8},
         )
         record = SimpleNamespace(
             operation=context.operation,
@@ -141,10 +141,10 @@ class MindmapCreationTransactionTest(unittest.IsolatedAsyncioTestCase):
         db.commit.assert_not_awaited()
         add_mindmap.assert_not_awaited()
 
-    async def test_existing_request_short_circuits_before_file_insert(self) -> None:
+    async def test_existing_copy_request_short_circuits_before_file_insert(self) -> None:
         db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
         context = MindmapCreationService.build_context(
-            'request-key-1234567890', 'template', {'templateId': 12},
+            'request-key-1234567890', 'copy', {'sourceMindmapId': 12},
         )
         existing = SimpleNamespace(
             operation=context.operation,
@@ -162,10 +162,10 @@ class MindmapCreationTransactionTest(unittest.IsolatedAsyncioTestCase):
         ):
             result = await MindmapService.add_mindmap_services(
                 db,
-                MindmapModel(name='模板', ownerId=7),
+                MindmapModel(name='副本', ownerId=7),
                 creation_request_id='request-key-1234567890',
-                creation_operation='template',
-                creation_intent={'templateId': 12},
+                creation_operation='copy',
+                creation_intent={'sourceMindmapId': 12},
             )
 
         self.assertEqual(result.result['id'], 73)

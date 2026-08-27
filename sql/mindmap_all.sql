@@ -65,29 +65,7 @@ CREATE TABLE IF NOT EXISTS mindmap_collaborator (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='脑图协作者表';
 
 -- ────────────────────────────────────────────────────────────
--- 5. 脑图模板分类表（Phase 5: 模板市场）
--- ────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS mindmap_template_category (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    name VARCHAR(100) NOT NULL COMMENT '分类名称',
-    sort_order INT DEFAULT 0 COMMENT '排序',
-    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_mindmap_template_category_name (name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='脑图模板分类表';
-
--- ────────────────────────────────────────────────────────────
--- 6. mindmap 表新增模板分类字段（Phase 5）
--- ────────────────────────────────────────────────────────────
--- 注意：MySQL 8.0 不支持 ADD COLUMN IF NOT EXISTS
--- 执行前请先确认该字段不存在，或忽略"Duplicate column"错误
-ALTER TABLE mindmap ADD COLUMN template_category_id BIGINT DEFAULT NULL COMMENT '模板分类ID';
-ALTER TABLE mindmap ADD INDEX idx_mindmap_template_market (is_template, del_flag, template_category_id, create_time);
-ALTER TABLE mindmap ADD CONSTRAINT fk_mindmap_template_category
-    FOREIGN KEY (template_category_id) REFERENCES mindmap_template_category (id)
-    ON DELETE RESTRICT ON UPDATE RESTRICT;
-
--- ────────────────────────────────────────────────────────────
--- 7. 菜单和权限数据
+-- 5. 菜单和权限数据
 -- ────────────────────────────────────────────────────────────
 -- 执行前先确认 ID 9000-9005 未被占用：
 --   SELECT menu_id FROM sys_menu WHERE menu_id BETWEEN 9000 AND 9010;
@@ -103,8 +81,3 @@ INSERT INTO sys_menu VALUES('9002', '脑图查询', '9001', '1', '', '', '', '1'
 INSERT INTO sys_menu VALUES('9003', '脑图新增', '9001', '2', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:add', '#', 'admin', NOW(), '', NULL, '');
 INSERT INTO sys_menu VALUES('9004', '脑图修改', '9001', '3', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:edit', '#', 'admin', NOW(), '', NULL, '');
 INSERT INTO sys_menu VALUES('9005', '脑图删除', '9001', '4', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:mindmap:remove', '#', 'admin', NOW(), '', NULL, '');
-
--- 模板管理权限
-INSERT INTO sys_menu VALUES('9006', '模板管理', '9000', '2', 'templateAdmin', 'mindmap/templateAdmin', '', '1', '0', 'C', '0', '0', 'mindmap:template:list', 'template', 'admin', NOW(), '', NULL, '模板管理菜单');
-INSERT INTO sys_menu VALUES('9007', '模板发布', '9006', '1', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:template:add', '#', 'admin', NOW(), '', NULL, '');
-INSERT INTO sys_menu VALUES('9008', '模板删除', '9006', '2', '', '', '', '1', '0', 'F', '0', '0', 'mindmap:template:remove', '#', 'admin', NOW(), '', NULL, '');

@@ -87,7 +87,6 @@ class MindmapGlobalSearchServiceTest(unittest.IsolatedAsyncioTestCase):
         sql = str(count_query.compile(compile_kwargs={'literal_binds': True}))
         self.assertIn('mindmap_collaborator.user_id = 7', sql)
         self.assertIn("mindmap.del_flag = '0'", sql)
-        self.assertIn('mindmap.is_template = 0', sql)
         self.assertIn("mindmap_migration_record.status != 'failed'", sql)
 
         path_query = db.execute.await_args_list[2].args[0]

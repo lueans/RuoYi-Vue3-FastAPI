@@ -9,6 +9,7 @@ from module_mindmap.entity.vo.mindmap_vo import (
     MindmapContentBatchModel,
     MindmapContentOperationModel,
     MindmapModel,
+    MindmapViewUpdateModel,
 )
 from module_mindmap.service.mindmap_service import MindmapService
 
@@ -95,6 +96,11 @@ class MindmapContentOperationContractTest(unittest.TestCase):
 
         self.assertEqual(request.document_data['simpleMindMap']['config']['imgTextMargin'], 8)
 
+    def test_content_snapshot_operation_is_supported(self) -> None:
+        operation = MindmapContentOperationModel(type='document.content.update')
+
+        self.assertEqual(operation.type, 'document.content.update')
+
     def test_document_data_rejects_oversized_deep_and_excessive_json(self) -> None:
         invalid_values = [
             {'payload': 'x' * (128 * 1024)},
@@ -114,6 +120,35 @@ class MindmapContentOperationContractTest(unittest.TestCase):
 
 
 class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_view_save_is_last_write_wins_without_content_revision(self) -> None:
+        request = MindmapViewUpdateModel(viewData={'scale': 1.25, 'translateX': -80})
+        db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+        update_content = AsyncMock()
+
+        with (
+            patch.object(MindmapService, 'check_mindmap_access', new=AsyncMock()),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.update_content_dao',
+                new=update_content,
+            ),
+        ):
+            result = await MindmapService.update_view_services(
+                db,
+                mindmap_id=8,
+                page_object=request,
+                user_id=3,
+            )
+
+        update_content.assert_awaited_once_with(
+            db,
+            8,
+            {'view_data': {'scale': 1.25, 'translateX': -80}},
+        )
+        db.commit.assert_awaited_once()
+        db.rollback.assert_not_awaited()
+        self.assertNotIn('contentRevision', result)
+        self.assertEqual(result['viewData']['scale'], 1.25)
+
     async def test_idempotent_replay_returns_before_revision_checks_or_writes(self) -> None:
         request = MindmapContentBatchModel(
             baseRevision=1,
@@ -197,6 +232,7 @@ class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
         )
         update_content = AsyncMock()
         create_draft = AsyncMock()
+        broadcast = AsyncMock()
 
         with (
             patch.object(MindmapService, 'check_mindmap_access', new=AsyncMock()),
@@ -222,7 +258,7 @@ class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 'module_mindmap.websocket.room_manager.room_manager.broadcast',
-                new=AsyncMock(),
+                new=broadcast,
             ),
         ):
             result = await MindmapService.update_content_batch_services(
@@ -239,10 +275,119 @@ class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('node_tree', persisted)
         self.assertEqual(result['documentData'], next_document_data)
         self.assertEqual(result['contentRevision'], 5)
+        broadcast.assert_awaited_once_with(8, {
+            'type': 'content_revision_changed',
+            'contentRevision': 5,
+            'clientMutationId': 'document-config-save',
+            'concurrentMerge': False,
+        })
         self.assertEqual(db.add.call_args.args[0].created_by, 'alice')
         self.assertEqual(create_draft.await_args.kwargs['created_by'], 'alice')
         self.assertTrue(savepoint.entered)
         self.assertTrue(savepoint.exited)
+        db.commit.assert_awaited_once()
+
+    async def test_content_snapshot_persists_document_fields_without_overwriting_view(self) -> None:
+        server_view = {'scale': 1.75, 'translateX': -120}
+        replacement_tree = {
+            'data': {'uid': 'root', 'text': '恢复后的正文'},
+            'children': [],
+        }
+        mindmap = SimpleNamespace(
+            id=8,
+            owner_id=3,
+            content_revision=4,
+            root_node_id=10,
+            node_count=1,
+            schema_version=1,
+            engine_name='simple-mind-map',
+            engine_version='test',
+            layout='logicalStructure',
+            theme={'template': 'default'},
+            view_data=server_view,
+            document_data={'plugin': {'version': 1}},
+        )
+        request = MindmapContentBatchModel(
+            baseRevision=4,
+            clientMutationId='content-snapshot-save',
+            operations=[{'type': 'document.content.update'}],
+            nodeTree=replacement_tree,
+            viewData={'scale': 0.5, 'translateX': 400},
+            layout='fishbone',
+            theme={'template': 'dark'},
+            documentData={'plugin': {'version': 2}},
+        )
+        savepoint = AsyncSavepoint()
+        db = SimpleNamespace(
+            add=Mock(),
+            begin_nested=Mock(return_value=savepoint),
+            commit=AsyncMock(),
+            rollback=AsyncMock(),
+        )
+        update_content = AsyncMock()
+        persist_tree = AsyncMock(return_value={
+            'root_node_id': 10,
+            'node_count': 1,
+            'schema_version': 2,
+            'engine_name': 'simple-mind-map',
+            'engine_version': 'test',
+            'changed_nodes': [],
+        })
+
+        with (
+            patch.object(MindmapService, 'check_mindmap_access', new=AsyncMock()),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.get_mindmap_for_update',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.update_content_dao',
+                new=update_content,
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapContentDao.get_change_by_mutation',
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapContentDao.get_node_revisions',
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(
+                MindmapService,
+                '_create_draft_version_safely',
+                new=AsyncMock(),
+            ) as create_draft,
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDocumentService.persist_tree_incremental',
+                new=persist_tree,
+            ),
+            patch(
+                'module_mindmap.websocket.room_manager.room_manager.broadcast',
+                new=AsyncMock(),
+            ),
+        ):
+            result = await MindmapService.update_content_batch_services(
+                db,
+                8,
+                request,
+                user_id=3,
+                user_name='alice',
+            )
+
+        persisted = update_content.await_args.args[2]
+        self.assertEqual(persisted['layout'], 'fishbone')
+        self.assertEqual(persisted['theme'], {'template': 'dark'})
+        self.assertEqual(persisted['document_data'], {'plugin': {'version': 2}})
+        self.assertNotIn('view_data', persisted)
+        self.assertEqual(result['viewData'], server_view)
+        self.assertEqual(create_draft.await_args.kwargs['view_data'], server_view)
+        persist_tree.assert_awaited_once_with(
+            db,
+            8,
+            replacement_tree,
+            owner_id=3,
+            operator='alice',
+        )
         db.commit.assert_awaited_once()
 
     async def test_draft_failure_rolls_back_savepoint_without_blocking_outer_commit(self) -> None:

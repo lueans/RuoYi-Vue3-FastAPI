@@ -51,6 +51,7 @@ MAX_YJS_PATCH_BYTES = 2 * 1024 * 1024
 MAX_YJS_PATCH_NODE_COUNT = 20000
 MAX_YJS_PATCH_CHILD_COUNT = 50000
 MAX_YJS_PATCH_JSON_DEPTH = 64
+MAX_CLIENT_MUTATION_ID_LENGTH = 100
 WS_TRAFFIC_WINDOW_SECONDS = 10
 MAX_WS_MESSAGES_PER_WINDOW = 600
 MAX_WS_AWARENESS_PER_WINDOW = 120
@@ -130,6 +131,16 @@ def get_ws_rate_limit_payload() -> dict:
         'code': 'rate_limited',
         'message': '协作消息发送过于频繁，请稍后重试',
     }
+
+
+def normalize_client_mutation_id(value: object) -> str | None:
+    """只转发可由 HTTP 保存契约接受的批次标识。"""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > MAX_CLIENT_MUTATION_ID_LENGTH:
+        return None
+    return normalized
 
 
 def get_ws_client_message_type(payload: object) -> str | None:
@@ -765,11 +776,16 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
 
                 # 首个种子状态先持久化再转发，避免恰好在广播之后加入的连接
                 # 查不到状态并独立创建同名嵌套 Yjs 类型。
+                mutation_id = normalize_client_mutation_id(data.get('clientMutationId'))
+                correlation = {'contentRevision': data.get('contentRevision')}
+                if mutation_id:
+                    correlation['clientMutationId'] = mutation_id
                 await room_manager.broadcast(
                     mindmap_id,
                     {
                         'type': msg_type,
                         'update': update_b64,
+                        **(correlation if msg_type == 'update' else {}),
                         # RoomManager 按接收端能力裁剪：新客户端省略完整状态，
                         # 旧客户端在滚动升级期仍收到 state。
                         'state': state_b64 or None,

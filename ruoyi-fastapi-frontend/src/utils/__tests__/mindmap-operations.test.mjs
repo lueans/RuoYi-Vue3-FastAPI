@@ -4,7 +4,9 @@ import test from 'node:test'
 import {
   appendUniqueMindmapOperation,
   buildCrossNodeContentOperations,
+  buildMindmapDocumentOperations,
   buildMindmapContentOperations,
+  buildMindmapTreeDetailList,
   buildNodeTagContentOperations,
   detectMindmapFileOperations,
   snapshotMindmapDocumentMeta,
@@ -26,7 +28,7 @@ test('文档元数据比较不受对象 key 顺序影响', () => {
   assert.deepEqual(operations, [])
 })
 
-test('布局、主题、视图和文档扩展配置进入独立冲突域', () => {
+test('布局、主题和文档扩展配置进入正文冲突域，视图独立保存', () => {
   const saved = snapshotMindmapDocumentMeta({
     layout: 'logicalStructure',
     theme: { template: 'default' },
@@ -42,9 +44,80 @@ test('布局、主题、视图和文档扩展配置进入独立冲突域', () =>
   assert.deepEqual(operations, [
     'file.layout.update',
     'file.theme.update',
-    'file.view.update',
     'file.document_data.update',
   ])
+})
+
+test('本地草稿恢复生成细粒度操作且忽略纯视图变化', () => {
+  const previous = {
+    root: {
+      data: { uid: 'root', text: '根节点' },
+      children: [{ data: { uid: 'old', text: '旧节点' }, children: [] }],
+    },
+    layout: 'logicalStructure',
+    theme: { template: 'default' },
+    view: { scale: 1 },
+    documentData: {},
+  }
+  const current = {
+    ...previous,
+    root: {
+      data: { uid: 'root', text: '根节点' },
+      children: [{ data: { uid: 'new', text: '新节点' }, children: [] }],
+    },
+    view: { scale: 1.5 },
+  }
+  const operations = buildMindmapDocumentOperations(
+    previous,
+    current,
+    new Map([['old', 4]]),
+  )
+
+  assert.deepEqual(operations.map(operation => operation.type), [
+    'node.update',
+    'node.create',
+    'node.delete',
+  ])
+  assert.equal(operations.some(operation => operation.type === 'document.update'), false)
+  assert.equal(operations.some(operation => operation.type === 'file.view.update'), false)
+  assert.equal(operations.at(-1).targetRevision, 4)
+})
+
+test('草稿差异只物化直接子节点并对超大批次安全回退', () => {
+  const previousRoot = {
+    data: { uid: 'root', text: '旧根节点' },
+    children: [{
+      data: { uid: 'child', text: '子节点' },
+      children: [{ data: { uid: 'grandchild', text: '孙节点' }, children: [] }],
+    }],
+  }
+  const currentRoot = {
+    ...previousRoot,
+    data: { uid: 'root', text: '新根节点' },
+  }
+  const details = buildMindmapTreeDetailList(previousRoot, currentRoot)
+  assert.equal(details[0].data.children[0].data.uid, 'child')
+  assert.deepEqual(details[0].data.children[0].children, [])
+
+  const createWideDocument = suffix => ({
+    root: {
+      data: { uid: 'root', text: '根节点' },
+      children: Array.from({ length: 2001 }, (_, index) => ({
+        data: { uid: `node-${index}`, text: `节点 ${index} ${suffix}` },
+        children: [],
+      })),
+    },
+    layout: 'logicalStructure',
+    theme: {},
+    documentData: {},
+  })
+  assert.deepEqual(
+    buildMindmapDocumentOperations(
+      createWideDocument('旧'),
+      createWideDocument('新'),
+    ),
+    [{ type: 'document.content.update' }],
+  )
 })
 
 test('相同文件操作只入队一次', () => {

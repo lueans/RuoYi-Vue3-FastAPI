@@ -31,6 +31,7 @@ from module_mindmap.entity.vo.mindmap_vo import (
     MindmapRenameModel,
     MindmapRestoreResultModel,
     MindmapStatusUpdateModel,
+    MindmapViewUpdateModel,
 )
 from module_mindmap.permissions import mindmap_permissions
 from module_mindmap.service.mindmap_creation_service import (
@@ -273,6 +274,28 @@ async def update_mindmap_content_batch(
         current_user.user.user_name,
     )
     return ResponseUtil.success(msg='保存成功', data=result)
+
+
+@mindmap_controller.patch(
+    '/file/{mindmap_id}/view',
+    summary='保存脑图画布视图',
+    description='以后写覆盖方式保存平移和缩放，不推进正文 contentRevision',
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
+)
+async def update_mindmap_view(
+    request: Request,
+    mindmap_id: Annotated[int, Path(description='脑图文件ID')],
+    model: MindmapViewUpdateModel,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapService.update_view_services(
+        query_db,
+        mindmap_id,
+        model,
+        current_user.user.user_id,
+    )
+    return ResponseUtil.success(msg='视图已保存', data=result)
 
 
 @mindmap_controller.get(

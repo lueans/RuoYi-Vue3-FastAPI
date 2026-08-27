@@ -22,8 +22,12 @@ FILE_OPERATION_FIELDS = {
     'file.document_data.update': 'document_data',
 }
 LEGACY_DOCUMENT_OPERATION_TYPES = frozenset({'document.update'})
+CONTENT_SNAPSHOT_OPERATION_TYPES = frozenset({'document.content.update'})
 SUPPORTED_CONTENT_OPERATION_TYPES = (
-    TREE_OPERATION_TYPES | frozenset(FILE_OPERATION_FIELDS) | LEGACY_DOCUMENT_OPERATION_TYPES
+    TREE_OPERATION_TYPES
+    | frozenset(FILE_OPERATION_FIELDS)
+    | LEGACY_DOCUMENT_OPERATION_TYPES
+    | CONTENT_SNAPSHOT_OPERATION_TYPES
 )
 MAX_MINDMAP_NAME_LENGTH = 200
 MAX_MINDMAP_DESCRIPTION_LENGTH = 500
@@ -222,6 +226,14 @@ class MindmapContentUpdateModel(BaseModel):
         return validate_document_data(value)
 
 
+class MindmapViewUpdateModel(BaseModel):
+    """与正文修订号解耦的画布视图偏好。"""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    view_data: dict[str, Any] | None = Field(default=None, description='平移、缩放等视图状态')
+
+
 class MindmapContentOperationModel(BaseModel):
     """前端 data_change_detail 转换后的领域操作。"""
 
@@ -235,7 +247,7 @@ class MindmapContentOperationModel(BaseModel):
             'node.tag.bind/node.tag.unbind/node.tag.reorder/'
             'relation|summary|group|asset.upsert|delete/'
             'file.layout.update/file.theme.update/file.view.update/'
-            'file.document_data.update/document.update'
+            'file.document_data.update/document.content.update/document.update'
         ),
     )
     node_uid: str | None = Field(default=None, max_length=64, description='目标节点UID')

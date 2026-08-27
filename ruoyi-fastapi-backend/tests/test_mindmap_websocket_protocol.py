@@ -22,6 +22,7 @@ from module_mindmap.websocket.mindmap_ws import (
     get_ws_invalid_message_payload,
     get_ws_rate_limit_payload,
     mindmap_websocket_endpoint,
+    normalize_client_mutation_id,
     normalize_awareness_node_uids,
     normalize_ws_capabilities,
     normalize_yjs_patch,
@@ -101,6 +102,12 @@ class MindmapWebsocketProtocolTest(unittest.TestCase):
             'code': 'rate_limited',
             'message': '协作消息发送过于频繁，请稍后重试',
         })
+
+    def test_client_mutation_id_correlation_is_bounded(self) -> None:
+        self.assertEqual(normalize_client_mutation_id(' mutation-1 '), 'mutation-1')
+        self.assertIsNone(normalize_client_mutation_id(''))
+        self.assertIsNone(normalize_client_mutation_id('x' * 101))
+        self.assertIsNone(normalize_client_mutation_id(7))
 
     def test_only_declared_json_object_messages_enter_protocol_handlers(self) -> None:
         for payload in (None, [], 'update', 1, {'type': None}, {'type': 'future'}):

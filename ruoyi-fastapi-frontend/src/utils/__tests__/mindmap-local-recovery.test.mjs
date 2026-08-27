@@ -3,14 +3,18 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 import {
+  areMindmapDraftDocumentsEqual,
   createMindmapDraftKey,
   getMindmapDraft,
   getMindmapDraftDisplayName,
   getMindmapDraftSourceLabel,
+  isMindmapDraftSessionActive,
   listMindmapDrafts,
+  removeInactiveMindmapDrafts,
   removeMindmapDraft,
   saveMindmapDraft,
   saveMindmapDraftFallbackSync,
+  startMindmapDraftSessionLease,
   stableSerialize,
 } from '../mindmap-draft.js'
 import {
@@ -44,6 +48,81 @@ class MemoryStorage {
     this.values.delete(key)
   }
 }
+
+class MemoryLockManager {
+  constructor() {
+    this.held = []
+  }
+
+  async request(name, callback) {
+    const lock = { name }
+    this.held.push(lock)
+    try {
+      return await callback(lock)
+    } finally {
+      this.held = this.held.filter(item => item !== lock)
+    }
+  }
+
+  async query() {
+    return { held: [...this.held], pending: [] }
+  }
+}
+
+test('纯平移缩放差异不形成正文恢复草稿', () => {
+  const base = {
+    root: { data: { uid: 'root', text: '正文' }, children: [] },
+    layout: 'logicalStructure',
+    theme: { template: 'default' },
+    view: { transform: { scaleX: 1, translateX: 0 } },
+    documentData: {},
+  }
+  assert.equal(areMindmapDraftDocumentsEqual(base, {
+    ...base,
+    view: { transform: { scaleX: 1.5, translateX: -300 } },
+  }), true)
+  assert.equal(areMindmapDraftDocumentsEqual(base, {
+    ...base,
+    root: { data: { uid: 'root', text: '正文已修改' }, children: [] },
+  }), false)
+})
+
+test('活跃编辑窗口锁不受过期租约影响，停止后立即释放', async () => {
+  const previousStorage = globalThis.localStorage
+  globalThis.localStorage = new MemoryStorage()
+  const lockManager = new MemoryLockManager()
+  let heartbeat
+  let clearedTimer
+  try {
+    const stop = startMindmapDraftSessionLease(7, 127, 'window-a', {
+      ttlMs: 10,
+      lockManager,
+      setIntervalFn: callback => {
+        heartbeat = callback
+        return 91
+      },
+      clearIntervalFn: timer => { clearedTimer = timer },
+    })
+    assert.equal(await isMindmapDraftSessionActive(7, 127, 'window-a', {
+      now: Date.now() + 60_000,
+      lockManager,
+    }), true)
+    heartbeat()
+    assert.equal(await isMindmapDraftSessionActive(7, 127, 'window-a', {
+      lockManager,
+    }), true)
+    stop()
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(clearedTimer, 91)
+    assert.equal(await isMindmapDraftSessionActive(7, 127, 'window-a', {
+      now: Date.now() + 60_000,
+      lockManager,
+    }), false)
+  } finally {
+    globalThis.localStorage = previousStorage
+  }
+})
 
 test('本地草稿列表按用户隔离、去除富文本标题并按时间倒序', async () => {
   const previousStorage = globalThis.localStorage
@@ -168,6 +247,48 @@ test('云端退出清理同一脑图的旧窗口草稿但保留清理期间的�
     const drafts = await listMindmapDrafts(7)
     assert.deepEqual(drafts.map(item => item.name), ['清理期间的新草稿'])
   } finally {
+    globalThis.localStorage = previousStorage
+    globalThis.indexedDB = previousIndexedDb
+  }
+})
+
+test('使用云端版本只删除失活草稿并保护仍在编辑的其他窗口', async () => {
+  const previousStorage = globalThis.localStorage
+  const previousIndexedDb = globalThis.indexedDB
+  globalThis.localStorage = new MemoryStorage()
+  globalThis.indexedDB = undefined
+  let stopActiveSession
+  try {
+    await saveMindmapDraft({
+      userId: 7,
+      mindmapId: 127,
+      sessionId: 'active-window',
+      contentRevision: 3,
+      updatedAt: 100,
+      document: { root: { data: { text: '仍在编辑' }, children: [] } },
+    })
+    await saveMindmapDraft({
+      userId: 7,
+      mindmapId: 127,
+      sessionId: 'crashed-window',
+      contentRevision: 3,
+      updatedAt: 200,
+      document: { root: { data: { text: '崩溃草稿' }, children: [] } },
+    })
+    stopActiveSession = startMindmapDraftSessionLease(7, 127, 'active-window', {
+      lockManager: {},
+      setIntervalFn: () => 92,
+      clearIntervalFn: () => {},
+    })
+
+    const result = await removeInactiveMindmapDrafts(7, 127, { beforeUpdatedAt: 200 })
+    const drafts = await listMindmapDrafts(7)
+
+    assert.deepEqual(drafts.map(item => item.name), ['仍在编辑'])
+    assert.deepEqual(result.preservedKeys, [createMindmapDraftKey(7, 127, 'active-window')])
+    assert.deepEqual(result.removedKeys, [createMindmapDraftKey(7, 127, 'crashed-window')])
+  } finally {
+    stopActiveSession?.()
     globalThis.localStorage = previousStorage
     globalThis.indexedDB = previousIndexedDb
   }
@@ -444,9 +565,23 @@ test('明确使用云端版本会让新协作会话替换旧缓存而不是再�
     /async function performContentConflictResolution[\s\S]*?async function manualSave/,
   )?.[0] || ''
 
-  assert.match(draftBlock, /action === 'cancel'[\s\S]*?requestAuthoritativeCollaborationReset\(\)/)
+  const discardBlock = editorSource.match(
+    /async function discardLocalDraftsAndUseCloud[\s\S]*?function clearRestoredDraft/,
+  )?.[0] || ''
+
+  assert.match(draftBlock, /action === 'cancel'[\s\S]*?await discardLocalDraftsAndUseCloud\(draft\)/)
+  assert.match(discardBlock, /removeInactiveMindmapDrafts\(userId, mindmapId, \{\s*beforeUpdatedAt: record\.updatedAt/)
+  assert.doesNotMatch(discardBlock, /sessionId:|key:/)
+  assert.ok(
+    discardBlock.indexOf('await enqueueDraftOperation')
+      < discardBlock.indexOf('requestAuthoritativeCollaborationReset()'),
+  )
+  assert.match(discardBlock, /draftProtection\.markClean\(\)/)
+  assert.match(draftBlock, /cancelButtonText: '删除本地草稿并使用云端'/)
   assert.match(createSyncBlock, /preferAuthoritativeDocument/)
   assert.match(conflictBlock, /requestAuthoritativeCollaborationReset\(\)[\s\S]*?onYjsReinit/)
+  assert.match(editorSource, /buildMindmapDocumentOperations\(/)
+  assert.doesNotMatch(editorSource, /pendingContentOperations\.push\(\{ type: 'document\.update' \}\)/)
 })
 
 test('固定脑图导航具备原生键盘语义与清晰焦点样式', async () => {

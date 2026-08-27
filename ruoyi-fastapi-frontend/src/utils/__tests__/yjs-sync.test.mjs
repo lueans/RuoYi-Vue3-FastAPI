@@ -622,10 +622,11 @@ test('旧服务端未协商检查点时本地详情事务继续携带完整状�
     action: 'update',
     oldData: document.root.children[0],
     data: updatedChild,
-  }])
+  }], 'mutation-live-1')
 
   const updateMessage = sent.find(message => message.type === 'update')
   assert.ok(updateMessage.update)
+  assert.equal(updateMessage.clientMutationId, 'mutation-live-1')
   assert.ok(updateMessage.state)
   assert.deepEqual(updateMessage.patch, {
     schemaVersion: 1,
@@ -704,6 +705,97 @@ test('未确认远端状态不会随内容版本推进被提升为检查点', ()
   assert.equal(staleEvents[0].reason, 'unconfirmed_yjs_state')
   assert.equal(sync._flushCheckpoint({ reschedule: false }), false)
   assert.equal(sent.some(message => message.type === 'checkpoint'), false)
+  remoteDoc.destroy()
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('Yjs 实时批次收到同 clientMutationId 的 HTTP 确认后不误判 stale', () => {
+  const document = createDocument()
+  let staleCount = 0
+  let observedRevision = 0
+  const sync = new YjsMindmapSync(1, createMindmap(document), 1, {
+    onStaleState: () => { staleCount += 1 },
+    onContentRevision: revision => { observedRevision = revision },
+  })
+  sync.initFromMindmap(document)
+  const remoteDoc = new Y.Doc()
+  Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(sync.doc))
+  remoteDoc.getMap('nodes').get('child').get('data').set('text', '已持久化协作内容')
+  sync._handleUpdate({
+    state: sync._encodeUpdate(Y.encodeStateAsUpdate(remoteDoc)),
+    clientMutationId: 'mutation-remote-1',
+    contentRevision: 1,
+  })
+
+  sync._handleContentRevisionChanged({
+    contentRevision: 2,
+    clientMutationId: 'mutation-remote-1',
+    concurrentMerge: false,
+  })
+
+  assert.equal(staleCount, 0)
+  assert.equal(sync.contentRevision, 2)
+  assert.equal(observedRevision, 2)
+  assert.equal(sync.requiresAuthoritativeReconciliation(), false)
+  remoteDoc.destroy()
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('服务端并发合并会让对应 Yjs 批次回到权威校准', () => {
+  const document = createDocument()
+  let staleReason = ''
+  const sync = new YjsMindmapSync(1, createMindmap(document), 1, {
+    onStaleState: data => { staleReason = data.reason },
+  })
+  sync.initFromMindmap(document)
+  const remoteDoc = new Y.Doc()
+  Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(sync.doc))
+  remoteDoc.getMap('nodes').get('child').get('data').set('text', '需要服务端合并')
+  sync._handleUpdate({
+    state: sync._encodeUpdate(Y.encodeStateAsUpdate(remoteDoc)),
+    clientMutationId: 'mutation-merge-1',
+  })
+
+  sync._handleContentRevisionChanged({
+    contentRevision: 2,
+    clientMutationId: 'mutation-merge-1',
+    concurrentMerge: true,
+  })
+
+  assert.equal(staleReason, 'concurrent_merge')
+  assert.equal(sync.connectionState.value, 'stale')
+  remoteDoc.destroy()
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('乱序 revision 广播仍会清理各自的 Yjs 待确认批次', () => {
+  const document = createDocument()
+  const sync = new YjsMindmapSync(1, createMindmap(document), 1)
+  sync.initFromMindmap(document)
+  const remoteDoc = new Y.Doc()
+  Y.applyUpdate(remoteDoc, Y.encodeStateAsUpdate(sync.doc))
+  remoteDoc.getMap('nodes').get('child').get('data').set('text', '批次一')
+  sync._handleUpdate({
+    state: sync._encodeUpdate(Y.encodeStateAsUpdate(remoteDoc)),
+    clientMutationId: 'mutation-order-1',
+  })
+  remoteDoc.getMap('nodes').get('child').get('data').set('text', '批次二')
+  sync._handleUpdate({
+    state: sync._encodeUpdate(Y.encodeStateAsUpdate(remoteDoc)),
+    clientMutationId: 'mutation-order-2',
+  })
+
+  sync._handleContentRevisionChanged({
+    contentRevision: 3,
+    clientMutationId: 'mutation-order-2',
+  })
+  sync._handleContentRevisionChanged({
+    contentRevision: 2,
+    clientMutationId: 'mutation-order-1',
+  })
+
+  assert.equal(sync.contentRevision, 3)
+  assert.equal(sync.requiresAuthoritativeReconciliation(), false)
   remoteDoc.destroy()
   sync.destroy({ flushCheckpoint: false })
 })
@@ -1195,7 +1287,7 @@ test('版本预览暂停期间的标签定义变化在恢复后统一重放', ()
   sync.destroy()
 })
 
-test('远程元数据通过完整文档接口应用布局、主题、视图和展示设置', () => {
+test('远程元数据只应用语义配置，视图保持当前客户端工作区', () => {
   const mindMap = createMindmap(createDocument())
   let appliedMeta
   const sync = new YjsMindmapSync(1, mindMap, 1, {
@@ -1213,12 +1305,13 @@ test('远程元数据通过完整文档接口应用布局、主题、视图和�
   assert.equal(call.type, 'full')
   assert.equal(call.value.layout, 'fishbone')
   assert.equal(call.value.theme.template, 'dark')
-  assert.equal(call.value.view.transform.scaleX, 1.5)
+  assert.equal(call.value.view.transform.scaleX, 1)
+  assert.equal(mindMap.getData(true).view.transform.scaleX, 1)
   assert.equal(appliedMeta.documentData.simpleMindMap.config.textContentMargin, 6)
   sync.destroy()
 })
 
-test('仅视图协作更新不走清空选区的完整数据替换', async () => {
+test('旧版 Yjs 视图缓存不会覆盖本地视角或选区', async () => {
   const document = createDocument()
   const mindMap = createMindmap(document)
   const sync = new YjsMindmapSync(1, mindMap)
@@ -1229,7 +1322,8 @@ test('仅视图协作更新不走清空选区的完整数据替换', async () =>
   })
 
   assert.equal(await sync._applyYjsToMindmap({ applyMeta: true }), true)
-  assert.deepEqual(mindMap.calls.map(call => call.type), ['tree', 'view'])
+  assert.deepEqual(mindMap.calls.map(call => call.type), ['tree'])
+  assert.equal(mindMap.getData(true).view.transform.scaleX, 1)
   assert.equal(mindMap.getData().children[0].data.isActive, true)
   mindMap.emit('node_tree_render_end')
   sync.destroy()

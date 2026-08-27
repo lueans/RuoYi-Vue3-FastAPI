@@ -47,6 +47,7 @@ from module_mindmap.entity.vo.mindmap_vo import (
     MindmapPageQueryModel,
     MindmapRenameModel,
     MindmapStatusUpdateModel,
+    MindmapViewUpdateModel,
 )
 from module_mindmap.service.mindmap_creation_service import (
     MindmapCreationContext,
@@ -1666,7 +1667,12 @@ class MindmapService:
                 operation.get('type') == 'document.update'
                 for operation in request_operations
             )
-            should_persist_tree = bool(tree_operations or legacy_document_update)
+            content_snapshot_update = any(
+                operation.get('type') == 'document.content.update'
+                for operation in request_operations
+            )
+            document_snapshot_update = legacy_document_update or content_snapshot_update
+            should_persist_tree = bool(tree_operations or document_snapshot_update)
             materialized_tree = page_object.node_tree
             concurrent_merge = False
             if page_object.base_revision != mindmap.content_revision:
@@ -1707,7 +1713,7 @@ class MindmapService:
 
             # nodeTree 只是客户端物化快照，真正的写入来源必须是 operations。即便文件
             # revision 尚未变化，也不能把 Yjs 收到但未进入本地操作日志的远端内容带入。
-            if tree_operations and not legacy_document_update:
+            if tree_operations and not document_snapshot_update:
                 if not server_tree:
                     server_tree = mindmap.node_tree
                     if isinstance(server_tree, str):
@@ -1795,13 +1801,13 @@ class MindmapService:
                 update_data['node_tree'] = json.dumps(materialized_tree, ensure_ascii=False)
             if 'view_data' in file_fields or legacy_document_update:
                 update_data['view_data'] = page_object.view_data
-            if ('layout' in file_fields or legacy_document_update) and page_object.layout is not None:
+            if ('layout' in file_fields or document_snapshot_update) and page_object.layout is not None:
                 update_data['layout'] = page_object.layout
-            if ('theme' in file_fields or legacy_document_update) and page_object.theme is not None:
+            if ('theme' in file_fields or document_snapshot_update) and page_object.theme is not None:
                 update_data['theme'] = page_object.theme
             should_update_document_data = (
                 'document_data' in file_fields
-                or (legacy_document_update and page_object.document_data is not None)
+                or (document_snapshot_update and page_object.document_data is not None)
             )
             if should_update_document_data:
                 update_data['document_data'] = page_object.document_data
@@ -1809,12 +1815,12 @@ class MindmapService:
 
             effective_layout = (
                 page_object.layout
-                if 'layout' in file_fields or legacy_document_update
+                if 'layout' in file_fields or document_snapshot_update
                 else mindmap.layout
             )
             effective_theme = (
                 page_object.theme
-                if 'theme' in file_fields or legacy_document_update
+                if 'theme' in file_fields or document_snapshot_update
                 else mindmap.theme
             )
             effective_view = (
@@ -1872,6 +1878,7 @@ class MindmapService:
                     'type': 'content_revision_changed',
                     'contentRevision': new_revision,
                     'clientMutationId': page_object.client_mutation_id,
+                    'concurrentMerge': concurrent_merge,
                 })
             except Exception as exc:
                 # HTTP 保存已提交，实时通知失败不能反向回滚主数据。
@@ -1881,6 +1888,28 @@ class MindmapService:
         except (ServiceException, ServiceWarning):
             await query_db.rollback()
             raise
+        except Exception:
+            await query_db.rollback()
+            raise
+
+    @classmethod
+    async def update_view_services(
+        cls,
+        query_db: AsyncSession,
+        mindmap_id: int,
+        page_object: MindmapViewUpdateModel,
+        user_id: int,
+    ) -> dict[str, Any]:
+        """保存非语义视图状态；不占用正文 revision，也不触发协作重校准。"""
+        await cls.check_mindmap_access(query_db, mindmap_id, user_id, require_edit=True)
+        try:
+            await MindmapDao.update_content_dao(
+                query_db,
+                mindmap_id,
+                {'view_data': page_object.view_data},
+            )
+            await query_db.commit()
+            return {'viewData': page_object.view_data}
         except Exception:
             await query_db.rollback()
             raise

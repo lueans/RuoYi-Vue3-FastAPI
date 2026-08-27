@@ -3,7 +3,7 @@
  *
  * 数据模型（细粒度，非整体替换）：
  *   Y.Doc
- *   ├── Y.Map('meta')    → { layout: string, theme: object, viewData: object }
+ *   ├── Y.Map('meta')    → { layout: string, theme: object, documentData: object }
  *   ├── Y.Map('tagDefinitions') → { [tagId]: 当前可渲染定义（不写入节点） }
  *   ├── Y.Map('nodes')   → { [uid]: Y.Map({ data: Y.Map, children: Y.Array<string>, parentUid: string }) }
  *   ├── Y.Map('relations') / Y.Map('summaries') / Y.Map('groups')
@@ -49,6 +49,7 @@ const MAX_STRUCTURED_PATCH_JSON_DEPTH = 64
 const LOCAL_NODE_DETAIL_ORIGIN = 'local-node-detail'
 const YJS_CHECKPOINT_CAPABILITY = 'yjs-checkpoint-v1'
 const CHECKPOINT_INTERVAL_MS = 5000
+const MAX_CONFIRMED_MUTATION_IDS = 100
 const DOCUMENT_PREPARE_RETRY_DELAYS = [1000, 3000, 10000, 30000]
 const DOCUMENT_PREPARE_ERROR = '协作内容渲染能力加载失败，正在重试'
 const DOCUMENT_PREPARE_EXHAUSTED_ERROR = '协作内容渲染能力加载失败，请检查网络后刷新页面'
@@ -246,6 +247,10 @@ export class YjsMindmapSync {
     this._checkpointTimer = null
     this._checkpointDirty = false
     this._hasUnconfirmedRemoteState = false
+    this._hasLegacyUnconfirmedRemoteState = false
+    this._unconfirmedRemoteMutationIds = new Set()
+    this._confirmedRemoteMutationIds = new Map()
+    this._outgoingClientMutationId = null
     this._authoritativeRevisionPending = null
     this._pendingRemoteApply = false
     this._pendingRemoteApplyMeta = false
@@ -343,10 +348,15 @@ export class YjsMindmapSync {
         const patch = origin === LOCAL_NODE_DETAIL_ORIGIN
           ? this._pendingStructuredPatch
           : null
+        const clientMutationId = this._normalizeClientMutationId(
+          this._outgoingClientMutationId,
+        )
+        const correlation = clientMutationId ? { clientMutationId } : {}
         if (origin !== 'init' && this._supportsCheckpointProtocol()) {
           this.wsClient.send({
             type: 'update',
             update: this._encodeUpdate(update),
+            ...correlation,
             patch: patch || {
               schemaVersion: 1,
               nodes: [],
@@ -360,6 +370,7 @@ export class YjsMindmapSync {
           this.wsClient.send({
             type: 'update',
             update: this._encodeUpdate(update),
+            ...correlation,
             state: this._encodeUpdate(Y.encodeStateAsUpdate(this.doc)),
             ...(patch ? { patch } : {}),
             contentRevision: this.contentRevision,
@@ -471,6 +482,38 @@ export class YjsMindmapSync {
     }
   }
 
+  _normalizeClientMutationId(value) {
+    if (typeof value !== 'string') return null
+    const normalized = value.trim()
+    return normalized && normalized.length <= 100 ? normalized : null
+  }
+
+  _withOutgoingClientMutationId(clientMutationId, action) {
+    const previous = this._outgoingClientMutationId
+    this._outgoingClientMutationId = this._normalizeClientMutationId(clientMutationId)
+    try {
+      return action()
+    } finally {
+      this._outgoingClientMutationId = previous
+    }
+  }
+
+  _refreshUnconfirmedRemoteState() {
+    this._hasUnconfirmedRemoteState = this._hasLegacyUnconfirmedRemoteState
+      || this._unconfirmedRemoteMutationIds.size > 0
+  }
+
+  _rememberConfirmedRemoteMutation(clientMutationId, concurrentMerge = false) {
+    if (!clientMutationId) return
+    this._confirmedRemoteMutationIds.delete(clientMutationId)
+    this._confirmedRemoteMutationIds.set(clientMutationId, concurrentMerge === true)
+    while (this._confirmedRemoteMutationIds.size > MAX_CONFIRMED_MUTATION_IDS) {
+      this._confirmedRemoteMutationIds.delete(
+        this._confirmedRemoteMutationIds.keys().next().value,
+      )
+    }
+  }
+
   /** 当前 Yjs 内容需要由 HTTP 权威文档重新确认后才能继续持久化。 */
   requiresAuthoritativeReconciliation() {
     return this._hasUnconfirmedRemoteState || this._authoritativeRevisionPending !== null
@@ -509,7 +552,12 @@ export class YjsMindmapSync {
     } : currentData
     if (!this.hasData()) {
       const root = currentDocument?.root || currentDocument
-      if (root) this.initFromMindmap(currentDocument)
+      if (root) {
+        this.initFromMindmap(
+          currentDocument,
+          this.options.getClientMutationId?.(),
+        )
+      }
     } else if (this._hadLocalDataBeforeSync) {
       // 重连时补发完整状态，覆盖断网期间未能通过 WebSocket 发送的增量。
       this._sendFullState()
@@ -518,7 +566,6 @@ export class YjsMindmapSync {
       const missingMeta = {}
       if (!this.yMeta.has('layout')) missingMeta.layout = currentDocument.layout
       if (!this.yMeta.has('theme')) missingMeta.theme = currentDocument.theme
-      if (!this.yMeta.has('viewData')) missingMeta.view = currentDocument.view
       if (
         !this.yMeta.has('documentData')
         && currentDocument.documentData !== undefined
@@ -652,10 +699,6 @@ export class YjsMindmapSync {
     if (document.theme !== undefined) {
       setYMapValueIfChanged(this.yMeta, 'theme', document.theme)
     }
-    const viewData = document.view !== undefined ? document.view : document.viewData
-    if (viewData !== undefined) {
-      setYMapValueIfChanged(this.yMeta, 'viewData', viewData)
-    }
     if (document.documentData !== undefined) {
       setYMapValueIfChanged(this.yMeta, 'documentData', document.documentData)
     }
@@ -730,18 +773,20 @@ export class YjsMindmapSync {
     return true
   }
 
-  syncDocumentMeta(document = {}) {
+  syncDocumentMeta(document = {}, clientMutationId = null) {
     if (this._paused || this._destroyed) return
     this._localYjsChange = true
     try {
-      this.doc.transact(() => this._writeDocumentMeta(document), 'local-meta')
+      this._withOutgoingClientMutationId(clientMutationId, () => {
+        this.doc.transact(() => this._writeDocumentMeta(document), 'local-meta')
+      })
     } finally {
       this._localYjsChange = false
     }
   }
 
   /** 将当前完整脑图写入 Yjs（初始化或文档重置时调用）。 */
-  initFromMindmap(document) {
+  initFromMindmap(document, clientMutationId = null) {
     const fullDocument = document?.root ? document : { root: document }
     const flat = flattenMindmapTree(fullDocument.root)
     const definitions = this._captureTagDefinitions(fullDocument)
@@ -749,38 +794,40 @@ export class YjsMindmapSync {
 
     this._localYjsChange = true
     try {
-      this.doc.transact(() => {
-        replaceYMapEntries(this.yTagDefinitions, Object.fromEntries(definitions))
-        this._replaceCrossNodeState(crossNodeState)
-        for (const uid of Array.from(this.yNodes.keys())) {
-          if (!flat[uid]) this.yNodes.delete(uid)
-        }
-        for (const [uid, nodeInfo] of Object.entries(flat)) {
-          let yNode = this.yNodes.get(uid)
-          if (!yNode) {
-            yNode = new Y.Map()
-            yNode.set('data', new Y.Map())
-            yNode.set('children', new Y.Array())
-            this.yNodes.set(uid, yNode)
+      this._withOutgoingClientMutationId(clientMutationId, () => {
+        this.doc.transact(() => {
+          replaceYMapEntries(this.yTagDefinitions, Object.fromEntries(definitions))
+          this._replaceCrossNodeState(crossNodeState)
+          for (const uid of Array.from(this.yNodes.keys())) {
+            if (!flat[uid]) this.yNodes.delete(uid)
           }
-          replaceYMapEntries(yNode.get('data'), stripCrossNodeData(nodeInfo.data || {}))
-          replaceYArrayValues(yNode.get('children'), nodeInfo.children || [])
-          setYMapValueIfChanged(yNode, 'parentUid', nodeInfo.parentUid)
-        }
-        synchronizeYjsParentUids(
-          this.yNodes,
-          fullDocument.root?.data?.uid,
-        )
-        this._writeDocumentMeta(fullDocument)
-        this.yMeta.set('crossNodeSchemaVersion', 1)
-      }, 'init')
+          for (const [uid, nodeInfo] of Object.entries(flat)) {
+            let yNode = this.yNodes.get(uid)
+            if (!yNode) {
+              yNode = new Y.Map()
+              yNode.set('data', new Y.Map())
+              yNode.set('children', new Y.Array())
+              this.yNodes.set(uid, yNode)
+            }
+            replaceYMapEntries(yNode.get('data'), stripCrossNodeData(nodeInfo.data || {}))
+            replaceYArrayValues(yNode.get('children'), nodeInfo.children || [])
+            setYMapValueIfChanged(yNode, 'parentUid', nodeInfo.parentUid)
+          }
+          synchronizeYjsParentUids(
+            this.yNodes,
+            fullDocument.root?.data?.uid,
+          )
+          this._writeDocumentMeta(fullDocument)
+          this.yMeta.set('crossNodeSchemaVersion', 1)
+        }, 'init')
+      })
     } finally {
       this._localYjsChange = false
     }
   }
 
   /** 监听 simple-mind-map 的 data_change_detail 事件，翻译为 Yjs 操作 */
-  onDataChangeDetail(detailList) {
+  onDataChangeDetail(detailList, clientMutationId = null) {
     if (!detailList || !detailList.length) return
     if (this._paused) return
 
@@ -788,7 +835,7 @@ export class YjsMindmapSync {
     this._pendingStructuredPatch = this._buildStructuredPatch(detailList)
     const syncCrossNodeState = detailListTouchesCrossNodeState(detailList)
     try {
-      this.doc.transact(() => {
+      this._withOutgoingClientMutationId(clientMutationId, () => this.doc.transact(() => {
         for (const detail of detailList) {
           const uid = detail.data?.data?.uid || detail.oldData?.uid
           if (!uid) continue
@@ -848,7 +895,7 @@ export class YjsMindmapSync {
           this._replaceCrossNodeState(extractCrossNodeState(this.mindMap?.getData?.(true)))
           this.yMeta.set('crossNodeSchemaVersion', 1)
         }
-      }, LOCAL_NODE_DETAIL_ORIGIN)
+      }, LOCAL_NODE_DETAIL_ORIGIN))
     } finally {
       this._pendingStructuredPatch = null
       this._localYjsChange = false
@@ -1021,7 +1068,6 @@ export class YjsMindmapSync {
     const meta = {
       layout: this.yMeta.get('layout'),
       theme: this.yMeta.get('theme'),
-      view: this.yMeta.get('viewData'),
     }
     if (this.yMeta.has('documentData')) meta.documentData = this.yMeta.get('documentData')
     return meta
@@ -1279,7 +1325,9 @@ export class YjsMindmapSync {
         documentData: this.options.getDocumentData?.(),
       } : currentData
       if (currentDocument) this.initFromMindmap(currentDocument)
-      this._hasUnconfirmedRemoteState = false
+      this._hasLegacyUnconfirmedRemoteState = false
+      this._unconfirmedRemoteMutationIds.clear()
+      this._refreshUnconfirmedRemoteState()
       this._completeSyncHandshake(true)
       this._sendConsolidatedCheckpoint(
         staged.acceptedSourceIds,
@@ -1291,7 +1339,10 @@ export class YjsMindmapSync {
       }
       return
     }
-    if (staged.mergedUpdate) this._hasUnconfirmedRemoteState = true
+    if (staged.mergedUpdate) {
+      this._hasLegacyUnconfirmedRemoteState = true
+      this._refreshUnconfirmedRemoteState()
+    }
     this._localYjsChange = true
     try {
       if (staged.mergedUpdate) Y.applyUpdate(this.doc, staged.mergedUpdate, 'remote')
@@ -1347,6 +1398,21 @@ export class YjsMindmapSync {
 
   _handleUpdate(data) {
     if (this._destroyed) return
+    const clientMutationId = this._normalizeClientMutationId(data?.clientMutationId)
+    const wasAlreadyConfirmed = clientMutationId
+      && this._confirmedRemoteMutationIds.has(clientMutationId)
+    if (
+      wasAlreadyConfirmed
+      && this._confirmedRemoteMutationIds.get(clientMutationId) === true
+    ) {
+      this._handleStaleState({
+        ...data,
+        contentRevision: data?.contentRevision || this.contentRevision,
+        message: '协作内容已在服务器合并，正在加载权威版本',
+        reason: 'concurrent_merge',
+      })
+      return
+    }
     const patch = this._normalizeStructuredPatch(data.patch)
     // 新协议只广播增量和受影响节点快照；旧服务端仍可提供完整状态自愈。
     const encodedUpdate = patch ? data.update : (data.state || data.update)
@@ -1381,7 +1447,11 @@ export class YjsMindmapSync {
     } finally {
       this._localYjsChange = false
     }
-    this._hasUnconfirmedRemoteState = true
+    if (!wasAlreadyConfirmed) {
+      if (clientMutationId) this._unconfirmedRemoteMutationIds.add(clientMutationId)
+      else this._hasLegacyUnconfirmedRemoteState = true
+      this._refreshUnconfirmedRemoteState()
+    }
     this._normalizeEmbeddedCrossNodeState()
     this._requestYjsApply({ applyMeta: patch?.applyMeta === true || !patch })
     if (!this._receivedServerState && this.hasData()) {
@@ -1403,8 +1473,31 @@ export class YjsMindmapSync {
 
   _handleContentRevisionChanged(data) {
     const revision = Number(data?.contentRevision)
-    if (!Number.isInteger(revision) || revision < this.contentRevision) return
-    if (this._hasUnconfirmedRemoteState) {
+    if (!Number.isInteger(revision)) return
+    const clientMutationId = this._normalizeClientMutationId(data?.clientMutationId)
+    const confirmsRemoteMutation = clientMutationId
+      && this._unconfirmedRemoteMutationIds.delete(clientMutationId)
+    if (clientMutationId) {
+      this._rememberConfirmedRemoteMutation(
+        clientMutationId,
+        data?.concurrentMerge === true,
+      )
+    }
+    this._refreshUnconfirmedRemoteState()
+
+    if (confirmsRemoteMutation && data?.concurrentMerge === true) {
+      this._handleStaleState({
+        ...data,
+        contentRevision: revision,
+        message: '协作内容已在服务器合并，正在加载权威版本',
+        reason: 'concurrent_merge',
+      })
+      return
+    }
+    // 跨实例广播可能乱序到达；旧 revision 仍可确认它对应的实时批次，
+    // 但不能让当前内容版本倒退，也不能再次触发旧式校准。
+    if (revision < this.contentRevision) return
+    if (this._hasLegacyUnconfirmedRemoteState) {
       if (this._authoritativeRevisionPending === revision) return
       this._handleStaleState({
         ...data,
@@ -1414,6 +1507,9 @@ export class YjsMindmapSync {
       })
       return
     }
+    // 带 clientMutationId 的实时更新和 HTTP 保存属于同一不可变批次。
+    // 确认一个批次后可安全推进 revision；其他尚未落库的远端批次继续留在
+    // Yjs 顶层，等各自的确认到达，无需把正常协作误判为 stale。
     if (revision === this.contentRevision) return
     this.setContentRevision(revision)
     this.options.onContentRevision?.(revision, data)

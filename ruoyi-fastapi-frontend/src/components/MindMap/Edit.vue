@@ -92,7 +92,11 @@ import {
   isMindmapSidebarReadonlySafe,
 } from './useStore'
 import { defaultData } from './config'
-import { batchUpdateMindmapContent, getMindmap } from '@/api/mindmap/mindmap'
+import {
+  batchUpdateMindmapContent,
+  getMindmap,
+  updateMindmapView,
+} from '@/api/mindmap/mindmap'
 import { YjsMindmapSync } from '@/utils/yjs-sync'
 import { resolveMindmapPerformanceOptions } from '@/utils/mindmap-performance'
 import { ensureMindmapDocumentPlugins } from '@/utils/mindmap-plugin-loader'
@@ -111,6 +115,7 @@ import {
 import {
   appendUniqueMindmapOperation,
   buildCrossNodeContentOperations,
+  buildMindmapDocumentOperations,
   buildMindmapContentOperations,
   buildNodeTagContentOperations,
   detectMindmapFileOperations,
@@ -121,9 +126,12 @@ import useUserStore from '@/store/modules/user'
 import {
   areMindmapDraftDocumentsEqual,
   getMindmapDraft,
+  isMindmapDraftSessionActive,
+  removeInactiveMindmapDrafts,
   removeMindmapDraft,
   saveMindmapDraft,
   saveMindmapDraftFallbackSync,
+  startMindmapDraftSessionLease,
 } from '@/utils/mindmap-draft'
 import { downloadMindmapBackup } from '@/utils/mindmap-backup'
 import { isMindmapContentWritable } from '@/utils/mindmap-content-state'
@@ -210,6 +218,7 @@ const pendingSave = ref(false)
 const saveStatus = ref('idle') // idle | pending | saving | retrying | syncing | offline | saved | error
 let saveStatusTimer = null
 const AUTO_SAVE_DELAY = 2000
+const VIEW_SAVE_DELAY = 1200
 const DRAFT_SAVE_DELAY = 500
 const CLOUD_EXIT_MAX_PASSES = 3
 const SAVE_RETRY_DELAYS = [2000, 5000, 10000, 30000, 60000]
@@ -250,9 +259,16 @@ let retryNoticeShown = false
 let localDraftFailureNoticeShown = false
 let crossNodeOperationSnapshot = null
 let authoritativeCollaborationResetRequired = false
+let pendingViewData = undefined
+let viewSaveTimer = null
+let viewSaveInProgress = false
+let viewSaveRequested = false
+let viewSavePromise = null
+let stopDraftSessionLease = null
+let pendingClientMutationId = null
 
 const documentMetaBuffer = createMindmapDocumentMetaBuffer((meta) => {
-  yjsSync?.syncDocumentMeta(meta)
+  yjsSync?.syncDocumentMeta(meta, pendingClientMutationId)
 })
 const draftProtection = createMindmapDraftProtectionTracker()
 
@@ -261,7 +277,21 @@ function createMutationId() {
     || `mindmap-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+function ensurePendingClientMutationId() {
+  if (!pendingClientMutationId) pendingClientMutationId = createMutationId()
+  return pendingClientMutationId
+}
+
 const draftSessionId = createMutationId()
+
+function ensureDraftSessionLease() {
+  if (stopDraftSessionLease || !canUseLocalDraft()) return
+  stopDraftSessionLease = startMindmapDraftSessionLease(
+    userStore.id,
+    props.mindmapId,
+    draftSessionId,
+  )
+}
 
 function markDocumentMetaSaved(document) {
   savedDocumentMeta = snapshotMindmapDocumentMeta(document)
@@ -323,6 +353,7 @@ function onDocumentMetaChange(patch) {
   }
   const current = getCurrentDocument()
   recordDocumentOperations(current)
+  ensurePendingClientMutationId()
   scheduleYjsMetaSync(normalizedPatch)
   scheduleLocalDraftPersist()
   resetSaveRetryForNewChange()
@@ -431,16 +462,33 @@ function clearLocalDraft(beforeUpdatedAt) {
 }
 
 function clearDraftRecord(record) {
-  if (!record?.key) return
+  if (!record?.key) return Promise.resolve()
   const userId = userStore.id
   const mindmapId = props.mindmapId
-  enqueueDraftOperation(() => removeMindmapDraft(userId, mindmapId, {
+  return enqueueDraftOperation(() => removeMindmapDraft(userId, mindmapId, {
     key: record.key,
     beforeUpdatedAt: record.updatedAt,
   }))
 }
 
+async function discardLocalDraftsAndUseCloud(record) {
+  if (!record?.updatedAt) return
+  clearTimeout(draftSaveTimer)
+  const userId = userStore.id
+  const mindmapId = props.mindmapId
+  // 只清理确认失活的旧会话；其他标签页仍持有的草稿属于对方正在进行的编辑，
+  // 当前窗口选择云端版本不能替它放弃恢复副本。
+  await enqueueDraftOperation(() => removeInactiveMindmapDrafts(userId, mindmapId, {
+    beforeUpdatedAt: record.updatedAt,
+  }))
+  restoredLocalDraft = false
+  restoredDraftRecord = null
+  draftProtection.markClean()
+  requestAuthoritativeCollaborationReset()
+}
+
 function clearRestoredDraft() {
+  restoredLocalDraft = false
   if (!restoredDraftRecord) return
   const record = restoredDraftRecord
   restoredDraftRecord = null
@@ -461,10 +509,13 @@ function persistLocalDraftBeforeUnload() {
 
 function handlePageHide() {
   persistLocalDraftBeforeUnload()
+  if (viewSaveRequested) void flushPendingViewSave()
 }
 
 function handleVisibilityChange() {
-  if (document.visibilityState !== 'hidden' || !hasUnsavedChanges()) return
+  if (document.visibilityState !== 'hidden') return
+  if (viewSaveRequested) void flushPendingViewSave()
+  if (!hasUnsavedChanges()) return
   // localStorage provides the immediate freeze/navigation fallback; IndexedDB
   // remains the durable, larger-capacity primary draft store when time permits.
   persistLocalDraftBeforeUnload()
@@ -498,6 +549,19 @@ async function resolveLocalDraft(serverDocument, signal) {
   }
   if (sessionCancelled(signal)) return null
   if (!draft) return null
+  if (draft.sessionId && draft.sessionId !== draftSessionId) {
+    const otherSessionActive = await isMindmapDraftSessionActive(
+      userStore.id,
+      props.mindmapId,
+      draft.sessionId,
+    )
+    if (sessionCancelled(signal)) return null
+    if (otherSessionActive) {
+      // 另一标签页仍在持续续租，这不是崩溃恢复草稿。它会自行完成云端保存，
+      // 当前窗口不应弹窗或把对方的工作区当成自己的恢复来源。
+      return null
+    }
+  }
   if (areMindmapDraftDocumentsEqual(draft.document, serverDocument)) {
     clearDraftRecord(draft)
     return null
@@ -512,7 +576,7 @@ async function resolveLocalDraft(serverDocument, signal) {
         {
           type: 'warning',
           confirmButtonText: '恢复本地草稿',
-          cancelButtonText: '使用云端版本',
+          cancelButtonText: '删除本地草稿并使用云端',
           distinguishCancelAndClose: true,
           closeOnClickModal: false,
         }
@@ -523,8 +587,7 @@ async function resolveLocalDraft(serverDocument, signal) {
     } catch (action) {
       if (sessionCancelled(signal)) return null
       if (action === 'cancel') {
-        clearDraftRecord(draft)
-        requestAuthoritativeCollaborationReset()
+        await discardLocalDraftsAndUseCloud(draft)
       }
       return null
     } finally {
@@ -555,8 +618,7 @@ async function resolveLocalDraft(serverDocument, signal) {
   } catch (action) {
     if (sessionCancelled(signal)) return null
     if (action === 'cancel') {
-      clearDraftRecord(draft)
-      requestAuthoritativeCollaborationReset()
+      await discardLocalDraftsAndUseCloud(draft)
     }
   } finally {
     localDraftDialogOpen = false
@@ -605,7 +667,8 @@ function onMindmapDataChangeDetail(detailList) {
   if (isContentDetailTrackingSuspended()) return
   const operationCountBefore = pendingContentOperations.length
   recordContentOperations(detailList)
-  yjsSync?.onDataChangeDetail(detailList)
+  const clientMutationId = ensurePendingClientMutationId()
+  yjsSync?.onDataChangeDetail(detailList, clientMutationId)
   // data_change 在远端渲染保护窗口内会被过滤；如果用户恰好在该窗口输入，
   // data_change_detail 仍需独立把真实本地操作放入保存队列并启动稳定期保存。
   if (pendingContentOperations.length > operationCountBefore) {
@@ -657,6 +720,7 @@ function createYjsSyncInstance() {
       avatar: userStore.avatar,
     },
     getDocumentData: () => normalizeMindmapDocumentData(documentData.value),
+    getClientMutationId: () => pendingClientMutationId,
     // 协作更新可能首次引入富文本、公式等渲染能力。统一加载实际缺失的
     // 插件，避免当前客户端是否曾打开编辑器侧栏影响远端内容显示。
     prepareDocument: (document, targetMindMap) => (
@@ -721,6 +785,28 @@ function createYjsSyncInstance() {
       }
     },
   })
+}
+
+function bindYjsDetailTracking() {
+  if (!yjsSync || !mindMap.value || isReadonly.value || dataChangeDetailHandler) return
+  dataChangeDetailHandler = onMindmapDataChangeDetail
+  mindMap.value.on('data_change_detail', dataChangeDetailHandler)
+}
+
+function startYjsSyncIfReady() {
+  if (
+    yjsSync
+    || restoredLocalDraft
+    || !props.mindmapId
+    || isReadonly.value
+    || !mindMap.value
+    || terminalState
+  ) return false
+  yjsSync = createYjsSyncInstance()
+  yjsSyncRef.value = yjsSync
+  yjsSync.start()
+  bindYjsDetailTracking()
+  return true
 }
 
 const isZenMode = computed(() => store.localConfig.isZenMode)
@@ -825,6 +911,11 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   persistLocalDraftBeforeUnload()
+  clearTimeout(viewSaveTimer)
+  viewSaveTimer = null
+  if (viewSaveRequested) void flushPendingViewSave()
+  stopDraftSessionLease?.()
+  stopDraftSessionLease = null
   componentMounted = false
   cancelSessionAsyncWork()
   unbindBusEvents()
@@ -858,6 +949,8 @@ async function initMindMap(signal) {
   let themeTemplate = 'default'
   let themeConfig = {}
   let viewData = null
+  let serverDocument = null
+  let restoredDraftOperations = []
   const savedConfig = getMindmapLocalRuntimeConfig(actions.getConfig())
   let nodeCount = 0
 
@@ -901,6 +994,13 @@ async function initMindMap(signal) {
         updateTime: data.updateTime,
       })
       emit('name-change', data.name)
+      serverDocument = {
+        root,
+        layout,
+        theme: { template: themeTemplate, config: themeConfig },
+        view: viewData,
+        documentData: documentData.value,
+      }
     } catch (error) {
       if (sessionCancelled(signal)) return
       const message = error?.response?.data?.msg || error?.message || '加载脑图失败'
@@ -919,15 +1019,15 @@ async function initMindMap(signal) {
   }
 
   if (props.mindmapId && !isReadonly.value) {
-    const localDraft = await resolveLocalDraft({
-      root,
-      layout,
-      theme: { template: themeTemplate, config: themeConfig },
-      view: viewData,
-      documentData: documentData.value,
-    }, signal)
+    ensureDraftSessionLease()
+    const localDraft = await resolveLocalDraft(serverDocument, signal)
     if (sessionCancelled(signal)) return
     if (localDraft) {
+      restoredDraftOperations = buildMindmapDocumentOperations(
+        serverDocument,
+        localDraft,
+        nodeRevisionMap,
+      )
       root = localDraft.root || root
       layout = localDraft.layout || layout
       themeTemplate = localDraft.theme?.template || themeTemplate
@@ -1074,19 +1174,17 @@ async function initMindMap(signal) {
   crossNodeOperationSnapshot = extractCrossNodeState(root)
 
   if (restoredLocalDraft) {
-    pendingContentOperations.push({ type: 'document.update' })
-    viewChangeVersion += 1
+    pendingContentOperations.push(...restoredDraftOperations)
+    if (restoredDraftOperations.length > 0) ensurePendingClientMutationId()
     setSaveStatus('pending')
     persistLocalDraft()
-    autoSaveTimer = setTimeout(() => saveToBackend(), 1000)
+    // 在接入持久化 Yjs 状态前立即冻结恢复批次。网络失败时仍由保存重试链路
+    // 保护草稿，只有该批次提交成功后 startYjsSyncIfReady 才会放行协作。
+    void saveToBackend()
   }
 
   // Yjs 实时协作（仅后端模式 + 非只读）
-  if (props.mindmapId && !isReadonly.value) {
-    yjsSync = createYjsSyncInstance()
-    yjsSyncRef.value = yjsSync
-    yjsSync.start()
-  }
+  startYjsSyncIfReady()
 
   // Load dynamic plugins based on config
   if (openNodeRichText.value) {
@@ -1108,10 +1206,7 @@ async function initMindMap(signal) {
     bus.on('data_change', onBusDataChange)
     bus.on('view_data_change', onBusViewDataChange)
     // Yjs 增量同步（带反馈循环保护）
-    if (yjsSync) {
-      dataChangeDetailHandler = onMindmapDataChangeDetail
-      mm.on('data_change_detail', dataChangeDetailHandler)
-    }
+    bindYjsDetailTracking()
 
     // Ctrl+S manual save
     mm.keyCommand.addShortcut('Control+s', () => {
@@ -1192,22 +1287,70 @@ function onBusDataChange(data, sourceMindMap = null) {
   }
 }
 
+function scheduleViewSave(data) {
+  if (!props.mindmapId || isReadonly.value || terminalState) return
+  pendingViewData = data && typeof data === 'object' ? { ...data } : null
+  viewSaveRequested = true
+  clearTimeout(viewSaveTimer)
+  viewSaveTimer = setTimeout(() => {
+    viewSaveTimer = null
+    void flushPendingViewSave()
+  }, VIEW_SAVE_DELAY)
+}
+
+async function flushPendingViewSave() {
+  if (viewSaveInProgress) return viewSavePromise || false
+  if (!viewSaveRequested) return true
+  if (!props.mindmapId || isReadonly.value || terminalState) return false
+  clearTimeout(viewSaveTimer)
+  viewSaveTimer = null
+  viewSaveInProgress = true
+  viewSaveRequested = false
+  const snapshot = pendingViewData
+  let requestSucceeded = false
+  let newerViewRequested = false
+  const requestPromise = Promise.resolve()
+    .then(() => updateMindmapView(props.mindmapId, snapshot))
+    .then(() => {
+      requestSucceeded = true
+      return true
+    })
+    .catch((error) => {
+      // 失败的最新视图继续保留为待保存状态，供手动保存、离开守卫或下一次
+      // 视图变化重试；它仍不进入正文 revision、Yjs 或恢复草稿。
+      newerViewRequested = viewSaveRequested
+      if (!viewSaveRequested) {
+        pendingViewData = snapshot
+        viewSaveRequested = true
+      }
+      console.warn('保存脑图视图失败:', error)
+      return false
+    })
+    .finally(() => {
+      viewSaveInProgress = false
+      if (viewSavePromise === requestPromise) viewSavePromise = null
+      // 请求期间产生了更新视图时继续保存最新快照；单次网络失败则等待
+      // 手动保存、离开页面或用户再次平移，避免固定频率重试冲击后端。
+      if (viewSaveRequested && (requestSucceeded || newerViewRequested)) {
+        clearTimeout(viewSaveTimer)
+        viewSaveTimer = setTimeout(() => {
+          viewSaveTimer = null
+          void flushPendingViewSave()
+        }, VIEW_SAVE_DELAY)
+      }
+    })
+  viewSavePromise = requestPromise
+  return requestPromise
+}
+
 function onBusViewDataChange(data, sourceMindMap = null) {
   if (!isCurrentMindmapEventSource(sourceMindMap, mindMap.value)) return
   if (isReadonly.value) return
   if (props.mindmapId) {
     // 跳过远程变更或暂停状态引发的本地视图变更
     if (isChangeTrackingSuspended()) return
-    scheduleYjsMetaSync({ view: data })
-    queueFileOperation('file.view.update')
-    viewChangeVersion += 1
-    scheduleLocalDraftPersist()
-    resetSaveRetryForNewChange()
-    // 后端模式：视图变更也触发保存（平移/缩放后 2 秒自动保存）
-    clearTimeout(autoSaveTimer)
-    autoSaveTimer = setTimeout(() => {
-      saveToBackend()
-    }, AUTO_SAVE_DELAY)
+    // 平移/缩放独立采用后写覆盖，不进入正文 revision、Yjs 或恢复草稿。
+    scheduleViewSave(data)
   } else {
     clearTimeout(storeConfigTimer)
     storeConfigTimer = setTimeout(() => {
@@ -1304,6 +1447,7 @@ function handleNetworkOffline() {
 }
 
 function handleNetworkOnline() {
+  if (viewSaveRequested && !viewSaveInProgress) void flushPendingViewSave()
   if (authoritativeReloadRequired && !hasUnsavedChanges()) {
     scheduleAuthoritativeReload()
     return
@@ -1428,14 +1572,18 @@ async function saveToBackend() {
     const draftClearBeforeUpdatedAt = nextDraftUpdatedAt()
     if (!activeSaveMutation) {
       recordDocumentOperations(fullData)
+      const clientMutationId = pendingClientMutationId || createMutationId()
       activeSaveMutation = createMindmapSaveMutation({
-        clientMutationId: createMutationId(),
+        clientMutationId,
         baseRevision: contentRevision,
         operations: pendingContentOperations,
         document: fullData,
         viewChangeVersion,
       })
-      if (activeSaveMutation) pendingContentOperations = []
+      if (activeSaveMutation) {
+        pendingContentOperations = []
+        if (pendingClientMutationId === clientMutationId) pendingClientMutationId = null
+      }
     }
     let mutation = activeSaveMutation
     if (!mutation) {
@@ -1568,6 +1716,7 @@ async function saveToBackend() {
       clearLocalDraft(draftClearBeforeUpdatedAt)
       clearRestoredDraft()
       draftProtection.markClean()
+      startYjsSyncIfReady()
     }
     if (
       authoritativeReloadRequired
@@ -1703,6 +1852,7 @@ function terminateEditingSession(eventName, data) {
   blockedConflictData = null
   pendingContentOperations = []
   activeSaveMutation = null
+  pendingClientMutationId = null
   resolveAuthoritativeReload()
   savedViewChangeVersion = viewChangeVersion
   isSaving.value = false
@@ -1789,6 +1939,7 @@ async function reloadLatestServerDocument({ preserveLocalDraft = false, requireC
   }
   pendingContentOperations = []
   activeSaveMutation = null
+  pendingClientMutationId = null
   resolveAuthoritativeReload()
   crossNodeOperationSnapshot = extractCrossNodeState(data.nodeTree || defaultData)
   markDocumentMetaSaved({
@@ -1899,6 +2050,7 @@ async function performContentConflictResolution(localFullData, conflictData) {
     }
     pendingContentOperations = []
     activeSaveMutation = null
+    pendingClientMutationId = null
     resolveAuthoritativeReload()
     crossNodeOperationSnapshot = extractCrossNodeState(data.nodeTree || defaultData)
     markDocumentMetaSaved({
@@ -1940,8 +2092,11 @@ async function manualSave() {
     clearTimeout(autoSaveTimer)
     resetSaveRetryForNewChange()
     const ok = await saveToBackend()
-    if (ok === true) {
+    const viewSaved = await flushPendingViewSave()
+    if (ok === true && viewSaved === true) {
       ElMessage.success('已保存到服务器')
+    } else if (ok === true && viewSaved === false) {
+      ElMessage.warning('正文已保存，但画布视图暂未保存，请稍后重试')
     } else if (ok === false) {
       if (['offline', 'retrying'].includes(saveStatus.value)) {
         ElMessage.warning('云端暂不可用，系统正在保护本地修改')
@@ -2004,6 +2159,7 @@ function hasUnsavedChanges() {
 }
 
 function handleBeforeUnload(event) {
+  if (viewSaveRequested) void flushPendingViewSave()
   if (!isReadonly.value && hasUnsavedChanges()) {
     persistLocalDraftBeforeUnload()
     event.preventDefault()
@@ -2012,20 +2168,31 @@ function handleBeforeUnload(event) {
 }
 
 async function flushBeforeLeave() {
-  if (terminalState || isReadonly.value || !props.mindmapId || !hasUnsavedChanges()) return true
+  if (terminalState || isReadonly.value || !props.mindmapId) return true
   clearTimeout(autoSaveTimer)
   clearTimeout(saveRetryTimer)
   saveRetryTimer = null
-  return flushPendingMindmapChanges({
-    hasUnsavedChanges,
-    isSaveInProgress: () => isSaving.value,
-    markPendingSave: () => { pendingSave.value = true },
-    requestSave: async () => {
-      clearTimeout(autoSaveTimer)
-      return saveToBackend()
-    },
-    persistLocalBackup: persistLocalDraftBeforeUnload,
-  })
+  for (let pass = 0; pass < CLOUD_EXIT_MAX_PASSES; pass += 1) {
+    const contentSaved = await flushPendingMindmapChanges({
+      hasUnsavedChanges,
+      isSaveInProgress: () => isSaving.value,
+      markPendingSave: () => { pendingSave.value = true },
+      requestSave: async () => {
+        clearTimeout(autoSaveTimer)
+        return saveToBackend()
+      },
+      persistLocalBackup: persistLocalDraftBeforeUnload,
+    })
+    if (contentSaved !== true) return false
+
+    clearTimeout(viewSaveTimer)
+    viewSaveTimer = null
+    const viewSaved = await flushPendingViewSave()
+    if (viewSaved !== true) return false
+    if (!hasUnsavedChanges() && !viewSaveRequested && !viewSaveInProgress) return true
+  }
+  persistLocalDraftBeforeUnload()
+  return false
 }
 
 async function prepareForCloudExit() {
@@ -2045,7 +2212,7 @@ async function prepareForCloudExit() {
 
     // 用户可能在离开守卫等待网络或 IndexedDB 时继续编辑。新修改必须再次
     // 保存到云端，不能被本轮缓存清理当成已经提交的数据。
-    if (hasUnsavedChanges()) continue
+    if (hasUnsavedChanges() || viewSaveRequested || viewSaveInProgress) continue
 
     const restoredDraftToClear = restoredDraftRecord
     await removeMindmapDraft(userStore.id, props.mindmapId, {
@@ -2058,7 +2225,7 @@ async function prepareForCloudExit() {
         beforeUpdatedAt: restoredDraftToClear.updatedAt,
       })
     }
-    if (hasUnsavedChanges()) continue
+    if (hasUnsavedChanges() || viewSaveRequested || viewSaveInProgress) continue
 
     if (restoredDraftRecord === restoredDraftToClear) restoredDraftRecord = null
     draftProtection.markClean()
@@ -2285,15 +2452,8 @@ function onYjsReinit(_restoredRoot, revision) {
     mindMap.value?.off('data_change_detail', dataChangeDetailHandler)
     dataChangeDetailHandler = null
   }
-  // 组件可能正在卸载，检查 mindMap 是否仍可用
-  if (!mindMap.value) return
-  // 创建新的 Yjs 同步，使用恢复后的数据
-  yjsSync = createYjsSyncInstance()
-  yjsSyncRef.value = yjsSync
-  yjsSync.start()
-  // 重新绑定 data_change_detail 事件（具名引用）
-  dataChangeDetailHandler = onMindmapDataChangeDetail
-  mindMap.value.on('data_change_detail', dataChangeDetailHandler)
+  // 恢复草稿尚未提交时保持协作门闩关闭，避免 sync_init 把本地恢复内容覆盖。
+  startYjsSyncIfReady()
 }
 
 function isContentDetailTrackingSuspended() {

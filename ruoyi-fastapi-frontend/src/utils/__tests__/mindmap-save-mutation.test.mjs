@@ -12,7 +12,15 @@ import {
 const editorUrl = new URL('../../components/MindMap/Edit.vue', import.meta.url)
 const apiUrl = new URL('../../api/mindmap/mindmap.js', import.meta.url)
 const pageUrl = new URL('../../views/mindmap/edit.vue', import.meta.url)
+const appUrl = new URL('../../App.vue', import.meta.url)
 const requestUrl = new URL('../request.js', import.meta.url)
+
+test('mindmap editor messages start below the fixed command header', async () => {
+  const source = await readFile(appUrl, 'utf8')
+
+  assert.match(source, /<el-config-provider :message="elementMessageConfig">/)
+  assert.match(source, /route\.path === '\/mindmap\/edit' \? 72 : 16/)
+})
 
 test('save mutation freezes one retryable idempotency payload away from live editor values', () => {
   const operations = [{ type: 'node.update', nodeUid: 'root', payload: { text: 'before' } }]
@@ -143,6 +151,12 @@ test('whole-document and semantic conflicts are never automatically rebased', ()
 
   assert.equal(rebaseMindmapSaveMutation(createMutation([
     { type: 'document.update' },
+  ]), {
+    currentRevision: 8,
+    requiresSnapshot: true,
+  }), null)
+  assert.equal(rebaseMindmapSaveMutation(createMutation([
+    { type: 'document.content.update' },
   ]), {
     currentRevision: 8,
     requiresSnapshot: true,
@@ -300,7 +314,8 @@ test('editor separates in-flight and pending operations and reuses the same muta
   const operationBlock = source.match(/function recordDocumentOperations[\s\S]*?\n\}/)?.[0] || ''
 
   assert.match(saveBlock, /if \(!activeSaveMutation\) \{[\s\S]*?createMindmapSaveMutation\(/)
-  assert.match(saveBlock, /if \(activeSaveMutation\) pendingContentOperations = \[\]/)
+  assert.match(saveBlock, /if \(activeSaveMutation\) \{[\s\S]*?pendingContentOperations = \[\]/)
+  assert.match(saveBlock, /clientMutationId: pendingClientMutationId \|\| createMutationId\(\)|const clientMutationId = pendingClientMutationId \|\| createMutationId\(\)/)
   assert.match(saveBlock, /submitMindmapSaveMutation\(/)
   assert.match(saveBlock, /payload => batchUpdateMindmapContent\(props\.mindmapId, payload\)/)
   assert.match(saveBlock, /assertMindmapSaveMutationResponse\(mutation, response\.data\)/)
@@ -328,7 +343,7 @@ test('local detail events remain saveable while a remote render is only waiting 
   const detailGuardBlock = source.match(/function isContentDetailTrackingSuspended[\s\S]*?\n\}/)?.[0] || ''
 
   assert.match(detailBlock, /isContentDetailTrackingSuspended\(\)/)
-  assert.match(detailBlock, /yjsSync\?\.onDataChangeDetail\(detailList\)/)
+  assert.match(detailBlock, /yjsSync\?\.onDataChangeDetail\(detailList, clientMutationId\)/)
   assert.match(detailBlock, /setTimeout\(\(\) => saveToBackend\(\), AUTO_SAVE_DELAY\)/)
   assert.match(detailGuardBlock, /isMutatingMindmapFromRemote/)
   assert.doesNotMatch(detailGuardBlock, /isApplyingRemote/)
@@ -370,6 +385,49 @@ test('mindmap batch save has a dedicated weak-network timeout and server idempot
   assert.match(source, /const MINDMAP_SAVE_TIMEOUT_MS = 30_000/)
   assert.match(batchBlock, /headers: \{ repeatSubmit: false \}/)
   assert.match(batchBlock, /timeout: MINDMAP_SAVE_TIMEOUT_MS/)
+})
+
+test('view changes use a non-revisioned endpoint and never enter drafts or Yjs', async () => {
+  const [source, apiSource] = await Promise.all([
+    readFile(editorUrl, 'utf8'),
+    readFile(apiUrl, 'utf8'),
+  ])
+  const viewBlock = source.match(/function onBusViewDataChange[\s\S]*?\n\}/)?.[0] || ''
+  const viewApiBlock = apiSource.match(/export function updateMindmapView[\s\S]*?\n\}/)?.[0] || ''
+  const leaveBlock = source.match(/async function flushBeforeLeave[\s\S]*?async function prepareForCloudExit/)?.[0] || ''
+  const manualSaveBlock = source.match(/async function manualSave[\s\S]*?async function recoverSave/)?.[0] || ''
+  const unmountBlock = source.match(/onBeforeUnmount\(\(\) => \{[\s\S]*?async function initMindMap/)?.[0] || ''
+  const onlineBlock = source.match(/function handleNetworkOnline[\s\S]*?function markAuthoritativeReloadRequired/)?.[0] || ''
+
+  assert.match(viewBlock, /scheduleViewSave\(data\)/)
+  assert.doesNotMatch(viewBlock, /file\.view\.update/)
+  assert.doesNotMatch(viewBlock, /scheduleLocalDraftPersist/)
+  assert.doesNotMatch(viewBlock, /scheduleYjsMetaSync/)
+  assert.match(viewApiBlock, /\/mindmap\/file\/.*\/view/)
+  assert.match(viewApiBlock, /method: 'patch'/)
+  assert.match(leaveBlock, /await flushPendingViewSave\(\)/)
+  assert.match(manualSaveBlock, /const viewSaved = await flushPendingViewSave\(\)/)
+  assert.match(onlineBlock, /viewSaveRequested[\s\S]*?flushPendingViewSave\(\)/)
+  assert.ok(
+    unmountBlock.indexOf('flushPendingViewSave()')
+      < unmountBlock.indexOf('componentMounted = false'),
+  )
+})
+
+test('restored drafts freeze their HTTP mutation before Yjs can start', async () => {
+  const source = await readFile(editorUrl, 'utf8')
+  const initializationBlock = source.match(
+    /if \(restoredLocalDraft\) \{[\s\S]*?\/\/ Load dynamic plugins/,
+  )?.[0] || ''
+  const startBlock = source.match(/function startYjsSyncIfReady[\s\S]*?\n\}/)?.[0] || ''
+  const saveBlock = source.match(/async function saveToBackend[\s\S]*?\n\}/)?.[0] || ''
+
+  assert.ok(
+    initializationBlock.indexOf('void saveToBackend()')
+      < initializationBlock.indexOf('startYjsSyncIfReady()'),
+  )
+  assert.match(startBlock, /restoredLocalDraft/)
+  assert.match(saveBlock, /clearRestoredDraft\(\)[\s\S]*?startYjsSyncIfReady\(\)/)
 })
 
 test('authoritative collaboration reload retries with a bounded visible recovery state', async () => {

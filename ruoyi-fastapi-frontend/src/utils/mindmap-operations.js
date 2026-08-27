@@ -1,5 +1,13 @@
 import { stableSerialize } from './mindmap-draft.js'
-import { stripCrossNodeData } from './yjs-cross-node-state.js'
+import {
+  extractCrossNodeState,
+  stripCrossNodeData,
+} from './yjs-cross-node-state.js'
+import {
+  transformTreeDataToObject,
+} from '../libs/simple-mind-map/src/utils/treeData.js'
+
+export const MAX_MINDMAP_CONTENT_OPERATIONS = 2000
 
 export function snapshotMindmapDocumentMeta(document = {}) {
   return {
@@ -16,7 +24,6 @@ export function detectMindmapFileOperations(document, savedMeta) {
   const operations = []
   if (current.layout !== savedMeta.layout) operations.push('file.layout.update')
   if (current.theme !== savedMeta.theme) operations.push('file.theme.update')
-  if (current.view !== savedMeta.view) operations.push('file.view.update')
   if (current.documentData !== savedMeta.documentData) operations.push('file.document_data.update')
   return operations
 }
@@ -193,4 +200,89 @@ export function buildMindmapContentOperations(detailList, nodeRevisions = new Ma
     operations.push(operation)
   }
   return operations
+}
+
+/**
+ * Build the same fine-grained detail list emitted by simple-mind-map history,
+ * but from two persisted documents. Draft recovery uses this instead of the
+ * legacy whole-document replacement operation so concurrent edits can still be
+ * checked and merged at node/edge/entity granularity.
+ */
+export function buildMindmapTreeDetailList(previousRoot, currentRoot) {
+  const previous = transformTreeDataToObject(previousRoot)
+  const current = transformTreeDataToObject(currentRoot)
+  const details = []
+
+  // 操作构建只读取节点数据和直接子节点 UID。不要为每个变更节点展开完整
+  // 后代子树，否则深层草稿的全量恢复会产生平方级复制和内存占用。
+  const materializeDetailNode = (entries, uid) => {
+    const entry = entries[uid]
+    if (!entry) return null
+    return {
+      ...entry,
+      data: entry.data && typeof entry.data === 'object'
+        ? { ...entry.data }
+        : entry.data,
+      children: (Array.isArray(entry.children) ? entry.children : []).map(childUid => ({
+        data: { uid: childUid },
+        children: [],
+      })),
+    }
+  }
+
+  for (const uid of Object.keys(current)) {
+    if (!previous[uid]) {
+      details.push({
+        action: 'create',
+        data: materializeDetailNode(current, uid),
+      })
+      continue
+    }
+    if (stableSerialize(previous[uid]) !== stableSerialize(current[uid])) {
+      details.push({
+        action: 'update',
+        oldData: materializeDetailNode(previous, uid),
+        data: materializeDetailNode(current, uid),
+      })
+    }
+  }
+  for (const uid of Object.keys(previous)) {
+    if (current[uid]) continue
+    details.push({
+      action: 'delete',
+      oldData: materializeDetailNode(previous, uid),
+      data: materializeDetailNode(previous, uid),
+    })
+  }
+  return details
+}
+
+export function buildMindmapDocumentOperations(
+  previousDocument,
+  currentDocument,
+  nodeRevisions = new Map(),
+) {
+  const previousRoot = previousDocument?.root || previousDocument
+  const currentRoot = currentDocument?.root || currentDocument
+  if (!previousRoot?.data?.uid || !currentRoot?.data?.uid) return []
+  const details = buildMindmapTreeDetailList(previousRoot, currentRoot)
+  const operations = [
+    ...buildMindmapContentOperations(details, nodeRevisions),
+    ...buildNodeTagContentOperations(details),
+    ...buildCrossNodeContentOperations(
+      extractCrossNodeState(previousRoot),
+      extractCrossNodeState(currentRoot),
+    ),
+    ...detectMindmapFileOperations(
+      currentDocument,
+      snapshotMindmapDocumentMeta(previousDocument),
+    ).map(type => ({ type })),
+  ]
+  // 服务端单批最多接受 2000 项。大规模离线草稿无法安全拆成多个独立
+  // revision（父边、标签和跨节点实体需要原子提交），因此退回受乐观锁保护的
+  // 正文快照操作。它覆盖树和正文配置但明确排除 view，避免绕过独立的视图
+  // LWW 通道；若云端已推进 revision，服务端仍会拒绝覆盖并进入冲突流程。
+  return operations.length > MAX_MINDMAP_CONTENT_OPERATIONS
+    ? [{ type: 'document.content.update' }]
+    : operations
 }

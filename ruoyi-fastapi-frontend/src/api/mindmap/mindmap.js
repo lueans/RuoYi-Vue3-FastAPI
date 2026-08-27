@@ -136,6 +136,17 @@ export function batchUpdateMindmapContent(mindmapId, data) {
   })
 }
 
+// 视图状态采用后写覆盖，不进入正文 revision/冲突日志。
+export function updateMindmapView(mindmapId, viewData) {
+  return request({
+    url: '/mindmap/file/' + mindmapId + '/view',
+    method: 'patch',
+    data: { viewData },
+    headers: { repeatSubmit: false },
+    timeout: 5000,
+  })
+}
+
 export function getMindmapContentChanges(mindmapId, afterRevision) {
   return request({
     url: '/mindmap/file/' + mindmapId + '/changes',

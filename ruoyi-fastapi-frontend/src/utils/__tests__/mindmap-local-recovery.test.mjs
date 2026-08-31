@@ -550,7 +550,7 @@ test('草稿中心把指定记录键传给编辑器并只删除该编辑窗口�
   assert.match(editorSource, /clearDraftRecord\(draft\)/)
 })
 
-test('明确使用云端版本会让新协作会话替换旧缓存而不是再次合入', async () => {
+test('明确使用云端版本先删除本地草稿并重置整个旧 revision 协作基线', async () => {
   const editorSource = await readFile(
     new URL('../../components/MindMap/Edit.vue', import.meta.url),
     'utf8',
@@ -566,20 +566,28 @@ test('明确使用云端版本会让新协作会话替换旧缓存而不是再�
   )?.[0] || ''
 
   const discardBlock = editorSource.match(
-    /async function discardLocalDraftsAndUseCloud[\s\S]*?function clearRestoredDraft/,
+    /async function discardLocalDraftAndUseCloud[\s\S]*?function clearRestoredDraft/,
   )?.[0] || ''
 
-  assert.match(draftBlock, /action === 'cancel'[\s\S]*?await discardLocalDraftsAndUseCloud\(draft\)/)
-  assert.match(discardBlock, /removeInactiveMindmapDrafts\(userId, mindmapId, \{\s*beforeUpdatedAt: record\.updatedAt/)
-  assert.doesNotMatch(discardBlock, /sessionId:|key:/)
+  assert.match(draftBlock, /action === 'cancel'[\s\S]*?useAuthoritativeCloudVersion\(draft, signal\)/)
+  assert.match(discardBlock, /removeDraftRecordRequired\([\s\S]*?resetMindmapCollaboration/)
   assert.ok(
-    discardBlock.indexOf('await enqueueDraftOperation')
-      < discardBlock.indexOf('requestAuthoritativeCollaborationReset()'),
+    discardBlock.indexOf('removeDraftRecordRequired')
+      < discardBlock.indexOf('resetMindmapCollaboration'),
   )
+  assert.match(discardBlock, /clientMutationId: createMutationId\(\)/)
+  assert.doesNotMatch(discardBlock, /collaborationSessionId/)
+  assert.match(discardBlock, /if \(localDraftRemoved\)[\s\S]*?restoreDraftRecordPersistence\(record\)/)
   assert.match(discardBlock, /draftProtection\.markClean\(\)/)
-  assert.match(draftBlock, /cancelButtonText: '删除本地草稿并使用云端'/)
-  assert.match(createSyncBlock, /preferAuthoritativeDocument/)
-  assert.match(conflictBlock, /requestAuthoritativeCollaborationReset\(\)[\s\S]*?onYjsReinit/)
+  assert.match(draftBlock, /cancelButtonText: '使用云端版本'/)
+  assert.match(draftBlock, /closeOnPressEscape: false/)
+  assert.match(draftBlock, /showClose: false/)
+  assert.doesNotMatch(createSyncBlock, /preferAuthoritativeDocument/)
+  assert.match(conflictBlock, /discardCurrentConflictDrafts\(\)[\s\S]*?resetCurrentCollaborationToCloud/)
+  assert.match(editorSource, /async function resetCurrentCollaborationToCloud\(observedRevision\)[\s\S]*?stopCurrentCollaborationSource\(\)[\s\S]*?resetMindmapCollaboration/)
+  assert.doesNotMatch(conflictBlock, /startYjsSyncIfReady\(\)/)
+  assert.doesNotMatch(editorSource, /discardCurrentSource/)
+  assert.doesNotMatch(conflictBlock, /requestAuthoritativeCollaborationReset/)
   assert.match(editorSource, /buildMindmapDocumentOperations\(/)
   assert.doesNotMatch(editorSource, /pendingContentOperations\.push\(\{ type: 'document\.update' \}\)/)
 })

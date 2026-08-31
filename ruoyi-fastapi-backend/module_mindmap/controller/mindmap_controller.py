@@ -20,6 +20,7 @@ from module_mindmap.entity.vo.mindmap_vo import (
     DeleteMindmapModel,
     MindmapBatchStatusResultModel,
     MindmapBatchStatusUpdateModel,
+    MindmapCollaborationResetModel,
     MindmapContentBatchModel,
     MindmapContentUpdateModel,
     MindmapGlobalNodeSearchItemModel,
@@ -274,6 +275,28 @@ async def update_mindmap_content_batch(
         current_user.user.user_name,
     )
     return ResponseUtil.success(msg='保存成功', data=result)
+
+
+@mindmap_controller.post(
+    '/file/{mindmap_id}/collaboration/reset',
+    summary='使用云端版本并重置协作基线',
+    description='推进正文修订号并废弃旧 revision 的全部 Yjs 缓存，使所有协作者重新加载数据库正文',
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
+)
+async def reset_mindmap_collaboration(
+    request: Request,
+    mindmap_id: Annotated[int, Path(description='脑图文件ID')],
+    model: MindmapCollaborationResetModel,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapService.reset_collaboration_state_services(
+        query_db,
+        mindmap_id,
+        model,
+        current_user.user.user_id,
+    )
+    return ResponseUtil.success(msg='已切换到云端版本', data=result)
 
 
 @mindmap_controller.patch(

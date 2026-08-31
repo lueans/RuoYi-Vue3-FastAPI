@@ -601,9 +601,16 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
                     return
                 try:
                     async with AsyncSessionLocal() as db:
-                        await MindmapService.check_mindmap_access(
+                        checked_mindmap = await MindmapService.check_mindmap_access(
                             db, mindmap_id, user_info['id'], require_edit=True,
                         )
+                    # Redis 广播短暂不可用时，以数据库 revision 作为最终兜底。
+                    # 更新房间栅栏后，旧客户端的下一条写消息会收到 stale_state，
+                    # 从而不能无限期继续广播已经被放弃的 Yjs 状态。
+                    room_manager.set_content_revision(
+                        mindmap_id,
+                        checked_mindmap.content_revision,
+                    )
                     access_recheck_failures = 0
                 except ServiceException:
                     await room_manager.notify_and_disconnect_user(
@@ -861,6 +868,7 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
                     mindmap_id,
                     state_b64,
                     str(user_info['id']),
+                    client_revision,
                     exclude=websocket,
                 )
 

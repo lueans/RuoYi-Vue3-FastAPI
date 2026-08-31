@@ -137,6 +137,8 @@ def merge_yjs_state_bundle(
     states = unpack_yjs_state_bundle(blob)
     for replaced_source_id in normalized_replacements:
         states.pop(replaced_source_id, None)
+    # 多个连接可能在合并后提交完全相同的完整状态。保留重复副本只会快速
+    # 消耗来源数量和总字节上限，不提供额外恢复信息。
     for key in [key for key, value in states.items() if value == state]:
         states.pop(key, None)
     states.pop(source_id, None)

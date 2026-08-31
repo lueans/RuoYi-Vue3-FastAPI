@@ -22,8 +22,8 @@ from module_mindmap.websocket.mindmap_ws import (
     get_ws_invalid_message_payload,
     get_ws_rate_limit_payload,
     mindmap_websocket_endpoint,
-    normalize_client_mutation_id,
     normalize_awareness_node_uids,
+    normalize_client_mutation_id,
     normalize_ws_capabilities,
     normalize_yjs_patch,
 )
@@ -117,6 +117,9 @@ class MindmapWebsocketProtocolTest(unittest.TestCase):
         self.assertEqual(
             get_ws_client_message_type({'type': 'update', 'update': 'YWJj'}),
             'update',
+        )
+        self.assertIsNone(
+            get_ws_client_message_type({'type': 'discard_source', 'contentRevision': 3})
         )
         self.assertEqual(get_ws_invalid_message_payload(), {
             'type': 'protocol_error',

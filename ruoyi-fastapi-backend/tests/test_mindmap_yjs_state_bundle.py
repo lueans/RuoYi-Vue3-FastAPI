@@ -56,6 +56,22 @@ class MindmapYjsStateBundleTest(unittest.TestCase):
             'consolidated-d': b'merged-a-b',
         })
 
+    def test_repeated_full_state_consolidation_remains_bounded(self) -> None:
+        bundle = pack_yjs_state_bundle({'seed': b'state-0'})
+        for index in range(1, 80):
+            previous_sources = list(unpack_yjs_state_bundle(bundle))
+            bundle = merge_yjs_state_bundle(
+                bundle,
+                f'client-{index}',
+                f'state-{index}'.encode(),
+                replace_source_ids=previous_sources,
+            )
+
+        self.assertEqual(
+            unpack_yjs_state_bundle(bundle),
+            {'client-79': b'state-79'},
+        )
+
     def test_replacement_source_list_is_bounded_unique_and_strict(self) -> None:
         self.assertEqual(
             normalize_yjs_state_source_ids([' source-a ', 'source-b']),
@@ -88,7 +104,6 @@ class MindmapYjsStateBundleTest(unittest.TestCase):
     def test_corrupted_bundle_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, '格式损坏|不完整'):
             unpack_yjs_state_bundle(STATE_BUNDLE_MAGIC + b'\x00\x01\x00')
-
 
 class MindmapYjsStatePersistenceTest(unittest.IsolatedAsyncioTestCase):
     async def test_first_writer_insert_race_retries_and_merges_winner_state(self) -> None:

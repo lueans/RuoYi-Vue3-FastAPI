@@ -5,7 +5,18 @@
         <aside class="tagGroupPanel" aria-label="标签分组管理">
           <div class="tagGroupPanelHeader">
             <span>标签分组</span>
-            <el-button link type="primary" @click="openCategoryManager">管理</el-button>
+            <el-tooltip v-if="canAddCategory" content="新建标签分组" placement="top">
+              <el-button
+                class="tagGroupAddButton"
+                type="primary"
+                :icon="Plus"
+                size="small"
+                plain
+                aria-label="新建标签分组"
+                :disabled="categoryLoading || Boolean(categoryReordering)"
+                @click="openCreateCategory"
+              />
+            </el-tooltip>
           </div>
           <div v-if="categoryError" class="groupLoadError" role="alert">
             <span>分组加载失败</span>
@@ -21,18 +32,148 @@
             >
               <span>全部标签</span>
             </button>
-            <button
-              v-for="category in categories"
-              :key="category.id"
-              type="button"
-              class="tagGroupNavItem"
-              :class="{ active: Number(query.categoryId) === Number(category.id) }"
-              :aria-current="Number(query.categoryId) === Number(category.id) ? 'page' : undefined"
-              @click="selectCategory(category.id)"
+            <div v-if="globalCategoryRows.length && personalCategoryRows.length" class="tagGroupScopeLabel">全局分组</div>
+            <Draggable
+              v-model="globalCategoryRows"
+              item-key="id"
+              tag="div"
+              class="tagGroupSortableList"
+              handle=".tagGroupDragHandle"
+              :animation="180"
+              :disabled="!canReorderCategoryScope('global') || Boolean(categoryReordering)"
+              ghost-class="tagGroupDragGhost"
+              chosen-class="tagGroupDragChosen"
+              @start="captureCategoryOrder('global')"
+              @end="finishCategoryReorder('global')"
             >
-              <span class="tagGroupNavName" :title="category.name">{{ category.name }}</span>
-              <span class="tagGroupNavCount">{{ category.tagCount || 0 }}</span>
-            </button>
+              <template #item="{ element: category }">
+                <div
+                  class="tagGroupSortableRow"
+                  :class="{ active: Number(query.categoryId) === Number(category.id) }"
+                >
+                  <button
+                    v-if="canEditCategoryRow(category)"
+                    type="button"
+                    class="tagGroupDragHandle"
+                    :disabled="!canReorderCategoryScope('global') || Boolean(categoryReordering)"
+                    :aria-label="`拖拽调整${category.name}的顺序`"
+                    title="按住拖拽排序"
+                  >
+                    <el-icon><Rank /></el-icon>
+                  </button>
+                  <button
+                    type="button"
+                    class="tagGroupSelectButton"
+                    :aria-current="Number(query.categoryId) === Number(category.id) ? 'page' : undefined"
+                    @click="selectCategory(category.id)"
+                  >
+                    <span class="tagGroupNavName" :title="category.name">{{ category.name }}</span>
+                    <span class="tagGroupNavCount">{{ category.tagCount || 0 }}</span>
+                  </button>
+                  <div v-if="canEditCategoryRow(category) || canRemoveCategoryRow(category)" class="tagGroupRowActions">
+                    <el-tooltip v-if="canEditCategoryRow(category)" content="编辑分组" placement="top">
+                      <button
+                        type="button"
+                        class="tagGroupActionButton"
+                        :aria-label="`编辑分组 ${category.name}`"
+                        :disabled="Boolean(categoryReordering)"
+                        @click.stop="openEditCategory(category)"
+                      >
+                        <el-icon><EditPen /></el-icon>
+                      </button>
+                    </el-tooltip>
+                    <el-tooltip
+                      v-if="canRemoveCategoryRow(category)"
+                      :content="Number(category.tagCount) > 0 ? '请先移动或删除分组内的标签' : '删除分组'"
+                      placement="top"
+                    >
+                      <span class="tagGroupActionTooltip">
+                        <button
+                          type="button"
+                          class="tagGroupActionButton is-danger"
+                          :aria-label="`删除分组 ${category.name}`"
+                          :disabled="Number(category.tagCount) > 0 || Boolean(categoryReordering)"
+                          @click.stop="removeCategory(category)"
+                        >
+                          <el-icon><Delete /></el-icon>
+                        </button>
+                      </span>
+                    </el-tooltip>
+                  </div>
+                </div>
+              </template>
+            </Draggable>
+            <div v-if="globalCategoryRows.length && personalCategoryRows.length" class="tagGroupScopeLabel">我的分组</div>
+            <Draggable
+              v-model="personalCategoryRows"
+              item-key="id"
+              tag="div"
+              class="tagGroupSortableList"
+              handle=".tagGroupDragHandle"
+              :animation="180"
+              :disabled="!canReorderCategoryScope('mine') || Boolean(categoryReordering)"
+              ghost-class="tagGroupDragGhost"
+              chosen-class="tagGroupDragChosen"
+              @start="captureCategoryOrder('mine')"
+              @end="finishCategoryReorder('mine')"
+            >
+              <template #item="{ element: category }">
+                <div
+                  class="tagGroupSortableRow"
+                  :class="{ active: Number(query.categoryId) === Number(category.id) }"
+                >
+                  <button
+                    v-if="canEditCategoryRow(category)"
+                    type="button"
+                    class="tagGroupDragHandle"
+                    :disabled="!canReorderCategoryScope('mine') || Boolean(categoryReordering)"
+                    :aria-label="`拖拽调整${category.name}的顺序`"
+                    title="按住拖拽排序"
+                  >
+                    <el-icon><Rank /></el-icon>
+                  </button>
+                  <button
+                    type="button"
+                    class="tagGroupSelectButton"
+                    :aria-current="Number(query.categoryId) === Number(category.id) ? 'page' : undefined"
+                    @click="selectCategory(category.id)"
+                  >
+                    <span class="tagGroupNavName" :title="category.name">{{ category.name }}</span>
+                    <span class="tagGroupNavCount">{{ category.tagCount || 0 }}</span>
+                  </button>
+                  <div v-if="canEditCategoryRow(category) || canRemoveCategoryRow(category)" class="tagGroupRowActions">
+                    <el-tooltip v-if="canEditCategoryRow(category)" content="编辑分组" placement="top">
+                      <button
+                        type="button"
+                        class="tagGroupActionButton"
+                        :aria-label="`编辑分组 ${category.name}`"
+                        :disabled="Boolean(categoryReordering)"
+                        @click.stop="openEditCategory(category)"
+                      >
+                        <el-icon><EditPen /></el-icon>
+                      </button>
+                    </el-tooltip>
+                    <el-tooltip
+                      v-if="canRemoveCategoryRow(category)"
+                      :content="Number(category.tagCount) > 0 ? '请先移动或删除分组内的标签' : '删除分组'"
+                      placement="top"
+                    >
+                      <span class="tagGroupActionTooltip">
+                        <button
+                          type="button"
+                          class="tagGroupActionButton is-danger"
+                          :aria-label="`删除分组 ${category.name}`"
+                          :disabled="Number(category.tagCount) > 0 || Boolean(categoryReordering)"
+                          @click.stop="removeCategory(category)"
+                        >
+                          <el-icon><Delete /></el-icon>
+                        </button>
+                      </span>
+                    </el-tooltip>
+                  </div>
+                </div>
+              </template>
+            </Draggable>
             <button
               type="button"
               class="tagGroupNavItem"
@@ -302,134 +443,58 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="categoryDialog.visible" title="标签分组管理" width="min(760px, calc(100vw - 32px))">
-      <el-alert title="拖拽手柄可调整分组顺序；全局分组仅管理员可排序。仍有标签的分组不能删除。" type="info" :closable="false" show-icon />
-      <div class="categoryToolbar">
-        <el-button v-if="canAddCategory && !categoryEditing" type="primary" @click="startCreateCategory">新建分组</el-button>
-      </div>
-      <div v-if="categoryEditing" class="categoryEditor">
-        <div class="categoryEditorMain">
-          <el-input v-model="categoryForm.name" placeholder="分组名称" :maxlength="MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH" show-word-limit />
-          <span class="categoryEditorHint">类型：{{ categoryTypeText(categoryForm.categoryType) }}</span>
-        </div>
-        <el-radio-group v-model="categoryForm.showOnHome" class="categoryDisplayChoice" aria-label="分组展示位置">
-          <el-radio-button :value="true">标签首页</el-radio-button>
-          <el-radio-button :value="false">仅更多标签</el-radio-button>
-        </el-radio-group>
-        <el-radio-group v-model="categoryForm.selectionMode" class="categoryDisplayChoice" aria-label="分组选择模式">
-          <el-radio-button value="single">单选分组</el-radio-button>
-          <el-radio-button value="multiple">多选分组</el-radio-button>
-        </el-radio-group>
-        <el-select v-if="!categoryForm.id && isAdmin" v-model="categoryForm.ownerScope">
-          <el-option label="我的分组" value="mine" />
-          <el-option label="全局分组" value="global" />
-        </el-select>
-        <el-button @click="cancelCategoryEdit">取消</el-button>
-        <el-button type="primary" :loading="categorySubmitting" @click="saveCategory">保存</el-button>
-      </div>
-      <div v-loading="categoryLoading" class="categoryManagerBody">
-        <section v-if="globalCategoryRows.length" class="categoryScopeSection" aria-labelledby="globalCategoryTitle">
-          <div class="categoryScopeHeader">
-            <div>
-              <strong id="globalCategoryTitle">全局分组</strong>
-              <span>所有用户可见</span>
-            </div>
-            <span>{{ globalCategoryRows.length }} 个</span>
-          </div>
-          <Draggable
-            v-model="globalCategoryRows"
-            item-key="id"
-            tag="div"
-            class="categoryRows"
-            handle=".categoryDragHandle"
-            :animation="180"
-            :disabled="!canReorderCategoryScope('global') || Boolean(categoryReordering)"
-            ghost-class="categoryDragGhost"
-            chosen-class="categoryDragChosen"
-            @start="captureCategoryOrder('global')"
-            @end="finishCategoryReorder('global')"
-          >
-            <template #item="{ element: row }">
-              <div class="categoryRow">
-                <button
-                  type="button"
-                  class="categoryDragHandle"
-                  :disabled="!canReorderCategoryScope('global') || Boolean(categoryReordering)"
-                  :aria-label="`拖拽调整${row.name}的顺序`"
-                  title="按住拖拽排序"
-                ><span aria-hidden="true">⠿</span></button>
-                <div class="categoryRowMain">
-                  <div class="categoryRowName">
-                    <span>{{ row.name }}</span>
-                    <el-tag size="small" :type="categoryTypeTagType(row.categoryType)" effect="plain">{{ categoryTypeText(row.categoryType) }}</el-tag>
-                  </div>
-                  <span class="categoryRowMeta">{{ row.showOnHome ? '标签首页展示' : '仅更多标签' }} · {{ row.selectionMode === 'single' ? '单选' : '多选' }} · 排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
-                </div>
-                <div class="categoryRowActions">
-                  <el-button v-if="canEditCategoryRow(row)" link type="primary" @click="startEditCategory(row)">编辑</el-button>
-                  <el-button v-if="canRemoveCategoryRow(row)" link type="danger" :disabled="Number(row.tagCount) > 0" @click="removeCategory(row)">删除</el-button>
-                </div>
-              </div>
-            </template>
-          </Draggable>
-        </section>
-
-        <section class="categoryScopeSection" aria-labelledby="personalCategoryTitle">
-          <div class="categoryScopeHeader">
-            <div>
-              <strong id="personalCategoryTitle">我的分组</strong>
-              <span>仅当前用户可见</span>
-            </div>
-            <span>{{ personalCategoryRows.length }} 个</span>
-          </div>
-          <Draggable
-            v-if="personalCategoryRows.length"
-            v-model="personalCategoryRows"
-            item-key="id"
-            tag="div"
-            class="categoryRows"
-            handle=".categoryDragHandle"
-            :animation="180"
-            :disabled="!canReorderCategoryScope('mine') || Boolean(categoryReordering)"
-            ghost-class="categoryDragGhost"
-            chosen-class="categoryDragChosen"
-            @start="captureCategoryOrder('mine')"
-            @end="finishCategoryReorder('mine')"
-          >
-            <template #item="{ element: row }">
-              <div class="categoryRow">
-                <button
-                  type="button"
-                  class="categoryDragHandle"
-                  :disabled="!canReorderCategoryScope('mine') || Boolean(categoryReordering)"
-                  :aria-label="`拖拽调整${row.name}的顺序`"
-                  title="按住拖拽排序"
-                ><span aria-hidden="true">⠿</span></button>
-                <div class="categoryRowMain">
-                  <div class="categoryRowName">
-                    <span>{{ row.name }}</span>
-                    <el-tag size="small" :type="categoryTypeTagType(row.categoryType)" effect="plain">{{ categoryTypeText(row.categoryType) }}</el-tag>
-                  </div>
-                  <span class="categoryRowMeta">{{ row.showOnHome ? '标签首页展示' : '仅更多标签' }} · {{ row.selectionMode === 'single' ? '单选' : '多选' }} · 排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
-                </div>
-                <div class="categoryRowActions">
-                  <el-button v-if="canEditCategoryRow(row)" link type="primary" @click="startEditCategory(row)">编辑</el-button>
-                  <el-button v-if="canRemoveCategoryRow(row)" link type="danger" :disabled="Number(row.tagCount) > 0" @click="removeCategory(row)">删除</el-button>
-                </div>
-              </div>
-            </template>
-          </Draggable>
-          <div v-else class="categoryEmpty">暂无自定义分组</div>
-        </section>
-      </div>
-      <template #footer><el-button @click="categoryDialog.visible = false">关闭</el-button></template>
+    <el-dialog
+      v-model="categoryDialog.visible"
+      :title="categoryForm.id ? '编辑标签分组' : '新建标签分组'"
+      width="min(520px, calc(100vw - 32px))"
+      destroy-on-close
+    >
+      <el-form class="categoryForm" label-position="top" @submit.prevent>
+        <el-form-item label="分组名称" required>
+          <el-input
+            v-model="categoryForm.name"
+            autofocus
+            placeholder="请输入分组名称"
+            :maxlength="MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH"
+            show-word-limit
+            @keyup.enter="saveCategory"
+          />
+        </el-form-item>
+        <el-form-item v-if="!categoryForm.id && isAdmin" label="分组范围">
+          <el-radio-group v-model="categoryForm.ownerScope" class="categoryChoiceGroup">
+            <el-radio value="mine" border>我的分组</el-radio>
+            <el-radio value="global" border>全局分组</el-radio>
+          </el-radio-group>
+          <p class="categoryFieldHint">全局分组对所有用户可见；我的分组仅自己可见。</p>
+        </el-form-item>
+        <el-form-item label="展示位置">
+          <el-radio-group v-model="categoryForm.showOnHome" class="categoryChoiceGroup" aria-label="分组展示位置">
+            <el-radio :value="true" border>标签首页</el-radio>
+            <el-radio :value="false" border>仅更多标签</el-radio>
+          </el-radio-group>
+          <p class="categoryFieldHint">首页仅展示常用分组，其余分组可在“更多标签”中使用。</p>
+        </el-form-item>
+        <el-form-item label="选择方式">
+          <el-radio-group v-model="categoryForm.selectionMode" class="categoryChoiceGroup" aria-label="分组选择方式">
+            <el-radio value="single" border>单选</el-radio>
+            <el-radio value="multiple" border>多选</el-radio>
+          </el-radio-group>
+          <p class="categoryFieldHint">单选时，同一节点在该分组中只能保留一个标签。</p>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="closeCategoryDialog">取消</el-button>
+        <el-button type="primary" :loading="categorySubmitting" @click="saveCategory">
+          {{ categoryForm.id ? '保存修改' : '创建分组' }}
+        </el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup name="TagManagement">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Search } from '@element-plus/icons-vue'
+import { Delete, EditPen, Plus, Rank, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Draggable from 'vuedraggable'
 import {
@@ -542,7 +607,6 @@ const replacementOptions = ref([])
 const replacementLoading = ref(false)
 const replaceSubmitting = ref(false)
 const categoryDialog = reactive({ visible: false })
-const categoryEditing = ref(false)
 const categorySubmitting = ref(false)
 const categoryReordering = ref('')
 const globalCategoryRows = ref([])
@@ -600,14 +664,6 @@ function canEditCategoryRow(row) {
 
 function canRemoveCategoryRow(row) {
   return canRemoveCategory.value && canManage(row?.ownerId)
-}
-
-function categoryTypeText(categoryType) {
-  return categoryType === 'system' ? '系统' : '用户自定义'
-}
-
-function categoryTypeTagType(categoryType) {
-  return categoryType === 'system' ? 'info' : 'success'
 }
 
 function syncCategoryOrderRows(items = categories.value) {
@@ -985,12 +1041,8 @@ function handleCommand(command, row) {
   if (command === 'archive' && canArchiveManagedTag(row)) void archiveTag(row)
 }
 
-async function openCategoryManager() {
-  categoryDialog.visible = true
-  await loadCategories()
-}
-
-function startCreateCategory() {
+function openCreateCategory() {
+  if (!canAddCategory.value || categoryReordering.value) return
   Object.assign(categoryForm, {
     id: null,
     name: '',
@@ -1000,10 +1052,11 @@ function startCreateCategory() {
     showOnHome: false,
     selectionMode: 'multiple',
   })
-  categoryEditing.value = true
+  categoryDialog.visible = true
 }
 
-function startEditCategory(row) {
+function openEditCategory(row) {
+  if (!canEditCategoryRow(row) || categoryReordering.value) return
   Object.assign(categoryForm, {
     id: row.id,
     name: row.name,
@@ -1013,14 +1066,16 @@ function startEditCategory(row) {
     showOnHome: Boolean(row.showOnHome),
     selectionMode: row.selectionMode === 'single' ? 'single' : 'multiple',
   })
-  categoryEditing.value = true
+  categoryDialog.visible = true
 }
 
-function cancelCategoryEdit() {
-  categoryEditing.value = false
+function closeCategoryDialog() {
+  if (categorySubmitting.value) return
+  categoryDialog.visible = false
 }
 
 async function saveCategory() {
+  if (categorySubmitting.value) return
   const name = validateMindmapTagDisplayName(categoryForm.name, {
     label: '分组名称',
     maxLength: MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
@@ -1053,7 +1108,7 @@ async function saveCategory() {
         categoryForm.selectionMode,
       )
     }
-    categoryEditing.value = false
+    categoryDialog.visible = false
     ElMessage.success(categoryForm.id ? '分组已更新' : '分组已创建')
     await loadCategories()
   } catch (error) {
@@ -1064,6 +1119,7 @@ async function saveCategory() {
 }
 
 async function removeCategory(row) {
+  if (!canRemoveCategoryRow(row) || Number(row?.tagCount) > 0 || categoryReordering.value) return
   try {
     await ElMessageBox.confirm(`确认删除空分组「${row.name}」？`, '删除标签分组', { type: 'warning' })
     await deleteTagCategory(row.id)
@@ -1122,8 +1178,7 @@ onBeforeUnmount(() => {
 }
 
 .filterBar,
-.batchBar,
-.categoryEditor {
+.batchBar {
   display: flex;
   align-items: center;
 }
@@ -1144,9 +1199,12 @@ onBeforeUnmount(() => {
 }
 
 .tagGroupPanel {
+  display: flex;
+  max-height: calc(100vh - 84px);
   min-width: 0;
   margin: 0;
   padding: 0;
+  flex-direction: column;
   border-radius: 0;
   background: #fbfcfe;
   border-right: 1px solid var(--el-border-color-lighter);
@@ -1165,12 +1223,29 @@ onBeforeUnmount(() => {
   letter-spacing: 0.5px;
 }
 
+.tagGroupAddButton {
+  flex: 0 0 auto;
+}
+
 .tagGroupNav {
   display: flex;
+  flex: 1;
   min-height: 120px;
   padding: 2px 8px 16px;
   flex-direction: column;
   gap: 1px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border-radius: 4px;
+    background: #d4d6d9;
+  }
 }
 
 .tagGroupNavItem {
@@ -1206,6 +1281,139 @@ onBeforeUnmount(() => {
     color: #303133;
     font-weight: 500;
   }
+}
+
+.tagGroupSortableList {
+  display: flex;
+  min-height: 1px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tagGroupScopeLabel {
+  padding: 9px 8px 4px;
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tagGroupSortableRow {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 4px;
+  border-radius: 5px;
+  background: transparent;
+  transition: background-color 0.15s, box-shadow 0.15s;
+
+  &:hover,
+  &:focus-within {
+    background: #e8f0fe;
+  }
+
+  &.active {
+    background: #d6e4ff;
+  }
+}
+
+.tagGroupDragHandle,
+.tagGroupActionButton {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #909399;
+  font: inherit;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s;
+
+  &:hover:not(:disabled) {
+    background: rgb(64 158 255 / 9%);
+    color: var(--el-color-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: -2px;
+  }
+
+  &:disabled {
+    color: #c7c9cc;
+    cursor: not-allowed;
+  }
+}
+
+.tagGroupDragHandle {
+  color: #a5a8ad;
+  cursor: grab;
+
+  &:active:not(:disabled) {
+    cursor: grabbing;
+  }
+}
+
+.tagGroupSelectButton {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: #303133;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+
+  &:focus-visible {
+    border-radius: 4px;
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: -2px;
+  }
+}
+
+.tagGroupSortableRow.active .tagGroupSelectButton {
+  font-weight: 500;
+}
+
+.tagGroupRowActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 1px;
+  margin-left: 1px;
+}
+
+.tagGroupActionTooltip {
+  display: inline-flex;
+}
+
+.tagGroupActionButton.is-danger:hover:not(:disabled) {
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+}
+
+.tagGroupDragGhost {
+  opacity: 0.45;
+  background: #eef3ff;
+}
+
+.tagGroupDragChosen {
+  z-index: 2;
+  box-shadow: 0 6px 18px rgb(49 85 217 / 16%);
 }
 
 .tagGroupNavName {
@@ -1429,177 +1637,43 @@ onBeforeUnmount(() => {
   margin-top: 18px;
 }
 
-.categoryToolbar {
-  margin: 14px 0;
-}
+.categoryForm {
+  padding: 2px 2px 0;
 
-.categoryEditor {
-  gap: 8px;
-  margin: 14px 0;
-  padding: 12px;
-  border: 1px solid var(--tag-border);
-  border-radius: 8px;
-  background: #fafbfc;
-}
-
-.categoryEditorMain {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.categoryDisplayChoice {
-  flex: 0 0 auto;
-}
-
-.categoryEditorHint,
-.categoryRowMeta,
-.categoryScopeHeader span,
-.categoryEmpty {
-  color: #8f959e;
-  font-size: 12px;
-}
-
-.categoryManagerBody {
-  display: flex;
-  min-height: 150px;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.categoryScopeSection {
-  overflow: hidden;
-  border: 1px solid var(--tag-border);
-  border-radius: 9px;
-  background: #fff;
-}
-
-.categoryScopeHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border-bottom: 1px solid #eef0f3;
-  background: #f7f8fa;
-
-  div {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
+  :deep(.el-form-item) {
+    margin-bottom: 22px;
   }
 
-  strong {
-    color: #1f2329;
-    font-size: 13px;
+  :deep(.el-form-item:last-child) {
+    margin-bottom: 4px;
+  }
+
+  :deep(.el-form-item__label) {
+    color: var(--el-text-color-primary);
+    font-weight: 600;
   }
 }
 
-.categoryRows {
-  min-height: 1px;
-}
-
-.categoryRow {
+.categoryChoiceGroup {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 58px;
-  padding: 8px 12px 8px 8px;
-  border-bottom: 1px solid #f0f1f2;
-  background: #fff;
-  transition: border-color 0.16s, box-shadow 0.16s, transform 0.16s;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 
-  &:last-child {
-    border-bottom: 0;
-  }
-}
-
-.categoryDragHandle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 32px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #86909c;
-  font-size: 20px;
-  line-height: 1;
-  cursor: grab;
-
-  &:hover:not(:disabled) {
-    background: #f2f3f5;
-    color: #3155d9;
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--el-color-primary);
-    outline-offset: -2px;
-  }
-
-  &:active:not(:disabled) {
-    cursor: grabbing;
-  }
-
-  &:disabled {
-    color: #c9cdd4;
-    cursor: not-allowed;
-  }
-}
-
-.categoryRowMain {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.categoryRowName {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  color: #1f2329;
-  font-size: 13px;
-  font-weight: 500;
-
-  > span:first-child {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
-.categoryRowActions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-
-  :deep(.el-button) {
+  :deep(.el-radio.is-bordered) {
+    width: 100%;
+    height: 40px;
     margin: 0;
+    justify-content: center;
   }
 }
 
-.categoryDragGhost {
-  opacity: 0.45;
-  background: #eef3ff;
-}
-
-.categoryDragChosen {
-  z-index: 2;
-  border: 1px solid #a9bfff;
-  box-shadow: 0 8px 22px rgb(49 85 217 / 14%);
-}
-
-.categoryEmpty {
-  padding: 26px 12px;
-  text-align: center;
+.categoryFieldHint {
+  width: 100%;
+  margin: 7px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 @media (max-width: 768px) {
@@ -1615,7 +1689,8 @@ onBeforeUnmount(() => {
 
   .tagGroupPanel {
     margin-bottom: 16px;
-    padding: 0 0 14px;
+    max-height: 360px;
+    padding: 0;
     border-right: 0;
     border-bottom: 1px solid var(--tag-border);
   }
@@ -1623,12 +1698,11 @@ onBeforeUnmount(() => {
   .tagGroupNav {
     min-height: auto;
     padding: 8px;
-    flex-flow: row wrap;
   }
 
   .tagGroupNavItem {
-    width: auto;
-    max-width: 180px;
+    width: 100%;
+    max-width: none;
   }
 
   .tagListPanel {
@@ -1643,20 +1717,6 @@ onBeforeUnmount(() => {
   .filterSelect {
     width: 100%;
   }
-
-  .categoryEditor {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .categoryRow {
-    grid-template-columns: 32px minmax(0, 1fr);
-  }
-
-  .categoryRowActions {
-    grid-column: 2;
-    justify-content: flex-start;
-  }
 }
 
 @media (max-width: 520px) {
@@ -1669,6 +1729,10 @@ onBeforeUnmount(() => {
   .tagStyleColorGrid,
   .tagStyleNumberGrid,
   .tagStyleLayoutGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .categoryChoiceGroup {
     grid-template-columns: minmax(0, 1fr);
   }
 }

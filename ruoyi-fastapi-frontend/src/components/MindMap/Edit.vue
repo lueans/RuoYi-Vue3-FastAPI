@@ -95,6 +95,7 @@ import { defaultData } from './config'
 import {
   batchUpdateMindmapContent,
   getMindmap,
+  resetMindmapCollaboration,
   updateMindmapView,
 } from '@/api/mindmap/mindmap'
 import { YjsMindmapSync } from '@/utils/yjs-sync'
@@ -125,9 +126,9 @@ import { extractCrossNodeState } from '@/utils/yjs-cross-node-state'
 import useUserStore from '@/store/modules/user'
 import {
   areMindmapDraftDocumentsEqual,
+  createMindmapDraftKey,
   getMindmapDraft,
   isMindmapDraftSessionActive,
-  removeInactiveMindmapDrafts,
   removeMindmapDraft,
   saveMindmapDraft,
   saveMindmapDraftFallbackSync,
@@ -258,7 +259,7 @@ let saveRetryAttempt = 0
 let retryNoticeShown = false
 let localDraftFailureNoticeShown = false
 let crossNodeOperationSnapshot = null
-let authoritativeCollaborationResetRequired = false
+let selectedAuthoritativeServerData = null
 let pendingViewData = undefined
 let viewSaveTimer = null
 let viewSaveInProgress = false
@@ -406,6 +407,16 @@ function enqueueDraftOperation(operation) {
   return draftWriteQueue
 }
 
+function enqueueRequiredDraftOperation(operation) {
+  const requiredOperation = draftWriteQueue
+    .catch(() => undefined)
+    .then(operation)
+  draftWriteQueue = requiredOperation.catch((error) => {
+    console.warn('本地脑图草稿操作失败:', error)
+  })
+  return requiredOperation
+}
+
 function scheduleLocalDraftPersist() {
   if (terminalState || !canUseLocalDraft() || !mindMap.value) return
   draftProtection.markDirty()
@@ -471,20 +482,72 @@ function clearDraftRecord(record) {
   }))
 }
 
-async function discardLocalDraftsAndUseCloud(record) {
-  if (!record?.updatedAt) return
-  clearTimeout(draftSaveTimer)
+async function removeDraftRecordRequired(record, message) {
   const userId = userStore.id
   const mindmapId = props.mindmapId
-  // 只清理确认失活的旧会话；其他标签页仍持有的草稿属于对方正在进行的编辑，
-  // 当前窗口选择云端版本不能替它放弃恢复副本。
-  await enqueueDraftOperation(() => removeInactiveMindmapDrafts(userId, mindmapId, {
+  await enqueueRequiredDraftOperation(() => removeMindmapDraft(userId, mindmapId, {
+    key: record.key,
     beforeUpdatedAt: record.updatedAt,
   }))
-  restoredLocalDraft = false
-  restoredDraftRecord = null
-  draftProtection.markClean()
-  requestAuthoritativeCollaborationReset()
+  const remaining = await getMindmapDraft(userId, mindmapId, { key: record.key })
+  if (remaining) throw new Error(message)
+}
+
+async function restoreDraftRecordPersistence(record) {
+  if (!record?.document) return
+  const result = await enqueueRequiredDraftOperation(() => saveMindmapDraft({
+    userId: userStore.id,
+    mindmapId: props.mindmapId,
+    sessionId: record.sessionId,
+    contentRevision: record.contentRevision,
+    document: record.document,
+    name: record.name,
+    updatedAt: record.updatedAt,
+  }))
+  const restored = await getMindmapDraft(userStore.id, props.mindmapId, { key: record.key })
+  if (result?.saved !== true || !restored) {
+    throw new Error('本地草稿回滚失败，修改仍保留在当前页面')
+  }
+}
+
+async function restoreDraftRecords(records) {
+  for (const record of records) await restoreDraftRecordPersistence(record)
+}
+
+async function discardLocalDraftAndUseCloud(record, signal) {
+  if (!record?.updatedAt) return
+  clearTimeout(draftSaveTimer)
+  const mindmapId = props.mindmapId
+  let localDraftRemoved = false
+  try {
+    // 先完成可回滚的本地删除，再触发服务端权威重置；删除失败不能影响共享房间。
+    await removeDraftRecordRequired(
+      record,
+      '本地草稿未能删除，已保留原内容并停止切换',
+    )
+    localDraftRemoved = true
+    const resetResponse = await resetMindmapCollaboration(mindmapId, {
+      observedRevision: contentRevision,
+      clientMutationId: createMutationId(),
+    })
+    if (sessionCancelled(signal)) return null
+    const latestResponse = await getMindmap(mindmapId, { signal })
+    if (sessionCancelled(signal)) return null
+    restoredLocalDraft = false
+    restoredDraftRecord = null
+    draftProtection.markClean()
+    contentRevision = resetResponse.data.contentRevision || contentRevision
+    return latestResponse.data
+  } catch (error) {
+    if (localDraftRemoved) {
+      try {
+        await restoreDraftRecordPersistence(record)
+      } catch (restoreError) {
+        error.message = `${error?.message || '云端状态校准失败'}；${restoreError.message}`
+      }
+    }
+    throw error
+  }
 }
 
 function clearRestoredDraft() {
@@ -495,8 +558,61 @@ function clearRestoredDraft() {
   clearDraftRecord(record)
 }
 
-function requestAuthoritativeCollaborationReset() {
-  authoritativeCollaborationResetRequired = true
+async function discardCurrentConflictDrafts() {
+  const userId = userStore.id
+  const mindmapId = props.mindmapId
+  const currentKey = createMindmapDraftKey(userId, mindmapId, draftSessionId)
+  const targets = [
+    { key: currentKey },
+    restoredDraftRecord,
+  ].filter((record, index, items) => (
+    record?.key && items.findIndex(item => item?.key === record.key) === index
+  ))
+  const records = (await Promise.all(
+    targets.map(record => getMindmapDraft(userId, mindmapId, { key: record.key })),
+  )).filter(Boolean)
+  try {
+    await enqueueRequiredDraftOperation(async () => {
+      for (const record of targets) {
+        await removeMindmapDraft(userId, mindmapId, {
+          key: record.key,
+          beforeUpdatedAt: record.updatedAt,
+        })
+      }
+    })
+    for (const record of targets) {
+      const remaining = await getMindmapDraft(userId, mindmapId, { key: record.key })
+      if (remaining) {
+        throw new Error('本地冲突草稿未能删除，已停止切换并保留当前内容')
+      }
+    }
+    return records
+  } catch (error) {
+    try {
+      await restoreDraftRecords(records)
+    } catch (restoreError) {
+      error.message = `${error.message}；${restoreError.message}`
+    }
+    throw error
+  }
+}
+
+function stopCurrentCollaborationSource() {
+  if (!yjsSync) return false
+  yjsSync.destroy({ flushCheckpoint: false })
+  yjsSync = null
+  yjsSyncRef.value = null
+  return true
+}
+
+async function resetCurrentCollaborationToCloud(observedRevision) {
+  // 先关闭当前 Yjs 连接且不冲刷旧检查点。服务端随后推进 revision 并清空
+  // 整个旧缓存，其他协作者会通过 document_reset 重新加载数据库正文。
+  stopCurrentCollaborationSource()
+  return resetMindmapCollaboration(props.mindmapId, {
+    observedRevision,
+    clientMutationId: createMutationId(),
+  })
 }
 
 function persistLocalDraftBeforeUnload() {
@@ -537,6 +653,31 @@ function cancelSessionAsyncWork() {
   conflictDialogOpen = false
 }
 
+function restoreLocalDraftRecord(draft) {
+  restoredDraftRecord = { key: draft.key, updatedAt: draft.updatedAt }
+  return draft.document
+}
+
+async function useAuthoritativeCloudVersion(draft, signal) {
+  try {
+    const latestServerData = await discardLocalDraftAndUseCloud(draft, signal)
+    if (latestServerData) selectedAuthoritativeServerData = latestServerData
+    return null
+  } catch (error) {
+    if (sessionCancelled(signal)) return null
+    const preservedDraft = await getMindmapDraft(
+      userStore.id,
+      props.mindmapId,
+      { key: draft.key },
+    ).catch(() => null)
+    ElNotification.error({
+      title: '未能切换到云端版本',
+      message: `${error?.message || '云端状态校准失败'}；本地修改仍保留，已继续打开本地版本`,
+    })
+    return restoreLocalDraftRecord(preservedDraft || draft)
+  }
+}
+
 async function resolveLocalDraft(serverDocument, signal) {
   if (!canUseLocalDraft() || sessionCancelled(signal)) return null
   let draft
@@ -571,25 +712,26 @@ async function resolveLocalDraft(serverDocument, signal) {
     try {
       localDraftDialogOpen = true
       await ElMessageBox.confirm(
-        `检测到 ${new Date(draft.updatedAt).toLocaleString()} 保存的本地草稿，是否恢复？`,
-        '发现未提交的本地草稿',
+        `检测到 ${new Date(draft.updatedAt).toLocaleString()} 保存的本地修改（基于云端版本 ${draft.contentRevision}）。继续本地修改会自动同步；使用云端版本会放弃这份本地修改。`,
+        '发现未同步的本地修改',
         {
           type: 'warning',
-          confirmButtonText: '恢复本地草稿',
-          cancelButtonText: '删除本地草稿并使用云端',
+          confirmButtonText: '继续本地修改',
+          cancelButtonText: '使用云端版本',
           distinguishCancelAndClose: true,
           closeOnClickModal: false,
+          closeOnPressEscape: false,
+          showClose: false,
         }
       )
       if (sessionCancelled(signal)) return null
-      restoredDraftRecord = { key: draft.key, updatedAt: draft.updatedAt }
-      return draft.document
+      return restoreLocalDraftRecord(draft)
     } catch (action) {
       if (sessionCancelled(signal)) return null
       if (action === 'cancel') {
-        await discardLocalDraftsAndUseCloud(draft)
+        return useAuthoritativeCloudVersion(draft, signal)
       }
-      return null
+      return restoreLocalDraftRecord(draft)
     } finally {
       localDraftDialogOpen = false
     }
@@ -598,28 +740,32 @@ async function resolveLocalDraft(serverDocument, signal) {
   try {
     localDraftDialogOpen = true
     await ElMessageBox.confirm(
-      `本地草稿基于版本 ${draft.contentRevision}，云端已更新到版本 ${contentRevision}。为避免覆盖协作者内容，只能下载草稿副本后使用云端版本。`,
-      '发现冲突草稿',
+      `本地修改基于版本 ${draft.contentRevision}，云端已更新到版本 ${contentRevision}。为避免删除协作者内容，请下载本地副本后使用云端，或直接放弃本地修改。`,
+      '本地修改与云端版本不同',
       {
         type: 'warning',
-        confirmButtonText: '下载草稿副本',
-        cancelButtonText: '丢弃草稿并使用云端',
+        confirmButtonText: '下载副本并使用云端',
+        cancelButtonText: '使用云端版本',
         distinguishCancelAndClose: true,
         closeOnClickModal: false,
+        closeOnPressEscape: false,
+        showClose: false,
       }
     )
     if (sessionCancelled(signal)) return null
     const downloaded = downloadConflictBackup(draft.document, 'mindmap-local-draft')
     if (downloaded) {
-      clearDraftRecord(draft)
+      return useAuthoritativeCloudVersion(draft, signal)
     } else {
       ElMessage.error('浏览器未能下载草稿，副本仍保留在本地草稿中心')
+      return restoreLocalDraftRecord(draft)
     }
   } catch (action) {
     if (sessionCancelled(signal)) return null
     if (action === 'cancel') {
-      await discardLocalDraftsAndUseCloud(draft)
+      return useAuthoritativeCloudVersion(draft, signal)
     }
+    return restoreLocalDraftRecord(draft)
   } finally {
     localDraftDialogOpen = false
   }
@@ -710,10 +856,7 @@ function setupTextEditExitDetection() {
 
 function createYjsSyncInstance() {
   let documentPrepareFailureNotified = false
-  const preferAuthoritativeDocument = authoritativeCollaborationResetRequired
-  authoritativeCollaborationResetRequired = false
   return new YjsMindmapSync(props.mindmapId, mindMap.value, contentRevision, {
-    preferAuthoritativeDocument,
     user: {
       id: userStore.id,
       name: userStore.nickName || userStore.name,
@@ -943,6 +1086,59 @@ onBeforeUnmount(() => {
   actions.resetState()
 })
 
+function applyLoadedMindmapData(data) {
+  const root = data.nodeTree || defaultData
+  const layout = data.layout || 'logicalStructure'
+  const themeTemplate = data.theme?.template || 'default'
+  const themeConfig = data.theme?.config || {}
+  const viewData = data.viewData || null
+  const nextDocumentData = normalizeMindmapDocumentData(data.documentData)
+  documentData.value = nextDocumentData
+  contentRevision = data.contentRevision || 1
+  markDocumentMetaSaved({
+    layout,
+    theme: { template: themeTemplate, config: themeConfig },
+    view: viewData,
+    documentData: nextDocumentData,
+  })
+  nodeRevisionMap.clear()
+  for (const [nodeUid, revision] of Object.entries(data.nodeRevisions || {})) {
+    nodeRevisionMap.set(nodeUid, revision)
+  }
+  serverCanEdit.value = data.canEdit === true
+    && isMindmapContentWritable(data.contentState)
+  actions.setCanManageCollaborators(data.isOwner === true)
+  emit('access-change', {
+    canEdit: serverCanEdit.value,
+    isOwner: data.isOwner === true,
+    permission: data.effectivePermission,
+    accessType: data.accessType,
+    contentState: data.contentState,
+    contentStateMessage: data.contentStateMessage,
+    status: data.status,
+    description: data.description || '',
+    nodeCount: data.nodeCount,
+    versionCount: data.versionCount,
+    updateTime: data.updateTime,
+  })
+  emit('name-change', data.name)
+  return {
+    root,
+    layout,
+    themeTemplate,
+    themeConfig,
+    viewData,
+    nodeCount: Number(data.nodeCount) || 0,
+    serverDocument: {
+      root,
+      layout,
+      theme: { template: themeTemplate, config: themeConfig },
+      view: viewData,
+      documentData: nextDocumentData,
+    },
+  }
+}
+
 async function initMindMap(signal) {
   let root = defaultData
   let layout = 'logicalStructure'
@@ -960,47 +1156,14 @@ async function initMindMap(signal) {
       const response = await getMindmap(props.mindmapId, { signal })
       if (sessionCancelled(signal)) return
       const data = response.data
-      root = data.nodeTree || defaultData
-      layout = data.layout || 'logicalStructure'
-      themeTemplate = data.theme?.template || 'default'
-      themeConfig = data.theme?.config || {}
-      viewData = data.viewData || null
-      documentData.value = normalizeMindmapDocumentData(data.documentData)
-      contentRevision = data.contentRevision || 1
-      nodeCount = Number(data.nodeCount) || 0
-      markDocumentMetaSaved({
-        layout,
-        theme: { template: themeTemplate, config: themeConfig },
-        view: viewData,
-        documentData: documentData.value,
-      })
-      for (const [nodeUid, revision] of Object.entries(data.nodeRevisions || {})) {
-        nodeRevisionMap.set(nodeUid, revision)
-      }
-      serverCanEdit.value = data.canEdit === true
-        && isMindmapContentWritable(data.contentState)
-      actions.setCanManageCollaborators(data.isOwner === true)
-      emit('access-change', {
-        canEdit: serverCanEdit.value,
-        isOwner: data.isOwner === true,
-        permission: data.effectivePermission,
-        accessType: data.accessType,
-        contentState: data.contentState,
-        contentStateMessage: data.contentStateMessage,
-        status: data.status,
-        description: data.description || '',
-        nodeCount: data.nodeCount,
-        versionCount: data.versionCount,
-        updateTime: data.updateTime,
-      })
-      emit('name-change', data.name)
-      serverDocument = {
-        root,
-        layout,
-        theme: { template: themeTemplate, config: themeConfig },
-        view: viewData,
-        documentData: documentData.value,
-      }
+      const loaded = applyLoadedMindmapData(data)
+      root = loaded.root
+      layout = loaded.layout
+      themeTemplate = loaded.themeTemplate
+      themeConfig = loaded.themeConfig
+      viewData = loaded.viewData
+      nodeCount = loaded.nodeCount
+      serverDocument = loaded.serverDocument
     } catch (error) {
       if (sessionCancelled(signal)) return
       const message = error?.response?.data?.msg || error?.message || '加载脑图失败'
@@ -1022,7 +1185,17 @@ async function initMindMap(signal) {
     ensureDraftSessionLease()
     const localDraft = await resolveLocalDraft(serverDocument, signal)
     if (sessionCancelled(signal)) return
-    if (localDraft) {
+    if (selectedAuthoritativeServerData) {
+      const loaded = applyLoadedMindmapData(selectedAuthoritativeServerData)
+      selectedAuthoritativeServerData = null
+      root = loaded.root
+      layout = loaded.layout
+      themeTemplate = loaded.themeTemplate
+      themeConfig = loaded.themeConfig
+      viewData = loaded.viewData
+      nodeCount = loaded.nodeCount
+      serverDocument = loaded.serverDocument
+    } else if (localDraft) {
       restoredDraftOperations = buildMindmapDocumentOperations(
         serverDocument,
         localDraft,
@@ -1788,9 +1961,11 @@ async function handleStaleCollaborationState() {
   }
 }
 
-async function handleRemoteDocumentReset() {
+async function handleRemoteDocumentReset(data) {
   if (resolvingStaleState || !mindMap.value || isReadonly.value) return
   resolvingStaleState = true
+  const isCloudReset = data?.reason === 'authoritative_cloud_reset'
+  const actionTitle = isCloudReset ? '协作者选择了云端版本' : '协作者恢复了历史版本'
   try {
     let preserveLocalDraft = false
     if (hasUnsavedChanges()) {
@@ -1802,21 +1977,21 @@ async function handleRemoteDocumentReset() {
       )
       preserveLocalDraft = !downloaded && fallbackSaved
       if (!downloaded && !fallbackSaved) {
-        throw new Error('未能创建本地安全副本，已暂停加载协作者恢复的版本')
+        throw new Error(`未能创建本地安全副本，已暂停处理“${actionTitle}”`)
       }
       ElNotification.warning({
-        title: '协作者恢复了历史版本',
+        title: actionTitle,
         message: downloaded
-          ? '当前未保存内容已下载为本地副本，正在加载恢复后的版本'
+          ? `当前未保存内容已下载为本地副本，正在加载${isCloudReset ? '服务器' : '恢复后的'}版本`
           : '自动下载未能启动，本地草稿仍保留，可在脑图列表的草稿中心下载',
       })
     }
     const reloaded = await reloadLatestServerDocument({ preserveLocalDraft })
     if (!reloaded) return
-    ElMessage.success('已切换到协作者恢复的版本')
+    ElMessage.success(isCloudReset ? '已重新加载服务器云端版本' : '已切换到协作者恢复的版本')
   } catch (error) {
     if (sessionCancelled(sessionController?.signal)) return
-    console.error('加载协作者恢复版本失败:', error)
+    console.error('加载协作基线重置结果失败:', error)
     setSaveStatus('error')
   } finally {
     resolvingStaleState = false
@@ -1987,6 +2162,8 @@ async function performContentConflictResolution(localFullData, conflictData) {
     entityConflictCount ? `${entityConflictCount} 个关联对象` : '',
   ].filter(Boolean).join('、')
   const signal = sessionController?.signal
+  let discardedDraftRecords = []
+  let draftDiscardPrepared = false
   try {
     conflictDialogOpen = true
     await ElMessageBox.confirm(
@@ -2019,6 +2196,11 @@ async function performContentConflictResolution(localFullData, conflictData) {
     if (!downloadConflictBackup(localFullData)) {
       throw new Error('浏览器未能下载冲突副本，本地草稿仍已保留，请稍后从草稿中心下载')
     }
+    discardedDraftRecords = await discardCurrentConflictDrafts()
+    draftDiscardPrepared = true
+    await resetCurrentCollaborationToCloud(
+      Number(conflictData.currentRevision) || contentRevision,
+    )
     const response = await getMindmap(props.mindmapId, { signal })
     if (sessionCancelled(signal) || !mindMap.value) return false
     const data = response.data
@@ -2062,15 +2244,28 @@ async function performContentConflictResolution(localFullData, conflictData) {
     savedViewChangeVersion = viewChangeVersion
     conflictBlocked = false
     clearSaveRetryState()
-    clearLocalDraft()
-    clearRestoredDraft()
-    requestAuthoritativeCollaborationReset()
+    restoredLocalDraft = false
+    restoredDraftRecord = null
+    draftProtection.markClean()
     onYjsReinit(data.nodeTree || defaultData)
     setSaveStatus('saved')
     ElMessage.success('已加载服务器最新内容，本地冲突副本已下载')
     return true
   } catch (error) {
     if (sessionCancelled(signal)) return false
+    if (draftDiscardPrepared) {
+      try {
+        await restoreDraftRecords(discardedDraftRecords)
+        const result = await enqueueRequiredDraftOperation(() => saveMindmapDraft(
+          createDraftOptions(localFullData),
+        ))
+        if (result?.saved !== true) {
+          throw new Error('本地冲突草稿回滚失败，JSON 备份仍可用于恢复')
+        }
+      } catch (restoreError) {
+        error.message = `${error?.message || '重新加载失败'}；${restoreError.message}`
+      }
+    }
     ElMessage.error(error?.message || '重新加载失败')
     return false
   }

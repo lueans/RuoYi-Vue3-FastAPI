@@ -313,6 +313,7 @@ class RoomManager:
         mindmap_id: int,
         state: str,
         origin: str,
+        content_revision: int,
         exclude: WebSocket | None = None,
     ) -> None:
         """以标准 update 发布检查点，新 worker 再按连接能力抑制冗余消息。"""
@@ -324,6 +325,7 @@ class RoomManager:
                 'state': state,
                 'patch': None,
                 'checkpoint': True,
+                'contentRevision': content_revision,
                 'origin': origin,
             },
             exclude=exclude,

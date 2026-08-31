@@ -136,6 +136,17 @@ export function batchUpdateMindmapContent(mindmapId, data) {
   })
 }
 
+// 用户明确选择云端版本时推进 revision，并废弃整个旧协作基线。
+export function resetMindmapCollaboration(mindmapId, data) {
+  return request({
+    url: '/mindmap/file/' + mindmapId + '/collaboration/reset',
+    method: 'post',
+    data,
+    headers: { repeatSubmit: false },
+    timeout: MINDMAP_SAVE_TIMEOUT_MS,
+  })
+}
+
 // 视图状态采用后写覆盖，不进入正文 revision/冲突日志。
 export function updateMindmapView(mindmapId, viewData) {
   return request({

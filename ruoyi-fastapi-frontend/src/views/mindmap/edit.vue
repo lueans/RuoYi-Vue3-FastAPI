@@ -450,46 +450,55 @@ let manualSaveRequestId = 0
 const isRealtimeConnected = computed(() => editRef.value?.isCollaborationSynced?.() === true)
 const realtimeState = computed(() => editRef.value?.getCollaborationState?.() || 'connecting')
 const realtimeError = computed(() => editRef.value?.getCollaborationError?.() || '')
-const realtimeStatusText = computed(() => ({
-  connected: '协作在线',
-  degraded: '协作已恢复',
-  syncing: '正在同步',
-  stale: '正在合并',
-  reconnecting: '正在重连',
-  authenticating: '正在认证',
-  'auth-error': '协作不可用',
-  offline: '协作离线',
-  closed: '协作已关闭',
-}[realtimeState.value] || '正在连接'))
+const realtimeStatusText = computed(() => {
+  if (!editorReady.value) return '等待版本确认'
+  return ({
+    connected: '协作在线',
+    degraded: '协作已恢复',
+    syncing: '正在同步',
+    stale: '正在合并',
+    reconnecting: '正在重连',
+    authenticating: '正在认证',
+    'auth-error': '协作不可用',
+    offline: '协作离线',
+    closed: '协作已关闭',
+  }[realtimeState.value] || '正在连接')
+})
 const realtimeStatusClass = computed(() => ({
   online: isRealtimeConnected.value && realtimeState.value === 'connected',
   error: ['auth-error', 'offline'].includes(realtimeState.value),
   warning: ['syncing', 'stale', 'reconnecting', 'authenticating', 'degraded'].includes(realtimeState.value),
 }))
-const realtimeStatusDetail = computed(() => realtimeError.value || ({
-  connected: '实时协作连接正常',
-  degraded: '检测到异常协作缓存，已隔离并使用可恢复内容继续同步',
-  syncing: '连接已建立，正在校准协作状态',
-  stale: '检测到较新的服务器内容，正在安全合并本地修改',
-  reconnecting: '连接中断，正在自动重连',
-  authenticating: '正在验证协作身份',
-  offline: '实时协作暂时不可用，本地自动保存仍然有效',
-}[realtimeState.value] || '正在建立实时协作连接'))
+const realtimeStatusDetail = computed(() => {
+  if (!editorReady.value) return '确认本地修改与云端版本后再建立实时协作连接'
+  return realtimeError.value || ({
+    connected: '实时协作连接正常',
+    degraded: '检测到异常协作缓存，已隔离并使用可恢复内容继续同步',
+    syncing: '连接已建立，正在校准协作状态',
+    stale: '检测到较新的服务器内容，正在安全合并本地修改',
+    reconnecting: '连接中断，正在自动重连',
+    authenticating: '正在验证协作身份',
+    offline: '实时协作暂时不可用，本地自动保存仍然有效',
+  }[realtimeState.value] || '正在建立实时协作连接')
+})
 const canRetryRealtime = computed(() => (
   documentLoaded.value
   && !isReadonly.value
   && realtimeState.value === 'offline'
 ))
-const saveStatusText = computed(() => ({
-  pending: '待保存',
-  saving: '正在保存',
-  retrying: '正在重试',
-  syncing: '正在同步画布',
-  offline: '离线草稿',
-  saved: '已自动保存',
-  error: '保存异常',
-  idle: '已自动保存',
-}[saveStatus.value] || '已自动保存'))
+const saveStatusText = computed(() => {
+  if (!editorReady.value) return '正在检查本地修改'
+  return ({
+    pending: '待保存',
+    saving: '正在保存',
+    retrying: '正在重试',
+    syncing: '正在同步画布',
+    offline: '离线草稿',
+    saved: '已自动保存',
+    error: '保存异常',
+    idle: '已自动保存',
+  }[saveStatus.value] || '已自动保存')
+})
 
 const shareDialogRef = ref(null)
 let terminalDialogShown = false

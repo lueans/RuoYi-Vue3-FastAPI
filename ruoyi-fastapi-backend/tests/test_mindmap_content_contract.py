@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import ValidationError
 
+from module_mindmap.controller.mindmap_controller import reset_mindmap_collaboration
+from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
+from module_mindmap.dao.mindmap_dao import MindmapDao
 from module_mindmap.entity.vo.mindmap_vo import (
+    MindmapCollaborationResetModel,
     MindmapContentBatchModel,
     MindmapContentOperationModel,
     MindmapModel,
@@ -120,6 +124,33 @@ class MindmapContentOperationContractTest(unittest.TestCase):
 
 
 class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cloud_selection_controller_forwards_only_authenticated_user_id(self) -> None:
+        request = MindmapCollaborationResetModel(
+            observedRevision=4,
+            clientMutationId='cloud-reset-1',
+        )
+        db = SimpleNamespace()
+        current_user = SimpleNamespace(user=SimpleNamespace(user_id=3, user_name='alice'))
+        reset_state = AsyncMock(return_value={
+            'contentRevision': 5,
+            'resetMode': 'authoritative',
+        })
+
+        with patch.object(
+            MindmapService,
+            'reset_collaboration_state_services',
+            new=reset_state,
+        ):
+            await reset_mindmap_collaboration(
+                request=SimpleNamespace(),
+                mindmap_id=8,
+                model=request,
+                query_db=db,
+                current_user=current_user,
+            )
+
+        reset_state.assert_awaited_once_with(db, 8, request, 3)
+
     async def test_view_save_is_last_write_wins_without_content_revision(self) -> None:
         request = MindmapViewUpdateModel(viewData={'scale': 1.25, 'translateX': -80})
         db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
@@ -417,6 +448,129 @@ class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(savepoint.exited)
         self.assertIs(savepoint.exception_type, RuntimeError)
         db.commit.assert_awaited_once()
+
+    async def test_cloud_selection_advances_revision_and_invalidates_all_yjs_state(self) -> None:
+        request = MindmapCollaborationResetModel(
+            observedRevision=4,
+            clientMutationId='cloud-reset-1',
+        )
+        mindmap = SimpleNamespace(content_revision=6)
+        db = SimpleNamespace(
+            execute=AsyncMock(),
+            add=Mock(),
+            commit=AsyncMock(),
+            rollback=AsyncMock(),
+        )
+        update_content = AsyncMock()
+        broadcast = AsyncMock()
+
+        with (
+            patch.object(
+                MindmapService,
+                'check_mindmap_access',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch.object(
+                MindmapDao,
+                'get_mindmap_for_update',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch.object(
+                MindmapContentDao,
+                'get_change_by_mutation',
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                MindmapDao,
+                'update_content_dao',
+                new=update_content,
+            ),
+            patch(
+                'module_mindmap.websocket.room_manager.room_manager.broadcast',
+                new=broadcast,
+            ),
+        ):
+            result = await MindmapService.reset_collaboration_state_services(
+                db,
+                mindmap_id=8,
+                page_object=request,
+                user_id=3,
+            )
+
+        update_content.assert_awaited_once_with(
+            db,
+            8,
+            {
+                'content_revision': 7,
+                'update_by': '3',
+                'update_time': update_content.await_args.args[2]['update_time'],
+            },
+        )
+        delete_statement = db.execute.await_args.args[0]
+        self.assertIn('mindmap_ws_state', str(delete_statement))
+        change_log = db.add.call_args.args[0]
+        self.assertEqual(change_log.base_revision, 6)
+        self.assertEqual(change_log.revision, 7)
+        self.assertEqual(change_log.operations[0]['type'], 'collaboration.authoritative_reset')
+        db.commit.assert_awaited_once()
+        broadcast.assert_awaited_once()
+        self.assertEqual(result['contentRevision'], 7)
+        self.assertEqual(result['resetMode'], 'authoritative')
+        self.assertFalse(result['idempotentReplay'])
+
+    async def test_cloud_selection_retry_reuses_committed_reset_revision(self) -> None:
+        request = MindmapCollaborationResetModel(
+            observedRevision=6,
+            clientMutationId='cloud-reset-retry',
+        )
+        mindmap = SimpleNamespace(content_revision=7)
+        previous = SimpleNamespace(result_data={
+            'contentRevision': 7,
+            'previousRevision': 6,
+            'observedRevision': 6,
+            'clientMutationId': 'cloud-reset-retry',
+            'resetMode': 'authoritative',
+            'idempotentReplay': False,
+        })
+        db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+        update_content = AsyncMock()
+        broadcast = AsyncMock()
+
+        with (
+            patch.object(
+                MindmapService,
+                'check_mindmap_access',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch.object(
+                MindmapDao,
+                'get_mindmap_for_update',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch.object(
+                MindmapContentDao,
+                'get_change_by_mutation',
+                new=AsyncMock(return_value=previous),
+            ),
+            patch.object(MindmapDao, 'update_content_dao', new=update_content),
+            patch(
+                'module_mindmap.websocket.room_manager.room_manager.broadcast',
+                new=broadcast,
+            ),
+        ):
+            result = await MindmapService.reset_collaboration_state_services(
+                db,
+                mindmap_id=8,
+                page_object=request,
+                user_id=3,
+            )
+
+        update_content.assert_not_awaited()
+        db.commit.assert_not_awaited()
+        db.rollback.assert_awaited_once()
+        broadcast.assert_awaited_once()
+        self.assertEqual(result['contentRevision'], 7)
+        self.assertTrue(result['idempotentReplay'])
 
 
 if __name__ == '__main__':

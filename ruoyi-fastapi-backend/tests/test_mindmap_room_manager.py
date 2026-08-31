@@ -392,7 +392,7 @@ class MindmapRoomManagerTest(unittest.IsolatedAsyncioTestCase):
         )
         await manager.join(11, legacy, {'id': 3})
 
-        await manager.broadcast_checkpoint(11, 'full-state', '7')
+        await manager.broadcast_checkpoint(11, 'full-state', '7', 4)
 
         self.assertEqual(modern.messages, [])
         expected = {
@@ -400,6 +400,7 @@ class MindmapRoomManagerTest(unittest.IsolatedAsyncioTestCase):
             'update': 'full-state',
             'state': 'full-state',
             'patch': None,
+            'contentRevision': 4,
             'origin': '7',
         }
         self.assertEqual(patch_only.messages, [expected])
@@ -440,7 +441,7 @@ class MindmapRoomManagerTest(unittest.IsolatedAsyncioTestCase):
         )
         await receiver.join(13, legacy, {'id': 2})
         try:
-            await publisher.broadcast_checkpoint(13, 'cross-worker-state', '8')
+            await publisher.broadcast_checkpoint(13, 'cross-worker-state', '8', 5)
             await self._wait_until(lambda: len(legacy.messages) == 1)
 
             self.assertEqual(modern.messages, [])
@@ -449,6 +450,7 @@ class MindmapRoomManagerTest(unittest.IsolatedAsyncioTestCase):
                 'update': 'cross-worker-state',
                 'state': 'cross-worker-state',
                 'patch': None,
+                'contentRevision': 5,
                 'origin': '8',
             }])
         finally:

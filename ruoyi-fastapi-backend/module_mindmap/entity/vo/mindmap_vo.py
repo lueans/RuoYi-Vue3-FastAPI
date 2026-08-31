@@ -233,6 +233,15 @@ class MindmapViewUpdateModel(BaseModel):
     view_data: dict[str, Any] | None = Field(default=None, description='平移、缩放等视图状态')
 
 
+class MindmapCollaborationResetModel(BaseModel):
+    """用户明确放弃本地修改时，以数据库正文重置协作基线。"""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    observed_revision: int = Field(ge=1, description='用户作出选择时看到的云端修订号')
+    client_mutation_id: str = Field(min_length=1, max_length=100, description='客户端幂等标识')
+
+
 class MindmapContentOperationModel(BaseModel):
     """前端 data_change_detail 转换后的领域操作。"""
 

@@ -1314,31 +1314,6 @@ export class YjsMindmapSync {
       ? data.states
       : [data.state]
     const staged = stagePersistedYjsStates(states, data.stateSources)
-    if (this.options.preferAuthoritativeDocument === true) {
-      // “使用云端版本”是一次明确的丢弃决定。不要再把同 revision 的
-      // 旧协作缓存合回刚加载的 HTTP 权威文档；以当前画布重新播种并
-      // 用检查点替换这些来源，避免数秒后再次进入同一个冲突循环。
-      this.options.preferAuthoritativeDocument = false
-      const currentData = this.mindMap?.getData?.(true)
-      const currentDocument = currentData?.root ? {
-        ...currentData,
-        documentData: this.options.getDocumentData?.(),
-      } : currentData
-      if (currentDocument) this.initFromMindmap(currentDocument)
-      this._hasLegacyUnconfirmedRemoteState = false
-      this._unconfirmedRemoteMutationIds.clear()
-      this._refreshUnconfirmedRemoteState()
-      this._completeSyncHandshake(true)
-      this._sendConsolidatedCheckpoint(
-        staged.acceptedSourceIds,
-        staged.invalidSourceIds,
-      )
-      if (staged.invalidStateCount) {
-        this.connectionState.value = 'degraded'
-        this.syncError.value = `检测到 ${staged.invalidStateCount} 份异常协作缓存，已隔离并继续同步`
-      }
-      return
-    }
     if (staged.mergedUpdate) {
       this._hasLegacyUnconfirmedRemoteState = true
       this._refreshUnconfirmedRemoteState()
@@ -1355,6 +1330,8 @@ export class YjsMindmapSync {
     this._normalizeEmbeddedCrossNodeState()
     this._requestYjsApply({ applyMeta: true })
     this._completeSyncHandshake(true)
+    // 当前完整检查点已经包含握手接受的全部来源，可以原子替换这些旧副本。
+    // 新来源若在并发窗口写入，服务端不会出现在 replacesSources 中，仍会保留。
     this._sendConsolidatedCheckpoint(
       staged.acceptedSourceIds,
       staged.invalidSourceIds,
@@ -1401,6 +1378,27 @@ export class YjsMindmapSync {
     const clientMutationId = this._normalizeClientMutationId(data?.clientMutationId)
     const wasAlreadyConfirmed = clientMutationId
       && this._confirmedRemoteMutationIds.has(clientMutationId)
+    const messageRevision = Number(data?.contentRevision)
+    if (
+      this._authoritativeRevisionPending !== null
+      || (
+        Number.isInteger(messageRevision)
+        && messageRevision !== this.contentRevision
+        && !wasAlreadyConfirmed
+      )
+    ) {
+      // 权威重置开始后，旧 revision 的在途增量和断开检查点都必须失效；
+      // 已由同 clientMutationId 确认的乱序保存批次仍可补应用到当前画布。
+      if (Number.isInteger(messageRevision) && messageRevision > this.contentRevision) {
+        this._handleStaleState({
+          ...data,
+          contentRevision: messageRevision,
+          message: '检测到更新的服务器协作状态，正在安全同步',
+          reason: 'newer_yjs_revision',
+        })
+      }
+      return
+    }
     if (
       wasAlreadyConfirmed
       && this._confirmedRemoteMutationIds.get(clientMutationId) === true
@@ -1460,7 +1458,7 @@ export class YjsMindmapSync {
   }
 
   _handleStaleState(data) {
-    const revision = Number(data?.contentRevision)
+    const revision = Number(data?.contentRevision ?? data?.currentRevision)
     this._authoritativeRevisionPending = Number.isInteger(revision) && revision > 0
       ? revision
       : this.contentRevision
@@ -1518,9 +1516,11 @@ export class YjsMindmapSync {
   _handleDocumentReset(data) {
     const revision = Number(data?.contentRevision)
     if (!Number.isInteger(revision) || revision <= this.contentRevision) return
+    this._authoritativeRevisionPending = revision
+    this._clearCheckpoint()
     this.isSynced.value = false
     this.connectionState.value = 'syncing'
-    this.syncError.value = '协作者恢复了历史版本，正在加载最新内容'
+    this.syncError.value = data?.message || '协作基线已重置，正在加载最新内容'
     this.options.onDocumentReset?.(data)
   }
 

@@ -39,6 +39,7 @@ from module_mindmap.entity.vo.mindmap_vo import (
     TREE_OPERATION_TYPES,
     DeleteMindmapModel,
     MindmapBatchStatusUpdateModel,
+    MindmapCollaborationResetModel,
     MindmapContentBatchModel,
     MindmapContentUpdateModel,
     MindmapListItemModel,
@@ -1890,6 +1891,99 @@ class MindmapService:
         except Exception:
             await query_db.rollback()
             raise
+
+    @classmethod
+    async def reset_collaboration_state_services(
+        cls,
+        query_db: AsyncSession,
+        mindmap_id: int,
+        page_object: MindmapCollaborationResetModel,
+        user_id: int,
+    ) -> dict[str, Any]:
+        """以数据库正文建立新的协作 revision，彻底隔离旧 Yjs 状态。"""
+        await cls.check_mindmap_access(query_db, mindmap_id, user_id, require_edit=True)
+        event: dict[str, Any] | None = None
+        try:
+            from module_mindmap.entity.do.mindmap_ws_state_do import (  # noqa: PLC0415
+                MindmapWsState,
+            )
+
+            mindmap = await MindmapDao.get_mindmap_for_update(query_db, mindmap_id)
+            if not mindmap:
+                raise ServiceException(message='思维导图不存在')
+
+            previous = await MindmapContentDao.get_change_by_mutation(
+                query_db,
+                mindmap_id,
+                page_object.client_mutation_id,
+            )
+            if previous:
+                result = {**(previous.result_data or {}), 'idempotentReplay': True}
+                await query_db.rollback()
+                event = {
+                    'type': 'document_reset',
+                    'contentRevision': result['contentRevision'],
+                    'clientMutationId': page_object.client_mutation_id,
+                    'reason': 'authoritative_cloud_reset',
+                    'message': '协作者已选择云端版本，正在重新加载服务器内容',
+                }
+            else:
+                base_revision = mindmap.content_revision
+                new_revision = base_revision + 1
+                await MindmapDao.update_content_dao(query_db, mindmap_id, {
+                    'content_revision': new_revision,
+                    'update_by': str(user_id),
+                    'update_time': datetime.now(),
+                })
+                # Yjs 检查点是完整 CRDT 状态；一个来源可能已经包含另一个来源的
+                # 更新，因此无法安全地做来源级删除。推进 revision 并清空缓存后，
+                # 旧连接的检查点和在途增量都会被服务端版本栅栏拒绝。
+                await query_db.execute(
+                    sa_delete(MindmapWsState).where(MindmapWsState.mindmap_id == mindmap_id)
+                )
+                result = {
+                    'contentRevision': new_revision,
+                    'previousRevision': base_revision,
+                    'observedRevision': page_object.observed_revision,
+                    'clientMutationId': page_object.client_mutation_id,
+                    'resetMode': 'authoritative',
+                    'idempotentReplay': False,
+                }
+                query_db.add(MindmapChangeLog(
+                    file_id=mindmap_id,
+                    base_revision=base_revision,
+                    revision=new_revision,
+                    client_mutation_id=page_object.client_mutation_id,
+                    operations=[{
+                        'type': 'collaboration.authoritative_reset',
+                        'payload': {'observedRevision': page_object.observed_revision},
+                    }],
+                    result_data=result,
+                    created_by=str(user_id),
+                    created_time=datetime.now(),
+                ))
+                await query_db.commit()
+                event = {
+                    'type': 'document_reset',
+                    'contentRevision': new_revision,
+                    'clientMutationId': page_object.client_mutation_id,
+                    'reason': 'authoritative_cloud_reset',
+                    'message': '协作者已选择云端版本，正在重新加载服务器内容',
+                }
+        except Exception:
+            await query_db.rollback()
+            raise
+
+        try:
+            from module_mindmap.websocket.room_manager import room_manager  # noqa: PLC0415
+
+            room_manager.set_content_revision(mindmap_id, result['contentRevision'])
+            await room_manager.broadcast(mindmap_id, event)
+        except Exception as exc:
+            # 重置事务已经提交；广播失败时旧写入仍会因数据库 revision 不匹配而被拒绝。
+            record_mindmap_event('broadcast_failure')
+            logger.warning(f'广播脑图协作基线重置失败: {exc}')
+        return result
 
     @classmethod
     async def update_view_services(

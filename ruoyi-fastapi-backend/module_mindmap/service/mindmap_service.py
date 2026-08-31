@@ -1151,6 +1151,7 @@ class MindmapService:
         for binding, tag in tag_rows:
             resolved_tag = {
                 'tagId': tag.id,
+                'categoryId': tag.category_id,
                 'text': tag.name,
                 'style': dict(tag.style or {}),
                 'status': tag.status,

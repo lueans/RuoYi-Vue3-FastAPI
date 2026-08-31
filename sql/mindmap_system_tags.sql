@@ -2,7 +2,7 @@
 --
 -- 前置条件：
 --   1. 已执行脑图标签表结构迁移；
---   2. mindmap_tag_category 已包含 category_type、sort_order；
+--   2. mindmap_tag_category 已包含 category_type、show_on_home、selection_mode、sort_order；
 --   3. mindmap_tag 已包含 status、definition_revision、usage_* 字段。
 --
 -- 本脚本只初始化 4 个系统分组和 61 个内置标记标签，
@@ -11,12 +11,12 @@
 START TRANSACTION;
 
 INSERT INTO mindmap_tag_category (
-    name, category_type, owner_id, sort_order, created_by, created_time
+    name, category_type, show_on_home, selection_mode, owner_id, sort_order, created_by, created_time
 ) VALUES
-    ('优先级', 'system', 0, 100, 'system', NOW()),
-    ('任务', 'system', 0, 200, 'system', NOW()),
-    ('表情', 'system', 0, 300, 'system', NOW()),
-    ('符号', 'system', 0, 400, 'system', NOW())
+    ('优先级', 'system', 1, 'single', 0, 100, 'system', NOW()),
+    ('任务', 'system', 1, 'single', 0, 200, 'system', NOW()),
+    ('表情', 'system', 1, 'single', 0, 300, 'system', NOW()),
+    ('符号', 'system', 1, 'single', 0, 400, 'system', NOW())
 ON DUPLICATE KEY UPDATE
     category_type = VALUES(category_type),
     sort_order = VALUES(sort_order);

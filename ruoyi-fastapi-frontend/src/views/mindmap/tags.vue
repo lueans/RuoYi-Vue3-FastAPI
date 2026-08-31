@@ -312,6 +312,14 @@
           <el-input v-model="categoryForm.name" placeholder="分组名称" :maxlength="MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH" show-word-limit />
           <span class="categoryEditorHint">类型：{{ categoryTypeText(categoryForm.categoryType) }}</span>
         </div>
+        <el-radio-group v-model="categoryForm.showOnHome" class="categoryDisplayChoice" aria-label="分组展示位置">
+          <el-radio-button :value="true">标签首页</el-radio-button>
+          <el-radio-button :value="false">仅更多标签</el-radio-button>
+        </el-radio-group>
+        <el-radio-group v-model="categoryForm.selectionMode" class="categoryDisplayChoice" aria-label="分组选择模式">
+          <el-radio-button value="single">单选分组</el-radio-button>
+          <el-radio-button value="multiple">多选分组</el-radio-button>
+        </el-radio-group>
         <el-select v-if="!categoryForm.id && isAdmin" v-model="categoryForm.ownerScope">
           <el-option label="我的分组" value="mine" />
           <el-option label="全局分组" value="global" />
@@ -355,7 +363,7 @@
                     <span>{{ row.name }}</span>
                     <el-tag size="small" :type="categoryTypeTagType(row.categoryType)" effect="plain">{{ categoryTypeText(row.categoryType) }}</el-tag>
                   </div>
-                  <span class="categoryRowMeta">排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
+                  <span class="categoryRowMeta">{{ row.showOnHome ? '标签首页展示' : '仅更多标签' }} · {{ row.selectionMode === 'single' ? '单选' : '多选' }} · 排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
                 </div>
                 <div class="categoryRowActions">
                   <el-button v-if="canEditCategoryRow(row)" link type="primary" @click="startEditCategory(row)">编辑</el-button>
@@ -402,7 +410,7 @@
                     <span>{{ row.name }}</span>
                     <el-tag size="small" :type="categoryTypeTagType(row.categoryType)" effect="plain">{{ categoryTypeText(row.categoryType) }}</el-tag>
                   </div>
-                  <span class="categoryRowMeta">排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
+                  <span class="categoryRowMeta">{{ row.showOnHome ? '标签首页展示' : '仅更多标签' }} · {{ row.selectionMode === 'single' ? '单选' : '多选' }} · 排序 {{ row.sortOrder }} · {{ row.tagCount || 0 }} 个标签</span>
                 </div>
                 <div class="categoryRowActions">
                   <el-button v-if="canEditCategoryRow(row)" link type="primary" @click="startEditCategory(row)">编辑</el-button>
@@ -540,7 +548,15 @@ const categoryReordering = ref('')
 const globalCategoryRows = ref([])
 const personalCategoryRows = ref([])
 const categoryOrderSnapshot = reactive({ global: [], mine: [] })
-const categoryForm = reactive({ id: null, name: '', sortOrder: 0, ownerScope: 'mine', categoryType: 'custom' })
+const categoryForm = reactive({
+  id: null,
+  name: '',
+  sortOrder: 0,
+  ownerScope: 'mine',
+  categoryType: 'custom',
+  showOnHome: false,
+  selectionMode: 'multiple',
+})
 
 const selectedNodeCount = computed(() => selection.value.reduce((sum, row) => sum + Math.max(0, Number(row.usageNodeCount) || 0), 0))
 const currentCategoryTitle = computed(() => {
@@ -976,7 +992,13 @@ async function openCategoryManager() {
 
 function startCreateCategory() {
   Object.assign(categoryForm, {
-    id: null, name: '', sortOrder: 0, ownerScope: 'mine', categoryType: 'custom',
+    id: null,
+    name: '',
+    sortOrder: 0,
+    ownerScope: 'mine',
+    categoryType: 'custom',
+    showOnHome: false,
+    selectionMode: 'multiple',
   })
   categoryEditing.value = true
 }
@@ -988,6 +1010,8 @@ function startEditCategory(row) {
     sortOrder: Number(row.sortOrder) || 0,
     ownerScope: Number(row.ownerId) === 0 ? 'global' : 'mine',
     categoryType: row.categoryType || 'custom',
+    showOnHome: Boolean(row.showOnHome),
+    selectionMode: row.selectionMode === 'single' ? 'single' : 'multiple',
   })
   categoryEditing.value = true
 }
@@ -1012,8 +1036,23 @@ async function saveCategory() {
   if (invalid) return ElMessage.warning(invalid.message)
   categorySubmitting.value = true
   try {
-    if (categoryForm.id) await updateTagCategory(categoryForm.id, name.value, sortOrder.value)
-    else await addTagCategory(name.value, sortOrder.value, categoryForm.ownerScope)
+    if (categoryForm.id) {
+      await updateTagCategory(
+        categoryForm.id,
+        name.value,
+        sortOrder.value,
+        categoryForm.showOnHome,
+        categoryForm.selectionMode,
+      )
+    } else {
+      await addTagCategory(
+        name.value,
+        sortOrder.value,
+        categoryForm.ownerScope,
+        categoryForm.showOnHome,
+        categoryForm.selectionMode,
+      )
+    }
     categoryEditing.value = false
     ElMessage.success(categoryForm.id ? '分组已更新' : '分组已创建')
     await loadCategories()
@@ -1409,6 +1448,10 @@ onBeforeUnmount(() => {
   flex: 1;
   flex-direction: column;
   gap: 5px;
+}
+
+.categoryDisplayChoice {
+  flex: 0 0 auto;
 }
 
 .categoryEditorHint,

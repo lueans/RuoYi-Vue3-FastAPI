@@ -9,19 +9,37 @@ export function listTagCategories() {
   })
 }
 
-export function addTagCategory(name, sortOrder, ownerScope = 'mine') {
+export function addTagCategory(
+  name,
+  sortOrder,
+  ownerScope = 'mine',
+  showOnHome = false,
+  selectionMode = 'multiple'
+) {
   return request({
     url: '/mindmap/tag/category',
     method: 'post',
-    params: { categoryName: name, sortOrder: sortOrder ?? 0, ownerScope }
+    params: {
+      categoryName: name,
+      sortOrder: sortOrder ?? 0,
+      ownerScope,
+      showOnHome,
+      selectionMode
+    }
   })
 }
 
-export function updateTagCategory(categoryId, name, sortOrder) {
+export function updateTagCategory(categoryId, name, sortOrder, showOnHome, selectionMode) {
   return request({
     url: '/mindmap/tag/category',
     method: 'put',
-    params: { categoryId, categoryName: name, sortOrder: sortOrder ?? 0 }
+    params: {
+      categoryId,
+      categoryName: name,
+      sortOrder: sortOrder ?? 0,
+      showOnHome,
+      selectionMode
+    }
   })
 }
 

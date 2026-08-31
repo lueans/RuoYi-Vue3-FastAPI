@@ -20,6 +20,7 @@ class MindmapVersionTagSnapshotsTest(unittest.TestCase):
                 'uid': 'root',
                 'tag': [{
                     'tagId': 8,
+                    'categoryId': 3,
                     'text': '高',
                     'style': {'fontSize': 14, 'fill': '#f00'},
                     'placement': 'right',
@@ -32,6 +33,7 @@ class MindmapVersionTagSnapshotsTest(unittest.TestCase):
 
         self.assertEqual(snapshots['8']['style'], {'fontSize': 14, 'fill': '#f00'})
         self.assertEqual(snapshots['8']['text'], '高')
+        self.assertEqual(snapshots['8']['categoryId'], 3)
 
     def test_preview_uses_tag_snapshot_and_preserves_local_layout(self) -> None:
         tree = {

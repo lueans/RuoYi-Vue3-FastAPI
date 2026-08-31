@@ -26,6 +26,14 @@ class MindmapTagCategory(Base):
         String(20), nullable=False, server_default='custom',
         comment='分组类型:system系统 custom用户自定义',
     )
+    show_on_home = Column(
+        SmallInteger, nullable=False, server_default='0',
+        comment='是否在脑图标签首页展示:0否 1是',
+    )
+    selection_mode = Column(
+        String(20), nullable=False, server_default='multiple',
+        comment='分组选择模式:single单选 multiple多选',
+    )
     owner_id = Column(BigInteger, nullable=False, server_default='0', comment='所有者(0=全局)')
     sort_order = Column(Integer, nullable=True, server_default='0', comment='排序')
     created_by = Column(String(64), nullable=True, comment='创建人')

@@ -44,9 +44,9 @@
         <el-button link type="primary" :disabled="isReadonly" @click="loadSuggestions">重新加载</el-button>
       </div>
       <template v-else>
-        <div v-if="groupLoadError" class="groupLoadWarning" role="status">
-          <span>{{ groupLoadError }}，暂按全部标签展示</span>
-          <el-button link type="primary" :disabled="isReadonly" @click="loadTagGroups">重新加载分组</el-button>
+        <div v-if="selectionRuleError" class="groupLoadWarning" role="alert">
+          <span>{{ selectionRuleError }}，选择规则暂不可用</span>
+          <el-button link type="primary" :disabled="isReadonly" @click="retrySelectionRules">重新加载规则</el-button>
         </div>
         <div v-if="groupedSuggestions.length" class="suggestionBrowser">
           <nav class="suggestionGroupSidebar" aria-label="标签分组">
@@ -71,7 +71,7 @@
           >
             <div class="suggestionGroupContentHeader">
               <span>{{ activeSuggestionGroup.name }}</span>
-              <span>可多选</span>
+              <span>{{ activeSuggestionGroup.selectionMode === 'single' ? '单选，选择新标签会替换同组标签' : '可多选' }}</span>
             </div>
             <div class="suggestionGroupTags">
               <button
@@ -82,7 +82,7 @@
                 :class="{ selected: isSelected(tag.id) }"
                 :style="getSuggestionStyle(tag, isSelected(tag.id))"
                 :aria-pressed="isSelected(tag.id)"
-                :disabled="isReadonly"
+                :disabled="isReadonly || !selectionRulesReady"
                 @click="toggleSuggestion(tag)"
               >
                 <el-icon v-if="isSelected(tag.id)"><Check /></el-icon>
@@ -101,7 +101,7 @@
           v-if="canCreate"
           type="button"
           class="createTagButton"
-          :disabled="isReadonly || creating"
+          :disabled="isReadonly || creating || !selectionRulesReady"
           @click="createAndSelectTag"
         >
           <el-icon><Plus /></el-icon>
@@ -139,7 +139,7 @@
 
     <template #footer>
       <el-button :disabled="creating" @click="dialogVisible = false">取消</el-button>
-      <el-button type="primary" :disabled="isReadonly || creating" @click="confirm">确定</el-button>
+      <el-button type="primary" :disabled="isReadonly || creating || !selectionRulesReady" @click="confirm">确定</el-button>
     </template>
   </el-dialog>
 </template>
@@ -160,6 +160,7 @@ import {
   addTag as createManagedTag,
   getTagSuggestions,
   listTagCategories,
+  listTags,
 } from '@/api/mindmap/tag'
 import useUserStore from '@/store/modules/user'
 import { captureMindmapEditTargets } from '@/utils/mindmap-edit-targets'
@@ -173,6 +174,14 @@ import {
   getMindmapMarkerTagIconKey,
   replaceMindmapMarkerInTagList,
 } from '@/utils/mindmap-marker-tags'
+import {
+  buildMindmapTagSelectionIndex,
+  getMindmapTagSelectionMode,
+  MINDMAP_TAG_SELECTION_MODE_SINGLE,
+  normalizeMindmapSingleSelectionTags,
+  normalizeMindmapTagSelectionMode,
+  removeMindmapSingleSelectionPeers,
+} from '@/utils/mindmap-tag-selection'
 import bus from './useEventBus'
 import { store } from './useStore'
 import { useMindMapActiveNodes } from './useMindMapActiveNodes'
@@ -191,6 +200,8 @@ const searchKeyword = ref('')
 const suggestions = ref([])
 const tagGroups = ref([])
 const tagGroupsLoaded = ref(false)
+const tagCatalog = ref([])
+const tagCatalogLoaded = ref(false)
 const activeGroupId = ref('')
 const tagArr = ref([])
 const editTargets = shallowRef([])
@@ -199,9 +210,12 @@ const loading = ref(false)
 const loadError = ref('')
 const groupLoadError = ref('')
 const groupLoading = ref(false)
+const catalogLoadError = ref('')
+const catalogLoading = ref(false)
 const creating = ref(false)
 const requestId = ref(0)
 const groupRequestId = ref(0)
+const catalogRequestId = ref(0)
 const dialogSessionId = ref(0)
 let searchTimer = null
 
@@ -215,10 +229,23 @@ const dialogTitle = computed(() => targetCount.value > 1
   ? `批量设置标签（${targetCount.value} 个节点）`
   : '标签')
 const normalizedKeyword = computed(() => searchKeyword.value.trim())
+const selectionRulesReady = computed(() => (
+  tagGroupsLoaded.value && tagCatalogLoaded.value && !groupLoading.value && !catalogLoading.value
+))
+const selectionRuleError = computed(() => groupLoadError.value || catalogLoadError.value)
+const tagSelectionIndex = computed(() => buildMindmapTagSelectionIndex(
+  tagGroups.value,
+  tagCatalog.value,
+))
 const groupedSuggestions = computed(() => {
   if (suggestions.value.length === 0) return []
   if (!tagGroupsLoaded.value) {
-    return [{ id: 'all', name: groupLoading.value ? '正在读取分组…' : '全部标签', tags: suggestions.value }]
+    return [{
+      id: 'all',
+      name: groupLoading.value ? '正在读取分组…' : '全部标签',
+      selectionMode: 'multiple',
+      tags: suggestions.value,
+    }]
   }
 
   const knownGroupIds = new Set(tagGroups.value.map(group => Number(group.id)))
@@ -226,6 +253,7 @@ const groupedSuggestions = computed(() => {
     .map(group => ({
       id: `group-${group.id}`,
       name: group.name,
+      selectionMode: normalizeMindmapTagSelectionMode(group.selectionMode),
       tags: suggestions.value.filter(tag => Number(tag.categoryId) === Number(group.id)),
     }))
     .filter(group => group.tags.length > 0)
@@ -235,10 +263,10 @@ const groupedSuggestions = computed(() => {
   const ungroupedTags = suggestions.value.filter(tag => tag.categoryId == null)
 
   if (unknownGroupTags.length > 0) {
-    groups.push({ id: 'unknown', name: '其他分组', tags: unknownGroupTags })
+    groups.push({ id: 'unknown', name: '其他分组', selectionMode: 'multiple', tags: unknownGroupTags })
   }
   if (ungroupedTags.length > 0) {
-    groups.push({ id: 'ungrouped', name: '未分组', tags: ungroupedTags })
+    groups.push({ id: 'ungrouped', name: '未分组', selectionMode: 'multiple', tags: ungroupedTags })
   }
   return groups
 })
@@ -248,6 +276,7 @@ const activeSuggestionGroup = computed(() => (
   || null
 ))
 const canCreate = computed(() => {
+  if (!selectionRulesReady.value) return false
   const validation = validateMindmapTagDisplayName(searchKeyword.value)
   if (!validation.valid || tagArr.value.length >= MAX_NODE_TAG_COUNT) return false
   return !suggestions.value.some(tag => tag.name === validation.value)
@@ -330,6 +359,41 @@ async function loadTagGroups() {
   }
 }
 
+async function loadTagCatalog() {
+  if (!dialogVisible.value) return
+  const currentRequestId = ++catalogRequestId.value
+  catalogLoading.value = true
+  catalogLoadError.value = ''
+  const rows = []
+  let pageNum = 1
+  let total = 0
+  try {
+    do {
+      const response = await listTags({ pageNum, pageSize: 100 })
+      if (currentRequestId !== catalogRequestId.value || !dialogVisible.value) return
+      const pageRows = (response.rows || []).filter(tag => tag?.id)
+      rows.push(...pageRows)
+      total = Number(response.total) || rows.length
+      pageNum += 1
+      if (pageRows.length === 0) break
+    } while (rows.length < total)
+    tagCatalog.value = rows
+    tagCatalogLoaded.value = true
+  } catch (error) {
+    if (currentRequestId !== catalogRequestId.value || !dialogVisible.value) return
+    tagCatalog.value = []
+    tagCatalogLoaded.value = false
+    catalogLoadError.value = error?.message || '标签选择规则加载失败'
+  } finally {
+    if (currentRequestId === catalogRequestId.value) catalogLoading.value = false
+  }
+}
+
+function retrySelectionRules() {
+  void loadTagGroups()
+  void loadTagCatalog()
+}
+
 function scheduleSearch() {
   clearSearchTimer()
   requestId.value += 1
@@ -351,6 +415,7 @@ function toNodeTag(tag) {
   const style = { ...(tag.style || {}) }
   return {
     tagId: tag.id,
+    categoryId: tag.categoryId,
     uuid: tag.uuid,
     tagKey: tag.tagKey,
     text: tag.name,
@@ -364,6 +429,10 @@ function toNodeTag(tag) {
 
 function toggleSuggestion(tag) {
   if (isReadonly.value) return
+  if (!selectionRulesReady.value) {
+    ElMessage.warning('标签选择规则尚未加载，请重试')
+    return
+  }
   const index = tagArr.value.findIndex(item => (
     item && typeof item === 'object' && Number(item.tagId) === Number(tag.id)
   ))
@@ -371,7 +440,18 @@ function toggleSuggestion(tag) {
     tagArr.value.splice(index, 1)
     return
   }
-  const nextTags = replaceMindmapMarkerInTagList(tagArr.value, toNodeTag(tag))
+  const selectionMode = getMindmapTagSelectionMode(tag, tagSelectionIndex.value)
+  const categoryAdjustedTags = removeMindmapSingleSelectionPeers(
+    tagArr.value,
+    tag,
+    tagSelectionIndex.value,
+  )
+  const nextTags = (
+    getMindmapMarkerTagIconKey(tag)
+    && selectionMode === MINDMAP_TAG_SELECTION_MODE_SINGLE
+  )
+    ? replaceMindmapMarkerInTagList(categoryAdjustedTags, toNodeTag(tag))
+    : [...categoryAdjustedTags, toNodeTag(tag)]
   if (nextTags.length > MAX_NODE_TAG_COUNT) {
     ElMessage.warning(`最多添加 ${MAX_NODE_TAG_COUNT} 个标签`)
     return
@@ -443,6 +523,7 @@ function handleShow() {
   dialogVisible.value = true
   void loadSuggestions()
   void loadTagGroups()
+  void loadTagCatalog()
 }
 
 function onOpen() {
@@ -455,8 +536,10 @@ function onClose() {
   dialogSessionId.value += 1
   requestId.value += 1
   groupRequestId.value += 1
+  catalogRequestId.value += 1
   loading.value = false
   groupLoading.value = false
+  catalogLoading.value = false
   creating.value = false
   editTargets.value = []
   bus.emit('endTextEdit')
@@ -468,7 +551,15 @@ function removeTag(index) {
 
 function confirm() {
   if (isReadonly.value || creating.value || editTargets.value.length === 0) return
-  editTargets.value.forEach(node => node.setTag(tagArr.value.map(tag => (
+  if (!selectionRulesReady.value) {
+    ElMessage.warning('标签选择规则尚未加载，请重试')
+    return
+  }
+  const normalizedTags = normalizeMindmapSingleSelectionTags(
+    tagArr.value,
+    tagSelectionIndex.value,
+  )
+  editTargets.value.forEach(node => node.setTag(normalizedTags.map(tag => (
     tag && typeof tag === 'object' ? { ...tag, style: { ...(tag.style || {}) } } : tag
   ))))
   dialogVisible.value = false
@@ -483,10 +574,15 @@ function invalidateTagDialogForMindMapChange() {
   dialogSessionId.value += 1
   requestId.value += 1
   groupRequestId.value += 1
+  catalogRequestId.value += 1
   loading.value = false
   loadError.value = ''
   groupLoading.value = false
   groupLoadError.value = ''
+  catalogLoading.value = false
+  catalogLoadError.value = ''
+  tagCatalog.value = []
+  tagCatalogLoaded.value = false
   suggestions.value = []
   creating.value = false
   editTargets.value = []
@@ -506,7 +602,10 @@ function onManagedTagDefinitionChanged(data) {
         }
       : tag
   ))
-  if (dialogVisible.value) void loadSuggestions()
+  if (dialogVisible.value) {
+    void loadSuggestions()
+    void loadTagCatalog()
+  }
 }
 
 watch(isReadonly, (readonly) => {
@@ -529,6 +628,7 @@ onBeforeUnmount(() => {
   dialogSessionId.value += 1
   requestId.value += 1
   groupRequestId.value += 1
+  catalogRequestId.value += 1
   if (dialogVisible.value) bus.emit('endTextEdit')
   bus.off('showNodeTag', handleShow)
   bus.off('managed_tag_definition_changed', onManagedTagDefinitionChanged)

@@ -29,9 +29,15 @@ function createYNode(doc, uid, children = [], parentUid = '') {
 
 test('托管标签只保留身份和局部布局', () => {
   const result = stripManagedTagDefinitions({
-    tag: [{ tagId: 7, text: '旧名称', style: { fill: '#f00' }, placement: 'right' }],
+    tag: [{
+      tagId: 7,
+      categoryId: 3,
+      text: '旧名称',
+      style: { fill: '#f00' },
+      placement: 'right',
+    }],
   })
-  assert.deepEqual(result.tag, [{ tagId: 7, placement: 'right' }])
+  assert.deepEqual(result.tag, [{ tagId: 7, categoryId: 3, placement: 'right' }])
 })
 
 test('Yjs 节点数据排除本地选中状态', () => {

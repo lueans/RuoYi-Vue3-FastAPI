@@ -150,6 +150,8 @@ class MindmapTagService:
             category = await MindmapTagDao.add_category(db, {
                 'name': model.name,
                 'category_type': 'custom',
+                'show_on_home': int(bool(model.show_on_home)),
+                'selection_mode': model.selection_mode or 'multiple',
                 'owner_id': owner_id,
                 'sort_order': model.sort_order,
                 'created_by': user_name,
@@ -229,10 +231,15 @@ class MindmapTagService:
         if not is_unique:
             raise ServiceException(message=f'分组“{model.name}”已存在')
         try:
-            await MindmapTagDao.update_category(db, category_id, {
+            update_data = {
                 'name': model.name,
                 'sort_order': model.sort_order,
-            })
+            }
+            if model.show_on_home is not None:
+                update_data['show_on_home'] = int(model.show_on_home)
+            if model.selection_mode is not None:
+                update_data['selection_mode'] = model.selection_mode
+            await MindmapTagDao.update_category(db, category_id, update_data)
             await db.commit()
             return CrudResponseModel(is_success=True, message='分组更新成功')
         except IntegrityError as exc:
@@ -492,6 +499,7 @@ class MindmapTagService:
             new_revision = (tag.definition_revision or 1) + 1
             definition = {
                 'tagId': model.id,
+                'categoryId': model.category_id,
                 'uuid': tag.uuid,
                 'tagKey': model.tag_key,
                 'text': model.name,
@@ -520,7 +528,7 @@ class MindmapTagService:
             revision=new_revision,
             definition=definition,
             event_type='tag_definition_changed',
-            changed_fields=['name', 'style', 'status'],
+            changed_fields=['name', 'categoryId', 'style', 'status'],
         )
         return CrudResponseModel(is_success=True, message='标签更新成功')
 
@@ -541,6 +549,7 @@ class MindmapTagService:
         revision = (tag.definition_revision or 1) + 1
         definition = {
             'tagId': tag.id,
+            'categoryId': tag.category_id,
             'uuid': tag.uuid,
             'tagKey': tag.tag_key,
             'text': tag.name,
@@ -607,6 +616,7 @@ class MindmapTagService:
         target_definition_revision = target.definition_revision
         target_definition = {
             'tagId': target.id,
+            'categoryId': target.category_id,
             'uuid': target.uuid,
             'tagKey': target.tag_key,
             'text': target.name,

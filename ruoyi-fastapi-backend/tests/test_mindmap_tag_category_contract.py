@@ -10,8 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from exceptions.exception import ServiceException
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTagCategory
 from module_mindmap.entity.vo.mindmap_tag_vo import (
-    MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
     MAX_MINDMAP_TAG_CATEGORY_BATCH_SIZE,
+    MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH,
     MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER,
     MindmapTagCategoryListItemModel,
     MindmapTagCategoryMutationModel,
@@ -27,11 +27,15 @@ class MindmapTagCategoryModelTest(unittest.TestCase):
             name=' 业务风险 ',
             sortOrder=-MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER,
             ownerScope='global',
+            showOnHome=True,
+            selectionMode='single',
         )
 
         self.assertEqual(model.name, '业务风险')
         self.assertEqual(model.sort_order, -MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER)
         self.assertEqual(model.owner_scope, 'global')
+        self.assertTrue(model.show_on_home)
+        self.assertEqual(model.selection_mode, 'single')
 
         for payload in (
             {'name': '   '},
@@ -39,15 +43,19 @@ class MindmapTagCategoryModelTest(unittest.TestCase):
             {'name': '类' * (MAX_MINDMAP_TAG_CATEGORY_NAME_LENGTH + 1)},
             {'name': '风险', 'sortOrder': MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER + 1},
             {'name': '风险', 'ownerScope': 'team'},
+            {'name': '风险', 'selectionMode': 'exclusive'},
         ):
             with self.subTest(payload=payload), self.assertRaises(ValidationError):
                 MindmapTagCategoryMutationModel(**payload)
 
     def test_category_type_and_reorder_payload_are_explicit_and_bounded(self) -> None:
         category = MindmapTagCategoryListItemModel(
-            id=7, name='优先级', categoryType='system', ownerId=0,
+            id=7, name='优先级', categoryType='system', showOnHome=True,
+            selectionMode='single', ownerId=0,
         )
         self.assertEqual(category.category_type, 'system')
+        self.assertTrue(category.show_on_home)
+        self.assertEqual(category.selection_mode, 'single')
         self.assertEqual(
             MindmapTagCategoryReorderModel(categoryIds=[8, 7]).category_ids,
             [8, 7],
@@ -91,7 +99,9 @@ class MindmapTagCategoryServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('已存在', context.exception.message)
 
     async def test_create_returns_server_generated_category_id(self) -> None:
-        model = MindmapTagCategoryMutationModel(name='风险', sortOrder=8)
+        model = MindmapTagCategoryMutationModel(
+            name='风险', sortOrder=8, showOnHome=True, selectionMode='single',
+        )
         db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
         with (
             patch(
@@ -113,7 +123,38 @@ class MindmapTagCategoryServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.result, {'categoryId': 73})
         self.assertEqual(add_mock.await_args.args[1]['owner_id'], 42)
         self.assertEqual(add_mock.await_args.args[1]['category_type'], 'custom')
+        self.assertEqual(add_mock.await_args.args[1]['show_on_home'], 1)
+        self.assertEqual(add_mock.await_args.args[1]['selection_mode'], 'single')
         self.assertEqual(add_mock.await_args.args[1]['sort_order'], 8)
+        db.commit.assert_awaited_once()
+
+    async def test_update_persists_home_visibility_when_provided(self) -> None:
+        db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+        model = MindmapTagCategoryMutationModel(
+            name='风险', sortOrder=8, showOnHome=True, selectionMode='single',
+        )
+        with (
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.get_category_by_id',
+                new=AsyncMock(return_value=SimpleNamespace(id=7, owner_id=42)),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.check_category_name_unique',
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_tag_service.MindmapTagDao.update_category',
+                new=AsyncMock(),
+            ) as update_mock,
+        ):
+            await MindmapTagService.update_category(db, 7, model, user_id=42)
+
+        update_mock.assert_awaited_once_with(db, 7, {
+            'name': '风险',
+            'sort_order': 8,
+            'show_on_home': 1,
+            'selection_mode': 'single',
+        })
         db.commit.assert_awaited_once()
 
     async def test_concurrent_duplicate_is_reported_as_a_business_conflict(self) -> None:
@@ -246,6 +287,11 @@ class MindmapTagCategoryOpenApiTest(unittest.TestCase):
         self.assertEqual(create_by_name['sortOrder']['minimum'], -MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER)
         self.assertEqual(create_by_name['sortOrder']['maximum'], MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER)
         self.assertEqual(create_by_name['ownerScope']['enum'], ['mine', 'global'])
+        self.assertFalse(create_by_name['showOnHome']['default'])
+        self.assertEqual(create_by_name['selectionMode']['default'], 'multiple')
+        self.assertEqual(create_by_name['selectionMode']['enum'], ['single', 'multiple'])
+        self.assertIn('showOnHome', update_by_name)
+        self.assertIn('selectionMode', update_by_name)
         self.assertEqual(update_by_name['categoryId']['exclusiveMinimum'], 0)
         self.assertEqual(delete_by_name['category_id']['exclusiveMinimum'], 0)
         response_schema = schema['paths']['/mindmap/tag/category']['post']['responses']['200'][
@@ -266,6 +312,8 @@ class MindmapTagCategoryOpenApiTest(unittest.TestCase):
         category_item = schema['components']['schemas'][list_items['$ref'].rsplit('/', 1)[-1]]
         self.assertEqual(category_item['properties']['tagCount']['minimum'], 0)
         self.assertEqual(category_item['properties']['categoryType']['enum'], ['system', 'custom'])
+        self.assertEqual(category_item['properties']['showOnHome']['type'], 'boolean')
+        self.assertEqual(category_item['properties']['selectionMode']['enum'], ['single', 'multiple'])
 
         reorder_schema = schema['paths']['/mindmap/tag/categories/order']['put']['requestBody'][
             'content'

@@ -628,6 +628,7 @@ class MindmapContentDao:
         for binding, tag in tag_rows:
             resolved = {
                 'tagId': tag.id,
+                'categoryId': tag.category_id,
                 'uuid': tag.uuid,
                 'tagKey': tag.tag_key,
                 'text': tag.name,

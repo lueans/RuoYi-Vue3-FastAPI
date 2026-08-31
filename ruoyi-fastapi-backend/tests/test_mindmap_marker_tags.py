@@ -21,6 +21,7 @@ def _tag(tag_id: int, icon_key: str) -> SimpleNamespace:
         uuid=f'uuid-{tag_id}',
         tag_key=f'builtin_marker_{icon_key}',
         name=icon_key,
+        category_id=10,
         style={'iconKey': icon_key, 'placement': 'right', 'align': 'center'},
         status=0,
         owner_id=0,
@@ -58,6 +59,7 @@ def test_runtime_migration_adds_bindings_and_preserves_unknown_icons() -> None:
     )
     assert document.nodes[0]['content_data'] == {'icon': ['custom_1'], 'note': '保留'}
     assert [binding['raw']['tagId'] for binding in document.node_tags] == [1, 2]
+    assert [binding['raw']['categoryId'] for binding in document.node_tags] == [10, 10]
     assert [binding['sort_order'] for binding in document.node_tags] == [0, 1]
 
 

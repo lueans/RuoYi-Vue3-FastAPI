@@ -111,6 +111,14 @@ async def add_tag_category(
         Literal['mine', 'global'],
         Query(description='分组作用域', alias='ownerScope'),
     ] = 'mine',
+    show_on_home: Annotated[
+        bool,
+        Query(description='是否在脑图标签首页直接展示', alias='showOnHome'),
+    ] = False,
+    selection_mode: Annotated[
+        Literal['single', 'multiple'],
+        Query(description='分组选择模式', alias='selectionMode'),
+    ] = 'multiple',
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
@@ -118,6 +126,8 @@ async def add_tag_category(
         name=category_name,
         sortOrder=sort_order,
         ownerScope=owner_scope,
+        showOnHome=show_on_home,
+        selectionMode=selection_mode,
     )
     result = await MindmapTagService.add_category(
         query_db, model, current_user.user.user_id, current_user.user.user_name,
@@ -129,7 +139,7 @@ async def add_tag_category(
 @mindmap_tag_controller.put(
     '/category',
     summary='修改标签分组',
-    description='修改标签分组名称或排序',
+    description='修改标签分组名称、排序、展示位置或选择模式',
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:edit')],
 )
@@ -153,10 +163,23 @@ async def update_tag_category(
             le=MAX_MINDMAP_TAG_CATEGORY_SORT_ORDER,
         ),
     ] = 0,
+    show_on_home: Annotated[
+        bool | None,
+        Query(description='是否在脑图标签首页直接展示', alias='showOnHome'),
+    ] = None,
+    selection_mode: Annotated[
+        Literal['single', 'multiple'] | None,
+        Query(description='分组选择模式', alias='selectionMode'),
+    ] = None,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
-    model = MindmapTagCategoryMutationModel(name=category_name, sortOrder=sort_order)
+    model = MindmapTagCategoryMutationModel(
+        name=category_name,
+        sortOrder=sort_order,
+        showOnHome=show_on_home,
+        selectionMode=selection_mode,
+    )
     result = await MindmapTagService.update_category(
         query_db, category_id, model, current_user.user.user_id,
     )

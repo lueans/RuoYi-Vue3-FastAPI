@@ -1,94 +1,68 @@
 <template>
   <div>
-    <el-dialog
-      class="nodeImportDialog"
-      title="导入"
-      v-model="dialogVisible"
-      width="350px"
-      :close-on-click-modal="!isImporting"
-      :close-on-press-escape="!isImporting"
-      append-to-body
-    >
-      <el-upload
-        ref="uploadRef"
-        action="x"
-        :accept="supportFileStr"
-        :file-list="fileList"
-        :auto-upload="false"
-        :multiple="false"
-        :disabled="isImporting || readonly"
-        :on-change="onChange"
-        :on-remove="onRemove"
-        :limit="1"
-        :on-exceed="onExceed"
-      >
-        <template #trigger>
-          <el-button size="small" type="primary" :disabled="isImporting || readonly">选取文件</el-button>
-        </template>
-        <template #tip>
-          <div class="el-upload__tip">
-            支持{{ supportFileStr }}文件
-          </div>
-          <div class="importStatus" role="status" aria-live="polite">
-            {{ isImporting ? '正在解析并校验文件，请稍候…' : '文件只在本地解析，不会上传到服务器' }}
-          </div>
-        </template>
-      </el-upload>
-      <template #footer>
-        <span class="dialog-footer">
-          <el-button :disabled="isImporting" @click="cancel">取消</el-button>
-          <el-button
-            type="primary"
-            :loading="isImporting"
-            :disabled="fileList.length === 0 || readonly"
-            @click="confirm"
-          >{{ isImporting ? '导入中' : '确定' }}</el-button>
-        </span>
-      </template>
-    </el-dialog>
+    <input
+      ref="fileInputRef"
+      class="importFileInput"
+      type="file"
+      :accept="supportFileStr"
+      :disabled="isImporting || readonly"
+      @change="handleFileInputChange"
+    />
+    <span class="importStatus" role="status" aria-live="polite">{{ importStatusText }}</span>
+
     <el-dialog
       class="xmindCanvasSelectDialog"
-      title="选择要导入的画布"
+      :class="{ isDark: isDark }"
       v-model="xmindCanvasSelectDialogVisible"
-      width="300px"
+      width="480px"
+      modal-class="xmindCanvasSelectOverlay"
       :show-close="false"
       :close-on-click-modal="false"
       :close-on-press-escape="false"
       append-to-body
     >
-      <el-radio-group v-model="selectCanvas" class="canvasList" :disabled="readonly">
-        <el-radio
-          v-for="(item, index) in canvasList"
-          :key="index"
-          :value="index"
-        >{{ item.title }}</el-radio>
-      </el-radio-group>
-      <template #footer>
-        <span class="dialog-footer">
+      <div class="canvasSelectShell" :class="{ isDark: isDark }">
+        <div class="canvasSelectContent">
+          <h2 class="canvasSelectTitle">选择要导入的画布</h2>
+          <p class="canvasSelectHint">此 XMind 文件包含多个画布，请选择一个继续导入。</p>
+          <el-radio-group v-model="selectCanvas" class="canvasList" :disabled="readonly">
+            <el-radio
+              v-for="(item, index) in canvasList"
+              :key="index"
+              class="canvasOption"
+              :value="index"
+            >{{ item.title || `画布 ${index + 1}` }}</el-radio>
+          </el-radio-group>
+        </div>
+        <footer class="canvasSelectFooter">
           <el-button @click="cancelSelect">取消导入</el-button>
-          <el-button type="primary" :disabled="canvasList.length === 0 || readonly" @click="confirmSelect">导入所选画布</el-button>
-        </span>
-      </template>
+          <el-button
+            class="importButton"
+            :disabled="canvasList.length === 0 || readonly"
+            @click="confirmSelect"
+          >导入</el-button>
+        </footer>
+      </div>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
 import bus from './useEventBus'
-import { actions } from './useStore'
+import { actions, store } from './useStore'
 import { assertMindmapImportDocument } from '@/utils/mindmap-import-validation'
 
 const props = defineProps({
   readonly: { type: Boolean, default: false },
 })
 
-const dialogVisible = ref(false)
-const fileList = ref([])
-const uploadRef = ref(null)
+const isDark = computed(() => store.localConfig.isDark)
+const fileInputRef = ref(null)
 const xmindCanvasSelectDialogVisible = ref(false)
 const selectCanvas = ref(0)
 const canvasList = ref([])
 const isImporting = ref(false)
+const importStatusText = ref('')
 
 let selectPromiseResolve = null
 let selectPromiseReject = null
@@ -96,12 +70,24 @@ let fileFetchController = null
 let importRequestId = 0
 let componentAlive = true
 
-const supportFileStr = '.smm,.json,.xmind,.md'
+const supportFileStr = '.xmind,.smm,.json,.md'
 const MAX_IMPORT_FILE_SIZE = 20 * 1024 * 1024
 
 function handleShowImport() {
   if (props.readonly) return
-  dialogVisible.value = true
+  if (isImporting.value) {
+    ElMessage.warning('已有文件正在导入，请稍候')
+    return
+  }
+  fileInputRef.value?.click()
+}
+
+async function handleFileInputChange(event) {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  await handleImportFile(file)
 }
 
 function isImportRequestCurrent(requestId) {
@@ -114,8 +100,7 @@ function invalidateImportSession(message = '导入会话已经失效') {
   fileFetchController = null
   rejectCanvasSelection(message)
   isImporting.value = false
-  dialogVisible.value = false
-  fileList.value = []
+  importStatusText.value = ''
 }
 
 function getRegexp() {
@@ -165,49 +150,6 @@ async function handleFileURL() {
     ElMessage.error(error?.message || '文件下载失败')
   } finally {
     if (fileFetchController === requestController) fileFetchController = null
-  }
-}
-
-function onChange(file) {
-  if (props.readonly) {
-    fileList.value = []
-    return
-  }
-  if (!getRegexp().test(file.name)) {
-    ElMessage.error('请选择' + supportFileStr + '文件')
-    fileList.value = []
-  } else if (!validateFileSize(file.raw)) {
-    fileList.value = []
-  } else {
-    fileList.value = [file]
-  }
-}
-
-function onRemove(file, list) {
-  fileList.value = list
-}
-
-function onExceed() {
-  ElMessage.error('最多只能选择一个文件')
-}
-
-function cancel() {
-  if (isImporting.value) return
-  dialogVisible.value = false
-}
-
-async function confirm() {
-  if (props.readonly) return
-  if (fileList.value.length <= 0) {
-    return ElMessage.error('请选择要导入的文件')
-  }
-  const file = fileList.value[0]
-  const type = resolveImportType(file.name)
-  if (!type) return ElMessage.error('不支持该文件格式')
-  const imported = await executeImport(file, type)
-  if (imported) {
-    dialogVisible.value = false
-    actions.setActiveSidebar(null)
   }
 }
 
@@ -280,6 +222,11 @@ async function executeImport(file, type) {
   }
   const requestId = ++importRequestId
   isImporting.value = true
+  importStatusText.value = '正在解析并校验文件…'
+  const progressMessage = ElMessage.info({
+    message: '正在解析并校验文件…',
+    duration: 0,
+  })
   try {
     let data
     if (type === 'smm' || type === 'json') data = await handleSmm(file)
@@ -292,18 +239,22 @@ async function executeImport(file, type) {
       if (!handled) reject(new Error('脑图编辑器尚未就绪'))
     })
     if (!isImportRequestCurrent(requestId)) return false
+    importStatusText.value = '导入成功'
     ElMessage.success('导入成功')
     return true
   } catch (error) {
     if (!isImportRequestCurrent(requestId)) return false
     if (error?.code === 'IMPORT_CANCELLED') {
+      importStatusText.value = '已取消导入'
       ElMessage.info('已取消导入')
     } else {
       console.error(error)
+      importStatusText.value = error?.message || '文件解析失败'
       ElMessage.error(error?.message || '文件解析失败')
     }
     return false
   } finally {
+    progressMessage.close()
     if (requestId === importRequestId) isImporting.value = false
   }
 }
@@ -316,16 +267,14 @@ function validateFileSize(file) {
 
 async function handleImportFile(file) {
   if (props.readonly) return
-  onChange({ raw: file, name: file.name })
-  if (fileList.value.length <= 0) return
-  await confirm()
+  const name = file?.name || ''
+  const type = resolveImportType(name)
+  if (!type) return ElMessage.error('请选择 XMind、SMM、JSON 或 Markdown 文件')
+  if (!validateFileSize(file)) return false
+  const imported = await executeImport({ raw: file, name }, type)
+  if (imported) actions.setActiveSidebar(null)
+  return imported
 }
-
-watch(dialogVisible, (val, oldVal) => {
-  if (!val && oldVal) {
-    fileList.value = []
-  }
-})
 
 watch(() => props.readonly, (readonly) => {
   if (readonly) invalidateImportSession('脑图已切换为只读，导入已取消')
@@ -347,31 +296,205 @@ onBeforeUnmount(() => {
 </script>
 
 <style lang="less">
-.el-overlay.nodeImportDialog {
+.el-overlay.xmindCanvasSelectOverlay {
   pointer-events: auto;
+
+  .el-overlay-dialog {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .el-dialog.xmindCanvasSelectDialog {
+    margin: 0 !important;
+    padding: 0;
+    overflow: hidden;
+    border-radius: 12px;
+    background: #eef0f2;
+    box-shadow: 0 18px 54px rgba(0, 0, 0, 0.22);
+
+    &.isDark {
+      background: #1f2023;
+    }
+  }
+
+  .el-dialog__header {
+    display: none;
+  }
+
+  .el-dialog__body {
+    padding: 10px;
+  }
+}
+
+@media (max-width: 520px) {
+  .el-overlay.xmindCanvasSelectOverlay {
+    .el-overlay-dialog {
+      padding: 16px;
+    }
+
+    .el-dialog.xmindCanvasSelectDialog {
+      width: calc(100vw - 32px) !important;
+    }
+  }
 }
 </style>
 
 <style lang="less" scoped>
-.nodeImportDialog {
+.importFileInput {
+  display: none;
 }
 
-.canvasList {
+.canvasSelectShell {
   display: flex;
+  min-height: 360px;
+  max-height: min(520px, calc(100vh - 68px));
   flex-direction: column;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #fff;
+  color: #202124;
 
-  :deep(.el-radio) {
-    margin-bottom: 12px;
+  .canvasSelectContent {
+    min-height: 0;
+    flex: 1;
+    padding: 28px 28px 20px;
+  }
 
-    &:last-of-type {
-      margin-bottom: 0;
+  .canvasSelectTitle {
+    margin: 0 0 8px;
+    font-size: 21px;
+    font-weight: 650;
+    line-height: 1.3;
+  }
+
+  .canvasSelectHint {
+    margin: 0 0 22px;
+    color: #777a80;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .canvasList {
+    display: flex;
+    max-height: 280px;
+    flex-direction: column;
+    gap: 8px;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .canvasOption {
+    width: 100%;
+    min-height: 44px;
+    margin: 0;
+    padding: 10px 14px;
+    border: 1px solid #e2e4e7;
+    border-radius: 6px;
+    background: #fff;
+
+    &:hover {
+      border-color: #bfc2c7;
+      background: #f8f9fa;
+    }
+
+    &.is-checked {
+      border-color: #2f3033;
+      background: #f6f6f7;
+    }
+
+    :deep(.el-radio__input.is-checked .el-radio__inner) {
+      border-color: #2f3033;
+      background: #2f3033;
+    }
+
+    :deep(.el-radio__label) {
+      overflow: hidden;
+      color: #35373b;
+      font-size: 14px;
+      line-height: 20px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    :deep(.el-radio__input.is-checked + .el-radio__label) {
+      color: #202124;
+    }
+  }
+
+  .canvasSelectFooter {
+    display: flex;
+    height: 64px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 0 28px;
+    border-top: 1px solid #eceef0;
+
+    :deep(.el-button) {
+      min-width: 64px;
+      height: 32px;
+      margin-left: 0;
+      border-radius: 6px;
+    }
+
+    .importButton {
+      border-color: #2f3033;
+      background: #2f3033;
+      color: #fff;
+
+      &:hover,
+      &:focus {
+        border-color: #45464a;
+        background: #45464a;
+      }
+
+      &:disabled {
+        border-color: #a8aaae;
+        background: #a8aaae;
+      }
+    }
+  }
+
+  &.isDark {
+    background: #282a2d;
+    color: rgba(255, 255, 255, 0.94);
+
+    .canvasSelectHint {
+      color: rgba(255, 255, 255, 0.58);
+    }
+
+    .canvasOption {
+      border-color: #45474c;
+      background: #2f3135;
+
+      &:hover,
+      &.is-checked {
+        border-color: #777a80;
+        background: #37393d;
+      }
+
+      :deep(.el-radio__label),
+      :deep(.el-radio__input.is-checked + .el-radio__label) {
+        color: rgba(255, 255, 255, 0.86);
+      }
+    }
+
+    .canvasSelectFooter {
+      border-color: #3c3e42;
     }
   }
 }
 
 .importStatus {
-  margin-top: 4px;
-  color: var(--el-text-color-secondary);
-  line-height: 1.4;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 </style>

@@ -19,6 +19,8 @@ from module_mindmap.service.mindmap_schema_verifier import (
     REQUIRED_FOREIGN_KEYS,
     REQUIRED_INDEXES,
     REQUIRED_TABLES,
+    TAG_CATEGORY_HOME_MIGRATION,
+    TAG_CATEGORY_SELECTION_MIGRATION,
     TEMPLATE_REMOVAL_MIGRATION,
     MindmapSchemaIssue,
 )
@@ -175,6 +177,16 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
                 'uk_mindmap_comment_author_request',
                 'ADD UNIQUE INDEX',
             ),
+            TAG_CATEGORY_HOME_MIGRATION: (
+                'show_on_home',
+                "WHERE `category_type` = 'system'",
+            ),
+            TAG_CATEGORY_SELECTION_MIGRATION: (
+                'selection_mode',
+                "DEFAULT 'multiple'",
+                "SET `selection_mode` = 'single'",
+                "LIKE 'builtin_marker_%'",
+            ),
         }
 
         for filename, markers in contracts.items():
@@ -192,6 +204,21 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
             sql.index('DELETE file_row FROM mindmap AS file_row'),
             sql.index('ALTER TABLE mindmap DROP COLUMN is_template'),
         )
+
+    def test_mysql_category_backfills_run_after_the_add_column_guard(self) -> None:
+        contracts = {
+            TAG_CATEGORY_HOME_MIGRATION: 'SET `show_on_home` = 1',
+            TAG_CATEGORY_SELECTION_MIGRATION: 'SET `selection_mode` = \'single\'',
+        }
+
+        for filename, assignment in contracts.items():
+            sql = (self.MIGRATIONS_DIR / filename).read_text(encoding='utf-8')
+            with self.subTest(migration=filename):
+                backfill = sql.index('UPDATE `mindmap_tag_category`')
+                self.assertLess(sql.index('END IF;'), backfill)
+                self.assertGreater(sql.index(assignment), backfill)
+                self.assertIn('COLUMN_COMMENT = \'migration_pending_20260828_', sql)
+                self.assertLess(backfill, sql.rindex('MODIFY COLUMN'))
 
     def test_tag_category_data_convergence_commits_before_constraints(self) -> None:
         sql = (
@@ -232,6 +259,16 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
         self.assertIn('zz-mindmap-postgresql.sql', compose_source)
         self.assertIn('zzz-mindmap-unified-tags-postgresql.sql', compose_source)
         self.assertIn('zzzz-mindmap-markers-to-tags-postgresql.sql', compose_source)
+        self.assertIn('zzzzz-mindmap-tag-category-home-postgresql.sql', compose_source)
+        self.assertIn('zzzzzz-mindmap-tag-category-selection-mode-postgresql.sql', compose_source)
+        self.assertLess(
+            compose_source.index('zzzz-mindmap-markers-to-tags-postgresql.sql'),
+            compose_source.index('zzzzz-mindmap-tag-category-home-postgresql.sql'),
+        )
+        self.assertLess(
+            compose_source.index('zzzzz-mindmap-tag-category-home-postgresql.sql'),
+            compose_source.index('zzzzzz-mindmap-tag-category-selection-mode-postgresql.sql'),
+        )
         for table in REQUIRED_TABLES:
             self.assertIn(f'CREATE TABLE IF NOT EXISTS {table}', migration_source)
         self.assertNotIn('CREATE TABLE IF NOT EXISTS mindmap_tag_field', migration_source)
@@ -240,6 +277,8 @@ class MindmapSchemaReleaseTest(unittest.TestCase):
         self.assertNotIn('template_category_id BIGINT', migration_source)
         self.assertNotIn('field_id BIGINT', migration_source)
         self.assertNotIn('option_id BIGINT', migration_source)
+        self.assertNotIn('show_on_home', migration_source)
+        self.assertNotIn('selection_mode', migration_source)
         self.assertIn('DROP TABLE IF EXISTS mindmap_tag_field', unified_source)
         self.assertIn('DROP COLUMN IF EXISTS option_id', unified_source)
         self.assertNotIn('DELIMITER', migration_source)

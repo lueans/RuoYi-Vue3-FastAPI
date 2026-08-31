@@ -81,6 +81,14 @@ MINDMAP_SCHEMA_MIGRATIONS = (
         '20260827_remove_mindmap_template_feature.sql',
         '清理脑图模板数据、菜单和专属数据库结构',
     ),
+    MindmapMigrationDefinition(
+        '20260828_mindmap_tag_category_home.sql',
+        '为标签分组增加脑图标签首页展示开关，并保留系统标记分组的既有入口',
+    ),
+    MindmapMigrationDefinition(
+        '20260828_mindmap_tag_category_selection_mode.sql',
+        '为标签分组增加单选/多选规则，并把现有系统标记分组迁移为单选',
+    ),
 )
 
 POSTGRESQL_MIGRATION_OVERRIDES = {
@@ -91,6 +99,12 @@ POSTGRESQL_MIGRATION_OVERRIDES = {
     ),
     '20260827_remove_mindmap_template_feature.sql': (
         '20260827_remove_mindmap_template_feature_postgresql.sql'
+    ),
+    '20260828_mindmap_tag_category_home.sql': (
+        '20260828_mindmap_tag_category_home_postgresql.sql'
+    ),
+    '20260828_mindmap_tag_category_selection_mode.sql': (
+        '20260828_mindmap_tag_category_selection_mode_postgresql.sql'
     ),
 }
 

@@ -51,9 +51,13 @@ test('export runtime config only accepts bounded padding and a callable footer',
 test('export dialog uses semantic controls and awaits one request lifecycle', async () => {
   const source = await readFile(new URL('../../components/MindMap/Export.vue', import.meta.url), 'utf8')
 
-  assert.match(source, /<button\s+class="downloadTypeItem"/)
-  assert.match(source, /:aria-pressed="exportType === item\.type"/)
-  assert.match(source, /aria-label="关闭导出对话框"/)
+  assert.match(source, /class="xmindExportShell"/)
+  assert.match(source, /class="exportPreviewPane"/)
+  assert.match(source, /class="exportSettingsPane"/)
+  assert.match(source, /aria-label="导出格式"/)
+  assert.match(source, /导出为\{\{ currentTypeData\?\.name/)
+  assert.match(source, /store\.mindMap\.getSvgData\(\{/)
+  assert.match(source, /setAttribute\('viewBox', `0 0 \$\{rect\.width\} \$\{rect\.height\}`\)/)
   assert.match(source, /const isExporting = ref\(false\)/)
   assert.match(source, /await requestExport\(createExportArgs\(type, name, footerText\)\)/)
   assert.match(source, /config: \{[\s\S]*exportPaddingX: paddingX\.value[\s\S]*addContentToFooter:/)

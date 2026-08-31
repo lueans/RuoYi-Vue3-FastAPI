@@ -11,14 +11,26 @@ const toolbarSource = await readFile(
   'utf8'
 )
 
-test('import dialog exposes one loading state and blocks duplicate submissions', () => {
+test('import opens the native picker directly and blocks duplicate submissions', () => {
   assert.match(toolbarSource, /<ImportDialog ref="importRef" :readonly="isReadonly"/)
+  assert.match(toolbarSource, /const importFormatHint = '支持 \.xmind、\.smm、\.json、\.md 文件'/)
+  assert.equal((toolbarSource.match(/:content="importFormatHint"/g) || []).length, 2)
+  assert.equal((toolbarSource.match(/:aria-label="`导入文件，\$\{importFormatHint\}`"/g) || []).length, 2)
+  assert.match(toolbarSource, /const importFormatSummary = '\.xmind · \.smm · \.json · \.md'/)
+  assert.match(toolbarSource, /class="importFormatHint">\{\{ importFormatSummary \}\}/)
   assert.match(source, /readonly: \{ type: Boolean, default: false \}/)
+  assert.match(source, /<input[\s\S]*ref="fileInputRef"[\s\S]*type="file"/)
+  assert.match(source, /:accept="supportFileStr"/)
+  assert.match(source, /@change="handleFileInputChange"/)
+  assert.match(source, /fileInputRef\.value\?\.click\(\)/)
+  assert.match(source, /input\.value = ''/)
+  assert.match(source, /const supportFileStr = '\.xmind,\.smm,\.json,\.md'/)
+  assert.match(source, /请选择 XMind、SMM、JSON 或 Markdown 文件/)
+  assert.doesNotMatch(source, /class="nodeImportDialog"/)
   assert.match(source, /const isImporting = ref\(false\)/)
-  assert.match(source, /:loading="isImporting"/)
   assert.match(source, /:disabled="isImporting \|\| readonly"/)
   assert.match(source, /if \(isImporting\.value\) \{[\s\S]*已有文件正在导入/)
-  assert.match(source, /finally \{\s*if \(requestId === importRequestId\) isImporting\.value = false\s*\}/)
+  assert.match(source, /finally \{[\s\S]*progressMessage\.close\(\)[\s\S]*if \(requestId === importRequestId\) isImporting\.value = false\s*\}/)
   assert.match(source, /role="status" aria-live="polite"/)
 })
 
@@ -35,13 +47,17 @@ test('all supported formats flow through one validation and canvas update bounda
   assert.match(source, /if \(!handled\) reject\(new Error\('脑图编辑器尚未就绪'\)\)/)
 })
 
-test('failed imports keep the dialog open while successful imports close it', () => {
-  assert.match(source, /const imported = await executeImport\(file, type\)/)
-  assert.match(source, /if \(imported\) \{\s*dialogVisible\.value = false/)
+test('failed imports keep the picker reusable while successful imports close the active sidebar', () => {
+  assert.match(source, /const imported = await executeImport\(\{ raw: file, name \}, type\)/)
+  assert.match(source, /if \(imported\) actions\.setActiveSidebar\(null\)/)
+  assert.match(source, /input\.value = ''/)
   assert.match(source, /catch \(error\) \{[\s\S]*return false[\s\S]*finally/)
 })
 
 test('multi-canvas XMind selection has explicit settle and cancellation paths', () => {
+  assert.match(source, /class="canvasSelectShell"/)
+  assert.match(source, /class="canvasOption"/)
+  assert.match(source, /modal-class="xmindCanvasSelectOverlay"/)
   assert.match(source, /:close-on-click-modal="false"/)
   assert.match(source, /:close-on-press-escape="false"/)
   assert.match(source, /@click="cancelSelect"/)

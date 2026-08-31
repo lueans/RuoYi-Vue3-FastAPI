@@ -9,6 +9,8 @@ from module_mindmap.service.mindmap_schema_verifier import (
     REQUIRED_INDEX_DEFINITIONS,
     REQUIRED_INDEXES,
     REQUIRED_TABLES,
+    TAG_CATEGORY_HOME_MIGRATION,
+    TAG_CATEGORY_SELECTION_MIGRATION,
     TEMPLATE_REMOVAL_MIGRATION,
     UNIFIED_TAG_MIGRATION,
     find_mindmap_schema_issues,
@@ -103,6 +105,32 @@ class MindmapSchemaVerifierTest(unittest.TestCase):
                 'kind': 'column',
                 'object_name': 'mindmap_tag_category.category_type',
                 'migration': UNIFIED_TAG_MIGRATION,
+            },
+            [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
+        )
+
+    def test_missing_category_home_flag_requires_home_migration(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['columns']['mindmap_tag_category'].remove('show_on_home')
+
+        self.assertIn(
+            {
+                'kind': 'column',
+                'object_name': 'mindmap_tag_category.show_on_home',
+                'migration': TAG_CATEGORY_HOME_MIGRATION,
+            },
+            [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
+        )
+
+    def test_missing_category_selection_mode_requires_selection_migration(self) -> None:
+        snapshot = complete_snapshot()
+        snapshot['columns']['mindmap_tag_category'].remove('selection_mode')
+
+        self.assertIn(
+            {
+                'kind': 'column',
+                'object_name': 'mindmap_tag_category.selection_mode',
+                'migration': TAG_CATEGORY_SELECTION_MIGRATION,
             },
             [item.to_dict() for item in find_mindmap_schema_issues(snapshot)],
         )

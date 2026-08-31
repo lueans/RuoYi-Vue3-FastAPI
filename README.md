@@ -358,6 +358,10 @@ psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
   -f ruoyi-fastapi-backend/migrations/20260825_mindmap_markers_to_tags_postgresql.sql
 psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
   -f ruoyi-fastapi-backend/migrations/20260827_remove_mindmap_template_feature_postgresql.sql
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
+  -f ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_home_postgresql.sql
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
+  -f ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_selection_mode_postgresql.sql
 ```
 
 迁移成功后继续保持 `DB_AUTO_CREATE_TABLES=false`，再启动服务：

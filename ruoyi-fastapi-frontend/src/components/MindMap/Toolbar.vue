@@ -32,7 +32,7 @@
         <el-popover
           v-model:visible="popoverShow"
           placement="bottom-end"
-          :width="120"
+          :width="props.embedded ? 205 : 120"
           trigger="click"
           v-if="showMoreBtn"
           :style="{ marginLeft: horizontalList.length > 0 ? (props.embedded ? '2px' : '20px') : 0 }"
@@ -70,15 +70,21 @@
               </button>
             </template>
             <div v-if="props.embedded" class="overflowFileOperations" role="group" aria-label="文件操作">
-              <button
-                type="button"
-                class="toolbarBtn"
-                :disabled="isReadonly"
-                @click="bus.emit('showImport')"
-              >
-                <span class="icon iconfont icondaoru"></span>
-                <span class="text">导入</span>
-              </button>
+              <el-tooltip :content="importFormatHint" placement="left" :show-after="150">
+                <button
+                  type="button"
+                  class="toolbarBtn"
+                  :disabled="isReadonly"
+                  :aria-label="`导入文件，${importFormatHint}`"
+                  @click="bus.emit('showImport')"
+                >
+                  <span class="icon iconfont icondaoru"></span>
+                  <span class="fileOperationText">
+                    <span class="text">导入</span>
+                    <small class="importFormatHint">{{ importFormatSummary }}</small>
+                  </span>
+                </button>
+              </el-tooltip>
               <button
                 type="button"
                 class="toolbarBtn"
@@ -93,8 +99,14 @@
       </div>
       <!-- File operations block -->
       <div v-if="!props.embedded" class="toolbarBlock" role="group" aria-label="文件操作">
-        <el-tooltip :content="btnLabels.import" placement="bottom" :show-after="300">
-          <button type="button" class="toolbarBtn" :disabled="isReadonly" @click="bus.emit('showImport')">
+        <el-tooltip :content="importFormatHint" placement="bottom" :show-after="150">
+          <button
+            type="button"
+            class="toolbarBtn"
+            :disabled="isReadonly"
+            :aria-label="`导入文件，${importFormatHint}`"
+            @click="bus.emit('showImport')"
+          >
             <span class="icon iconfont icondaoru"></span>
             <span class="text">导入</span>
           </button>
@@ -153,7 +165,6 @@ const btnLabels = {
   summary: '概要',
   associativeLine: '联系',
   outerFrame: '外框',
-  import: '导入',
   export: '导出',
 }
 
@@ -212,6 +223,8 @@ let toolbarResizeObserver = null
 
 const isDark = computed(() => store.localConfig.isDark)
 const isReadonly = computed(() => store.isReadonly)
+const importFormatHint = '支持 .xmind、.smm、.json、.md 文件'
+const importFormatSummary = '.xmind · .smm · .json · .md'
 
 const noActive = computed(() => activeNodes.value.length <= 0)
 const hasRoot = computed(() => activeNodes.value.some(n => n.isRoot))
@@ -649,7 +662,7 @@ onBeforeUnmount(() => {
 
   &.v {
     display: block;
-    width: 120px;
+    width: 100%;
     flex-wrap: wrap;
 
     .toolbarBtn {
@@ -678,6 +691,22 @@ onBeforeUnmount(() => {
       margin-top: 10px;
       padding-top: 10px;
       border-top: 1px solid #eef0f3;
+
+      .fileOperationText {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        line-height: 1.2;
+      }
+
+      .importFormatHint {
+        margin-top: 2px;
+        color: #8f959e;
+        font-size: 10px;
+        font-weight: 400;
+        white-space: nowrap;
+      }
     }
   }
 }

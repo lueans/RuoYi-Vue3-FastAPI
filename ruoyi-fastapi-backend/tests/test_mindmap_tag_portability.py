@@ -16,6 +16,7 @@ class MindmapTagPortabilityTest(unittest.TestCase):
             'tagKey': 'private_key',
             'fieldId': 3,
             'optionId': 4,
+            'categoryId': 6,
             'text': '私有标签',
             'style': {'fill': '#123456'},
             'placement': 'right',

@@ -7,12 +7,12 @@
 BEGIN;
 
 INSERT INTO mindmap_tag_category (
-    name, category_type, owner_id, sort_order, created_by, created_time
+    name, category_type, show_on_home, selection_mode, owner_id, sort_order, created_by, created_time
 ) VALUES
-    ('优先级', 'system', 0, 100, 'system', CURRENT_TIMESTAMP),
-    ('任务', 'system', 0, 200, 'system', CURRENT_TIMESTAMP),
-    ('表情', 'system', 0, 300, 'system', CURRENT_TIMESTAMP),
-    ('符号', 'system', 0, 400, 'system', CURRENT_TIMESTAMP)
+    ('优先级', 'system', 1, 'single', 0, 100, 'system', CURRENT_TIMESTAMP),
+    ('任务', 'system', 1, 'single', 0, 200, 'system', CURRENT_TIMESTAMP),
+    ('表情', 'system', 1, 'single', 0, 300, 'system', CURRENT_TIMESTAMP),
+    ('符号', 'system', 1, 'single', 0, 400, 'system', CURRENT_TIMESTAMP)
 ON CONFLICT (owner_id, name) DO UPDATE SET
     category_type = EXCLUDED.category_type,
     sort_order = EXCLUDED.sort_order;

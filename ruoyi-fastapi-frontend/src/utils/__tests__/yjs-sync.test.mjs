@@ -68,7 +68,12 @@ function createDocument() {
         uid: 'root',
         text: '根节点',
         image: 'old.png',
-        tag: [{ tagId: 8, text: '托管名称', style: { fill: '#f00' } }],
+        tag: [{
+          tagId: 8,
+          categoryId: 3,
+          text: '托管名称',
+          style: { fill: '#f00' },
+        }],
       },
       children: [{ data: { uid: 'child', text: '子节点' }, children: [] }],
     },
@@ -165,7 +170,10 @@ test('初始化同时写入节点、标签引用和文档元数据', () => {
   sync.initFromMindmap(createDocument())
 
   assert.equal(sync.yNodes.size, 2)
-  assert.deepEqual(sync.yNodes.get('root').get('data').get('tag'), [{ tagId: 8 }])
+  assert.deepEqual(sync.yNodes.get('root').get('data').get('tag'), [{
+    tagId: 8,
+    categoryId: 3,
+  }])
   assert.equal(sync.yMeta.get('layout'), 'logicalStructure')
   assert.deepEqual(sync.yMeta.get('theme'), createDocument().theme)
   assert.deepEqual(sync.yMeta.get('documentData'), createDocument().documentData)
@@ -199,8 +207,12 @@ test('新标签定义通过独立 Yjs 缓存同步且不复制进节点数据', 
   targetSync._syncTagDefinitionsFromYjs()
   targetSync._applyYjsToMindmap()
 
-  assert.deepEqual(sourceSync.yNodes.get('root').get('data').get('tag'), [{ tagId: 8 }])
+  assert.deepEqual(sourceSync.yNodes.get('root').get('data').get('tag'), [{
+    tagId: 8,
+    categoryId: 3,
+  }])
   assert.equal(targetSync.tagDefinitions.get('8').text, '托管名称')
+  assert.equal(targetSync.tagDefinitions.get('8').categoryId, 3)
   assert.equal(targetMindMap.getData().data.tag[0].text, '托管名称')
   sourceSync.destroy()
   targetSync.destroy()
@@ -224,7 +236,7 @@ test('漏掉业务广播后仍通过 Yjs 删除事件清理过期标签定义', 
 
   assert.equal(sync.yTagDefinitions.has('8'), false)
   assert.equal(sync.tagDefinitions.has('8'), false)
-  assert.deepEqual(mindMap.getData().data.tag, [{ tagId: 8 }])
+  assert.deepEqual(mindMap.getData().data.tag, [{ tagId: 8, categoryId: 3 }])
   mindMap.emit('node_tree_render_end')
   remoteDoc.destroy()
   sync.destroy()
@@ -244,6 +256,7 @@ test('漏掉业务广播后仍通过 WebSocket Yjs 更新收敛标签名称和�
     tagId: 8,
     text: '重连后的名称',
     definitionRevision: 6,
+    categoryId: 5,
     style: { fill: '#123456', color: '#fff' },
   })
   sync._handleUpdate({
@@ -252,6 +265,7 @@ test('漏掉业务广播后仍通过 WebSocket Yjs 更新收敛标签名称和�
 
   assert.equal(sync.tagDefinitions.get('8').text, '重连后的名称')
   assert.equal(sync.tagDefinitions.get('8').definitionRevision, 6)
+  assert.equal(mindMap.getData().data.tag[0].categoryId, 5)
   assert.equal(mindMap.getData().data.tag[0].text, '重连后的名称')
   assert.deepEqual(mindMap.getData().data.tag[0].style, {
     fill: '#123456',
@@ -1682,14 +1696,17 @@ test('标签替换会在同一事务中删除旧定义并写入新定义', () =>
     sourceTagId: 8,
     targetTagId: 9,
     definitionRevision: 3,
-    definition: { tagId: 9, text: '替换标签', style: { fill: '#0f0' } },
+    definition: { tagId: 9, categoryId: 4, text: '替换标签', style: { fill: '#0f0' } },
   })
 
   assert.equal(definitionChanges.length, 1)
   assert.deepEqual(new Set(definitionChanges[0]), new Set(['8', '9']))
   assert.equal(sync.yTagDefinitions.has('8'), false)
   assert.equal(sync.yTagDefinitions.get('9').text, '替换标签')
-  assert.deepEqual(sync.yNodes.get('root').get('data').get('tag'), [{ tagId: 9 }])
+  assert.deepEqual(sync.yNodes.get('root').get('data').get('tag'), [{
+    tagId: 9,
+    categoryId: 4,
+  }])
   sync.destroy()
 })
 

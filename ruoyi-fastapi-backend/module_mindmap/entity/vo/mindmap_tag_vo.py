@@ -211,6 +211,11 @@ class MindmapTagCategoryModel(BaseModel):
     category_type: Literal['system', 'custom'] = Field(
         default='custom', description='分组类型:system系统 custom用户自定义',
     )
+    show_on_home: bool = Field(default=False, description='是否在脑图标签首页直接展示')
+    selection_mode: Literal['single', 'multiple'] = Field(
+        default='multiple',
+        description='分组选择模式:single单选 multiple多选',
+    )
     owner_id: int | None = Field(default=0, description='所有者(0=全局)')
     sort_order: int | None = Field(default=0, description='排序')
     created_by: str | None = Field(default=None, description='创建人')
@@ -240,6 +245,14 @@ class MindmapTagCategoryMutationModel(BaseModel):
         description='排序值',
     )
     owner_scope: Literal['mine', 'global'] = Field(default='mine', description='分组作用域')
+    show_on_home: bool | None = Field(
+        default=None,
+        description='是否在脑图标签首页直接展示；未传时创建默认关闭、更新保持原值',
+    )
+    selection_mode: Literal['single', 'multiple'] | None = Field(
+        default=None,
+        description='分组选择模式；未传时创建默认多选、更新保持原值',
+    )
 
     @field_validator('name', mode='before')
     @classmethod

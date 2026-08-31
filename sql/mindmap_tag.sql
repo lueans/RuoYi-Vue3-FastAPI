@@ -7,6 +7,9 @@
 CREATE TABLE IF NOT EXISTS mindmap_tag_category (
     id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '分类ID',
     name VARCHAR(100) NOT NULL COMMENT '分类名称',
+    category_type VARCHAR(20) NOT NULL DEFAULT 'custom' COMMENT '分组类型:system系统 custom用户自定义',
+    show_on_home SMALLINT NOT NULL DEFAULT 0 COMMENT '是否在脑图标签首页展示:0否 1是',
+    selection_mode VARCHAR(20) NOT NULL DEFAULT 'multiple' COMMENT '分组选择模式:single单选 multiple多选',
     owner_id BIGINT NOT NULL DEFAULT 0 COMMENT '所有者(0=全局)',
     sort_order INT DEFAULT 0 COMMENT '排序',
     created_by VARCHAR(64) DEFAULT NULL COMMENT '创建人',

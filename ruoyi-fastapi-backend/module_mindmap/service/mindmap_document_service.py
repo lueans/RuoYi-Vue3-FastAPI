@@ -64,7 +64,8 @@ def collect_tag_snapshots(node_tree: dict[str, Any] | None) -> dict[str, dict[st
             snapshot = {
                 key: tag[key]
                 for key in (
-                    'tagId', 'uuid', 'tagKey', 'text', 'style', 'status', 'definitionRevision',
+                    'tagId', 'categoryId', 'uuid', 'tagKey', 'text', 'style', 'status',
+                    'definitionRevision',
                 )
                 if key in tag
             }
@@ -173,6 +174,7 @@ class MindmapDocumentService:
         return {
             str(tag.id): {
                 'tagId': tag.id,
+                'categoryId': tag.category_id,
                 'uuid': tag.uuid,
                 'tagKey': tag.tag_key,
                 'text': tag.name,

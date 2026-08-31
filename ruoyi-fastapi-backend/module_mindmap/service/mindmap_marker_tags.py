@@ -54,6 +54,7 @@ def collect_legacy_marker_tag_keys(document: EncodedDocument) -> set[str]:
 def _tag_snapshot(tag: MindmapTag) -> dict[str, Any]:
     return {
         'tagId': tag.id,
+        'categoryId': tag.category_id,
         'uuid': tag.uuid,
         'tagKey': tag.tag_key,
         'text': tag.name,

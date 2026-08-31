@@ -1697,6 +1697,7 @@ export class YjsMindmapSync {
           const key = String(tag.tagId)
           const definition = {
             tagId: tag.tagId,
+            categoryId: tag.categoryId,
             uuid: tag.uuid,
             tagKey: tag.tagKey,
             text: tag.text,
@@ -1881,9 +1882,12 @@ export class YjsMindmapSync {
           continue
         }
         const tagId = Number(tag.tagId)
-        const replacement = tagId === Number(data.sourceTagId)
-          ? { ...tag, tagId: data.targetTagId }
-          : tag
+        let replacement = tag
+        if (tagId === Number(data.sourceTagId)) {
+          replacement = { ...tag, tagId: data.targetTagId }
+          if (targetDefinition.categoryId === undefined) delete replacement.categoryId
+          else replacement.categoryId = targetDefinition.categoryId
+        }
         const key = replacement.tagId ? String(replacement.tagId) : null
         if (key && seen.has(key)) {
           changed = true

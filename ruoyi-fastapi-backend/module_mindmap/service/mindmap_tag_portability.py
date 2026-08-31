@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 PRIVATE_IDENTITY_KEYS = {
     'tagId', 'id', 'uuid', 'tagKey', 'fieldId', 'optionId',
-    'definitionRevision', 'status',
+    'categoryId', 'definitionRevision', 'status',
 }
 
 

@@ -19,6 +19,8 @@ UNIFIED_TAG_MIGRATION = '20260824_mindmap_unified_tags.sql'
 COMMENT_MIGRATION = '20260825_mindmap_comments.sql'
 COMMENT_IDEMPOTENCY_MIGRATION = '20260826_mindmap_comment_idempotency.sql'
 TEMPLATE_REMOVAL_MIGRATION = '20260827_remove_mindmap_template_feature.sql'
+TAG_CATEGORY_HOME_MIGRATION = '20260828_mindmap_tag_category_home.sql'
+TAG_CATEGORY_SELECTION_MIGRATION = '20260828_mindmap_tag_category_selection_mode.sql'
 
 REQUIRED_TABLES = dict.fromkeys(
     (
@@ -59,6 +61,8 @@ REQUIRED_COLUMNS = {
     ('mindmap_version', 'tag_snapshots'): VERSION_MIGRATION,
     ('mindmap_folder', 'active_name'): FOLDER_MIGRATION,
     ('mindmap_tag_category', 'category_type'): UNIFIED_TAG_MIGRATION,
+    ('mindmap_tag_category', 'show_on_home'): TAG_CATEGORY_HOME_MIGRATION,
+    ('mindmap_tag_category', 'selection_mode'): TAG_CATEGORY_SELECTION_MIGRATION,
     ('mindmap_comment', 'client_request_id'): COMMENT_IDEMPOTENCY_MIGRATION,
 } | {
     ('mindmap_creation_request', column): CREATION_IDEMPOTENCY_MIGRATION

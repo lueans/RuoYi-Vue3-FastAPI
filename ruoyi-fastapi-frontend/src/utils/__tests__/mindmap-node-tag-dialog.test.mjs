@@ -4,7 +4,7 @@ import test from 'node:test'
 
 const nodeTagSourceUrl = new URL('../../components/MindMap/NodeTag.vue', import.meta.url)
 
-test('节点标签弹窗只展示统一标签多选入口', async () => {
+test('节点标签弹窗按分组规则展示统一标签选择入口', async () => {
   const source = await readFile(nodeTagSourceUrl, 'utf8')
 
   assert.match(source, /class="mindmap-node-tag-dialog"/)
@@ -15,6 +15,8 @@ test('节点标签弹窗只展示统一标签多选入口', async () => {
   assert.match(source, /placement: style\.placement/)
   assert.match(source, /align: style\.align/)
   assert.match(source, /最多添加 \$\{MAX_NODE_TAG_COUNT\} 个标签/)
+  assert.match(source, /normalizeMindmapSingleSelectionTags/)
+  assert.match(source, /removeMindmapSingleSelectionPeers/)
   assert.doesNotMatch(source, /tag-field|fieldId|optionId|selectMode/)
 })
 
@@ -30,7 +32,8 @@ test('统一标签选择器使用左侧分组、右侧标签的主从布局并�
   assert.match(source, /activeGroupId\.value = groups\[0\]\?\.id \|\| ''/)
   assert.match(source, /name: '未分组'/)
   assert.match(source, /tag\.categoryId == null/)
-  assert.match(source, /暂按全部标签展示/)
+  assert.match(source, /选择规则暂不可用/)
+  assert.match(source, /listTags\(\{ pageNum, pageSize: 100 \}\)/)
 })
 
 test('统一标签搜索和创建具备防抖、竞态与重复提交保护', async () => {

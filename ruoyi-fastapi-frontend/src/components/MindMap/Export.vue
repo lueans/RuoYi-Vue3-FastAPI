@@ -3,159 +3,149 @@
     class="nodeExportDialog"
     :class="{ isDark: isDark }"
     v-model="dialogVisible"
-    :width="'800px'"
+    width="760px"
+    modal-class="nodeExportOverlay"
     :show-close="false"
     :close-on-click-modal="!isExporting"
     :close-on-press-escape="!isExporting"
     append-to-body
   >
-    <div class="exportContainer" :class="{ isDark: isDark }">
-      <div class="downloadTypeSelectBox">
-        <!-- type list -->
-        <div class="downloadTypeList customScrollbar">
-          <button
-            class="downloadTypeItem"
-            v-for="item in filteredTypeList"
-            :key="item.type"
-            :class="{ active: exportType === item.type }"
-            type="button"
-            :aria-pressed="exportType === item.type"
-            :disabled="isExporting"
-            @click="exportType = item.type"
-          >
-            <div class="typeIcon" :class="[item.type]"></div>
-            <div class="name">{{ item.name }}</div>
-            <div class="icon checked el-icon-check" v-if="exportType === item.type">
-              <el-icon><Check /></el-icon>
-            </div>
-          </button>
-        </div>
-        <!-- type content -->
-        <div class="downloadTypeContent">
-          <!-- filename input -->
-          <div class="nameInputBox">
-            <div class="nameInput">
-              <span class="name">导出文件名称</span>
-              <el-input
-                style="max-width: 250px"
-                v-model="fileName"
-                size="small"
-                maxlength="125"
-                aria-label="导出文件名称"
-                :disabled="isExporting"
-                @keydown.stop
-              />
-              <span v-if="fileNameError" class="fieldError" role="alert">{{ fileNameError }}</span>
-            </div>
-            <button class="closeBtn" type="button" aria-label="关闭导出对话框" :disabled="isExporting" @click="cancel">
-              <el-icon><Close /></el-icon>
-            </button>
+    <div class="xmindExportShell" :class="{ isDark: isDark }">
+      <section class="exportPreviewPane" aria-label="当前脑图预览">
+        <div ref="previewRef" class="previewCanvas"></div>
+        <span v-if="!hasPreview" class="previewPlaceholder">正在生成预览…</span>
+      </section>
+
+      <section class="exportSettingsPane" aria-labelledby="mindmapExportTitle">
+        <div class="settingsContent customScrollbar">
+          <h2 id="mindmapExportTitle" class="dialogTitle">
+            导出为{{ currentTypeData?.name || '' }}
+          </h2>
+
+          <div class="settingGroup">
+            <label class="settingRow">
+              <span class="settingLabel">文件名称</span>
+              <span class="settingControl">
+                <el-input
+                  v-model="fileName"
+                  maxlength="125"
+                  :disabled="isExporting"
+                  aria-label="导出文件名称"
+                  @keydown.stop
+                >
+                  <template #append>.{{ currentTypeData?.type || '' }}</template>
+                </el-input>
+                <span v-if="fileNameError" class="fieldError" role="alert">{{ fileNameError }}</span>
+              </span>
+            </label>
+
+            <label class="settingRow">
+              <span class="settingLabel">格式</span>
+              <span class="settingControl">
+                <el-select
+                  v-model="exportType"
+                  :disabled="isExporting"
+                  aria-label="导出格式"
+                >
+                  <el-option
+                    v-for="item in filteredTypeList"
+                    :key="item.type"
+                    :label="item.name"
+                    :value="item.type"
+                  />
+                </el-select>
+              </span>
+            </label>
           </div>
-          <!-- config options -->
-          <div class="contentBox customScrollbar">
-            <div class="contentRow">
-              <div class="contentName">格式</div>
-              <div class="contentValue info">
-                {{ currentTypeData ? '.' + currentTypeData.type : '' }}
-              </div>
-            </div>
-            <div class="contentRow">
-              <div class="contentName">说明</div>
-              <div class="contentValue info">
-                {{ currentTypeData ? currentTypeData.desc : '' }}
-              </div>
-            </div>
-            <div class="contentRow">
-              <div class="contentName">选项</div>
-              <div class="contentValue info" v-if="noOptions">无</div>
-              <div class="contentValue" v-else>
-                <div
-                  class="valueItem"
-                  v-show="['smm', 'json'].includes(exportType)"
-                >
-                  <el-checkbox v-model="widthConfig" :disabled="isExporting">是否包含主题、结构等配置数据</el-checkbox>
-                </div>
-                <div
-                  class="valueItem"
-                  v-show="['svg', 'png', 'pdf'].includes(exportType)"
-                >
-                  <div class="valueSubItem">
-                    <span class="name">水平内边距</span>
-                    <el-input
-                      style="width: 200px"
-                      v-model="paddingX"
-                      type="number"
-                      min="0"
-                      max="200"
-                      step="1"
-                      :disabled="isExporting"
-                      size="small"
-                      @change="onPaddingChange"
-                      @keydown.stop
-                    />
-                  </div>
-                  <div class="valueSubItem">
-                    <span class="name">垂直内边距</span>
-                    <el-input
-                      style="width: 200px"
-                      v-model="paddingY"
-                      type="number"
-                      min="0"
-                      max="200"
-                      step="1"
-                      :disabled="isExporting"
-                      size="small"
-                      @change="onPaddingChange"
-                      @keydown.stop
-                    />
-                  </div>
-                  <div class="valueSubItem">
-                    <span class="name">底部添加文字</span>
-                    <el-input
-                      style="width: 200px"
-                      v-model="extraText"
-                      size="small"
-                      :disabled="isExporting"
-                      placeholder="比如：来自simple-mind-map"
-                      @keydown.stop
-                    />
-                  </div>
-                  <div class="valueSubItem">
-                    <el-checkbox
-                      v-show="['png', 'pdf'].includes(exportType)"
-                      v-model="isTransparent"
-                      :disabled="isExporting"
-                    >背景是否透明</el-checkbox>
-                  </div>
-                  <div class="valueSubItem">
-                    <el-checkbox v-show="showFitBgOption" v-model="isFitBg" :disabled="isExporting">
-                      是否显示完整背景图片（使用了背景图片时生效）
-                    </el-checkbox>
-                  </div>
-                </div>
-              </div>
+
+          <div v-if="!noOptions" class="settingsDivider"></div>
+
+          <div v-if="['smm', 'json'].includes(exportType)" class="settingGroup">
+            <div class="switchRow">
+              <span>包含主题、结构等配置数据</span>
+              <el-switch v-model="widthConfig" :disabled="isExporting" />
             </div>
           </div>
-          <!-- buttons -->
-          <div class="btnList">
-            <span class="exportStatus" role="status" aria-live="polite">{{ exportStatusText }}</span>
-            <el-button :disabled="isExporting" @click="cancel" size="small">取消</el-button>
-            <el-button
-              type="primary"
-              :loading="isExporting"
-              :disabled="Boolean(fileNameError)"
-              @click="confirm"
-              size="small"
-            >{{ isExporting ? '生成中' : '导出' }}</el-button>
+
+          <div v-if="['svg', 'png', 'pdf'].includes(exportType)" class="settingGroup">
+            <label class="settingRow">
+              <span class="settingLabel">水平内边距</span>
+              <span class="settingControl compactControl">
+                <el-input-number
+                  v-model="paddingX"
+                  :min="0"
+                  :max="200"
+                  :step="1"
+                  :disabled="isExporting"
+                  controls-position="right"
+                  aria-label="水平内边距"
+                  @change="onPaddingChange"
+                  @keydown.stop
+                />
+              </span>
+            </label>
+
+            <label class="settingRow">
+              <span class="settingLabel">垂直内边距</span>
+              <span class="settingControl compactControl">
+                <el-input-number
+                  v-model="paddingY"
+                  :min="0"
+                  :max="200"
+                  :step="1"
+                  :disabled="isExporting"
+                  controls-position="right"
+                  aria-label="垂直内边距"
+                  @change="onPaddingChange"
+                  @keydown.stop
+                />
+              </span>
+            </label>
+
+            <label class="settingRow">
+              <span class="settingLabel">底部文字</span>
+              <span class="settingControl">
+                <el-input
+                  v-model="extraText"
+                  :disabled="isExporting"
+                  placeholder="选填"
+                  aria-label="底部添加文字"
+                  @keydown.stop
+                />
+              </span>
+            </label>
+          </div>
+
+          <div v-if="['png', 'pdf'].includes(exportType)" class="settingsDivider"></div>
+
+          <div v-if="['png', 'pdf'].includes(exportType)" class="settingGroup switchGroup">
+            <div class="switchRow">
+              <span>透明背景</span>
+              <el-switch v-model="isTransparent" :disabled="isExporting" />
+            </div>
+            <div v-if="showFitBgOption" class="switchRow">
+              <span>显示完整背景图片</span>
+              <el-switch v-model="isFitBg" :disabled="isExporting" />
+            </div>
           </div>
         </div>
-      </div>
+
+        <footer class="dialogFooter">
+          <span class="exportStatus" role="status" aria-live="polite">{{ exportStatusText }}</span>
+          <el-button :disabled="isExporting" @click="cancel">取消</el-button>
+          <el-button
+            class="exportButton"
+            :loading="isExporting"
+            :disabled="Boolean(fileNameError)"
+            @click="confirm"
+          >{{ isExporting ? '生成中' : '导出' }}</el-button>
+        </footer>
+      </section>
     </div>
   </el-dialog>
 </template>
 
 <script setup>
-import { Close, Check } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import bus from './useEventBus'
 import { store } from './useStore'
@@ -168,7 +158,7 @@ import {
 const isDark = computed(() => store.localConfig.isDark)
 
 const dialogVisible = ref(false)
-const exportType = ref('smm')
+const exportType = ref('png')
 const fileName = ref('思维导图')
 const widthConfig = ref(true)
 const isTransparent = ref(false)
@@ -178,16 +168,17 @@ const extraText = ref('')
 const isFitBg = ref(true)
 const isExporting = ref(false)
 const exportStatusText = ref('')
+const previewRef = ref(null)
+const hasPreview = ref(false)
 let exportRequestId = 0
 
 const filteredTypeList = computed(() => {
-  // Use local downTypeList from config (already Chinese)
   return downTypeList.filter(item => {
     return item.value !== 'mm' && item.value !== 'xlsx'
   }).map(item => ({
     name: item.name,
     type: item.value,
-    desc: item.desc
+    desc: item.desc,
   }))
 })
 
@@ -208,9 +199,31 @@ const normalizedFileName = computed(() => (
 ))
 const fileNameError = computed(() => normalizedFileName.value.error)
 
-function handleShowExport() {
+function refreshPreview() {
+  hasPreview.value = false
+  previewRef.value?.replaceChildren()
+  if (!previewRef.value || !store.mindMap?.getSvgData) return
+  try {
+    const { svg, rect } = store.mindMap.getSvgData({
+      paddingX: 16,
+      paddingY: 16,
+      ignoreWatermark: true,
+    })
+    if (!svg?.node || !rect?.width || !rect?.height) return
+    svg.node.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`)
+    svg.node.setAttribute('preserveAspectRatio', 'xMidYMid meet')
+    previewRef.value.replaceChildren(svg.node)
+    hasPreview.value = true
+  } catch (error) {
+    console.warn('生成导出预览失败:', error)
+  }
+}
+
+async function handleShowExport() {
   exportStatusText.value = ''
   dialogVisible.value = true
+  await nextTick()
+  refreshPreview()
 }
 
 function onPaddingChange() {
@@ -288,333 +301,300 @@ onBeforeUnmount(() => {
 </script>
 
 <style lang="less">
-.el-overlay.nodeExportDialog {
+.el-overlay.nodeExportOverlay {
   pointer-events: auto;
+
+  .el-overlay-dialog {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .el-dialog.nodeExportDialog {
+    margin: 0 !important;
+    padding: 0;
+    overflow: hidden;
+    border-radius: 12px;
+    background: #eef0f2;
+    box-shadow: 0 18px 54px rgba(0, 0, 0, 0.22);
+
+    &.isDark {
+      background: #1f2023;
+    }
+  }
+
+  .el-dialog__header {
+    display: none;
+  }
+
+  .el-dialog__body {
+    padding: 10px;
+  }
+}
+
+@media (max-width: 800px) {
+  .el-overlay.nodeExportOverlay {
+    .el-overlay-dialog {
+      padding: 16px;
+    }
+
+    .el-dialog.nodeExportDialog {
+      width: calc(100vw - 32px) !important;
+    }
+  }
 }
 </style>
 
 <style lang="less" scoped>
-.nodeExportDialog {
-  .exportContainer {
-    &.isDark {
-      .downloadTypeSelectBox {
-        .downloadTypeList {
-          background-color: #363b3f;
+.xmindExportShell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  height: 540px;
+  color: #222326;
 
-          .downloadTypeItem {
-            background-color: #363b3f;
+  .exportPreviewPane,
+  .exportSettingsPane {
+    overflow: hidden;
+    border-radius: 10px;
+    background: #fff;
+  }
 
-            &.active {
-              background-color: #262a2e;
-            }
+  .exportPreviewPane {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 24px;
+  }
 
-            .name {
-              color: hsla(0, 0%, 100%, 0.9);
-            }
-          }
-        }
+  .previewCanvas {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
 
-        .downloadTypeContent {
-          .nameInputBox {
-            border-bottom: 1px solid hsla(0, 0%, 100%, 0.6);
+    :deep(svg) {
+      display: block;
+      width: 100%;
+      height: 100%;
+      max-width: 100%;
+      max-height: 100%;
+    }
+  }
 
-            .nameInput {
-              .name {
-                color: hsla(0, 0%, 100%, 0.6);
-              }
-            }
+  .previewPlaceholder {
+    position: absolute;
+    color: #9b9da2;
+    font-size: 13px;
+  }
 
-            .closeBtn {
-              color: hsla(0, 0%, 100%, 0.6);
-            }
-          }
+  .exportSettingsPane {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
 
-          .contentBox {
-            .contentRow {
-              .contentName {
-                color: hsla(0, 0%, 100%, 0.6);
-              }
+  .settingsContent {
+    min-height: 0;
+    flex: 1;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 28px 28px 20px;
+  }
 
-              .contentValue {
-                color: hsla(0, 0%, 100%, 0.6);
+  .dialogTitle {
+    margin: 0 0 28px;
+    color: #202124;
+    font-size: 21px;
+    font-weight: 650;
+    line-height: 1.25;
+  }
 
-                &.info {
-                  background-color: transparent;
-                }
-              }
-            }
-          }
+  .settingGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
 
-          .btnList {
-            border-top: 1px solid hsla(0, 0%, 100%, 0.6);
-          }
-        }
+  .settingRow {
+    display: grid;
+    grid-template-columns: 112px minmax(0, 1fr);
+    align-items: start;
+    min-height: 32px;
+  }
+
+  .settingLabel {
+    padding-top: 7px;
+    color: #5f6167;
+    font-size: 14px;
+    line-height: 18px;
+  }
+
+  .settingControl {
+    min-width: 0;
+
+    :deep(.el-select),
+    :deep(.el-input-number) {
+      width: 100%;
+    }
+
+    :deep(.el-input__wrapper),
+    :deep(.el-select__wrapper),
+    :deep(.el-input-number .el-input__wrapper) {
+      min-height: 32px;
+      border-radius: 6px;
+      box-shadow: 0 0 0 1px #d8dadd inset;
+    }
+
+    :deep(.el-input-group__append) {
+      padding: 0 10px;
+      border-radius: 0 6px 6px 0;
+      background: #f5f6f7;
+      color: #777a80;
+      box-shadow: 0 0 0 1px #d8dadd inset;
+    }
+  }
+
+  .compactControl {
+    max-width: 150px;
+  }
+
+  .fieldError {
+    display: block;
+    margin-top: 5px;
+    color: var(--el-color-danger);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
+  .settingsDivider {
+    height: 1px;
+    margin: 24px 0;
+    background: #eceef0;
+  }
+
+  .switchGroup {
+    gap: 18px;
+  }
+
+  .switchRow {
+    display: flex;
+    min-height: 28px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    color: #3d3f44;
+    font-size: 14px;
+
+    :deep(.el-switch) {
+      --el-switch-on-color: #2f3033;
+      --el-switch-off-color: #d6d8dc;
+      flex-shrink: 0;
+    }
+  }
+
+  .dialogFooter {
+    display: flex;
+    height: 64px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 0 28px;
+    border-top: 1px solid #eceef0;
+
+    :deep(.el-button) {
+      min-width: 64px;
+      height: 32px;
+      margin-left: 0;
+      border-radius: 6px;
+    }
+
+    .exportButton {
+      border-color: #2f3033;
+      background: #2f3033;
+      color: #fff;
+
+      &:hover,
+      &:focus {
+        border-color: #45464a;
+        background: #45464a;
       }
+
+      &:disabled {
+        border-color: #a8aaae;
+        background: #a8aaae;
+      }
+    }
+  }
+
+  .exportStatus {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  &.isDark {
+    color: rgba(255, 255, 255, 0.9);
+
+    .exportPreviewPane,
+    .exportSettingsPane {
+      background: #282a2d;
+    }
+
+    .dialogTitle {
+      color: rgba(255, 255, 255, 0.94);
+    }
+
+    .settingLabel,
+    .switchRow {
+      color: rgba(255, 255, 255, 0.68);
+    }
+
+    .settingsDivider,
+    .dialogFooter {
+      border-color: #3c3e42;
+    }
+
+    .settingsDivider {
+      background: #3c3e42;
+    }
+
+    .settingControl :deep(.el-input-group__append) {
+      background: #34363a;
+      color: rgba(255, 255, 255, 0.58);
     }
   }
 }
 
-.nodeExportDialog {
-  &.isDark {
-    :deep(.el-dialog__body) {
-      .el-checkbox {
-        .el-checkbox__label {
-          color: hsla(0, 0%, 100%, 0.6);
-        }
-      }
-    }
-  }
+@media (max-width: 800px) {
+  .xmindExportShell {
+    grid-template-columns: 1fr;
+    grid-template-rows: 170px minmax(0, 1fr);
+    height: min(700px, calc(100vh - 68px));
 
-  :deep(.el-dialog) {
-    border-radius: 10px;
-    overflow: hidden;
-
-    .el-dialog__header {
-      display: none;
-    }
-  }
-
-  :deep(.el-dialog__body) {
-    padding: 0;
-
-    .el-checkbox__input.is-checked + .el-checkbox__label {
-      color: #409eff !important;
+    .exportPreviewPane {
+      padding: 20px 32px;
     }
 
-    .el-checkbox {
-      .el-checkbox__label {
-        color: #1a1a1a;
-      }
+    .settingsContent {
+      padding: 22px 22px 18px;
     }
-  }
 
-  .exportContainer {
-    width: 100%;
-    height: 552px;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
+    .dialogTitle {
+      margin-bottom: 22px;
+    }
 
-    .downloadTypeSelectBox {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      display: flex;
-
-      .downloadTypeList {
-        width: 208px;
-        height: 100%;
-        overflow-y: auto;
-        overflow-x: hidden;
-        background-color: #f2f4f7;
-        flex-shrink: 0;
-        padding: 16px 0;
-
-        .downloadTypeItem {
-          appearance: none;
-          border: 0;
-          background: transparent;
-          text-align: left;
-          font: inherit;
-          width: 100%;
-          height: 52px;
-          padding: 0 30px;
-          overflow: hidden;
-          display: flex;
-          align-items: center;
-          cursor: pointer;
-
-          &:disabled {
-            cursor: progress;
-            opacity: 0.65;
-          }
-
-          &:focus-visible {
-            outline: 2px solid #3370ff;
-            outline-offset: -3px;
-          }
-
-          &.active {
-            background-color: #fff;
-
-            .icon {
-              &.checked {
-                display: block;
-              }
-            }
-          }
-
-          .icon {
-            font-size: 25px;
-            font-weight: 700;
-
-            &.checked {
-              color: #409eff;
-              font-size: 20px;
-              margin-left: auto;
-              display: none;
-            }
-          }
-
-          .typeIcon {
-            margin-right: 18px;
-            flex-shrink: 0;
-            width: 23px;
-            height: 26px;
-            background-size: cover;
-          }
-
-          .name {
-            color: #333;
-            font-size: 15px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            font-weight: bold;
-          }
-        }
-      }
-
-      .downloadTypeContent {
-        width: 100%;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-
-        .nameInputBox {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          min-height: 67px;
-          flex-shrink: 0;
-          border-bottom: 1px solid #f2f4f7;
-          padding-left: 40px;
-          padding-right: 20px;
-          padding-top: 16px;
-          padding-bottom: 12px;
-
-          .nameInput {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            width: 100%;
-            font-weight: bold;
-
-            .name {
-              margin-right: 10px;
-              font-size: 15px;
-              color: #333;
-              font-weight: bold;
-            }
-          }
-
-          .closeBtn {
-            font-size: 20px;
-            cursor: pointer;
-            display: inline-flex;
-            padding: 4px;
-            border: 0;
-            border-radius: 4px;
-            background: transparent;
-            color: inherit;
-
-            &:disabled {
-              cursor: progress;
-              opacity: 0.5;
-            }
-
-            &:focus-visible {
-              outline: 2px solid #3370ff;
-              outline-offset: 2px;
-            }
-          }
-
-          .fieldError {
-            flex-basis: 100%;
-            margin-top: 4px;
-            color: var(--el-color-danger);
-            font-size: 12px;
-            font-weight: 400;
-          }
-        }
-
-        .contentBox {
-          height: 100%;
-          overflow-y: auto;
-          overflow-x: hidden;
-          padding: 15px 40px;
-
-          .contentRow {
-            display: flex;
-            font-size: 14px;
-            margin-bottom: 20px;
-
-            &:last-of-type {
-              margin-bottom: 0;
-            }
-
-            .contentName {
-              min-width: 40px;
-              color: #808080;
-              flex-shrink: 0;
-              font-size: 13px;
-              font-weight: 500;
-              line-height: 25px;
-              margin-right: 12px;
-            }
-
-            .contentValue {
-              color: #808080;
-              line-height: 23px;
-              font-weight: 500;
-              border: 1px solid transparent;
-              font-size: 14px;
-
-              &.info {
-                color: rgb(90, 158, 247);
-                background-color: rgb(245, 248, 249);
-                border: 1px solid rgb(90, 158, 247);
-                border-radius: 5px;
-                padding: 0 16px;
-              }
-
-              .valueItem {
-                .valueSubItem {
-                  margin-bottom: 12px;
-                  display: flex;
-                  align-items: center;
-
-                  &:last-of-type {
-                    margin-right: 0;
-                  }
-
-                  .name {
-                    margin-right: 12px;
-                    min-width: 85px;
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        .btnList {
-          padding: 0 40px;
-          display: flex;
-          align-items: center;
-          justify-content: flex-end;
-          height: 69px;
-          flex-shrink: 0;
-          border-top: 1px solid #f2f4f7;
-
-          .exportStatus {
-            margin-right: auto;
-            color: var(--el-text-color-secondary);
-            font-size: 13px;
-          }
-        }
-      }
+    .dialogFooter {
+      padding: 0 22px;
     }
   }
 }

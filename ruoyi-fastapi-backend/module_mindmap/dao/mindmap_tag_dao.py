@@ -179,7 +179,7 @@ class MindmapTagDao:
                 )
             )
 
-        query = query.order_by(MindmapTag.updated_time.desc())
+        query = query.order_by(MindmapTag.updated_time.desc(), MindmapTag.id.desc())
         return await PageUtil.paginate(db, query, page_num, page_size, True)
 
     @classmethod

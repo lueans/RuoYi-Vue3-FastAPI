@@ -47,6 +47,8 @@ services:
       - ./ruoyi-fastapi-backend/migrations/20260820_mindmap_postgresql.sql:/docker-entrypoint-initdb.d/zz-mindmap-postgresql.sql
       - ./ruoyi-fastapi-backend/migrations/20260824_mindmap_unified_tags_postgresql.sql:/docker-entrypoint-initdb.d/zzz-mindmap-unified-tags-postgresql.sql
       - ./ruoyi-fastapi-backend/migrations/20260825_mindmap_markers_to_tags_postgresql.sql:/docker-entrypoint-initdb.d/zzzz-mindmap-markers-to-tags-postgresql.sql
+      - ./ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_home_postgresql.sql:/docker-entrypoint-initdb.d/zzzzz-mindmap-tag-category-home-postgresql.sql
+      - ./ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_selection_mode_postgresql.sql:/docker-entrypoint-initdb.d/zzzzzz-mindmap-tag-category-selection-mode-postgresql.sql
     networks:
       - ruoyi-network
     healthcheck:

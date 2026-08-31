@@ -862,6 +862,7 @@ function createYjsSyncInstance() {
       name: userStore.nickName || userStore.name,
       avatar: userStore.avatar,
     },
+    readonly: isReadonly.value,
     getDocumentData: () => normalizeMindmapDocumentData(documentData.value),
     getClientMutationId: () => pendingClientMutationId,
     // 协作更新可能首次引入富文本、公式等渲染能力。统一加载实际缺失的
@@ -941,7 +942,6 @@ function startYjsSyncIfReady() {
     yjsSync
     || restoredLocalDraft
     || !props.mindmapId
-    || isReadonly.value
     || !mindMap.value
     || terminalState
   ) return false
@@ -1356,7 +1356,7 @@ async function initMindMap(signal) {
     void saveToBackend()
   }
 
-  // Yjs 实时协作（仅后端模式 + 非只读）
+  // Yjs 实时协作（后端模式）
   startYjsSyncIfReady()
 
   // Load dynamic plugins based on config

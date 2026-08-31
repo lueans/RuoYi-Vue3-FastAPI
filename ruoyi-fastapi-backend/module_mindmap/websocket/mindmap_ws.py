@@ -13,6 +13,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from config.database import AsyncSessionLocal
 from exceptions.exception import ServiceException
+from module_mindmap.dao.mindmap_dao import MindmapDao
 from module_mindmap.service.mindmap_document_service import (
     STRUCTURED_CONTENT_CORRUPT_MESSAGE,
     MindmapDocumentService,
@@ -171,6 +172,17 @@ def normalize_ws_capabilities(payload: object) -> set[str]:
             YJS_CHECKPOINT_CAPABILITY,
         }
     }
+
+
+def normalize_ws_readonly_flag(value: object) -> bool:
+    """将客户端只读参数安全归一化。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 def get_ws_access_error_message(error: ServiceException) -> str:
@@ -417,6 +429,8 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
     """脑图实时协作 WebSocket 端点"""
     await websocket.accept()
     state_source_id = uuid.uuid4().hex
+    requested_readonly = False
+    can_edit_session = False
 
     # ── 连接后认证（不通过 URL 传递 token） ──
     try:
@@ -441,6 +455,7 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
         # 从 app.state 获取 redis
         redis = websocket.app.state.redis
         auth_token = auth_msg['token']
+        requested_readonly = normalize_ws_readonly_flag(auth_msg.get('readonly'))
         user_info = await validate_ws_token(auth_token, redis)
     except WebSocketDisconnect:
         return
@@ -486,8 +501,15 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
     # ── 脑图访问权限校验（防止认证用户访问无权限的脑图） ──
     try:
         async with AsyncSessionLocal() as db:
-            mindmap = await MindmapService.check_mindmap_access(
-                db, mindmap_id, user_info['id'], require_edit=True,
+            mindmap, permission, _ = await MindmapService.resolve_mindmap_access(
+                db, mindmap_id, user_info['id'], require_edit=False,
+            )
+            migration_failed = await MindmapDao.get_migration_status(db, mindmap_id) == 'failed'
+            can_edit_session = (
+                not requested_readonly
+                and permission >= 1
+                and mindmap.status == 0
+                and not migration_failed
             )
             if getattr(mindmap, 'schema_version', 1) >= SCHEMA_VERSION:
                 await MindmapDocumentService.load_tree(db, mindmap_id, required=True)
@@ -523,6 +545,7 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
     auth_ok_sent = await room_manager.send_to(websocket, {
         'type': 'auth_ok',
         'user': user_info,
+        'readonly': not can_edit_session,
         'capabilities': sorted(capabilities),
     })
     if not auth_ok_sent:
@@ -602,7 +625,7 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
                 try:
                     async with AsyncSessionLocal() as db:
                         checked_mindmap = await MindmapService.check_mindmap_access(
-                            db, mindmap_id, user_info['id'], require_edit=True,
+                            db, mindmap_id, user_info['id'], require_edit=can_edit_session,
                         )
                     # Redis 广播短暂不可用时，以数据库 revision 作为最终兜底。
                     # 更新房间栅栏后，旧客户端的下一条写消息会收到 stale_state，
@@ -720,6 +743,13 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
                 continue
 
             if msg_type in ('sync_step1', 'sync_step2', 'update'):
+                if not can_edit_session:
+                    await room_manager.send_to(websocket, {
+                        'type': 'protocol_error',
+                        'code': 'readonly_session',
+                        'message': '当前为只读协作连接，拒绝写入协作消息',
+                    })
+                    continue
                 if not traffic_budget.allow_payload(
                     get_ws_encoded_payload_size(data, msg_type)
                 ):
@@ -803,6 +833,13 @@ async def mindmap_websocket_endpoint(websocket: WebSocket, mindmap_id: int) -> N
                 )
 
             elif msg_type == 'checkpoint':
+                if not can_edit_session:
+                    await room_manager.send_to(websocket, {
+                        'type': 'protocol_error',
+                        'code': 'readonly_session',
+                        'message': '当前为只读协作连接，拒绝写入检查点',
+                    })
+                    continue
                 if not traffic_budget.allow_payload(
                     get_ws_encoded_payload_size(data, msg_type)
                 ):

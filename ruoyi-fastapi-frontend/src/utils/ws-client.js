@@ -83,6 +83,7 @@ export class MindmapWsClient {
     this.location = options.location ?? this.eventTarget?.location
     this.WebSocketImpl = options.WebSocketImpl ?? globalThis.WebSocket
     this.baseApi = options.baseApi ?? import.meta.env?.VITE_APP_BASE_API ?? ''
+    this.readonly = options.readonly === true
     // Window 定时器是 Web API 方法；保存后以客户端实例作为 this 调用时，
     // 部分 Chromium 环境会抛出 Illegal invocation。默认实现必须固定到
     // globalThis，测试注入的调度器则保持原样。
@@ -241,6 +242,7 @@ export class MindmapWsClient {
           type: 'auth',
           token: getToken(),
           capabilities: WS_CAPABILITIES,
+          readonly: this.readonly,
         }))
       } catch (error) {
         this._failCurrentSocket(socket, generation, error)
@@ -276,7 +278,7 @@ export class MindmapWsClient {
           this.isAuthenticated = true
           this.reconnectAttempts = 0
           this._setConnectionState('connected')
-          this.handlers.onAuthenticated?.(data.user, data.capabilities)
+          this.handlers.onAuthenticated?.(data.user, data.capabilities, data)
         } else if (data.type === 'auth_error') {
           const retryable = data.retryable === true
           this.handlers.onAuthError?.(data.message, {

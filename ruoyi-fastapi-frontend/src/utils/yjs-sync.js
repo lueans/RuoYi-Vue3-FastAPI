@@ -54,6 +54,13 @@ const DOCUMENT_PREPARE_RETRY_DELAYS = [1000, 3000, 10000, 30000]
 const DOCUMENT_PREPARE_ERROR = '协作内容渲染能力加载失败，正在重试'
 const DOCUMENT_PREPARE_EXHAUSTED_ERROR = '协作内容渲染能力加载失败，请检查网络后刷新页面'
 
+function normalizeReadonlyFlag(value) {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value !== 'string') return false
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
 /**
  * 分块 base64 编码，避免大数组调用栈溢出
  */
@@ -235,7 +242,11 @@ export class YjsMindmapSync {
     this.isSynced = ref(false)
     this.connectionState = ref('connecting')
     this.syncError = ref('')
-    this.options = options
+    this.readonly = normalizeReadonlyFlag(options.readonly)
+    this.options = {
+      ...options,
+      readonly: this.readonly,
+    }
     this._applyingRemote = false
     this._mutatingMindmapFromRemote = false
     this._preparingRemote = false
@@ -280,12 +291,19 @@ export class YjsMindmapSync {
     this._captureTagDefinitions(this.mindMap?.getData?.(true))
 
     this.wsClient = new MindmapWsClient(mindmapId, {
-      onAuthenticated: (user, capabilities) => {
+      onAuthenticated: (user, capabilities, authData) => {
         const authenticatedUser = this._normalizeUser(user)
         this.currentUser = {
           ...this.currentUser,
           ...authenticatedUser,
           avatar: this.currentUser?.avatar || authenticatedUser?.avatar || '',
+        }
+        if (authData && typeof authData.readonly === 'boolean') {
+          this.readonly = authData.readonly
+          this.options = {
+            ...this.options,
+            readonly: this.readonly,
+          }
         }
         this.serverCapabilities = new Set(
           Array.isArray(capabilities)
@@ -341,6 +359,7 @@ export class YjsMindmapSync {
     this.doc.on('update', (update, origin) => {
       if (
         !this._destroyed
+        && !this.readonly
         && origin !== 'remote'
         && !this._paused
         && this._authoritativeRevisionPending === null
@@ -581,7 +600,11 @@ export class YjsMindmapSync {
   }
 
   _sendFullState() {
-    if (this._destroyed || this.requiresAuthoritativeReconciliation()) return false
+    if (
+      this._destroyed
+      || this.requiresAuthoritativeReconciliation()
+      || this.readonly
+    ) return false
     const state = Y.encodeStateAsUpdate(this.doc)
     const sent = this.wsClient.send({
       type: 'update',
@@ -598,6 +621,7 @@ export class YjsMindmapSync {
     const rejectedSources = Array.isArray(invalidSources) ? invalidSources : []
     if (
       this._destroyed
+      || this.readonly
       || this._authoritativeRevisionPending !== null
       || !this._supportsCheckpointProtocol()
       || (!mergedSources.length && !rejectedSources.length)
@@ -643,6 +667,7 @@ export class YjsMindmapSync {
     this._checkpointTimer = null
     if (
       !this._checkpointDirty
+      || this.readonly
       || this._destroyed
       || this._paused
       || this.requiresAuthoritativeReconciliation()

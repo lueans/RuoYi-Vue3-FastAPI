@@ -8,6 +8,7 @@ import nodeCreateContentsMethods from './nodeCreateContents'
 import nodeExpandBtnPlaceholderRectMethods from './nodeExpandBtnPlaceholderRect'
 import nodeModifyWidthMethods from './nodeModifyWidth'
 import nodeCooperateMethods from './nodeCooperate'
+import { shouldBlockNodeTextEditByPresence } from './nodeCooperateState'
 import nodeCommentMethods from './nodeComment'
 import quickCreateChildBtnMethods from './quickCreateChildBtn'
 import nodeLayoutMethods from './nodeLayout'
@@ -78,6 +79,8 @@ class MindMapNode {
     this.children = opt.children || []
     // 当前同时操作该节点的用户列表
     this.userList = []
+    // 当前正在编辑该节点文本的远端会话；不能和仅用于展示选区的 userList 混用。
+    this.editingUserList = []
     this.commentCount = 0
     // 节点内容的容器
     this.group = null
@@ -350,6 +353,13 @@ class MindMapNode {
     // 单击事件，选中节点
     this.group.on('click', e => {
       this.mindMap.emit('node_click', this, e)
+      // 首次激活可能重建 MindMapNode 与 SVG 元素，第二次点击会重新变成
+      // detail=1，也不会派发原生 dblclick。连续点击状态必须保存在不会随
+      // 节点重绘销毁的 mindMap 实例上，并使用稳定 uid 识别同一节点。
+      if (this.isRepeatedPrimaryClick(e)) {
+        this.handleNodeDoubleClick(e)
+        return
+      }
       if (this.isMultipleChoice) {
         e.stopPropagation()
         this.isMultipleChoice = false
@@ -431,15 +441,15 @@ class MindMapNode {
     })
     // 双击事件
     this.group.on('dblclick', e => {
-      const { readonly, onlyOneEnableActiveNodeOnCooperate } = this.mindMap.opt
-      if (readonly || e.ctrlKey || e.metaKey) {
+      // 未发生重绘时浏览器仍会继续派发 dblclick；按稳定 uid 去重，避免
+      // click 序列兜底与原生事件连续打开两次编辑器。
+      if (this.wasDoubleClickHandledRecently()) {
+        // 即使节点级处理已去重，也必须阻止事件冒泡到画布的“双击回到
+        // 根节点”逻辑，否则编辑框刚打开就会被画布重定位/重绘打断。
+        e.stopPropagation()
         return
       }
-      e.stopPropagation()
-      if (onlyOneEnableActiveNodeOnCooperate && this.userList.length > 0) {
-        return
-      }
-      this.mindMap.emit('node_dblclick', this, e)
+      this.handleNodeDoubleClick(e)
     })
     // 右键菜单事件
     this.group.on('contextmenu', e => {
@@ -467,6 +477,66 @@ class MindMapNode {
       }
       this.mindMap.emit('node_contextmenu', e, this)
     })
+  }
+
+  getStableClickUid() {
+    return String(this.uid || this.getData?.('uid') || '')
+  }
+
+  isRepeatedPrimaryClick(e) {
+    const isPrimaryButton = e.button === undefined || Number(e.button) === 0
+    if (!isPrimaryButton || e.ctrlKey || e.metaKey) {
+      this.mindMap._lastNodePrimaryClick = null
+      return false
+    }
+    const uid = this.getStableClickUid()
+    const now = Date.now()
+    const previous = this.mindMap._lastNodePrimaryClick
+    const repeated = Boolean(
+      Number(e.detail) === 2
+      || (
+        uid
+        && previous?.uid === uid
+        && now - previous.at >= 0
+        && now - previous.at <= 500
+      )
+    )
+    // 双击完成后清空序列，避免第三次点击被误判为第二次双击。
+    this.mindMap._lastNodePrimaryClick = repeated ? null : { uid, at: now }
+    return repeated
+  }
+
+  wasDoubleClickHandledRecently() {
+    const handled = this.mindMap._lastHandledNodeDoubleClick
+    return Boolean(
+      handled?.uid === this.getStableClickUid()
+      && Date.now() - handled.at >= 0
+      && Date.now() - handled.at <= 500
+    )
+  }
+
+  // 统一处理鼠标和触屏的节点双击，确保协作占用及只读规则完全一致。
+  handleNodeDoubleClick(e) {
+    const {
+      readonly,
+      onlyOneEnableTextEditOnCooperate,
+      isNodeTextEditLeaseAuthoritative
+    } = this.mindMap.opt
+    if (readonly || e.ctrlKey || e.metaKey) return false
+    e.stopPropagation()
+    if (shouldBlockNodeTextEditByPresence(this, {
+      enabled: onlyOneEnableTextEditOnCooperate,
+      authoritative: isNodeTextEditLeaseAuthoritative?.() === true
+    })) {
+      this.mindMap.emit('node_text_edit_blocked', this, [...this.editingUserList])
+      return false
+    }
+    this.mindMap._lastHandledNodeDoubleClick = {
+      uid: this.getStableClickUid(),
+      at: Date.now()
+    }
+    this.mindMap.emit('node_dblclick', this, e)
+    return true
   }
 
   //  激活节点

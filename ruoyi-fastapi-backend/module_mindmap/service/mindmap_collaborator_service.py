@@ -107,21 +107,30 @@ class MindmapCollaboratorService:
         cls, db: AsyncSession, model: MindmapCollaboratorUpdateModel, operator_id: int,
     ) -> CrudResponseModel:
         """修改协作者权限"""
-        collab = await MindmapCollaboratorDao.get_collaborator_by_id(db, model.id)
-        if not collab:
+        observed_collab = await MindmapCollaboratorDao.get_collaborator_by_id(db, model.id)
+        if not observed_collab:
             raise ServiceException(message='协作者记录不存在')
 
-        mindmap = await MindmapDao.get_mindmap_for_update(db, collab.mindmap_id)
+        # 所有正文写入都会先锁脑图主记录。权限变更沿用同一锁顺序，保证“撤权
+        # 成功”与在途保存之间存在明确的先后关系；拿到主锁后必须用锁定读重新
+        # 确认协作者仍存在，不能继续使用等待期间可能已经过期的快照。
+        mindmap_id = observed_collab.mindmap_id
+        mindmap = await MindmapDao.get_mindmap_for_update(db, mindmap_id)
         if not mindmap or mindmap.owner_id != operator_id:
             await db.rollback()
             raise ServiceException(message='无权限操作')
+        collab = await MindmapCollaboratorDao.get_collaborator_by_id(
+            db, model.id, for_update=True,
+        )
+        if not collab or collab.mindmap_id != mindmap_id:
+            await db.rollback()
+            raise ServiceException(message='协作者记录不存在')
         if collab.permission == model.permission:
             await db.rollback()
             return CrudResponseModel(is_success=True, message='权限未发生变化')
         if mindmap.status == 1 and model.permission == 1:
             await db.rollback()
             raise ServiceException(message='脑图已归档，请恢复后再授予编辑权限')
-        mindmap_id = collab.mindmap_id
         target_user_id = collab.user_id
 
         try:
@@ -132,6 +141,7 @@ class MindmapCollaboratorService:
                     mindmap_id,
                     target_user_id,
                     '你的脑图权限已调整为只读，当前编辑会话已结束',
+                    revocation_scope='edit',
                 )
             return CrudResponseModel(is_success=True, message='权限修改成功')
         except Exception:
@@ -143,14 +153,21 @@ class MindmapCollaboratorService:
         cls, db: AsyncSession, collab_id: int, operator_id: int,
     ) -> CrudResponseModel:
         """移除协作者"""
-        collab = await MindmapCollaboratorDao.get_collaborator_by_id(db, collab_id)
-        if not collab:
+        observed_collab = await MindmapCollaboratorDao.get_collaborator_by_id(db, collab_id)
+        if not observed_collab:
             raise ServiceException(message='协作者记录不存在')
 
-        mindmap = await MindmapDao.get_mindmap_by_id(db, collab.mindmap_id)
+        mindmap_id = observed_collab.mindmap_id
+        mindmap = await MindmapDao.get_mindmap_for_update(db, mindmap_id)
         if not mindmap or mindmap.owner_id != operator_id:
+            await db.rollback()
             raise ServiceException(message='无权限操作')
-        mindmap_id = collab.mindmap_id
+        collab = await MindmapCollaboratorDao.get_collaborator_by_id(
+            db, collab_id, for_update=True,
+        )
+        if not collab or collab.mindmap_id != mindmap_id:
+            await db.rollback()
+            raise ServiceException(message='协作者记录不存在')
         target_user_id = collab.user_id
 
         try:
@@ -160,6 +177,7 @@ class MindmapCollaboratorService:
                 mindmap_id,
                 target_user_id,
                 '你已被移出该脑图，当前编辑会话已结束',
+                revocation_scope='access',
             )
             return CrudResponseModel(is_success=True, message='协作者已移除')
         except Exception:
@@ -182,7 +200,11 @@ class MindmapCollaboratorService:
 
     @staticmethod
     async def _notify_access_revoked(
-        mindmap_id: int, user_id: int, message: str,
+        mindmap_id: int,
+        user_id: int,
+        message: str,
+        *,
+        revocation_scope: str,
     ) -> None:
         """权限主数据已提交，实时通知失败只能降级，不能反向回滚。"""
         try:
@@ -196,6 +218,7 @@ class MindmapCollaboratorService:
                     'mindmapId': mindmap_id,
                     'message': message,
                 },
+                revocation_scope=revocation_scope,
             )
         except Exception as exc:
             logger.warning(

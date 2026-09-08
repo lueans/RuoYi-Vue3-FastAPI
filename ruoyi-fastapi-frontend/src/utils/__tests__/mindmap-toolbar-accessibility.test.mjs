@@ -64,6 +64,8 @@ test('编辑命令以内嵌模式进入单层工作台并在窄屏提供可访�
   assert.match(editorPage, /class="readonly-canvas-context" aria-label="脑图文档摘要"/)
   assert.match(editorPage, /\{\{ documentNodeCount \}\} 个节点 · \{\{ documentVersionCount \}\} 个版本/)
   assert.match(editorPage, /class="readonly-mode-banner" role="group" aria-label="阅读模式"/)
+  assert.match(editorPage, /\{\{ readonlyModeMessage \}\}/)
+  assert.match(editorPage, /当前账号只有查看权限；如需编辑，请让所有者在“协作者管理”中授予编辑权限/)
   assert.match(editorPage, /v-if="canEnterEditMode" type="button" @click="enterEditMode">进入编辑<\/button>/)
   assert.match(editorPage, /function enterEditMode\(\) \{[\s\S]*?delete query\.readonly[\s\S]*?router\.push\(\{ path: route\.path, query \}\)/)
   assert.match(editorPage, /function toggleSidebar\(sidebarName\) \{[\s\S]*?actions\.setActiveSidebar\(nextSidebar\)/)

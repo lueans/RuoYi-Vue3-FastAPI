@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -60,3 +60,19 @@ class MindmapVersionSaveModel(BaseModel):
 
     mindmap_id: int = Field(description='脑图ID')
     name: str | None = Field(default=None, description='版本名称')
+
+
+class MindmapVersionRestoreModel(BaseModel):
+    """带乐观锁和幂等标识的历史版本恢复请求。"""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    expected_revision: int = Field(ge=1, description='确认恢复时看到的正文修订号')
+    client_mutation_id: str = Field(min_length=1, max_length=100, description='客户端幂等标识')
+
+    @field_validator('client_mutation_id', mode='before')
+    @classmethod
+    def normalize_client_mutation_id(cls, value: object) -> object:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('clientMutationId 不能为空')
+        return value.strip()

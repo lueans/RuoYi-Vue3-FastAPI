@@ -7,6 +7,7 @@
  */
 
 import { cloneJsonValueIterative } from '../libs/simple-mind-map/src/utils/jsonClone.js'
+import { isSameObject } from '../libs/simple-mind-map/src/utils/deepEqual.js'
 
 export const CROSS_NODE_DATA_KEYS = Object.freeze([
   'associativeLineTargets',
@@ -23,9 +24,21 @@ const CROSS_NODE_DATA_KEY_SET = new Set(CROSS_NODE_DATA_KEYS)
 
 function cloneValue(value) {
   if (value === undefined) return undefined
-  if (typeof structuredClone === 'function') return structuredClone(value)
+  if (typeof structuredClone === 'function') {
+    try {
+      return structuredClone(value)
+    } catch {
+      // Native structuredClone implementations commonly recurse internally
+      // and overflow on otherwise valid deeply nested JSON. Fall through to
+      // the stack-safe document clone. The equality check below prevents that
+      // JSON-compatible fallback from silently coercing unsupported values.
+    }
+  }
   const cloned = cloneJsonValueIterative(value)
-  if (cloned === null && value !== null && typeof value === 'object') {
+  if (
+    (cloned === null && value !== null && typeof value === 'object')
+    || !isSameObject(cloned, value)
+  ) {
     throw new TypeError('跨节点协作数据无法安全复制')
   }
   return cloned
@@ -37,6 +50,12 @@ function entriesOf(collection) {
     return Array.from(collection.entries())
   }
   return Object.entries(collection)
+}
+
+function compareStableStrings(left, right) {
+  left = String(left)
+  right = String(right)
+  return left < right ? -1 : (left > right ? 1 : 0)
 }
 
 export function stripCrossNodeData(data = {}) {
@@ -52,11 +71,53 @@ export function nodeContainsCrossNodeData(node) {
   )))
 }
 
+function getDetailNodeData(node) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return null
+  return (
+    Array.isArray(node.children)
+    && node.data
+    && typeof node.data === 'object'
+    && !Array.isArray(node.data)
+  ) ? node.data : node
+}
+
 export function detailListTouchesCrossNodeState(detailList = []) {
   return detailList.some(detail => {
     if (detail?.action === 'delete') return true
-    return nodeContainsCrossNodeData(detail?.data)
-      || nodeContainsCrossNodeData(detail?.oldData)
+    const nextData = getDetailNodeData(detail?.data)
+    const previousData = getDetailNodeData(detail?.oldData)
+    if (detail?.action === 'update' && !previousData) {
+      // Legacy/plugin detail emitters may provide only an authoritative next
+      // snapshot. Absence of every cross key can itself mean "remove all".
+      return true
+    }
+    if (detail?.action !== 'update') {
+      return nodeContainsCrossNodeData({ data: nextData })
+        || nodeContainsCrossNodeData({ data: previousData })
+    }
+    const dataChanged = CROSS_NODE_DATA_KEYS.some(key => {
+      const previousHasKey = Object.prototype.hasOwnProperty.call(previousData, key)
+      const nextHasKey = Object.prototype.hasOwnProperty.call(nextData || {}, key)
+      return previousHasKey !== nextHasKey
+        || (previousHasKey && !isSameObject(previousData[key], nextData[key]))
+    })
+    if (dataChanged) return true
+
+    // Generalization endpoints are stored as child UIDs, while the component
+    // model stores numeric ranges. Reordering children changes that derived
+    // record even when the generalization payload itself is unchanged.
+    const ownsSummaries = Object.prototype.hasOwnProperty.call(previousData, 'generalization')
+      || Object.prototype.hasOwnProperty.call(nextData || {}, 'generalization')
+    if (!ownsSummaries) return false
+    const previousChildren = Array.isArray(detail?.oldData?.children)
+      ? detail.oldData.children.map(child => String(child?.data?.uid || ''))
+      : null
+    const nextChildren = Array.isArray(detail?.data?.children)
+      ? detail.data.children.map(child => String(child?.data?.uid || ''))
+      : null
+    return previousChildren !== null
+      && nextChildren !== null
+      && !isSameObject(previousChildren, nextChildren)
   })
 }
 
@@ -176,7 +237,413 @@ export function extractCrossNodeState(root, { validateReferences = true } = {}) 
       }
     }
   }
+  // Group membership is a set. Canonicalizing it prevents two equivalent
+  // trees with different traversal order from producing different records.
+  for (const group of Object.values(groups)) {
+    group.memberUids.sort(compareStableStrings)
+  }
   return { relations, summaries, groups, assets }
+}
+
+const CROSS_NODE_STATE_DOMAINS = Object.freeze([
+  'relations',
+  'summaries',
+  'groups',
+  'assets',
+])
+
+function asCrossNodeStateObject(state = {}) {
+  return Object.fromEntries(CROSS_NODE_STATE_DOMAINS.map(domain => [
+    domain,
+    Object.fromEntries(entriesOf(state[domain])),
+  ]))
+}
+
+function asDetailTree(node) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return null
+  if (
+    node.data
+    && typeof node.data === 'object'
+    && !Array.isArray(node.data)
+    && Array.isArray(node.children)
+  ) return node
+  return { data: node, children: [] }
+}
+
+function collectDetailTreeNodeUids(root, target = new Set()) {
+  if (!root || typeof root !== 'object') return target
+  const pending = [root]
+  const visited = new WeakSet()
+  while (pending.length) {
+    const node = pending.pop()
+    if (!node || typeof node !== 'object' || visited.has(node)) continue
+    visited.add(node)
+    const uid = node.data?.uid
+    if (uid !== undefined && uid !== null && String(uid)) target.add(String(uid))
+    for (const child of (Array.isArray(node.children) ? node.children : [])) {
+      pending.push(child)
+    }
+  }
+  return target
+}
+
+function rememberCrossNodeTransitions(transitions, previousState, nextState) {
+  for (const domain of CROSS_NODE_STATE_DOMAINS) {
+    const previous = previousState[domain] || {}
+    const next = nextState[domain] || {}
+    for (const key of new Set([...Object.keys(previous), ...Object.keys(next)])) {
+      const previousHasKey = Object.prototype.hasOwnProperty.call(previous, key)
+      const nextHasKey = Object.prototype.hasOwnProperty.call(next, key)
+      if (
+        previousHasKey === nextHasKey
+        && (!previousHasKey || isSameObject(previous[key], next[key]))
+      ) continue
+      const current = transitions[domain].get(key)
+      if (current) {
+        current.nextHasKey = nextHasKey
+        current.next = next[key]
+      } else {
+        transitions[domain].set(key, {
+          previousHasKey,
+          previous: previous[key],
+          nextHasKey,
+          next: next[key],
+        })
+      }
+    }
+  }
+}
+
+function recordReferencesAnyNode(domain, record, nodeUids) {
+  if (!record || nodeUids.size === 0) return false
+  if (domain === 'relations') {
+    return nodeUids.has(String(record.sourceUid || ''))
+      || nodeUids.has(String(record.targetUid || ''))
+  }
+  if (domain === 'summaries') {
+    return nodeUids.has(String(record.ownerUid || ''))
+      || nodeUids.has(String(record.startChildUid || ''))
+      || nodeUids.has(String(record.endChildUid || ''))
+  }
+  if (domain === 'groups') {
+    return (record.memberUids || []).some(uid => nodeUids.has(String(uid)))
+  }
+  return false
+}
+
+function isPlainRecord(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype,
+  )
+}
+
+function setOwnRecordValue(target, key, value) {
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  })
+}
+
+function createJsonMergeFrame({
+  output,
+  previous,
+  next,
+  parent = null,
+  restore = null,
+}) {
+  return {
+    output,
+    previous,
+    next,
+    parent,
+    changed: false,
+    restore,
+    keys: [...new Set([...Object.keys(previous), ...Object.keys(next)])],
+    index: 0,
+  }
+}
+
+/** Apply only the JSON fields changed between the local before/after values. */
+export function mergeJsonValueDelta(existingValue, previousValue, nextValue) {
+  if (!isPlainRecord(previousValue) || !isPlainRecord(nextValue)) {
+    return cloneValue(
+      isSameObject(previousValue, nextValue) ? existingValue : nextValue,
+    )
+  }
+
+  const existingIsRecord = isPlainRecord(existingValue)
+  const result = existingIsRecord ? cloneValue(existingValue) : {}
+  const rootFrame = createJsonMergeFrame({
+    output: result,
+    previous: previousValue,
+    next: nextValue,
+  })
+  const pending = [rootFrame]
+  while (pending.length) {
+    const frame = pending.at(-1)
+    if (frame.index >= frame.keys.length) {
+      pending.pop()
+      if (!frame.changed && frame.restore) {
+        if (frame.restore.hadKey) {
+          setOwnRecordValue(
+            frame.restore.output,
+            frame.restore.key,
+            frame.restore.value,
+          )
+        } else {
+          delete frame.restore.output[frame.restore.key]
+        }
+      }
+      if (frame.changed && frame.parent) frame.parent.changed = true
+      continue
+    }
+
+    const key = frame.keys[frame.index]
+    frame.index += 1
+    const previousHasKey = Object.prototype.hasOwnProperty.call(frame.previous, key)
+    const nextHasKey = Object.prototype.hasOwnProperty.call(frame.next, key)
+    const previousChildValue = previousHasKey ? frame.previous[key] : undefined
+    const nextChildValue = nextHasKey ? frame.next[key] : undefined
+    if (
+      previousHasKey === nextHasKey
+      && previousHasKey
+      && previousChildValue === nextChildValue
+    ) continue
+    if (!nextHasKey) {
+      delete frame.output[key]
+      frame.changed = true
+      continue
+    }
+
+    if (!previousHasKey) {
+      setOwnRecordValue(frame.output, key, cloneValue(nextChildValue))
+      frame.changed = true
+      continue
+    }
+
+    if (isPlainRecord(previousChildValue) && isPlainRecord(nextChildValue)) {
+      const outputHadKey = Object.prototype.hasOwnProperty.call(frame.output, key)
+      const previousOutputValue = outputHadKey ? frame.output[key] : undefined
+      const outputChildIsRecord = isPlainRecord(previousOutputValue)
+      const outputChild = outputChildIsRecord ? previousOutputValue : {}
+      if (!outputChildIsRecord) setOwnRecordValue(frame.output, key, outputChild)
+      pending.push(createJsonMergeFrame({
+        output: outputChild,
+        previous: previousChildValue,
+        next: nextChildValue,
+        parent: frame,
+        restore: outputChildIsRecord ? null : {
+          output: frame.output,
+          key,
+          hadKey: outputHadKey,
+          value: previousOutputValue,
+        },
+      }))
+      continue
+    }
+
+    if (isSameObject(previousChildValue, nextChildValue)) continue
+    setOwnRecordValue(frame.output, key, cloneValue(nextChildValue))
+    frame.changed = true
+  }
+  return rootFrame.changed || existingIsRecord
+    ? result
+    : cloneValue(existingValue)
+}
+
+export function mergeGroupMemberDelta(existingMembers, previousMembers, nextMembers) {
+  const previous = new Set((previousMembers || []).map(String))
+  const next = new Set((nextMembers || []).map(String))
+  const removed = new Set([...previous].filter(uid => !next.has(uid)))
+  const merged = new Set(
+    (existingMembers || []).map(String).filter(uid => !removed.has(uid)),
+  )
+  for (const uid of next) {
+    if (!previous.has(uid)) merged.add(uid)
+  }
+  return [...merged].sort(compareStableStrings)
+}
+
+const DELETE_CROSS_NODE_RECORD = Symbol('delete-cross-node-record')
+
+function mergeCrossNodeRecord(domain, existingRecord, transition) {
+  if (domain !== 'groups' && !transition.nextHasKey) {
+    return DELETE_CROSS_NODE_RECORD
+  }
+  if (domain === 'groups' && !transition.nextHasKey) {
+    const remainingMembers = mergeGroupMemberDelta(
+      existingRecord?.memberUids,
+      transition.previous?.memberUids,
+      [],
+    )
+    // A group disappearing from the component tree usually means its last
+    // local member was removed, not that the logical group was hard-deleted.
+    // Keep an empty record so a concurrent collaborator adding another member
+    // is not hidden by a record-level tombstone. Empty groups are not rendered.
+    return {
+      ...cloneValue(existingRecord || transition.previous || {}),
+      memberUids: remainingMembers,
+    }
+  }
+
+  const merged = mergeJsonValueDelta(
+    existingRecord,
+    transition.previousHasKey ? transition.previous : {},
+    transition.next,
+  )
+  if (domain === 'groups') {
+    merged.memberUids = mergeGroupMemberDelta(
+      existingRecord?.memberUids,
+      transition.previousHasKey ? transition.previous?.memberUids : [],
+      transition.next?.memberUids,
+    )
+  }
+  return merged
+}
+
+/**
+ * Build a record-level cross-node patch from simple-mind-map history details.
+ * Untouched records are intentionally absent so an already-received remote
+ * change cannot be rolled back by a stale runtime snapshot.
+ */
+export function buildCrossNodeStateDelta(
+  detailList = [],
+  currentRoot,
+  existingState = {},
+  runtimePreviousState = null,
+) {
+  currentRoot = currentRoot?.root || currentRoot
+  const desiredState = extractCrossNodeState(currentRoot)
+  const normalizedExistingState = asCrossNodeStateObject(existingState)
+  const transitions = Object.fromEntries(
+    CROSS_NODE_STATE_DOMAINS.map(domain => [domain, new Map()]),
+  )
+  const deletedNodeUids = new Set()
+
+  // A detail without oldData cannot use the current Y.Map as its before state:
+  // it may already contain remote records not rendered into the stale canvas.
+  // The runtime shadow represents exactly what the user saw before this local
+  // operation, so a full before/after diff remains safe for legacy emitters.
+  if (runtimePreviousState) {
+    rememberCrossNodeTransitions(
+      transitions,
+      asCrossNodeStateObject(runtimePreviousState),
+      desiredState,
+    )
+  }
+
+  for (const detail of (Array.isArray(detailList) ? detailList : [])) {
+    const action = detail?.action
+    const previousTree = asDetailTree(
+      detail?.oldData || (action === 'delete' ? detail?.data : null),
+    )
+    const nextTree = action === 'delete' ? null : asDetailTree(detail?.data)
+    if (!runtimePreviousState && !(action === 'update' && !detail?.oldData)) {
+      const previousState = extractCrossNodeState(previousTree, {
+        validateReferences: false,
+      })
+      const nextState = extractCrossNodeState(nextTree, {
+        validateReferences: false,
+      })
+      rememberCrossNodeTransitions(transitions, previousState, nextState)
+    }
+
+    if (action === 'delete') {
+      collectDetailTreeNodeUids(previousTree, deletedNodeUids)
+    }
+  }
+
+  if (deletedNodeUids.size > 0) {
+    for (const [key, relation] of Object.entries(normalizedExistingState.relations)) {
+      if (
+        !transitions.relations.has(key)
+        && recordReferencesAnyNode('relations', relation, deletedNodeUids)
+      ) {
+        transitions.relations.set(key, {
+          previousHasKey: true,
+          previous: relation,
+          nextHasKey: false,
+          next: undefined,
+        })
+      }
+    }
+    for (const [key, summary] of Object.entries(normalizedExistingState.summaries)) {
+      if (
+        transitions.summaries.has(key)
+        || !recordReferencesAnyNode('summaries', summary, deletedNodeUids)
+      ) continue
+      const desired = desiredState.summaries[key]
+      transitions.summaries.set(key, {
+        previousHasKey: true,
+        previous: summary,
+        nextHasKey: Boolean(desired),
+        next: desired,
+      })
+    }
+    for (const [key, group] of Object.entries(normalizedExistingState.groups)) {
+      if (transitions.groups.has(key)) continue
+      const removedMembers = (group.memberUids || []).filter(uid => (
+        deletedNodeUids.has(String(uid))
+      ))
+      if (!removedMembers.length) continue
+      transitions.groups.set(key, {
+        previousHasKey: true,
+        previous: group,
+        nextHasKey: true,
+        next: {
+          ...group,
+          memberUids: (group.memberUids || []).filter(uid => (
+            !deletedNodeUids.has(String(uid))
+          )),
+        },
+      })
+    }
+  }
+
+  let hasChanges = false
+  const delta = {}
+  for (const domain of CROSS_NODE_STATE_DOMAINS) {
+    const upserts = {}
+    const deletedKeys = []
+    const entries = [...transitions[domain].entries()]
+      .sort(([left], [right]) => compareStableStrings(left, right))
+    for (const [key, transition] of entries) {
+      const existingHasKey = Object.prototype.hasOwnProperty.call(
+        normalizedExistingState[domain],
+        key,
+      )
+      // The record existed on the rendered canvas but has already been
+      // deleted remotely. Match the node update-vs-delete policy: deletion
+      // wins, rather than resurrecting a partial record from changed fields.
+      if (
+        transition.previousHasKey
+        && transition.nextHasKey
+        && !existingHasKey
+      ) continue
+      const existingRecord = normalizedExistingState[domain][key]
+      const mergedRecord = mergeCrossNodeRecord(domain, existingRecord, transition)
+      if (mergedRecord === DELETE_CROSS_NODE_RECORD) {
+        if (existingHasKey) {
+          deletedKeys.push(key)
+        }
+        continue
+      }
+      if (
+        !existingHasKey
+        || !isSameObject(existingRecord, mergedRecord)
+      ) {
+        upserts[key] = mergedRecord
+      }
+    }
+    if (Object.keys(upserts).length || deletedKeys.length) hasChanges = true
+    delta[domain] = { upserts, deletedKeys }
+  }
+  return hasChanges ? delta : null
 }
 
 /** Expand top-level records back into the exact shape simple-mind-map expects. */
@@ -200,23 +667,29 @@ export function applyCrossNodeState(root, state = {}) {
   }
 
   const relationsBySource = new Map()
-  for (const [, relation] of entriesOf(state.relations)) {
+  for (const [recordKey, relation] of entriesOf(state.relations)) {
     if (!relation || relation.relationType && relation.relationType !== 'associative_line') continue
     const sourceUid = String(relation.sourceUid || '')
     const targetUid = String(relation.targetUid || '')
     if (!nodes.has(sourceUid) || !nodes.has(targetUid)) continue
     const rows = relationsBySource.get(sourceUid) || []
-    rows.push(relation)
+    rows.push({ recordKey: String(recordKey), record: relation })
     relationsBySource.set(sourceUid, rows)
   }
   for (const [sourceUid, rows] of relationsBySource) {
-    rows.sort((left, right) => Number(left.sortOrder || 0) - Number(right.sortOrder || 0))
+    rows.sort((left, right) => (
+      Number(left.record.sortOrder || 0) - Number(right.record.sortOrder || 0)
+      || compareStableStrings(
+        left.record.relationUid || left.recordKey,
+        right.record.relationUid || right.recordKey,
+      )
+    ))
     const targets = []
     const offsets = []
     const points = []
     const texts = {}
     const styles = {}
-    for (const row of rows) {
+    for (const { record: row } of rows) {
       const targetUid = String(row.targetUid)
       targets.push(targetUid)
       offsets.push(cloneValue(row.controlData?.offsets))
@@ -235,18 +708,24 @@ export function applyCrossNodeState(root, state = {}) {
   }
 
   const summariesByOwner = new Map()
-  for (const [, summary] of entriesOf(state.summaries)) {
+  for (const [recordKey, summary] of entriesOf(state.summaries)) {
     if (!summary) continue
     const ownerUid = String(summary.ownerUid || '')
     if (!nodes.has(ownerUid)) continue
     const rows = summariesByOwner.get(ownerUid) || []
-    rows.push(summary)
+    rows.push({ recordKey: String(recordKey), record: summary })
     summariesByOwner.set(ownerUid, rows)
   }
   for (const [ownerUid, rows] of summariesByOwner) {
-    rows.sort((left, right) => Number(left.sortOrder || 0) - Number(right.sortOrder || 0))
+    rows.sort((left, right) => (
+      Number(left.record.sortOrder || 0) - Number(right.record.sortOrder || 0)
+      || compareStableStrings(
+        left.record.summaryUid || left.recordKey,
+        right.record.summaryUid || right.recordKey,
+      )
+    ))
     const childUids = (nodes.get(ownerUid).children || []).map(child => String(child.data?.uid || ''))
-    nodes.get(ownerUid).data.generalization = rows.map(row => {
+    nodes.get(ownerUid).data.generalization = rows.map(({ record: row }) => {
       const payload = cloneValue(row.payload || {})
       if (row.summaryUid) payload.uid = String(row.summaryUid)
       const startIndex = childUids.indexOf(String(row.startChildUid || ''))
@@ -256,7 +735,9 @@ export function applyCrossNodeState(root, state = {}) {
     })
   }
 
-  for (const [, group] of entriesOf(state.groups)) {
+  const orderedGroups = entriesOf(state.groups)
+    .sort(([left], [right]) => compareStableStrings(left, right))
+  for (const [, group] of orderedGroups) {
     if (!group || group.groupType && group.groupType !== 'outer_frame') continue
     const outerFrame = { ...(cloneValue(group.payload || {})), groupId: String(group.groupUid) }
     for (const memberUid of (group.memberUids || [])) {
@@ -266,7 +747,9 @@ export function applyCrossNodeState(root, state = {}) {
   }
 
   const imgMap = {}
-  for (const [key, asset] of entriesOf(state.assets)) {
+  const orderedAssets = entriesOf(state.assets)
+    .sort(([left], [right]) => compareStableStrings(left, right))
+  for (const [key, asset] of orderedAssets) {
     if (asset?.uri !== undefined && asset?.uri !== null) {
       imgMap[String(asset.assetKey ?? key)] = cloneValue(asset.uri)
     }

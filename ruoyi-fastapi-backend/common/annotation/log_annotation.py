@@ -19,7 +19,7 @@ from user_agents import parse
 from common.context import RequestContext
 from common.enums import BusinessType
 from config.env import AppConfig
-from exceptions.exception import LoginException, ServiceException, ServiceWarning
+from exceptions.exception import INTERNAL_SERVER_ERROR_MESSAGE, LoginException, ServiceException, ServiceWarning
 from module_admin.entity.vo.log_vo import LogininforModel, OperLogModel
 from module_admin.service.log_service import LogQueueService
 from utils.client_ip_util import ClientIPUtil
@@ -165,8 +165,9 @@ class Log:
             user_agent = request.headers.get('User-Agent') or ''
             # 获取操作类型
             operator_type = self._get_oper_type(user_agent)
-            # 获取请求的url
-            oper_url = request.url.path
+            # 记录路由模板而不是已展开的 URL，避免分享令牌、重置令牌等
+            # 路径参数进入操作日志的 operUrl 字段。
+            oper_url = self._get_oper_url(request)
             # 获取请求ip
             oper_ip = ClientIPUtil.get_client_ip(request)
             # 获取请求ip归属区域
@@ -198,7 +199,7 @@ class Log:
                 result = ResponseUtil.error(data=e.data, msg=e.message)
             except Exception as e:
                 logger.exception(e)
-                result = ResponseUtil.error(msg=str(e))
+                result = ResponseUtil.error(msg=INTERNAL_SERVER_ERROR_MESSAGE)
             # 获取请求耗时
             cost_time = float(time.perf_counter() - start_time) * 1000
             # 判断请求是否来自api文档
@@ -278,6 +279,22 @@ class Log:
         func_path = f'{module_path}.{func.__name__}()'
 
         return func_path
+
+    @staticmethod
+    def _get_oper_url(request: Request) -> str:
+        """
+        获取不包含真实路径参数的操作日志 URL
+
+        FastAPI 在调用端点前已把匹配到的路由写入 scope。优先记录路由模板，
+        例如 ``/mindmap/share/join/{share_token}``，防止令牌等敏感路径参数
+        被持久化到操作日志。非路由上下文保留原路径以兼容现有调用。
+
+        :param request: Request对象
+        :return: 路由模板或原始请求路径
+        """
+        route = request.scope.get('route')
+        route_path = getattr(route, 'path', None)
+        return route_path if isinstance(route_path, str) and route_path else request.url.path
 
     @staticmethod
     def _limit_log_text(log_text: str, max_length: int, overflow_text: str) -> str:

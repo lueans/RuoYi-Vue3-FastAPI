@@ -1,7 +1,12 @@
 import { Circle, G, Text, Image } from '@svgdotjs/svg.js'
 import { generateColorByContent } from '../../../utils/index'
+import { isNodeTextEditOccupied } from './nodeCooperateState'
 
 // 协同相关功能
+
+function getUserIdentity(userInfo) {
+  return userInfo.sessionId || userInfo.id
+}
 
 // 创建容器
 function createUserListNode() {
@@ -85,7 +90,7 @@ function updateUserListNode() {
 function addUser(userInfo) {
   if (
     this.userList.find(item => {
-      return item.id == userInfo.id
+      return getUserIdentity(item) == getUserIdentity(userInfo)
     })
   )
     return
@@ -96,7 +101,7 @@ function addUser(userInfo) {
 // 移除用户
 function removeUser(userInfo) {
   const index = this.userList.findIndex(item => {
-    return item.id == userInfo.id
+    return getUserIdentity(item) == getUserIdentity(userInfo)
   })
   if (index === -1) return
   this.userList.splice(index, 1)
@@ -109,6 +114,35 @@ function emptyUser() {
   this.updateUserListNode()
 }
 
+// 记录正在编辑节点文本的远端会话。这里不复用 userList，否则普通单击或
+// 多选会被误认为编辑锁；身份优先使用 sessionId，同账号不同浏览器互不覆盖。
+function addEditingUser(userInfo) {
+  if (!Array.isArray(this.editingUserList)) this.editingUserList = []
+  if (
+    this.editingUserList.find(item => {
+      return getUserIdentity(item) == getUserIdentity(userInfo)
+    })
+  ) return
+  this.editingUserList.push(userInfo)
+}
+
+function removeEditingUser(userInfo) {
+  if (!Array.isArray(this.editingUserList)) return
+  const index = this.editingUserList.findIndex(item => {
+    return getUserIdentity(item) == getUserIdentity(userInfo)
+  })
+  if (index === -1) return
+  this.editingUserList.splice(index, 1)
+}
+
+function emptyEditingUser() {
+  this.editingUserList = []
+}
+
+function isTextEditOccupied() {
+  return isNodeTextEditOccupied(this)
+}
+
 export default {
   createUserListNode,
   updateUserListNode,
@@ -116,5 +150,9 @@ export default {
   createImageAvatar,
   addUser,
   removeUser,
-  emptyUser
+  emptyUser,
+  addEditingUser,
+  removeEditingUser,
+  emptyEditingUser,
+  isTextEditOccupied
 }

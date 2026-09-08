@@ -289,7 +289,7 @@
           </span>
         </div>
         <div v-if="documentLoaded && isReadonly" class="readonly-mode-banner" role="group" aria-label="阅读模式">
-          <span>当前为只读预览</span>
+          <span>{{ readonlyModeMessage }}</span>
           <button v-if="canEnterEditMode" type="button" @click="enterEditMode">进入编辑</button>
         </div>
         <div
@@ -420,6 +420,13 @@ const canEnterEditMode = computed(() => (
   && documentStatus.value !== 1
   && contentState.value === 'ready'
 ))
+const readonlyModeMessage = computed(() => {
+  if (documentStatus.value === 1) return '该脑图已归档，恢复前只能预览'
+  if (serverCanEdit.value === false) {
+    return '当前账号只有查看权限；如需编辑，请让所有者在“协作者管理”中授予编辑权限'
+  }
+  return '当前为只读预览'
+})
 const mindmapName = ref('')
 const mindmapDescription = ref('')
 const documentNodeCount = ref(0)

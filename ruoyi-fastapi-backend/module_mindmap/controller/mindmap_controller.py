@@ -14,6 +14,7 @@ from common.router import APIRouterPro
 from common.vo import DataResponseModel, PageResponseModel, ResponseBaseModel
 from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_mindmap.entity.vo.mindmap_version_vo import (
+    MindmapVersionRestoreModel,
     MindmapVersionSaveModel,
 )
 from module_mindmap.entity.vo.mindmap_vo import (
@@ -232,8 +233,8 @@ async def batch_update_mindmap_status(
 
 @mindmap_controller.put(
     '/content',
-    summary='更新脑图内容接口',
-    description='用于自动保存脑图内容',
+    summary='兼容旧版整树保存接口',
+    description='整树保存仍必须携带 baseRevision 与稳定 clientMutationId；新客户端应使用批量增量接口',
     response_model=ResponseBaseModel,
     dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
 )
@@ -302,7 +303,7 @@ async def reset_mindmap_collaboration(
 @mindmap_controller.patch(
     '/file/{mindmap_id}/view',
     summary='保存脑图画布视图',
-    description='以后写覆盖方式保存平移和缩放，不推进正文 contentRevision',
+    description='按正文 contentRevision 栅栏保存平移和缩放；旧客户端缺少栅栏时安全忽略',
     dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
 )
 async def update_mindmap_view(
@@ -615,11 +616,16 @@ async def get_version_detail(
 async def restore_version(
     request: Request,
     version_id: Annotated[int, Path(description='版本ID')],
+    model: MindmapVersionRestoreModel,
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
 ) -> Response:
     result = await MindmapVersionService.restore_version_services(
-        query_db, version_id, current_user.user.user_id, current_user.user.user_name,
+        query_db,
+        version_id,
+        model,
+        current_user.user.user_id,
+        current_user.user.user_name,
     )
     return ResponseUtil.success(msg=result.message, data=result.result)
 

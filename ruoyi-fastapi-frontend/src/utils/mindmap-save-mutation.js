@@ -1,5 +1,61 @@
 import { cloneRequestPayload } from './requestPayload.js'
 
+/**
+ * Freeze the exact document carried by a rejected HTTP mutation before any
+ * asynchronous conflict recovery work can let a remote Yjs preview replace
+ * the live canvas. A previously captured snapshot wins on retries because the
+ * active mutation may already have been released after a reset attempt.
+ */
+export function captureRejectedMindmapMutationSnapshot({
+  mutation,
+  fallbackDocument,
+  previousSnapshot = null,
+  fallbackBaseRevision = null,
+  fallbackContentChangeVersion = null,
+} = {}) {
+  const sourceSnapshot = previousSnapshot?.document
+    ? previousSnapshot
+    : null
+  const sourceDocument = sourceSnapshot?.document
+    || mutation?.document
+    || fallbackDocument
+  if (!sourceDocument) return null
+
+  const baseRevision = Number(
+    sourceSnapshot?.baseRevision
+      ?? mutation?.baseRevision
+      ?? fallbackBaseRevision,
+  )
+  const contentChangeVersion = Number(
+    sourceSnapshot?.contentChangeVersion
+      ?? mutation?.contentChangeVersion
+      ?? fallbackContentChangeVersion,
+  )
+  const yjsUpdateCount = Number(
+    sourceSnapshot?.yjsUpdateCount
+      ?? mutation?.yjsUpdateCount
+      ?? 0,
+  )
+  return Object.freeze({
+    clientMutationId: String(
+      sourceSnapshot?.clientMutationId
+        || mutation?.clientMutationId
+        || '',
+    ),
+    baseRevision: Number.isInteger(baseRevision) && baseRevision > 0
+      ? baseRevision
+      : null,
+    contentChangeVersion: Number.isSafeInteger(contentChangeVersion)
+      && contentChangeVersion >= 0
+      ? contentChangeVersion
+      : null,
+    yjsUpdateCount: Number.isInteger(yjsUpdateCount) && yjsUpdateCount >= 0
+      ? yjsUpdateCount
+      : 0,
+    document: cloneRequestPayload(sourceDocument),
+  })
+}
+
 function isAutoRebaseSafeOperationSet(operations) {
   if (!Array.isArray(operations) || operations.length === 0) return false
   const createdNodeUids = new Set(
@@ -41,16 +97,27 @@ export function createMindmapSaveMutation({
   operations,
   document,
   viewChangeVersion,
+  contentChangeVersion = 0,
+  yjsUpdateCount = 0,
+  yjsDeliveryMode = 'sequenced',
   rebaseAttempts = 0,
 }) {
   if (!Array.isArray(operations) || operations.length === 0) return null
   if (!clientMutationId) throw new TypeError('Mindmap save mutation requires a clientMutationId')
+  if (!Number.isInteger(yjsUpdateCount) || yjsUpdateCount < 0) {
+    throw new TypeError('Mindmap save mutation requires a valid Yjs update count')
+  }
+  if (!['sequenced', 'reload'].includes(yjsDeliveryMode)) {
+    throw new TypeError('Mindmap save mutation requires a valid Yjs delivery mode')
+  }
 
   const frozenOperations = cloneRequestPayload(operations)
   const frozenDocument = cloneRequestPayload(document)
   const payload = Object.freeze({
     baseRevision,
     clientMutationId,
+    yjsUpdateCount,
+    yjsDeliveryMode,
     operations: frozenOperations,
     nodeTree: frozenDocument.root,
     viewData: frozenDocument.view,
@@ -65,6 +132,9 @@ export function createMindmapSaveMutation({
     operations: frozenOperations,
     document: frozenDocument,
     viewChangeVersion,
+    contentChangeVersion,
+    yjsUpdateCount,
+    yjsDeliveryMode,
     rebaseAttempts,
     payload,
   })
@@ -89,6 +159,10 @@ export function rebaseMindmapSaveMutation(mutation, conflictData, maxAttempts = 
   if (
     conflictData?.requiresSnapshot !== true
     || reportedConflicts
+    // 已发送过 Yjs 帧的批次绑定原始 collaboration revision/lineage。
+    // 即使 HTTP 操作本身可重放，也不能把同 mutation/frame 声明改基到
+    // 新 revision；只有从未发过实时帧的纯 HTTP 批次允许自动 rebase。
+    || mutation?.yjsUpdateCount !== 0
     || !Number.isInteger(currentRevision)
     || currentRevision <= Number(mutation?.baseRevision)
     || !isAutoRebaseSafeOperationSet(operations)
@@ -101,6 +175,9 @@ export function rebaseMindmapSaveMutation(mutation, conflictData, maxAttempts = 
     operations,
     document: mutation.document,
     viewChangeVersion: mutation.viewChangeVersion,
+    contentChangeVersion: mutation.contentChangeVersion,
+    yjsUpdateCount: mutation.yjsUpdateCount,
+    yjsDeliveryMode: mutation.yjsDeliveryMode,
     rebaseAttempts: Number(mutation.rebaseAttempts || 0) + 1,
   })
 }

@@ -6,7 +6,13 @@ import { getToken } from './auth.js'
 
 const WS_CAPABILITIES = [
   'structured-node-patch-v1',
+  'conditional-node-patch-v1',
   'yjs-checkpoint-v1',
+  'yjs-mutation-sequence-v1',
+  'yjs-lineage-v1',
+  'yjs-source-cas-v1',
+  'cross-node-crdt-v2',
+  'node-edit-lease-v1',
 ]
 const DEFAULT_CONNECT_TIMEOUT_MS = 10000
 const DEFAULT_AUTH_TIMEOUT_MS = 15000
@@ -296,7 +302,8 @@ export class MindmapWsClient {
             this._retireSocket(socket, generation, { closeSocket: true })
           }
         } else if (data.type === 'ping') {
-          // 心跳响应
+          // 心跳也可携带服务端刚从数据库复核的权威正文版本。
+          this.handlers.onHeartbeat?.(data)
           this.send({ type: 'pong' })
         } else if (this.isAuthenticated) {
           // 未识别的对象消息保持向前兼容；只有当前客户端已注册的类型才分发。

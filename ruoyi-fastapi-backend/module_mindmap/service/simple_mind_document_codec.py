@@ -106,7 +106,36 @@ def stable_relation_uid(source_uid: str, target_uid: str) -> str:
 
 
 def _clone(value: Any) -> Any:
-    return copy.deepcopy(value)
+    return clone_json_value(value)
+
+
+def clone_json_value(value: Any) -> Any:
+    """用显式栈复制 JSON 容器，避免深层扩展数据耗尽 Python 调用栈。"""
+    if not isinstance(value, (dict, list)):
+        return copy.deepcopy(value)
+
+    root: dict[Any, Any] | list[Any] = {} if isinstance(value, dict) else []
+    memo: dict[int, Any] = {id(value): root}
+    pending: list[tuple[dict[Any, Any] | list[Any], dict[Any, Any] | list[Any]]] = [
+        (value, root),
+    ]
+    while pending:
+        source, target = pending.pop()
+        items = source.items() if isinstance(source, dict) else enumerate(source)
+        for key, child in items:
+            if isinstance(child, (dict, list)):
+                cloned_child = memo.get(id(child))
+                if cloned_child is None:
+                    cloned_child = {} if isinstance(child, dict) else []
+                    memo[id(child)] = cloned_child
+                    pending.append((child, cloned_child))
+            else:
+                cloned_child = copy.deepcopy(child)
+            if isinstance(target, dict):
+                target[key] = cloned_child
+            else:
+                target.append(cloned_child)
+    return root
 
 
 def _clone_mindmap_tree(root: dict[str, Any]) -> dict[str, Any]:

@@ -184,6 +184,11 @@ class RichText {
     if (this.showTextEdit) {
       return
     }
+    const textEdit = this.mindMap.renderer.textEdit
+    if (textEdit.isTextEditBlockedByRemote(node)) {
+      textEdit.emitTextEditBlocked(node)
+      return
+    }
     let {
       customInnerElsAppendTo,
       nodeTextEditZIndex,
@@ -286,6 +291,7 @@ class RichText {
     this.initQuillEditor()
     this.setQuillContainerMinHeight(originHeight)
     this.setIsShowTextEdit(true)
+    this.mindMap.emit('node_text_edit_start', node)
     // 如果是刚创建的节点，那么默认全选，否则普通激活不全选，除非selectTextOnEnterEditText配置为true
     // 在selectTextOnEnterEditText时，如果是在keydown事件进入的节点编辑，也不需要全选
     this.focus(
@@ -378,14 +384,23 @@ class RichText {
     this.mindMap.emit('rich_text_selection_change', false)
     this.node = null
     this.isInserting = false
-    list.forEach(node => {
-      this.mindMap.execCommand('SET_NODE_TEXT', node, html, true)
-      // if (node.isGeneralization) {
-      // 概要节点
-      // node.generalizationBelongNode.updateGeneralization()
-      // }
-      this.mindMap.render()
-    })
+    try {
+      list.forEach(node => {
+        this.mindMap.execCommand('SET_NODE_TEXT', node, html, true)
+        // 与租约释放建立同一同步边界：历史节流中的最终文本必须先触发
+        // data_change_detail/Yjs update，再允许其他浏览器取得该节点。
+        this.mindMap.command?.flushPendingHistory?.()
+        // if (node.isGeneralization) {
+        // 概要节点
+        // node.generalizationBelongNode.updateGeneralization()
+        // }
+        this.mindMap.render()
+      })
+    } finally {
+      // 与普通文本保持相同线性化顺序：正常时先提交再释放，异常时
+      // 也必须释放以避免假锁。
+      this.mindMap.emit('node_text_edit_end', node)
+    }
     this.mindMap.emit('hide_text_edit', this.textEditNode, list, node)
   }
 

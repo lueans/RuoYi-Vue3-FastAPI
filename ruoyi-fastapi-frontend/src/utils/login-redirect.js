@@ -41,6 +41,17 @@ export function createLoginRedirectLocation(fullPath) {
 }
 
 /**
+ * 认证过期时保存当前站内地址。先退出再重新访问该地址，路由守卫会生成
+ * 正确编码的登录 redirect，登录完成后即可回到原脑图及其查询/节点位置。
+ */
+export function getCurrentLoginReturnPath(locationRef = globalThis.location) {
+  if (!locationRef) return DEFAULT_LOGIN_REDIRECT
+  return normalizeLoginRedirect(
+    `${locationRef.pathname || '/'}${locationRef.search || ''}${locationRef.hash || ''}`,
+  )
+}
+
+/**
  * 还原登录后的完整站内地址，并兼容旧版本已经拆散的登录链接：
  * `/login?redirect=/mindmap/edit&id=122`。
  */

@@ -108,3 +108,37 @@ async def view_by_share_token(
 ) -> Response:
     result = await MindmapShareService.view_by_share_token(query_db, share_token)
     return ResponseUtil.success(data=result)
+
+
+# ──────────────────── 领取编辑邀请（需要登录） ────────────────────
+
+@mindmap_share_controller.post(
+    '/join/{share_token}',
+    summary='通过分享链接加入编辑',
+    description='已登录用户领取编辑邀请并成为脑图编辑协作者',
+    response_model=ResponseBaseModel,
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('edit'))],
+)
+@Log(
+    title='脑图分享',
+    business_type=BusinessType.INSERT,
+    # 分享 token 是领取邀请所需的 bearer secret。无论部署环境是否启用
+    # 通用日志脱敏，都不应把该请求载荷写入操作日志；操作者、动作和路由
+    # 模板仍会正常记录，足以满足审计需要。
+    request_log_mode='none',
+)
+async def join_edit_share(
+    request: Request,
+    share_token: Annotated[str, Path(description='分享token')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await MindmapShareService.join_edit_share(
+        query_db,
+        share_token,
+        current_user.user.user_id,
+    )
+    return ResponseUtil.success(
+        data=result.model_dump(by_alias=True),
+        msg='已加入脑图编辑',
+    )

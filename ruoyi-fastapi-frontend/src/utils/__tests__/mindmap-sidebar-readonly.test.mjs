@@ -60,9 +60,16 @@ test('节点样式类侧栏在直接写入边界重新校验只读状态', async
   assert.doesNotMatch(nodeIcon, /node\.setIcon/)
 
   assert.match(formula, /:disabled="!canInsertFormula"/)
-  assert.match(formula, /const canInsertFormula = computed[\s\S]*!isReadonly\.value[\s\S]*store\.activeSidebar === 'formulaSidebar'[\s\S]*node\?\.mindMap === activeMindMap/)
-  assert.match(formula, /function confirm\(\)[\s\S]*if \(!canInsertFormula\.value \|\| !activeMindMap\) return/)
-  assert.match(formula, /activeMindMap\.execCommand\('INSERT_FORMULA', str\)/)
+  assert.match(formula, /:disabled="isReadonly \|\| formulaSubmitting"/)
+  assert.match(formula, /:loading="formulaSubmitting"/)
+  assert.match(formula, /const canInsertFormula = computed[\s\S]*!isReadonly\.value[\s\S]*!formulaSubmitting\.value[\s\S]*store\.activeSidebar === 'formulaSidebar'[\s\S]*node\?\.mindMap === activeMindMap/)
+  assert.match(formula, /async function confirm\(\)[\s\S]*if \(!canInsertFormula\.value \|\| !activeMindMap\) return/)
+  assert.match(formula, /await activeMindMap\.formula\.insertFormulaToNodes\([\s\S]*targetNodes,[\s\S]*str/)
+  assert.match(
+    formula,
+    /insertedCount > 0 && formulaText\.value\.trim\(\) === str[\s\S]*?formulaText\.value = ''/,
+  )
+  assert.match(formula, /formulaSubmitting\.value = true[\s\S]*finally \{[\s\S]*formulaSubmitting\.value = false/)
 
   assert.match(structure, /:disabled="isReadonly"/)
   assert.match(structure, /function useLayout[\s\S]*isReadonly\.value[\s\S]*props\.mindMap\.setLayout/)

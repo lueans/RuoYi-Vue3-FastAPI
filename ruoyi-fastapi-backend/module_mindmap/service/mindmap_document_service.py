@@ -5,10 +5,11 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import and_, case, or_, select, update
 
 from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
+from module_mindmap.dao.mindmap_tag_dao import MindmapTagDao
 from module_mindmap.entity.do.mindmap_content_do import MindmapNode, MindmapNodeTag
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
 from module_mindmap.service.mindmap_marker_tags import promote_legacy_marker_tags
@@ -88,19 +89,26 @@ class MindmapDocumentService:
         owner_id: int,
         operator: str,
         allow_disabled_bindings: bool = False,
+        *,
+        for_update: bool = False,
     ) -> dict[str, Any]:
         encoded = SimpleMindDocumentCodec.encode(root)
         await promote_legacy_marker_tags(db, encoded)
-        existing_bindings = await cls._load_existing_tag_bindings(db, file_id)
-        old_tag_ids = set((await db.execute(
-            select(MindmapNodeTag.tag_id).where(MindmapNodeTag.file_id == file_id).distinct()
-        )).scalars())
-        await cls._resolve_tag_bindings(
-            db, encoded.node_tags, owner_id, operator, existing_bindings,
+        old_tag_ids, new_tag_ids = await cls._lock_and_resolve_tag_bindings(
+            db,
+            file_id,
+            encoded.node_tags,
+            owner_id,
+            operator,
             allow_disabled_bindings,
         )
-        new_tag_ids = {row['tag_id'] for row in encoded.node_tags if row.get('tag_id')}
-        metadata = await MindmapContentDao.replace_document(db, file_id, encoded, operator)
+        metadata = await MindmapContentDao.replace_document(
+            db,
+            file_id,
+            encoded,
+            operator,
+            for_update=for_update,
+        )
         await cls._refresh_tag_usage(db, old_tag_ids | new_tag_ids)
         return {
             **metadata,
@@ -122,16 +130,21 @@ class MindmapDocumentService:
         """增量物化文档并保留节点、关系等已有主键。"""
         encoded = SimpleMindDocumentCodec.encode(root)
         await promote_legacy_marker_tags(db, encoded)
-        existing_bindings = await cls._load_existing_tag_bindings(db, file_id)
-        old_tag_ids = set((await db.execute(
-            select(MindmapNodeTag.tag_id).where(MindmapNodeTag.file_id == file_id).distinct()
-        )).scalars())
-        await cls._resolve_tag_bindings(
-            db, encoded.node_tags, owner_id, operator, existing_bindings,
+        old_tag_ids, new_tag_ids = await cls._lock_and_resolve_tag_bindings(
+            db,
+            file_id,
+            encoded.node_tags,
+            owner_id,
+            operator,
             allow_disabled_bindings,
         )
-        new_tag_ids = {row['tag_id'] for row in encoded.node_tags if row.get('tag_id')}
-        metadata = await MindmapContentDao.sync_document(db, file_id, encoded, operator)
+        metadata = await MindmapContentDao.sync_document(
+            db,
+            file_id,
+            encoded,
+            operator,
+            for_update=True,
+        )
         await cls._refresh_tag_usage(db, old_tag_ids | new_tag_ids)
         return {
             **metadata,
@@ -142,10 +155,19 @@ class MindmapDocumentService:
 
     @classmethod
     async def load_tree(
-        cls, db: AsyncSession, file_id: int, *, required: bool = False,
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        *,
+        required: bool = False,
+        for_update: bool = False,
     ) -> dict[str, Any] | None:
         try:
-            document = await MindmapContentDao.load_document(db, file_id)
+            document = await MindmapContentDao.load_document(
+                db,
+                file_id,
+                for_update=for_update,
+            )
             if not document:
                 if required:
                     logger.error(f'脑图结构化内容完整性校验失败: file_id={file_id}, reason=节点记录不存在')
@@ -190,13 +212,63 @@ class MindmapDocumentService:
         """删除结构化内容并同步标签使用量缓存。"""
         if not file_ids:
             return
-        tag_ids = set((await db.execute(
+        tag_id_query = (
             select(MindmapNodeTag.tag_id)
             .where(MindmapNodeTag.file_id.in_(file_ids))
-            .distinct()
-        )).scalars())
-        await MindmapContentDao.delete_document(db, file_ids)
+            .order_by(MindmapNodeTag.tag_id.asc(), MindmapNodeTag.id.asc())
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        tag_ids = set((await db.execute(tag_id_query)).scalars())
+        # 调用方已按 file_id 锁定 Mindmap。删除绑定前继续按 tag_id 锁定
+        # 标签，和正文保存、标签治理保持统一的 Mindmap -> Tag -> binding 锁序。
+        await MindmapTagDao.get_tags_by_ids(db, tag_ids, for_update=True)
+        await MindmapContentDao.delete_document(db, file_ids, for_update=True)
         await cls._refresh_tag_usage(db, tag_ids)
+
+    @classmethod
+    async def _lock_and_resolve_tag_bindings(
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        bindings: list[dict[str, Any]],
+        owner_id: int,
+        operator: str,
+        allow_disabled_bindings: bool,
+    ) -> tuple[set[int], set[int]]:
+        """锁定旧、新标签后再校验绑定，阻断治理与正文保存的 TOCTOU。"""
+        existing_bindings = await cls._load_existing_tag_bindings(
+            db,
+            file_id,
+            for_update=True,
+        )
+        old_tag_query = (
+            select(MindmapNodeTag.tag_id)
+            .where(MindmapNodeTag.file_id == file_id)
+            .order_by(MindmapNodeTag.tag_id.asc(), MindmapNodeTag.id.asc())
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+        old_tag_ids = set((await db.execute(old_tag_query)).scalars())
+        locked_context = await cls._prefetch_tag_binding_context(
+            db,
+            bindings,
+            owner_id=owner_id,
+            additional_tag_ids=old_tag_ids,
+            for_update=True,
+        )
+        await cls._resolve_tag_bindings(
+            db,
+            bindings,
+            owner_id,
+            operator,
+            existing_bindings,
+            allow_disabled_bindings,
+            cache=locked_context,
+            context_locked=True,
+        )
+        new_tag_ids = {row['tag_id'] for row in bindings if row.get('tag_id')}
+        return old_tag_ids, new_tag_ids
 
     @classmethod
     async def _resolve_tag_bindings(
@@ -207,12 +279,23 @@ class MindmapDocumentService:
         operator: str,
         existing_bindings: set[tuple[str, int]],
         allow_disabled_bindings: bool,
+        *,
+        cache: dict[str, MindmapTag] | None = None,
+        context_locked: bool = False,
     ) -> None:
-        cache = await cls._prefetch_tag_binding_context(db, bindings)
+        if cache is None:
+            cache = await cls._prefetch_tag_binding_context(db, bindings)
         deduplicated: list[dict[str, Any]] = []
         seen: set[tuple[str, int]] = set()
         for binding in bindings:
-            tag = await cls._resolve_single_tag(db, binding.get('raw'), owner_id, operator, cache)
+            tag = await cls._resolve_single_tag(
+                db,
+                binding.get('raw'),
+                owner_id,
+                operator,
+                cache,
+                context_locked=context_locked,
+            )
             if not tag:
                 continue
             raw = binding.get('raw') if isinstance(binding.get('raw'), dict) else {}
@@ -238,47 +321,82 @@ class MindmapDocumentService:
     async def _load_existing_tag_bindings(
         db: AsyncSession,
         file_id: int,
+        *,
+        for_update: bool = False,
     ) -> set[tuple[str, int]]:
-        rows = (await db.execute(
+        query = (
             select(MindmapNode.node_uid, MindmapNodeTag.tag_id)
             .join(MindmapNodeTag, MindmapNodeTag.node_id == MindmapNode.id)
             .where(
                 MindmapNode.file_id == file_id,
                 MindmapNode.is_deleted == 0,
             )
-        )).all()
+            .order_by(MindmapNode.id.asc(), MindmapNodeTag.id.asc())
+        )
+        if for_update:
+            query = query.with_for_update(read=True).execution_options(populate_existing=True)
+        rows = (await db.execute(query)).all()
         return {(str(node_uid), tag_id) for node_uid, tag_id in rows}
 
     @staticmethod
     async def _prefetch_tag_binding_context(
         db: AsyncSession,
         bindings: list[dict[str, Any]],
+        *,
+        owner_id: int | None = None,
+        additional_tag_ids: set[int] | None = None,
+        for_update: bool = False,
     ) -> dict[str, MindmapTag]:
         """一次预取标签，避免大文档保存时逐标签查询。"""
         cache: dict[str, MindmapTag] = {}
-        raw_dicts = [
-            binding['raw']
-            for binding in bindings
-            if isinstance(binding.get('raw'), dict)
-        ]
-        tag_ids = {
+        raw_values = [binding.get('raw') for binding in bindings]
+        raw_dicts = [raw for raw in raw_values if isinstance(raw, dict)]
+        tag_ids = set(additional_tag_ids or ()) | {
             tag_id
             for raw in raw_dicts
             if (tag_id := _optional_int(raw.get('tagId') or raw.get('id'))) is not None
         }
         tag_uuids = {str(raw['uuid']) for raw in raw_dicts if raw.get('uuid')}
+        custom_names = {
+            str(name).strip()[:200]
+            for raw in raw_values
+            if (
+                (
+                    isinstance(raw, dict)
+                    and not (raw.get('tagId') or raw.get('id') or raw.get('uuid'))
+                    and (name := raw.get('text')) is not None
+                )
+                or (not isinstance(raw, dict) and (name := raw) is not None)
+            )
+            and str(name).strip()
+        }
+        custom_tag_keys = {build_custom_tag_key(name) for name in custom_names}
         tag_conditions = []
         if tag_ids:
             tag_conditions.append(MindmapTag.id.in_(tag_ids))
         if tag_uuids:
             tag_conditions.append(MindmapTag.uuid.in_(tag_uuids))
-        prefetched_tags = list((await db.execute(
-            select(MindmapTag).where(or_(*tag_conditions))
-        )).scalars()) if tag_conditions else []
+        if owner_id is not None and custom_tag_keys:
+            tag_conditions.append(and_(
+                MindmapTag.owner_id == owner_id,
+                MindmapTag.tag_key.in_(custom_tag_keys),
+            ))
+        if tag_conditions:
+            query = (
+                select(MindmapTag)
+                .where(or_(*tag_conditions))
+                .order_by(MindmapTag.id.asc())
+            )
+            if for_update:
+                query = query.with_for_update().execution_options(populate_existing=True)
+            prefetched_tags = list((await db.execute(query)).scalars())
+        else:
+            prefetched_tags = []
         for tag in prefetched_tags:
             cache[f'id:{tag.id}'] = tag
             if tag.uuid:
                 cache[f'uuid:{tag.uuid}'] = tag
+            cache[f'key:{tag.owner_id}:{tag.tag_key}'] = tag
         return cache
 
     @classmethod
@@ -289,6 +407,8 @@ class MindmapDocumentService:
         owner_id: int,
         operator: str,
         cache: dict[str, MindmapTag],
+        *,
+        context_locked: bool = False,
     ) -> MindmapTag | None:
         raw_dict = raw if isinstance(raw, dict) else {}
         tag_id = raw_dict.get('tagId') or raw_dict.get('id')
@@ -302,6 +422,9 @@ class MindmapDocumentService:
         cache_key = f'id:{tag_id}' if tag_id else f'uuid:{tag_uuid}' if tag_uuid else ''
         if cache_key and cache_key in cache:
             return cache[cache_key]
+        if context_locked and (tag_id or tag_uuid):
+            identifier = tag_id or tag_uuid
+            raise ValueError(f'标签不存在: {identifier}')
         tag = await MindmapContentDao.find_tag(db, tag_id=tag_id, tag_uuid=tag_uuid)
         if tag:
             if cache_key:
@@ -319,10 +442,12 @@ class MindmapDocumentService:
         cache_key = f'key:{owner_id}:{tag_key}'
         if cache_key in cache:
             return cache[cache_key]
-        tag = (await db.execute(select(MindmapTag).where(
-            MindmapTag.owner_id == owner_id,
-            MindmapTag.tag_key == tag_key,
-        ))).scalars().first()
+        tag = None
+        if not context_locked:
+            tag = (await db.execute(select(MindmapTag).where(
+                MindmapTag.owner_id == owner_id,
+                MindmapTag.tag_key == tag_key,
+            ))).scalars().first()
         if not tag:
             style = raw_dict.get('style') if isinstance(raw_dict.get('style'), dict) else None
             tag = MindmapTag(
@@ -354,15 +479,26 @@ class MindmapDocumentService:
         rows = (await db.execute(
             select(
                 MindmapNodeTag.tag_id,
-                func.count(MindmapNodeTag.id),
-                func.count(func.distinct(MindmapNodeTag.file_id)),
+                MindmapNodeTag.file_id,
             )
             .where(MindmapNodeTag.tag_id.in_(tag_ids))
-            .group_by(MindmapNodeTag.tag_id)
+            .order_by(
+                MindmapNodeTag.tag_id.asc(),
+                MindmapNodeTag.file_id.asc(),
+                MindmapNodeTag.id.asc(),
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
         )).all()
-        counts = {tag_id: (node_count, file_count) for tag_id, node_count, file_count in rows}
-        node_counts = {tag_id: counts.get(tag_id, (0, 0))[0] for tag_id in tag_ids}
-        file_counts = {tag_id: counts.get(tag_id, (0, 0))[1] for tag_id in tag_ids}
+        node_counts: dict[int, int] = {}
+        file_ids_by_tag: dict[int, set[int]] = {}
+        for tag_id, file_id in rows:
+            node_counts[tag_id] = node_counts.get(tag_id, 0) + 1
+            file_ids_by_tag.setdefault(tag_id, set()).add(file_id)
+        file_counts = {
+            tag_id: len(file_ids_by_tag.get(tag_id, set()))
+            for tag_id in tag_ids
+        }
         await db.execute(
             update(MindmapTag)
             .where(MindmapTag.id.in_(tag_ids))

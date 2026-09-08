@@ -126,6 +126,10 @@ export const defaultOpt = {
   useLeftKeySelectionRightKeyDrag: false,
   // 节点即将进入编辑前的回调方法，如果该方法返回true以外的值，那么将取消编辑，函数可以返回一个值，或一个Promise，回调参数为节点实例
   beforeTextEdit: null,
+  // 协作层是否已启用服务端权威节点编辑租约；启用后 Presence 仅作展示，
+  // 是否能进入编辑由 beforeTextEdit 的租约申请结果决定。
+  isNodeTextEditLeaseAuthoritative: null,
+  releaseNodeTextEditLease: null,
   // 是否开启自定义节点内容
   isUseCustomNodeContent: false,
   // 自定义返回节点内容的方法
@@ -184,6 +188,9 @@ export const defaultOpt = {
   },
   // 协同编辑时，同一个节点不能同时被多人选中
   onlyOneEnableActiveNodeOnCooperate: false,
+  // 协同编辑时，同一个节点文本不能同时被多个远端会话编辑。与节点选区
+  // 分开控制，避免协作者仅选中节点就长期阻塞其他人编辑。
+  onlyOneEnableTextEditOnCooperate: false,
   // 插入概要的默认文本
   defaultGeneralizationText: '概要',
   // 粘贴文本的方式创建新节点时，控制是否按换行自动分割节点，即如果存在换行，那么会根据换行创建多个节点，否则只会创建一个节点

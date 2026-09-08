@@ -52,6 +52,8 @@ class MindmapTagPortabilityService:
         root: dict[str, Any],
         target_owner_id: int,
         allow_disabled_references: bool = False,
+        *,
+        for_update: bool = False,
     ) -> dict[str, Any]:
         tree = copy.deepcopy(root)
         tag_objects = cls._collect_tag_objects(tree)
@@ -68,9 +70,20 @@ class MindmapTagPortabilityService:
             conditions.append(MindmapTag.id.in_(tag_ids))
         if tag_uuids:
             conditions.append(MindmapTag.uuid.in_(tag_uuids))
-        tag_models = list((await db.execute(
-            select(MindmapTag).where(or_(*conditions))
-        )).scalars()) if conditions else []
+        if conditions:
+            query = (
+                select(MindmapTag)
+                .where(or_(*conditions))
+                .order_by(MindmapTag.id.asc())
+            )
+            if for_update:
+                # 版本恢复在请求早期已做过普通版本查询。在 MySQL
+                # REPEATABLE READ 下，后续普通 SELECT 会继续命中该旧快照；
+                # 锁定并刷新 identity map，确保可携带性基于当前标签定义。
+                query = query.with_for_update().execution_options(populate_existing=True)
+            tag_models = list((await db.execute(query)).scalars())
+        else:
+            tag_models = []
         tags_by_id = {tag.id: tag for tag in tag_models}
         tags_by_uuid = {tag.uuid: tag for tag in tag_models if tag.uuid}
 
@@ -118,11 +131,9 @@ class MindmapTagPortabilityService:
     ) -> bool:
         allowed_statuses = {0, 1} if allow_disabled_references else {0}
         has_tag_identity = bool(raw.get('tagId') or raw.get('id') or raw.get('uuid'))
-        if has_tag_identity and (
+        return not has_tag_identity or not (
             not tag or tag.owner_id not in (0, target_owner_id) or tag.status not in allowed_statuses
-        ):
-            return False
-        return True
+        )
 
     @staticmethod
     def _fallback_definition(

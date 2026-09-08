@@ -1,6 +1,8 @@
 import katex from 'katex'
 import Quill from 'quill'
 import { getChromeVersion, htmlEscape } from '../utils/index'
+import { ERROR_TYPES } from '../constants/constant'
+import { resolveCurrentNodeTextEditTarget } from '../core/render/node/nodeCooperateState'
 import { getBaseStyleText, getFontStyleText } from './FormulaStyle'
 
 let extended = false
@@ -106,15 +108,92 @@ class Formula {
   }
 
   // 给指定的节点插入指定公式
-  insertFormulaToNode(node, formula) {
+  async insertFormulaToNode(node, formula) {
     const richTextPlugin = this.mindMap.richText
-    richTextPlugin.showEditText({ node })
-    richTextPlugin.quill.insertEmbed(
-      richTextPlugin.quill.getLength() - 1,
-      'formula',
-      formula
+    const currentEditingNode = richTextPlugin.showTextEdit
+      ? richTextPlugin.node
+      : null
+    // 不为插入公式抢走另一个尚未提交的浮层编辑会话；同一节点则沿用
+    // 现有编辑器，但仍必须先通过权威租约检查。
+    if (currentEditingNode && currentEditingNode !== node) return false
+
+    const authoritativeNodeEditLease = (
+      typeof this.mindMap.opt.isNodeTextEditLeaseAuthoritative === 'function'
+      && this.mindMap.opt.isNodeTextEditLeaseAuthoritative()
     )
-    richTextPlugin.hideEditText([node])
+    let leasedNodeUid = ''
+    let targetNode = node
+    try {
+      const { beforeTextEdit } = this.mindMap.opt
+      if (
+        typeof beforeTextEdit === 'function'
+        && await beforeTextEdit(node, false) !== true
+      ) return false
+
+      if (authoritativeNodeEditLease) {
+        leasedNodeUid = node?.uid || node?.getData?.('uid') || ''
+        targetNode = resolveCurrentNodeTextEditTarget(
+          node,
+          this.mindMap.renderer,
+          {
+            authoritative: true,
+            readonly: this.mindMap.opt.readonly
+          }
+        )
+        // 申请等待期间可能收到删除或整树替换。绝不能把公式写回旧实例；
+        // finally 会归还刚授予的租约。
+        if (!targetNode) return false
+      }
+
+      richTextPlugin.showEditText({ node: targetNode })
+      if (
+        !richTextPlugin.showTextEdit
+        || richTextPlugin.node !== targetNode
+        || !richTextPlugin.quill
+      ) return false
+      richTextPlugin.quill.insertEmbed(
+        richTextPlugin.quill.getLength() - 1,
+        'formula',
+        formula
+      )
+      // hideEditText 内部严格按 SET_NODE_TEXT -> flushPendingHistory ->
+      // node_text_edit_end 的顺序提交并释放；finally 再做 owner-only 兜底。
+      richTextPlugin.hideEditText([targetNode])
+      return true
+    } catch (error) {
+      this.mindMap.opt.errorHandler(ERROR_TYPES.BEFORE_TEXT_EDIT_ERROR, error)
+      return false
+    } finally {
+      if (
+        richTextPlugin.showTextEdit
+        && richTextPlugin.node === targetNode
+      ) {
+        try {
+          richTextPlugin.hideEditText([targetNode])
+        } catch (error) {
+          this.mindMap.opt.errorHandler(
+            ERROR_TYPES.BEFORE_TEXT_EDIT_ERROR,
+            error
+          )
+        }
+      }
+      if (leasedNodeUid) {
+        this.mindMap.opt.releaseNodeTextEditLease?.(leasedNodeUid)
+      }
+    }
+  }
+
+  // 以明确的异步结果批量插入公式。命令总线保持同步兼容，侧栏则直接
+  // await 此 API，只有至少一个目标真正提交后才清空用户输入。
+  async insertFormulaToNodes(nodes, formula) {
+    if (this.mindMap.opt.readonly) return 0
+    const list = Array.isArray(nodes) ? nodes : [nodes]
+    let insertedCount = 0
+    for (const node of list) {
+      if (!node) continue
+      if (await this.insertFormulaToNode(node, formula)) insertedCount += 1
+    }
+    return insertedCount
   }
 
   // 将公式富文本转换为公式源码

@@ -46,6 +46,17 @@ def _session_expiring(*records: _ExpireAfterCommitRecord) -> SimpleNamespace:
     )
 
 
+def _session_expiring_on_rollback(*records: _ExpireAfterCommitRecord) -> SimpleNamespace:
+    async def expire_records() -> None:
+        for record in records:
+            record.expire()
+
+    return SimpleNamespace(
+        commit=AsyncMock(),
+        rollback=AsyncMock(side_effect=expire_records),
+    )
+
+
 class MindmapCommentServiceTest(unittest.IsolatedAsyncioTestCase):
     def test_comment_models_trim_and_reject_blank_content(self) -> None:
         model = MindmapCommentCreateModel(mindmapId=5, nodeUid=' node-1 ', content='  需要确认  ')
@@ -305,20 +316,20 @@ class MindmapCommentServiceTest(unittest.IsolatedAsyncioTestCase):
         broadcast_mock.assert_awaited_once_with(5, 'replied', 19, 'node-1')
 
     async def test_delete_retry_is_idempotent(self) -> None:
-        comment = SimpleNamespace(
+        comment = _ExpireAfterCommitRecord(
             id=23,
             thread_id=19,
             created_by=7,
             del_flag='2',
         )
-        thread = SimpleNamespace(
+        thread = _ExpireAfterCommitRecord(
             id=19,
             mindmap_id=5,
             node_uid='node-1',
             created_by=7,
             del_flag='2',
         )
-        db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+        db = _session_expiring_on_rollback(comment, thread)
         with (
             patch(
                 'module_mindmap.service.mindmap_comment_service.MindmapCommentDao.get_comment',

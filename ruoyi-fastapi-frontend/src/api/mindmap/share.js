@@ -5,7 +5,8 @@ export function createShareLink(data) {
   return request({
     url: '/mindmap/share/link',
     method: 'post',
-    data: data
+    data: data,
+    silentError: true,
   })
 }
 
@@ -13,7 +14,8 @@ export function createShareLink(data) {
 export function getShareLinks(mindmapId) {
   return request({
     url: '/mindmap/share/link/' + mindmapId,
-    method: 'get'
+    method: 'get',
+    silentError: true,
   })
 }
 
@@ -21,7 +23,8 @@ export function getShareLinks(mindmapId) {
 export function deleteShareLink(shareId) {
   return request({
     url: '/mindmap/share/link/' + shareId,
-    method: 'delete'
+    method: 'delete',
+    silentError: true,
   })
 }
 
@@ -32,5 +35,16 @@ export function viewByShareToken(shareToken, { signal } = {}) {
     method: 'get',
     headers: { isToken: false },
     signal,
+    silentError: true,
+  })
+}
+
+// 已登录用户通过编辑邀请加入脑图
+export function joinEditShare(shareToken, { signal } = {}) {
+  return request({
+    url: '/mindmap/share/join/' + encodeURIComponent(String(shareToken)),
+    method: 'post',
+    signal,
+    silentError: true,
   })
 }

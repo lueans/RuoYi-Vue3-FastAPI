@@ -13,6 +13,12 @@ test('公开分享详情请求编码路径令牌并支持取消', async () => {
   assert.match(viewBlock, /encodeURIComponent\(String\(shareToken\)\)/)
   assert.match(viewBlock, /headers: \{ isToken: false \}/)
   assert.match(viewBlock, /signal,/)
+
+  const joinBlock = source.match(/export function joinEditShare[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(joinBlock, /mindmap\/share\/join/)
+  assert.match(joinBlock, /encodeURIComponent\(String\(shareToken\)\)/)
+  assert.doesNotMatch(joinBlock, /isToken: false/)
+  assert.match(joinBlock, /signal,/)
 })
 
 test('公开分享预览隔离路由切换、插件加载和实例构造的迟到任务', async () => {
@@ -46,4 +52,22 @@ test('公开分享预览隔离路由切换、插件加载和实例构造的迟�
   assert.match(unmountBlock, /componentActive = false[\s\S]*?cancelShareLoad\(\)[\s\S]*?destroyMindMap\(\)/)
   assert.match(source, /function handleShortcut\(event\) \{\s*if \(!mindMap\.value\) return/)
   assert.match(source, /role="region"[\s\S]*?:aria-label="`\$\{mindmapData\.name \|\| '脑图'\}只读画布`"[\s\S]*?tabindex="0"/)
+})
+
+test('编辑邀请不公开正文，并在登录后领取协作者权限再进入编辑器', async () => {
+  const source = await readFile(viewUrl, 'utf8')
+  const loadBlock = source.match(/async function loadShare[\s\S]*?\n\}/)?.[0] || ''
+  const joinBlock = source.match(/async function handleJoinEditShare[\s\S]*?\n\}/)?.[0] || ''
+
+  assert.match(loadBlock, /Number\(data\?\.shareType\) === 1[\s\S]*mindmapData\.value = data[\s\S]*return true/)
+  assert.ok(loadBlock.indexOf("Number(data?.shareType) === 1") < loadBlock.indexOf('registerPreviewPlugins'))
+  assert.match(source, /登录后加入编辑/)
+  assert.match(source, /加入并开始编辑/)
+  assert.match(source, /分享者可以随时在协作者管理中调整或移除你的权限/)
+  assert.match(joinBlock, /if \(!getToken\(\)\)[\s\S]*goToInviteLogin\(\)/)
+  assert.match(source, /function goToInviteLogin\(\) \{[\s\S]*createLoginRedirectLocation\(route\.fullPath\)/)
+  assert.match(joinBlock, /joinEditShare\(token, \{ signal \}\)/)
+  assert.match(joinBlock, /Number\(res\.data\?\.mindmapId\)/)
+  assert.match(joinBlock, /path: '\/mindmap\/edit'/)
+  assert.match(joinBlock, /from: 'shared'/)
 })

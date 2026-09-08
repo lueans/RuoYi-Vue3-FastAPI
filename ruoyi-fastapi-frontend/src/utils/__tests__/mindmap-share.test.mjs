@@ -107,6 +107,10 @@ test('分享弹窗具备加载竞态、操作锁、禁用确认和完整表单�
   assert.match(source, /function reloadLinks\(\) \{[\s\S]*void loadLinks\(\)/)
   assert.match(source, /ElMessageBox\.confirm\([\s\S]*禁用后该链接将立即无法访问/)
   assert.match(source, /aria-label="分享访问权限"/)
+  assert.match(source, /label="仅查看（无需登录）" :value="0"/)
+  assert.match(source, /label="可编辑（需要登录）" :value="1"/)
+  assert.match(source, /禁用链接不会移除已经加入的成员/)
+  assert.match(source, /Number\(link\.shareType\) === 1 \? '可编辑' : '仅查看'/)
   assert.match(source, /aria-label="分享链接有效期"/)
   assert.match(source, /aria-label="分享链接过期时间"/)
   assert.match(source, /aria-label="复制分享链接"/)
@@ -127,4 +131,13 @@ test('分享写操作绑定打开时文件会话并在切换或关闭后停止�
   assert.match(source, /watch\(\(\) => props\.mindmapId,[\s\S]*invalidateShareSession\(\)[\s\S]*visible\.value = false/)
   assert.match(source, /width="min\(560px, calc\(100vw - 32px\)\)"/)
   assert.match(source, /@media \(max-width: 600px\)[\s\S]*flex-direction: column/)
+})
+
+test('分享请求由当前界面单点呈现错误，避免全局与局部重复弹出', async () => {
+  const source = await readFile(
+    new URL('../../api/mindmap/share.js', import.meta.url),
+    'utf8'
+  )
+
+  assert.equal((source.match(/silentError: true/g) || []).length, 5)
 })

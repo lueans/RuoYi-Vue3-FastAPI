@@ -1,8 +1,9 @@
 """脑图标签服务层"""
 import uuid as uuid_lib
+from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import and_, delete, distinct, func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
@@ -10,6 +11,7 @@ from sqlalchemy.sql import Select
 from common.vo import CrudResponseModel, PageModel
 from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_tag_dao import MindmapTagDao
+from module_mindmap.dao.mindmap_dao import MindmapDao
 from module_mindmap.entity.do.mindmap_collaborator_do import MindmapCollaborator
 from module_mindmap.entity.do.mindmap_content_do import MindmapChangeLog, MindmapNode, MindmapNodeTag
 from module_mindmap.entity.do.mindmap_do import Mindmap
@@ -38,6 +40,23 @@ from utils.log_util import logger
 TAG_STATUS_ACTIVE = 0
 TAG_STATUS_DISABLED = 1
 TAG_STATUS_ARCHIVED = 2
+TAG_GOVERNANCE_SCOPE_RETRIES = 3
+
+
+class _TagGovernanceScopeChanged(RuntimeError):
+    """受影响文件集合在加锁窗口内扩大，必须释放锁并重新按顺序获取。"""
+
+
+@dataclass(slots=True)
+class _TagGovernanceContext:
+    mindmaps: dict[int, Mindmap]
+    tags: dict[int, MindmapTag]
+    affected_bindings: list[MindmapNodeTag]
+    related_bindings: list[MindmapNodeTag]
+
+    @property
+    def affected_file_ids(self) -> list[int]:
+        return sorted({int(binding.file_id) for binding in self.affected_bindings})
 
 
 def _tag_impact_metric_units(
@@ -157,11 +176,12 @@ class MindmapTagService:
                 'created_by': user_name,
                 'created_time': datetime.now(),
             })
+            category_id = category.id
             await db.commit()
             return CrudResponseModel(
                 is_success=True,
                 message='分组创建成功',
-                result={'categoryId': category.id},
+                result={'categoryId': category_id},
             )
         except IntegrityError as exc:
             await db.rollback()
@@ -437,64 +457,60 @@ class MindmapTagService:
         cls, db: AsyncSession, model: MindmapTagModel, user_id: int,
     ) -> CrudResponseModel:
         """修改标签"""
-        tag = await MindmapTagDao.get_tag_by_id(db, model.id)
-        if not tag:
-            raise ServiceException(message='标签不存在')
-        _check_write_permission(tag.owner_id, user_id, '标签')
-
-        # key 唯一性检查（排除自身），使用标签自身的 owner scope
-        # 处理 owner_id 变更（仅管理员可在私有/全局间切换）
-        new_owner_id = tag.owner_id
-        if model.owner_id is not None and model.owner_id != tag.owner_id and user_id == 1:
-            new_owner_id = model.owner_id
-            # 非管理员忽略 owner_id 变更请求
-        if tag.tag_key.startswith(MINDMAP_MARKER_TAG_KEY_PREFIX) and (
-            model.tag_key != tag.tag_key or new_owner_id != tag.owner_id
-        ):
-            raise ServiceException(message='内置标记标签的 Key 和全局作用域不可修改')
-        await _validate_category_assignment(db, model.category_id, new_owner_id)
-
-        if new_owner_id not in (tag.owner_id, 0):
-            foreign_file_count = (await db.execute(
-                select(func.count(distinct(MindmapNodeTag.file_id)))
-                .join(Mindmap, Mindmap.id == MindmapNodeTag.file_id)
-                .where(
-                    MindmapNodeTag.tag_id == model.id,
-                    Mindmap.del_flag == '0',
-                    Mindmap.owner_id != new_owner_id,
-                )
-            )).scalar_one()
-            if foreign_file_count:
-                raise ServiceException(
-                    message=(
-                        f'该标签仍被 {foreign_file_count} 个其他所有者的脑图使用，'
-                        '不能收窄为私有标签'
-                    )
-                )
-
-        if model.tag_key != tag.tag_key and user_id != 1:
-            raise ServiceException(message='标签 Key 是稳定外部标识，仅管理员可修改')
-        if model.tag_key != tag.tag_key or new_owner_id != tag.owner_id:
-            is_unique = await MindmapTagDao.check_key_unique(
-                db, new_owner_id, model.tag_key, exclude_id=model.id,
-            )
-            if not is_unique:
-                raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')
-
-        new_status = model.status if model.status is not None else tag.status
-        await _validate_marker_tag_mapping(
-            db,
-            owner_id=new_owner_id,
-            tag_key=model.tag_key,
-            style=model.style,
-            status=new_status,
-            exclude_id=model.id,
-        )
-
         try:
-            affected_file_ids = list((await db.execute(
-                select(distinct(MindmapNodeTag.file_id)).where(MindmapNodeTag.tag_id == model.id)
-            )).scalars())
+            context = await cls._lock_definition_update_context(db, model.id)
+            tag = context.tags.get(model.id)
+            if not tag:
+                raise ServiceException(message='标签不存在')
+            _check_write_permission(tag.owner_id, user_id, '标签')
+
+            # 锁后重新计算所有约束；等待锁期间 owner/status/category 可能已改变。
+            new_owner_id = tag.owner_id
+            if model.owner_id is not None and model.owner_id != tag.owner_id and user_id == 1:
+                new_owner_id = model.owner_id
+            if tag.tag_key.startswith(MINDMAP_MARKER_TAG_KEY_PREFIX) and (
+                model.tag_key != tag.tag_key or new_owner_id != tag.owner_id
+            ):
+                raise ServiceException(message='内置标记标签的 Key 和全局作用域不可修改')
+            await _validate_category_assignment(db, model.category_id, new_owner_id)
+
+            affected_file_ids = context.affected_file_ids
+            if new_owner_id not in (tag.owner_id, 0):
+                # context 已按 Mindmap -> Tag -> NodeTag 锁序取得当前绑定，
+                # 不再使用可能沿用认证 RR 快照的聚合一致读。
+                foreign_file_count = sum(
+                    1
+                    for file_id in affected_file_ids
+                    if context.mindmaps[file_id].del_flag == '0'
+                    and context.mindmaps[file_id].owner_id != new_owner_id
+                )
+                if foreign_file_count:
+                    raise ServiceException(
+                        message=(
+                            f'该标签仍被 {foreign_file_count} 个其他所有者的脑图使用，'
+                            '不能收窄为私有标签'
+                        )
+                    )
+
+            if model.tag_key != tag.tag_key and user_id != 1:
+                raise ServiceException(message='标签 Key 是稳定外部标识，仅管理员可修改')
+            if model.tag_key != tag.tag_key or new_owner_id != tag.owner_id:
+                is_unique = await MindmapTagDao.check_key_unique(
+                    db, new_owner_id, model.tag_key, exclude_id=model.id,
+                )
+                if not is_unique:
+                    raise ServiceException(message=f'标签key "{model.tag_key}" 已存在')
+
+            new_status = model.status if model.status is not None else tag.status
+            await _validate_marker_tag_mapping(
+                db,
+                owner_id=new_owner_id,
+                tag_key=model.tag_key,
+                style=model.style,
+                status=new_status,
+                exclude_id=model.id,
+            )
+
             own_style = dict(model.style or {})
             new_revision = (tag.definition_revision or 1) + 1
             definition = {
@@ -519,9 +535,9 @@ class MindmapTagService:
                 'update_by': str(user_id),
             })
             await db.commit()
-        except Exception as e:
-            await db.rollback()
-            raise e
+        except Exception:
+            await cls._rollback(db)
+            raise
         await cls._broadcast_definition(
             affected_file_ids,
             tag_id=model.id,
@@ -535,37 +551,42 @@ class MindmapTagService:
     @classmethod
     async def disable_tag(cls, db: AsyncSession, tag_id: int, user_id: int) -> CrudResponseModel:
         """停用标签：保留既有绑定和渲染，但不再出现在新增选择器。"""
-        tag = await MindmapTagDao.get_tag_by_id(db, tag_id)
-        if not tag:
-            raise ServiceException(message='标签不存在')
-        _check_write_permission(tag.owner_id, user_id, '标签')
-        if tag.status == TAG_STATUS_ARCHIVED:
-            raise ServiceException(message='已归档标签不能停用')
-        if tag.status == TAG_STATUS_DISABLED:
-            return CrudResponseModel(is_success=True, message='标签已处于停用状态')
-
-        affected_file_ids = await cls._affected_file_ids(db, tag_id)
-        resolved_style = dict(tag.style or {})
-        revision = (tag.definition_revision or 1) + 1
-        definition = {
-            'tagId': tag.id,
-            'categoryId': tag.category_id,
-            'uuid': tag.uuid,
-            'tagKey': tag.tag_key,
-            'text': tag.name,
-            'style': resolved_style,
-            'status': TAG_STATUS_DISABLED,
-        }
         try:
+            tag = await MindmapTagDao.get_tag_by_id(db, tag_id, for_update=True)
+            if not tag:
+                raise ServiceException(message='标签不存在')
+            _check_write_permission(tag.owner_id, user_id, '标签')
+            if tag.status == TAG_STATUS_ARCHIVED:
+                raise ServiceException(message='已归档标签不能停用')
+            if tag.status == TAG_STATUS_DISABLED:
+                await cls._rollback(db)
+                return CrudResponseModel(is_success=True, message='标签已处于停用状态')
+
+            affected_file_ids = await cls._affected_file_ids(
+                db,
+                {tag_id},
+                for_update=True,
+            )
+            resolved_style = dict(tag.style or {})
+            revision = (tag.definition_revision or 1) + 1
+            definition = {
+                'tagId': tag.id,
+                'categoryId': tag.category_id,
+                'uuid': tag.uuid,
+                'tagKey': tag.tag_key,
+                'text': tag.name,
+                'style': resolved_style,
+                'status': TAG_STATUS_DISABLED,
+            }
             await MindmapTagDao.update_tag(db, tag_id, {
-                'status': 1,
+                'status': TAG_STATUS_DISABLED,
                 'definition_revision': revision,
                 'updated_time': datetime.now(),
                 'update_by': str(user_id),
             })
             await db.commit()
         except Exception:
-            await db.rollback()
+            await cls._rollback(db)
             raise
         await cls._broadcast_definition(
             affected_file_ids,
@@ -589,68 +610,99 @@ class MindmapTagService:
         """把所有源标签绑定原子替换为目标标签，并消除同节点重复绑定。"""
         if source_tag_id == target_tag_id:
             raise ServiceException(message='源标签和目标标签不能相同')
-        source = await MindmapTagDao.get_tag_by_id(db, source_tag_id)
-        target = await MindmapTagDao.get_tag_by_id(db, target_tag_id)
-        if not source or not target:
-            raise ServiceException(message='源标签或目标标签不存在')
-        _check_write_permission(source.owner_id, user_id, '源标签')
-        if source.owner_id == 0 and target.owner_id != 0:
-            raise ServiceException(message='全局标签只能替换为全局标签')
-        if source.owner_id != 0 and target.owner_id not in (0, source.owner_id):
-            raise ServiceException(message='目标标签必须与源标签同属一个私有范围，或使用全局标签')
-        if target.status != TAG_STATUS_ACTIVE:
-            raise ServiceException(message='只能替换为启用中的标签')
+        for attempt in range(TAG_GOVERNANCE_SCOPE_RETRIES):
+            try:
+                context = await cls._lock_governance_context(
+                    db,
+                    affected_tag_ids={source_tag_id},
+                    related_tag_ids={target_tag_id},
+                )
+                source = context.tags.get(source_tag_id)
+                target = context.tags.get(target_tag_id)
+                if not source or not target:
+                    raise ServiceException(message='源标签或目标标签不存在')
 
-        affected_file_ids = sorted(await cls._affected_file_ids(db, source_tag_id))
-        await cls._check_files_edit_access(db, affected_file_ids, user_id)
+                # 权限和状态必须在 Mindmap、Tag、NodeTag 全部稳定后复核。
+                _check_write_permission(source.owner_id, user_id, '源标签')
+                if source.owner_id == 0 and target.owner_id != 0:
+                    raise ServiceException(message='全局标签只能替换为全局标签')
+                if source.owner_id != 0 and target.owner_id not in (0, source.owner_id):
+                    raise ServiceException(
+                        message='目标标签必须与源标签同属一个私有范围，或使用全局标签'
+                    )
+                if target.status != TAG_STATUS_ACTIVE:
+                    raise ServiceException(message='只能替换为启用中的标签')
 
-        duplicate_query = cls._replacement_duplicate_query(source_tag_id, target_tag_id)
+                affected_file_ids = context.affected_file_ids
+                await cls._check_locked_files_edit_access(
+                    db, context.mindmaps, affected_file_ids, user_id,
+                )
+                source_bindings = context.affected_bindings
+                target_node_ids = {
+                    binding.node_id
+                    for binding in context.related_bindings
+                    if binding.tag_id == target_tag_id
+                }
+                duplicate_binding_ids = [
+                    binding.id
+                    for binding in source_bindings
+                    if binding.node_id in target_node_ids
+                ]
+                binding_count = len(source_bindings)
+                duplicate_count = len(duplicate_binding_ids)
 
-        binding_count = (await db.execute(
-            select(func.count(MindmapNodeTag.id)).where(MindmapNodeTag.tag_id == source_tag_id)
-        )).scalar_one()
-        duplicate_count = (await db.execute(
-            select(func.count()).select_from(duplicate_query.subquery())
-        )).scalar_one()
-        duplicate_ids = duplicate_query.subquery()
-        target_definition_revision = target.definition_revision
-        target_definition = {
-            'tagId': target.id,
-            'categoryId': target.category_id,
-            'uuid': target.uuid,
-            'tagKey': target.tag_key,
-            'text': target.name,
-            'style': dict(target.style or {}),
-            'status': target.status,
-        }
-        source_revision = (source.definition_revision or 1) + 1
-        try:
-            await db.execute(
-                delete(MindmapNodeTag).where(MindmapNodeTag.id.in_(select(duplicate_ids.c.id)))
-            )
-            await db.execute(
-                update(MindmapNodeTag)
-                .where(MindmapNodeTag.tag_id == source_tag_id)
-                .values(tag_id=target_tag_id)
-            )
-            await MindmapTagDao.update_tag(db, source_tag_id, {
-                'status': 2,
-                'definition_revision': source_revision,
-                'updated_time': datetime.now(),
-                'update_by': str(user_id),
-            })
-            revisions = await cls._advance_file_revisions(
-                db, affected_file_ids, user_id,
-                operation={
-                    'type': 'tag.replace',
-                    'payload': {'sourceTagId': source_tag_id, 'targetTagId': target_tag_id},
-                },
-            )
-            await cls._refresh_usage(db, {source_tag_id, target_tag_id})
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+                # 提交前冻结广播载荷，避免 expire_on_commit 后触发异步懒加载。
+                target_definition_revision = target.definition_revision
+                target_definition = {
+                    'tagId': target.id,
+                    'categoryId': target.category_id,
+                    'uuid': target.uuid,
+                    'tagKey': target.tag_key,
+                    'text': target.name,
+                    'style': dict(target.style or {}),
+                    'status': target.status,
+                }
+                source_revision = (source.definition_revision or 1) + 1
+
+                if duplicate_binding_ids:
+                    await db.execute(
+                        delete(MindmapNodeTag).where(
+                            MindmapNodeTag.id.in_(duplicate_binding_ids)
+                        )
+                    )
+                await db.execute(
+                    update(MindmapNodeTag)
+                    .where(MindmapNodeTag.tag_id == source_tag_id)
+                    .values(tag_id=target_tag_id)
+                )
+                await MindmapTagDao.update_tag(db, source_tag_id, {
+                    'status': TAG_STATUS_ARCHIVED,
+                    'definition_revision': source_revision,
+                    'updated_time': datetime.now(),
+                    'update_by': str(user_id),
+                })
+                revisions = await cls._advance_file_revisions(
+                    db,
+                    context.mindmaps,
+                    affected_file_ids,
+                    user_id,
+                    operation={
+                        'type': 'tag.replace',
+                        'payload': {'sourceTagId': source_tag_id, 'targetTagId': target_tag_id},
+                    },
+                )
+                await cls._refresh_usage(db, {source_tag_id, target_tag_id})
+                await db.commit()
+                break
+            except _TagGovernanceScopeChanged as exc:
+                await cls._rollback(db)
+                if attempt + 1 >= TAG_GOVERNANCE_SCOPE_RETRIES:
+                    raise ServiceException(
+                        message='标签使用范围持续变化，请稍后重试'
+                    ) from exc
+            except Exception:
+                await cls._rollback(db)
+                raise
 
         for file_id in affected_file_ids:
             await cls._safe_broadcast(file_id, {
@@ -660,7 +712,8 @@ class MindmapTagService:
                 'definitionRevision': target_definition_revision,
                 'definition': target_definition,
                 'contentRevision': revisions[file_id],
-            }, revision=revisions[file_id], operation='标签替换')
+                'authoritativeRevision': revisions[file_id],
+            }, operation='标签替换')
         return CrudResponseModel(
             is_success=True,
             message='标签替换成功，源标签已归档',
@@ -675,81 +728,98 @@ class MindmapTagService:
 
     @classmethod
     @observe_mindmap_operation('tag_archive', work_units_getter=_tag_archive_metric_units)
-    async def delete_tags(
+    async def delete_tags(  # noqa: PLR0912
         cls, db: AsyncSession, ids_str: str, user_id: int, unbind: bool = False,
     ) -> CrudResponseModel:
         """归档标签；使用中时必须显式 unbind，禁止依赖缓存计数误删。"""
         id_list = cls._parse_tag_ids(ids_str)
-
-        tags = list((await db.execute(
-            select(MindmapTag)
-            .where(MindmapTag.id.in_(id_list))
-            .order_by(MindmapTag.id.asc())
-            .with_for_update()
-        )).scalars())
-        if len(tags) != len(id_list):
-            raise ServiceException(message=f'有 {len(id_list) - len(tags)} 个标签不存在或已删除')
-        for tag in tags:
-            _check_write_permission(tag.owner_id, user_id, '标签')
-
-        usage_rows = (await db.execute(
-            select(MindmapNodeTag.tag_id, func.count(MindmapNodeTag.id))
-            .where(MindmapNodeTag.tag_id.in_(id_list))
-            .group_by(MindmapNodeTag.tag_id)
-        )).all()
-        usage_counts = dict(usage_rows)
-        if not unbind:
-            for tag in tags:
-                if actual_count := usage_counts.get(tag.id, 0):
+        tag_id_set = set(id_list)
+        for attempt in range(TAG_GOVERNANCE_SCOPE_RETRIES):
+            try:
+                context = await cls._lock_governance_context(
+                    db,
+                    affected_tag_ids=tag_id_set,
+                )
+                tags = [context.tags[tag_id] for tag_id in id_list if tag_id in context.tags]
+                if len(tags) != len(id_list):
                     raise ServiceException(
-                        message=(
-                            f'标签“{tag.name}”仍被 {actual_count} 个节点使用，'
-                            '请先停用、替换或使用 unbind=true 解除绑定'
-                        )
+                        message=f'有 {len(id_list) - len(tags)} 个标签不存在或已删除'
+                    )
+                for tag in tags:
+                    _check_write_permission(tag.owner_id, user_id, '标签')
+
+                usage_counts: dict[int, int] = {}
+                for binding in context.affected_bindings:
+                    usage_counts[binding.tag_id] = usage_counts.get(binding.tag_id, 0) + 1
+                if not unbind:
+                    for tag in tags:
+                        if actual_count := usage_counts.get(tag.id, 0):
+                            raise ServiceException(
+                                message=(
+                                    f'标签“{tag.name}”仍被 {actual_count} 个节点使用，'
+                                    '请先停用、替换或使用 unbind=true 解除绑定'
+                                )
+                            )
+
+                affected_file_ids = context.affected_file_ids
+                if unbind:
+                    await cls._check_locked_files_edit_access(
+                        db, context.mindmaps, affected_file_ids, user_id,
+                    )
+                    await db.execute(
+                        delete(MindmapNodeTag).where(MindmapNodeTag.tag_id.in_(id_list))
                     )
 
-        affected_file_ids = set((await db.execute(
-            select(distinct(MindmapNodeTag.file_id)).where(MindmapNodeTag.tag_id.in_(id_list))
-        )).scalars())
+                tag_updates = {
+                    'status': TAG_STATUS_ARCHIVED,
+                    'definition_revision': MindmapTag.definition_revision + 1,
+                    'updated_time': datetime.now(),
+                    'update_by': str(user_id),
+                }
+                if unbind:
+                    tag_updates.update({'usage_node_count': 0, 'usage_file_count': 0})
+                await db.execute(
+                    update(MindmapTag)
+                    .where(MindmapTag.id.in_(id_list))
+                    .values(**tag_updates)
+                )
+                revisions = await cls._advance_file_revisions(
+                    db,
+                    context.mindmaps,
+                    affected_file_ids,
+                    user_id,
+                    operation={'type': 'tag.unbind', 'payload': {'tagIds': id_list}},
+                ) if unbind else {}
+                await db.commit()
+                break
+            except _TagGovernanceScopeChanged as exc:
+                await cls._rollback(db)
+                if attempt + 1 >= TAG_GOVERNANCE_SCOPE_RETRIES:
+                    raise ServiceException(
+                        message='标签使用范围持续变化，请稍后重试'
+                    ) from exc
+            except Exception:
+                await cls._rollback(db)
+                raise
 
+        # 只有事务提交后才能推进进程内/跨进程 revision 栅栏。
         if unbind:
-            await cls._check_files_edit_access(db, sorted(affected_file_ids), user_id)
-
-        try:
-            if unbind:
-                await db.execute(delete(MindmapNodeTag).where(MindmapNodeTag.tag_id.in_(id_list)))
-            tag_updates = {
-                'status': TAG_STATUS_ARCHIVED,
-                'definition_revision': MindmapTag.definition_revision + 1,
-                'updated_time': datetime.now(),
-                'update_by': str(user_id),
-            }
-            if unbind:
-                tag_updates.update({'usage_node_count': 0, 'usage_file_count': 0})
-            await db.execute(
-                update(MindmapTag)
-                .where(MindmapTag.id.in_([tag.id for tag in tags]))
-                .values(**tag_updates)
-            )
-            revisions = await cls._advance_file_revisions(
-                db, sorted(affected_file_ids), user_id,
-                operation={'type': 'tag.unbind', 'payload': {'tagIds': id_list}},
-            ) if unbind else {}
-            await db.commit()
             for file_id in affected_file_ids:
                 await cls._safe_broadcast(file_id, {
-                    'type': 'tag_unbound' if unbind else 'tag_definition_changed',
+                    'type': 'tag_unbound',
                     'tagIds': id_list,
-                    'contentRevision': revisions.get(file_id),
-                }, revision=revisions.get(file_id), operation='标签解绑')
-            return CrudResponseModel(
-                is_success=True,
-                message='标签已解除绑定并归档' if unbind else '标签已归档',
-                result={'tagIds': id_list, 'unbind': unbind, 'affectedFileCount': len(affected_file_ids)},
-            )
-        except Exception:
-            await db.rollback()
-            raise
+                    'contentRevision': revisions[file_id],
+                    'authoritativeRevision': revisions[file_id],
+                }, operation='标签解绑')
+        return CrudResponseModel(
+            is_success=True,
+            message='标签已解除绑定并归档' if unbind else '标签已归档',
+            result={
+                'tagIds': id_list,
+                'unbind': unbind,
+                'affectedFileCount': len(affected_file_ids),
+            },
+        )
 
     @classmethod
     async def get_suggestions(
@@ -760,10 +830,127 @@ class MindmapTagService:
         return [CamelCaseUtil.transform_result(tag) for tag in tags]
 
     @staticmethod
-    async def _affected_file_ids(db: AsyncSession, tag_id: int) -> list[int]:
-        return list((await db.execute(
-            select(distinct(MindmapNodeTag.file_id)).where(MindmapNodeTag.tag_id == tag_id)
+    async def _affected_file_ids(
+        db: AsyncSession,
+        tag_ids: set[int] | list[int],
+        *,
+        for_update: bool = False,
+    ) -> list[int]:
+        """在任何删除/替换前取得完整文件集合；不依赖使用量缓存。"""
+        normalized_ids = sorted(set(tag_ids))
+        if not normalized_ids:
+            return []
+        query = (
+            select(MindmapNodeTag.file_id)
+            .where(MindmapNodeTag.tag_id.in_(normalized_ids))
+            .order_by(MindmapNodeTag.file_id.asc())
+        )
+        if for_update:
+            # Tag 行锁会阻止新的同标签绑定；这里再用当前读取得等待 Tag 锁
+            # 期间已经提交的绑定，避免 MySQL 一致读快照漏掉广播目标。
+            query = query.with_for_update(read=True).execution_options(populate_existing=True)
+        else:
+            query = query.distinct()
+        return list(dict.fromkeys((await db.execute(query)).scalars()))
+
+    @staticmethod
+    async def _lock_mindmaps(
+        db: AsyncSession,
+        file_ids: list[int],
+    ) -> dict[int, Mindmap]:
+        normalized_ids = sorted(set(file_ids))
+        if not normalized_ids:
+            return {}
+        rows = list((await db.execute(
+            select(Mindmap)
+            .where(Mindmap.id.in_(normalized_ids))
+            .order_by(Mindmap.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )).scalars())
+        return {int(mindmap.id): mindmap for mindmap in rows}
+
+    @staticmethod
+    async def _lock_tag_bindings(
+        db: AsyncSession,
+        tag_ids: set[int],
+        *,
+        file_ids: list[int] | None = None,
+    ) -> list[MindmapNodeTag]:
+        normalized_tag_ids = sorted(tag_ids)
+        if not normalized_tag_ids or file_ids == []:
+            return []
+        query = select(MindmapNodeTag).where(
+            MindmapNodeTag.tag_id.in_(normalized_tag_ids)
+        )
+        if file_ids is not None:
+            query = query.where(MindmapNodeTag.file_id.in_(sorted(set(file_ids))))
+        query = query.order_by(
+            MindmapNodeTag.file_id.asc(),
+            MindmapNodeTag.node_id.asc(),
+            MindmapNodeTag.tag_id.asc(),
+            MindmapNodeTag.id.asc(),
+        ).with_for_update().execution_options(populate_existing=True)
+        return list((await db.execute(query)).scalars())
+
+    @classmethod
+    async def _lock_governance_context(
+        cls,
+        db: AsyncSession,
+        *,
+        affected_tag_ids: set[int],
+        related_tag_ids: set[int] | None = None,
+    ) -> _TagGovernanceContext:
+        """按 Mindmap -> Tag -> NodeTag 锁序冻结一次治理影响范围。"""
+        related_tag_ids = set(related_tag_ids or ())
+        preview_file_ids = await cls._affected_file_ids(db, affected_tag_ids)
+        mindmaps = await cls._lock_mindmaps(db, preview_file_ids)
+        tags = await MindmapTagDao.get_tags_by_ids(
+            db,
+            affected_tag_ids | related_tag_ids,
+            for_update=True,
+        )
+        tags_by_id = {int(tag.id): tag for tag in tags}
+        affected_bindings = await cls._lock_tag_bindings(db, affected_tag_ids)
+        current_file_ids = sorted({int(binding.file_id) for binding in affected_bindings})
+
+        # 不能在持有 Tag 锁后补锁一个新 Mindmap，否则会和正文保存的
+        # Mindmap -> Tag 顺序形成死锁。释放全部锁并从新集合有界重试。
+        if not set(current_file_ids).issubset(mindmaps):
+            raise _TagGovernanceScopeChanged
+
+        related_bindings = await cls._lock_tag_bindings(
+            db,
+            related_tag_ids,
+            file_ids=current_file_ids,
+        )
+        return _TagGovernanceContext(
+            mindmaps=mindmaps,
+            tags=tags_by_id,
+            affected_bindings=affected_bindings,
+            related_bindings=related_bindings,
+        )
+
+    @classmethod
+    async def _lock_definition_update_context(
+        cls,
+        db: AsyncSession,
+        tag_id: int,
+    ) -> _TagGovernanceContext:
+        """按统一锁序取得标签定义更新范围，并处理预览集合扩张。"""
+        for attempt in range(TAG_GOVERNANCE_SCOPE_RETRIES):
+            try:
+                return await cls._lock_governance_context(
+                    db,
+                    affected_tag_ids={tag_id},
+                )
+            except _TagGovernanceScopeChanged as exc:  # noqa: PERF203
+                await cls._rollback(db)
+                if attempt + 1 >= TAG_GOVERNANCE_SCOPE_RETRIES:
+                    raise ServiceException(
+                        message='标签使用范围持续变化，请稍后重试'
+                    ) from exc
+        raise AssertionError('标签定义更新锁重试循环未返回')
 
     @staticmethod
     async def _refresh_usage(db: AsyncSession, tag_ids: set[int]) -> None:
@@ -772,18 +959,26 @@ class MindmapTagService:
         rows = (await db.execute(
             select(
                 MindmapNodeTag.tag_id,
-                func.count(MindmapNodeTag.id),
-                func.count(distinct(MindmapNodeTag.file_id)),
+                MindmapNodeTag.file_id,
             )
             .where(MindmapNodeTag.tag_id.in_(tag_ids))
-            .group_by(MindmapNodeTag.tag_id)
+            .order_by(
+                MindmapNodeTag.tag_id.asc(),
+                MindmapNodeTag.file_id.asc(),
+                MindmapNodeTag.id.asc(),
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
         )).all()
-        counts = {tag_id: (node_count, file_count) for tag_id, node_count, file_count in rows}
+        node_counts: dict[int, int] = {}
+        file_ids_by_tag: dict[int, set[int]] = {}
+        for tag_id, file_id in rows:
+            node_counts[tag_id] = node_counts.get(tag_id, 0) + 1
+            file_ids_by_tag.setdefault(tag_id, set()).add(file_id)
         for tag_id in tag_ids:
-            node_count, file_count = counts.get(tag_id, (0, 0))
             await MindmapTagDao.update_tag(db, tag_id, {
-                'usage_node_count': node_count,
-                'usage_file_count': file_count,
+                'usage_node_count': node_counts.get(tag_id, 0),
+                'usage_file_count': len(file_ids_by_tag.get(tag_id, set())),
             })
 
     @staticmethod
@@ -818,30 +1013,51 @@ class MindmapTagService:
         )
 
     @staticmethod
-    async def _check_files_edit_access(
-        db: AsyncSession, file_ids: list[int], user_id: int,
+    async def _check_locked_files_edit_access(
+        db: AsyncSession,
+        mindmaps: dict[int, Mindmap],
+        file_ids: list[int],
+        user_id: int,
     ) -> None:
-        """一次查询校验批量标签治理涉及的全部文件均处于可编辑状态。"""
-        if not file_ids:
-            return
-        query = select(Mindmap.id).where(
-            Mindmap.id.in_(file_ids),
-            Mindmap.del_flag == '0',
-            Mindmap.status == 0,
-        )
-        if user_id != 1:
-            query = query.outerjoin(
-                MindmapCollaborator,
-                and_(
-                    MindmapCollaborator.mindmap_id == Mindmap.id,
+        """在文件锁后读取当前状态和协作者权限，消除预检 TOCTOU。"""
+        requested_ids = set(file_ids)
+        failed_migration_ids = {
+            file_id
+            for file_id in requested_ids
+            if await MindmapDao.get_migration_status(db, file_id) == 'failed'
+        }
+        allowed_ids = {
+            file_id
+            for file_id, mindmap in mindmaps.items()
+            if file_id in requested_ids
+            and file_id not in failed_migration_ids
+            and mindmap.del_flag == '0'
+            and mindmap.status == 0
+            and user_id in (1, mindmap.owner_id)
+        }
+        collaborator_file_ids = sorted(requested_ids - allowed_ids)
+        if user_id != 1 and collaborator_file_ids:
+            rows = (await db.execute(
+                select(
+                    MindmapCollaborator.mindmap_id,
+                    MindmapCollaborator.permission,
+                )
+                .where(
+                    MindmapCollaborator.mindmap_id.in_(collaborator_file_ids),
                     MindmapCollaborator.user_id == user_id,
-                ),
-            ).where(or_(
-                Mindmap.owner_id == user_id,
-                MindmapCollaborator.permission >= 1,
-            ))
-        allowed_ids = set((await db.execute(query)).scalars())
-        denied_count = len(set(file_ids) - allowed_ids)
+                )
+                .order_by(MindmapCollaborator.mindmap_id.asc())
+                .with_for_update()
+            )).all()
+            allowed_ids.update(
+                int(file_id)
+                for file_id, permission in rows
+                if permission >= 1
+                and file_id in mindmaps
+                and mindmaps[file_id].del_flag == '0'
+                and mindmaps[file_id].status == 0
+            )
+        denied_count = len(requested_ids - allowed_ids)
         if denied_count:
             raise ServiceException(
                 message=f'有 {denied_count} 个受影响脑图无编辑权限，无法执行批量标签治理'
@@ -849,16 +1065,29 @@ class MindmapTagService:
 
     @staticmethod
     async def _advance_file_revisions(
-        db: AsyncSession, file_ids: list[int], user_id: int, operation: dict,
+        db: AsyncSession,
+        mindmaps: dict[int, Mindmap],
+        file_ids: list[int],
+        user_id: int,
+        operation: dict,
     ) -> dict[int, int]:
-        """标签绑定批处理也是文件内容变更，必须推进 revision 并废弃旧 Yjs 缓存。"""
+        """在既有文件锁内推进 revision，并最后锁定、废弃旧 Yjs 缓存。"""
+        normalized_ids = sorted(set(file_ids))
+        missing_ids = set(normalized_ids) - set(mindmaps)
+        if missing_ids:
+            raise _TagGovernanceScopeChanged
+
+        # WsState 永远排在 Mindmap、Tag、NodeTag 之后并按 mindmap_id 加锁。
+        if normalized_ids:
+            await db.execute(
+                select(MindmapWsState.id)
+                .where(MindmapWsState.mindmap_id.in_(normalized_ids))
+                .order_by(MindmapWsState.mindmap_id.asc())
+                .with_for_update()
+            )
         revisions: dict[int, int] = {}
-        for file_id in sorted(file_ids):
-            mindmap = (await db.execute(
-                select(Mindmap).where(Mindmap.id == file_id).with_for_update()
-            )).scalars().first()
-            if not mindmap:
-                continue
+        for file_id in normalized_ids:
+            mindmap = mindmaps[file_id]
             base_revision = mindmap.content_revision
             revision = base_revision + 1
             mutation_id = f'tag-governance-{uuid_lib.uuid4()}'
@@ -869,7 +1098,6 @@ class MindmapTagService:
                     update_time=datetime.now(),
                 )
             )
-            await db.execute(delete(MindmapWsState).where(MindmapWsState.mindmap_id == file_id))
             db.add(MindmapChangeLog(
                 file_id=file_id,
                 base_revision=base_revision,
@@ -885,7 +1113,17 @@ class MindmapTagService:
                 created_time=datetime.now(),
             ))
             revisions[file_id] = revision
+        if normalized_ids:
+            await db.execute(
+                delete(MindmapWsState).where(MindmapWsState.mindmap_id.in_(normalized_ids))
+            )
         return revisions
+
+    @staticmethod
+    async def _rollback(db: AsyncSession) -> None:
+        rollback = getattr(db, 'rollback', None)
+        if rollback is not None:
+            await rollback()
 
     @staticmethod
     async def _broadcast_definition(
@@ -906,12 +1144,13 @@ class MindmapTagService:
 
     @staticmethod
     async def _safe_broadcast(
-        file_id: int, event: dict, *, revision: int | None = None, operation: str,
+        file_id: int,
+        event: dict,
+        *,
+        operation: str,
     ) -> None:
         """持久化提交后的实时通知只能降级，不能反向改变接口结果。"""
         try:
-            if revision is not None:
-                room_manager.set_content_revision(file_id, revision)
             await room_manager.broadcast(file_id, event)
         except Exception as exc:
             record_mindmap_event('broadcast_failure')

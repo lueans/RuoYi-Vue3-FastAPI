@@ -113,6 +113,13 @@ class LogSanitizer:
     ]
     _PARTIAL_KV_PATTERNS = _build_text_assignment_patterns(_TEXT_PARTIAL_KEY_PATTERN)
     _LOGIN_CODE_PATTERN = re.compile(r'^[A-Za-z0-9]{4,8}$')
+    # 分享链接中的 32 位 token 本身就是访问凭证。Uvicorn access log 只有
+    # 展开的 URL 文本，没有字段名可供普通敏感字段规则识别，因此必须按
+    # 路由形状强制脱敏，且不能受 LOG_MASK_ENABLED 开关影响。
+    _SHARE_ROUTE_TOKEN_PATTERN = re.compile(
+        r'(?P<prefix>/mindmap/share/(?:view|join)/)[0-9a-f]{32}(?=$|[/?#\s])',
+        re.IGNORECASE,
+    )
 
     @classmethod
     def sanitize_data(cls, data: Any, field_name: str | None = None) -> Any:
@@ -147,11 +154,17 @@ class LogSanitizer:
         :param text: 原始文本
         :return: 脱敏后的文本
         """
-        if not LogConfig.log_mask_enabled:
-            return text
         if not isinstance(text, str):
             return text
-        sanitized_text = cls._sanitize_string(text)
+        # bearer token 不允许进入 access/error log，即使开发环境为了排查
+        # 普通字段而关闭了可配置脱敏。
+        route_safe_text = cls._SHARE_ROUTE_TOKEN_PATTERN.sub(
+            lambda match: f'{match.group("prefix")}{cls._MASK}',
+            text,
+        )
+        if not LogConfig.log_mask_enabled:
+            return route_safe_text
+        sanitized_text = cls._sanitize_string(route_safe_text)
         return sanitized_text if isinstance(sanitized_text, str) else json.dumps(sanitized_text, ensure_ascii=False)
 
     @classmethod
@@ -193,7 +206,7 @@ class LogSanitizer:
         :return: 脱敏后的字符串或结构化数据
         """
         normalized_field = cls._normalize_key(field_name or '')
-        if normalized_field in cls._SENSITIVE_FIELDS:
+        if cls._is_sensitive_field(normalized_field):
             return cls._MASK
         if normalized_field in cls._PARTIAL_MASK_FIELDS:
             return cls._mask_partial_value(value, normalized_field)
@@ -285,7 +298,7 @@ class LogSanitizer:
         :param full_mapping: 当前层级的完整字段映射
         :return: 是否需要全量脱敏
         """
-        if normalized_key in cls._SENSITIVE_FIELDS:
+        if cls._is_sensitive_field(normalized_key):
             return True
         if normalized_key in {'captchacode', 'smscode'}:
             return True
@@ -294,6 +307,23 @@ class LogSanitizer:
             if 'uuid' in sibling_keys and cls._LOGIN_CODE_PATTERN.fullmatch(value):
                 return True
         return False
+
+    @classmethod
+    def _is_sensitive_field(cls, normalized_key: str) -> bool:
+        """
+        判断字段名是否表示敏感值
+
+        启用日志脱敏时，配置项既匹配完整字段名，也匹配复合字段名的后缀。例如配置中的
+        ``token`` 会覆盖 ``share_token``、``resetToken`` 等业务字段，避免
+        新增令牌字段时因未同步日志配置而发生泄露。
+
+        :param normalized_key: 标准化后的字段名
+        :return: 是否为敏感字段
+        """
+        return any(
+            normalized_key == sensitive_field or normalized_key.endswith(sensitive_field)
+            for sensitive_field in cls._SENSITIVE_FIELDS
+        )
 
     @classmethod
     def _is_secret_config_key(cls, config_key: str) -> bool:
@@ -439,7 +469,7 @@ class LoggerInitializer:
         record['extra']['trace_id'] = TraceCtx.get_trace_id()
         record['extra']['request_id'] = TraceCtx.get_request_id()
         record['extra']['span_id'] = TraceCtx.get_span_id()
-        record['extra']['path'] = TraceCtx.get_request_path()
+        record['extra']['path'] = LogSanitizer.sanitize_text(TraceCtx.get_request_path())
         record['extra']['method'] = TraceCtx.get_request_method()
         record['extra']['worker_id'] = self.worker_id
         record['extra']['instance_id'] = self.instance_id

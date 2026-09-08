@@ -1,6 +1,7 @@
 """脑图标签跨所有者携带规则测试。"""
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 from module_mindmap.service.mindmap_tag_portability import (
     MindmapTagPortabilityService,
@@ -65,6 +66,46 @@ class MindmapTagPortabilityTest(unittest.TestCase):
 
         self.assertEqual(name, '高优先级')
         self.assertEqual(style, {'fontSize': 14, 'radius': 6, 'fill': '#f00'})
+
+
+class MindmapTagPortabilityConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_restore_mode_uses_a_locking_current_read_for_tag_identity(self) -> None:
+        current_tag = SimpleNamespace(
+            id=7,
+            uuid='global-tag',
+            owner_id=0,
+            status=0,
+        )
+        result = MagicMock()
+        result.scalars.return_value = [current_tag]
+        db = AsyncMock()
+        db.execute.return_value = result
+        historical_tree = {
+            'data': {
+                'uid': 'root',
+                'tag': [{
+                    'tagId': 7,
+                    'uuid': 'global-tag',
+                    'status': 2,
+                    'text': '历史标签',
+                }],
+            },
+            'children': [],
+        }
+
+        restored_tree = await MindmapTagPortabilityService.prepare_tree_for_owner(
+            db,
+            historical_tree,
+            target_owner_id=42,
+            allow_disabled_references=True,
+            for_update=True,
+        )
+
+        query = db.execute.await_args.args[0]
+        self.assertIsNotNone(query._for_update_arg)
+        self.assertTrue(query.get_execution_options()['populate_existing'])
+        self.assertIn('ORDER BY mindmap_tag.id ASC', str(query))
+        self.assertEqual(restored_tree['data']['tag'][0]['tagId'], 7)
 
 
 if __name__ == '__main__':

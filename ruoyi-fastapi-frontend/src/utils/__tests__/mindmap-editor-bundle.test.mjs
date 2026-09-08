@@ -54,7 +54,7 @@ test('运行期替换文档会先补齐插件且拒绝迟到会话', async () =>
     readFile(new URL('../../components/MindMap/Import.vue', import.meta.url), 'utf8'),
   ])
 
-  assert.ok((editorSource.match(/await ensureMindmapDocumentPlugins\(/g) || []).length >= 5)
+  assert.ok((editorSource.match(/await ensureMindmapDocumentPlugins\(/g) || []).length >= 4)
   assert.match(editorSource, /mindMap\.value !== activeMindMap/)
   const versionEnsureIndex = versionSource.indexOf('await ensureMindmapDocumentPlugins(data, mindMap)')
   const versionApplyIndex = versionSource.indexOf('mindMap.setFullData(data)', versionEnsureIndex)
@@ -93,4 +93,38 @@ test('编辑器执行统一导出请求前会确保目标格式插件已就绪',
   assert.match(source, /await activeMindMap\.export\(type, true, name, \.\.\.args\)/)
   assert.match(source, /activeMindMap !== mindMap\.value/)
   assert.match(source, /request\.reject\?\.\(error\)/)
+})
+
+test('节点文本编辑占用与普通选区分离并按浏览器会话隔离', async () => {
+  const [editorSource, cooperateSource, nodeSource, textEditSource] = await Promise.all([
+    readFile(new URL('../../components/MindMap/Edit.vue', import.meta.url), 'utf8'),
+    readFile(
+      new URL('../../libs/simple-mind-map/src/core/render/node/nodeCooperate.js', import.meta.url),
+      'utf8',
+    ),
+    readFile(
+      new URL('../../libs/simple-mind-map/src/core/render/node/MindMapNode.js', import.meta.url),
+      'utf8',
+    ),
+    readFile(
+      new URL('../../libs/simple-mind-map/src/core/render/TextEdit.js', import.meta.url),
+      'utf8',
+    ),
+  ])
+
+  assert.match(editorSource, /onlyOneEnableTextEditOnCooperate:\s*Boolean\(props\.mindmapId/)
+  assert.match(editorSource, /onlyOneEnableActiveNodeOnCooperate:\s*false/)
+  assert.doesNotMatch(editorSource, /onlyOneEnableActiveNodeOnCooperate:\s*Boolean\(props\.mindmapId/)
+  assert.match(cooperateSource, /function getUserIdentity\(userInfo\)/)
+  assert.match(cooperateSource, /userInfo\.sessionId \|\| userInfo\.id/)
+  assert.match(cooperateSource, /getUserIdentity\(item\) == getUserIdentity\(userInfo\)/)
+  assert.match(cooperateSource, /this\.editingUserList\.push\(userInfo\)/)
+  assert.match(nodeSource, /shouldBlockNodeTextEditByPresence/)
+  assert.match(nodeSource, /isNodeTextEditLeaseAuthoritative/)
+  assert.doesNotMatch(
+    nodeSource.match(/handleNodeDoubleClick\(e\) \{([\s\S]*?)\n  \}/)?.[1] || '',
+    /this\.userList\.length/,
+  )
+  assert.match(textEditSource, /node_text_edit_start/)
+  assert.match(textEditSource, /node_text_edit_end/)
 })

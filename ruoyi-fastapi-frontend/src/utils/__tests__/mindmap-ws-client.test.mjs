@@ -161,6 +161,29 @@ test('协作 WebSocket 地址兼容代理路径、独立域名并编码资源身
   )
 })
 
+test('只读协作连接在认证消息中声明观察模式', () => {
+  FakeWebSocket.instances.length = 0
+  const { client } = createClient({}, { readonly: true })
+  client.connect()
+  const socket = FakeWebSocket.instances.at(-1)
+  socket.open()
+
+  assert.equal(socket.sent.length, 1)
+  assert.equal(socket.sent[0].type, 'auth')
+  assert.equal(socket.sent[0].readonly, true)
+  assert.deepEqual(socket.sent[0].capabilities, [
+    'structured-node-patch-v1',
+    'conditional-node-patch-v1',
+    'yjs-checkpoint-v1',
+    'yjs-mutation-sequence-v1',
+    'yjs-lineage-v1',
+    'yjs-source-cas-v1',
+    'cross-node-crdt-v2',
+    'node-edit-lease-v1',
+  ])
+  client.disconnect()
+})
+
 test('服务端消息解析限制 UTF-8 体积并只接受具名 JSON 对象', () => {
   assert.deepEqual(parseMindmapWsMessage('{"type":"ping"}', 32), { type: 'ping' })
   assert.throws(() => parseMindmapWsMessage('null', 32), /Invalid/)
@@ -170,6 +193,24 @@ test('服务端消息解析限制 UTF-8 体积并只接受具名 JSON 对象', (
     () => parseMindmapWsMessage('{"type":"消息"}', 16),
     /exceeds/,
   )
+})
+
+test('认证后的心跳上报权威版本并继续响应 pong', () => {
+  FakeWebSocket.instances.length = 0
+  const heartbeats = []
+  const { client } = createClient({
+    onHeartbeat: data => heartbeats.push(data),
+  })
+  client.connect()
+  const socket = FakeWebSocket.instances.at(-1)
+  socket.open()
+  socket.message({ type: 'auth_ok', user: { id: 1 }, capabilities: [] })
+
+  socket.message({ type: 'ping', contentRevision: 9 })
+
+  assert.deepEqual(heartbeats, [{ type: 'ping', contentRevision: 9 }])
+  assert.deepEqual(socket.sent.at(-1), { type: 'pong' })
+  client.disconnect()
 })
 
 test('认证前畸形、越界或越序消息会安全退休并有界重连', () => {

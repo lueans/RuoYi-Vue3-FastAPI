@@ -127,3 +127,131 @@ test('import parsing and editor replacement both use the shared validation bound
   assert.match(editSource, /async function onSetData\(data, request = \{\}\)/)
   assert.match(editSource, /assertMindmapImportDocument\(data\)/)
 })
+
+test('cloud import replaces the document through one durable snapshot before reporting success', async () => {
+  const editSource = await readFile(
+    new URL('../../components/MindMap/Edit.vue', import.meta.url),
+    'utf8',
+  )
+  const importBlock = editSource.match(
+    /async function onSetData\(data, request = \{\}\)[\s\S]*?^\}/m,
+  )?.[0] || ''
+
+  const flushExisting = importBlock.indexOf('await flushBeforeLeave()')
+  const blockEditing = importBlock.indexOf('setImportTransitionEditingBlocked(true)')
+  const finalCommit = importBlock.indexOf(
+    'commitActiveEditorsBeforeTermination()',
+    flushExisting,
+  )
+  const finalTick = importBlock.indexOf('await nextTick()', finalCommit)
+  const generationFence = importBlock.indexOf(
+    'draftProtection.getChangeVersion() !== importBoundaryChangeVersion',
+    finalTick,
+  )
+  const stopOldYjs = importBlock.indexOf('stopCurrentCollaborationSource()')
+  const replaceTree = Math.min(
+    ...[
+      importBlock.indexOf('activeMindMap.setFullData(data)'),
+      importBlock.indexOf('activeMindMap.setData(data)'),
+    ].filter(index => index >= 0),
+  )
+  const flushInitialHistory = importBlock.indexOf(
+    'activeMindMap.command?.flushPendingHistory?.()',
+  )
+  const stageSnapshot = importBlock.indexOf(
+    'pendingContentOperations = [{ type: CONTENT_SNAPSHOT_OPERATION }]',
+  )
+  const persistSnapshot = importBlock.indexOf('await flushPendingMindmapChanges({')
+  const reportSuccess = importBlock.indexOf('request.resolve?.(true)')
+
+  assert.match(editSource, /const CONTENT_SNAPSHOT_OPERATION = 'document\.content\.update'/)
+  assert.ok([
+    flushExisting,
+    blockEditing,
+    finalCommit,
+    finalTick,
+    generationFence,
+    stopOldYjs,
+    replaceTree,
+    flushInitialHistory,
+    stageSnapshot,
+    persistSnapshot,
+    reportSuccess,
+  ].every(index => index >= 0))
+  assert.ok(blockEditing < flushExisting)
+  assert.ok(flushExisting < stopOldYjs)
+  assert.ok(flushExisting < finalCommit)
+  assert.ok(finalCommit < finalTick)
+  assert.ok(finalTick < generationFence)
+  assert.ok(generationFence < stopOldYjs)
+  assert.ok(stopOldYjs < replaceTree)
+  assert.ok(replaceTree < flushInitialHistory)
+  assert.ok(flushInitialHistory < stageSnapshot)
+  assert.ok(stageSnapshot < persistSnapshot)
+  assert.ok(persistSnapshot < reportSuccess)
+  assert.match(importBlock, /persistLocalBackup: persistLocalDraftBeforeUnload/)
+  assert.match(
+    importBlock,
+    /serverCanEdit\.value !== true[\s\S]*?authoritativeRecoveryEditingBlocked\.value/,
+  )
+  assert.match(
+    importBlock,
+    /finally \{[\s\S]*?setImportTransitionEditingBlocked\(false\)[\s\S]*?resumeAfterEditingTransition\(\)/,
+  )
+  assert.doesNotMatch(
+    importBlock.slice(blockEditing, stopOldYjs),
+    /\|\| isReadonly\.value/,
+  )
+  assert.doesNotMatch(importBlock, /\bmanualSave\(\)/)
+})
+
+test('cloud import keeps collaboration detached until its snapshot is saved and fences partial apply failures', async () => {
+  const editSource = await readFile(
+    new URL('../../components/MindMap/Edit.vue', import.meta.url),
+    'utf8',
+  )
+  const importBlock = editSource.match(
+    /async function onSetData\(data, request = \{\}\)[\s\S]*?^\}/m,
+  )?.[0] || ''
+  const startBlock = editSource.match(
+    /function startYjsSyncIfReady[\s\S]*?^\}/m,
+  )?.[0] || ''
+  const saveBlock = editSource.match(
+    /async function saveToBackend[\s\S]*?function queueRemoteDocumentReset/,
+  )?.[0] || ''
+
+  const captureIndex = importBlock.indexOf(
+    'protectedDocumentBeforeImportApply = getCurrentDocument()',
+  )
+  const deferIndex = importBlock.indexOf(
+    'collaborationRestartDeferredUntilSave = true',
+  )
+  const stopIndex = importBlock.indexOf('stopCurrentCollaborationSource()', deferIndex)
+  const replaceIndex = importBlock.indexOf('activeMindMap.setFullData(data)', stopIndex)
+  const recoveryIndex = importBlock.indexOf(
+    'await enterAuthoritativeApplyFailureRecovery(',
+    replaceIndex,
+  )
+  const abandonIndex = importBlock.indexOf(
+    'abandonPendingContentForAuthoritativeReload()',
+    recoveryIndex,
+  )
+  const retryIndex = importBlock.indexOf('scheduleAuthoritativeReload()', abandonIndex)
+
+  assert.ok(captureIndex >= 0)
+  assert.ok(deferIndex > captureIndex)
+  assert.ok(stopIndex > deferIndex)
+  assert.ok(replaceIndex > stopIndex)
+  assert.ok(recoveryIndex > replaceIndex)
+  assert.ok(abandonIndex > recoveryIndex)
+  assert.ok(retryIndex > abandonIndex)
+  assert.match(startBlock, /\|\| collaborationRestartDeferredUntilSave/)
+  assert.match(
+    saveBlock,
+    /collaborationRestartDeferredUntilSave = false[\s\S]*?startYjsSyncIfReady\(\)/,
+  )
+  assert.match(
+    importBlock,
+    /catch \(applyError\)[\s\S]*?protectedDocumentBeforeImportApply[\s\S]*?enterAuthoritativeApplyFailureRecovery/,
+  )
+})

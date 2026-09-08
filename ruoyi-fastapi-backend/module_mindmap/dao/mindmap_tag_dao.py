@@ -183,11 +183,39 @@ class MindmapTagDao:
         return await PageUtil.paginate(db, query, page_num, page_size, True)
 
     @classmethod
-    async def get_tag_by_id(cls, db: AsyncSession, tag_id: int) -> MindmapTag | None:
-        result = (await db.execute(
-            select(MindmapTag).where(MindmapTag.id == tag_id)
-        )).scalars().first()
+    async def get_tag_by_id(
+        cls,
+        db: AsyncSession,
+        tag_id: int,
+        *,
+        for_update: bool = False,
+    ) -> MindmapTag | None:
+        query = select(MindmapTag).where(MindmapTag.id == tag_id)
+        if for_update:
+            query = query.with_for_update().execution_options(populate_existing=True)
+        result = (await db.execute(query)).scalars().first()
         return result
+
+    @classmethod
+    async def get_tags_by_ids(
+        cls,
+        db: AsyncSession,
+        tag_ids: list[int] | set[int],
+        *,
+        for_update: bool = False,
+    ) -> list[MindmapTag]:
+        """按稳定顺序读取标签；治理和正文写入共用同一锁序。"""
+        normalized_ids = sorted(set(tag_ids))
+        if not normalized_ids:
+            return []
+        query = (
+            select(MindmapTag)
+            .where(MindmapTag.id.in_(normalized_ids))
+            .order_by(MindmapTag.id.asc())
+        )
+        if for_update:
+            query = query.with_for_update().execution_options(populate_existing=True)
+        return list((await db.execute(query)).scalars().all())
 
     @classmethod
     async def check_key_unique(

@@ -63,6 +63,7 @@ class MindmapVersionDao:
             select(MindmapVersion)
             .where(MindmapVersion.id == version_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )).scalars().first()
 
     @classmethod
@@ -94,17 +95,26 @@ class MindmapVersionDao:
         return result
 
     @classmethod
-    async def get_latest_draft(cls, db: AsyncSession, mindmap_id: int) -> MindmapVersion | None:
+    async def get_latest_draft(
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        *,
+        for_update: bool = False,
+    ) -> MindmapVersion | None:
         """获取最近一次自动草稿。"""
-        return (await db.execute(
+        query = (
             select(MindmapVersion)
             .where(
                 MindmapVersion.mindmap_id == mindmap_id,
                 MindmapVersion.version_type == 0,
             )
-            .order_by(MindmapVersion.created_time.desc())
+            .order_by(MindmapVersion.created_time.desc(), MindmapVersion.id.desc())
             .limit(1)
-        )).scalars().first()
+        )
+        if for_update:
+            query = query.with_for_update().execution_options(populate_existing=True)
+        return (await db.execute(query)).scalars().first()
 
     @classmethod
     async def delete_old_drafts(
@@ -133,8 +143,25 @@ class MindmapVersionDao:
         )
 
     @classmethod
-    async def get_next_version_number(cls, db: AsyncSession, mindmap_id: int) -> int:
+    async def get_next_version_number(
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        *,
+        for_update: bool = False,
+    ) -> int:
         """获取下一个版本号"""
+        if for_update:
+            # 聚合一致读仍会沿用认证阶段建立的 MySQL RR 快照。文件行锁已经
+            # 串行化同一脑图的版本写入，因此锁定当前最大版本行即可安全分配。
+            latest = (await db.execute(
+                select(MindmapVersion.version_number)
+                .where(MindmapVersion.mindmap_id == mindmap_id)
+                .order_by(MindmapVersion.version_number.desc(), MindmapVersion.id.desc())
+                .limit(1)
+                .with_for_update()
+            )).scalars().first()
+            return (latest or 0) + 1
         max_num = (await db.execute(
             select(func.max(MindmapVersion.version_number))
             .where(MindmapVersion.mindmap_id == mindmap_id)

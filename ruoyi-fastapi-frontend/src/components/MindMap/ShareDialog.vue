@@ -20,9 +20,10 @@
               aria-label="分享访问权限"
               :disabled="isOperating"
             >
-              <el-option label="仅查看" :value="0" />
+              <el-option label="仅查看（无需登录）" :value="0" />
+              <el-option label="可编辑（需要登录）" :value="1" />
             </el-select>
-            <div class="permission-tip">需要共同编辑时，请在编辑器中添加协作者</div>
+            <div class="permission-tip">{{ createPermissionTip }}</div>
           </div>
           <div class="form-item">
             <label class="form-label">有效期</label>
@@ -87,7 +88,13 @@
               </el-input>
             </div>
             <div class="link-meta">
-              <el-tag size="small" type="info" effect="plain">仅查看</el-tag>
+              <el-tag
+                size="small"
+                :type="Number(link.shareType) === 1 ? 'primary' : 'info'"
+                effect="plain"
+              >
+                {{ Number(link.shareType) === 1 ? '可编辑' : '仅查看' }}
+              </el-tag>
               <span class="expire-info" v-if="link.expireTime">
                 <el-icon :size="12"><Clock /></el-icon>
                 {{ parseTime(link.expireTime) }}
@@ -156,6 +163,11 @@ const createForm = reactive({
   shareType: 0,
   expireTime: null,
 })
+const createPermissionTip = computed(() => (
+  Number(createForm.shareType) === 1
+    ? '获得链接的用户登录后可加入为编辑者；禁用链接不会移除已经加入的成员。'
+    : '任何获得链接的人都可以浏览脑图，但不能修改内容。'
+))
 
 function getMindmapId() {
   const id = Number(props.mindmapId)
@@ -238,7 +250,7 @@ async function handleCreate() {
     }
     await createShareLink(data)
     if (!isShareSessionCurrent(session)) return
-    ElMessage.success('分享链接创建成功')
+    ElMessage.success(createForm.shareType === 1 ? '编辑邀请链接创建成功' : '只读分享链接创建成功')
     await loadLinks(session)
     if (!isShareSessionCurrent(session)) return
     createForm.shareType = 0

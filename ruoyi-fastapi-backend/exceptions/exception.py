@@ -1,3 +1,6 @@
+INTERNAL_SERVER_ERROR_MESSAGE = '服务器内部错误，请稍后重试'
+
+
 class LoginException(Exception):
     """
     自定义登录异常LoginException

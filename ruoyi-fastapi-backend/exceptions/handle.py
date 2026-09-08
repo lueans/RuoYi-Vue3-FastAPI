@@ -3,6 +3,7 @@ from fastapi.exceptions import HTTPException
 from pydantic_validation_decorator import FieldValidationError
 
 from exceptions.exception import (
+    INTERNAL_SERVER_ERROR_MESSAGE,
     AuthException,
     LoginException,
     ModelValidatorException,
@@ -68,5 +69,8 @@ def handle_exception(app: FastAPI) -> None:
     # 处理其他异常
     @app.exception_handler(Exception)
     async def exception_handler(request: Request, exc: Exception) -> Response:
+        # 详细异常只写入服务端日志。直接把 str(exc) 返回给客户端会
+        # 泄露 SQL、表字段、文件路径或驱动细节，也会让用户看到无法处理的
+        # 技术堆栈。可预期的业务错误仍由上面的 ServiceException 保留原消息。
         logger.exception(exc)
-        return ResponseUtil.error(msg=str(exc))
+        return ResponseUtil.error(msg=INTERNAL_SERVER_ERROR_MESSAGE)

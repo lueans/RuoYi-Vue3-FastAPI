@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
@@ -18,6 +18,29 @@ from module_mindmap.service.simple_mind_document_codec import EncodedDocument
 
 
 class MindmapDocumentIntegrityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_locking_load_uses_current_read_and_refreshes_identity_map(self) -> None:
+        result = MagicMock()
+        result.scalars.return_value = []
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+        document = await MindmapContentDao.load_document(db, 42, for_update=True)
+
+        self.assertIsNone(document)
+        query = db.execute.await_args.args[0]
+        self.assertIsNotNone(query._for_update_arg)
+        self.assertTrue(query._for_update_arg.read)
+        self.assertTrue(query.get_execution_options()['populate_existing'])
+
+    async def test_load_tree_forwards_locking_current_read_to_dao(self) -> None:
+        load_document = AsyncMock(return_value=None)
+        db = AsyncMock()
+
+        with patch.object(MindmapContentDao, 'load_document', new=load_document):
+            result = await MindmapDocumentService.load_tree(db, 42, for_update=True)
+
+        self.assertIsNone(result)
+        load_document.assert_awaited_once_with(db, 42, for_update=True)
+
     async def test_load_tree_converts_corrupt_topology_to_stable_service_error(self) -> None:
         document = EncodedDocument(
             root_uid='root',
@@ -161,7 +184,7 @@ class MindmapDocumentIntegrityTest(unittest.IsolatedAsyncioTestCase):
             await MindmapService.update_content_services(db, request, user_id=7)
 
         self.assertEqual(context.exception.message, STRUCTURED_CONTENT_CORRUPT_MESSAGE)
-        load_tree.assert_awaited_once_with(db, 42, required=True)
+        load_tree.assert_awaited_once_with(db, 42, required=True, for_update=True)
         persist.assert_not_awaited()
         db.rollback.assert_awaited_once()
 
@@ -194,7 +217,7 @@ class MindmapDocumentIntegrityTest(unittest.IsolatedAsyncioTestCase):
             await MindmapService.update_content_batch_services(db, 42, request, user_id=7)
 
         self.assertEqual(context.exception.message, STRUCTURED_CONTENT_CORRUPT_MESSAGE)
-        load_tree.assert_awaited_once_with(db, 42, required=True)
+        load_tree.assert_awaited_once_with(db, 42, required=True, for_update=True)
         persist.assert_not_awaited()
         db.rollback.assert_awaited_once()
 

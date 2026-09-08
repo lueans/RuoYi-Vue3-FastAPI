@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 WRITE_BATCH_SIZE = 1_000
 
 
+def _locking_current_read(statement: Any, enabled: bool) -> Any:
+    """用共享 locking read 绕过 MySQL REPEATABLE READ 的旧一致读快照。"""
+    if not enabled:
+        return statement
+    return statement.with_for_update(read=True).execution_options(populate_existing=True)
+
+
 def _chunks(rows: list[dict[str, Any]], size: int = WRITE_BATCH_SIZE) -> list[list[dict[str, Any]]]:
     return [rows[index:index + size] for index in range(0, len(rows), size)]
 
@@ -137,7 +144,7 @@ class MindmapContentDao:
         operator: str,
         now: datetime,
     ) -> None:
-        """使用 executemany 批量写入标签绑定，避免高标签密度文档逐行往返。"""
+        """批量写入标签绑定；调用方必须已按序锁定 Mindmap 和涉及的 Tag。"""
         values = [
             {
                 'file_id': file_id,
@@ -165,21 +172,35 @@ class MindmapContentDao:
         )).first() is not None
 
     @classmethod
-    async def get_node_revisions(cls, db: AsyncSession, file_id: int) -> dict[str, int]:
-        rows = (await db.execute(select(
+    async def get_node_revisions(
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        *,
+        for_update: bool = False,
+    ) -> dict[str, int]:
+        query = select(
             MindmapNode.node_uid, MindmapNode.node_revision,
         ).where(
             MindmapNode.file_id == file_id,
             MindmapNode.is_deleted == 0,
-        ))).all()
+        )
+        rows = (await db.execute(_locking_current_read(query, for_update))).all()
         return dict(rows)
 
     @classmethod
-    async def delete_document(cls, db: AsyncSession, file_ids: list[int]) -> None:
+    async def delete_document(
+        cls,
+        db: AsyncSession,
+        file_ids: list[int],
+        *,
+        for_update: bool = False,
+    ) -> None:
         if not file_ids:
             return
+        group_query = select(MindmapGroup.id).where(MindmapGroup.file_id.in_(file_ids))
         group_ids = list((await db.execute(
-            select(MindmapGroup.id).where(MindmapGroup.file_id.in_(file_ids))
+            _locking_current_read(group_query, for_update)
         )).scalars())
         if group_ids:
             await db.execute(delete(MindmapGroupMember).where(MindmapGroupMember.group_id.in_(group_ids)))
@@ -196,9 +217,11 @@ class MindmapContentDao:
         file_id: int,
         document: EncodedDocument,
         operator: str,
+        *,
+        for_update: bool = False,
     ) -> dict[str, int]:
-        """在当前事务内完整替换一个文件的结构化内容。"""
-        await cls.delete_document(db, [file_id])
+        """在当前事务内完整替换；调用方须持有文件及新旧标签行锁。"""
+        await cls.delete_document(db, [file_id], for_update=for_update)
         now = datetime.now()
         uid_to_node = await cls._insert_nodes_by_level(
             db,
@@ -311,11 +334,14 @@ class MindmapContentDao:
         file_id: int,
         document: EncodedDocument,
         operator: str,
+        *,
+        for_update: bool = False,
     ) -> dict[str, Any]:
-        """增量物化完整文档，保留已有节点和关系的稳定数据库主键。"""
+        """增量物化完整文档；调用方须持有文件及新旧标签行锁。"""
         now = datetime.now()
+        node_query = select(MindmapNode).where(MindmapNode.file_id == file_id)
         existing_nodes = list((await db.execute(
-            select(MindmapNode).where(MindmapNode.file_id == file_id)
+            _locking_current_read(node_query, for_update)
         )).scalars())
         uid_to_node = {node.node_uid: node for node in existing_nodes}
         changed_nodes: list[dict[str, Any]] = []
@@ -388,10 +414,16 @@ class MindmapContentDao:
         await db.execute(delete(MindmapNodeTag).where(MindmapNodeTag.file_id == file_id))
         await cls._insert_node_tags(db, file_id, document.node_tags, uid_to_node, operator, now)
 
-        await cls._sync_relations(db, file_id, document, uid_to_node, now)
-        await cls._sync_summaries(db, file_id, document, uid_to_node, now)
-        await cls._sync_groups(db, file_id, document, uid_to_node, now)
-        await cls._sync_assets(db, file_id, document, now)
+        await cls._sync_relations(
+            db, file_id, document, uid_to_node, now, for_update=for_update,
+        )
+        await cls._sync_summaries(
+            db, file_id, document, uid_to_node, now, for_update=for_update,
+        )
+        await cls._sync_groups(
+            db, file_id, document, uid_to_node, now, for_update=for_update,
+        )
+        await cls._sync_assets(db, file_id, document, now, for_update=for_update)
         await db.flush()
         root = uid_to_node.get(document.root_uid)
         return {
@@ -404,9 +436,11 @@ class MindmapContentDao:
     async def _sync_relations(
         cls, db: AsyncSession, file_id: int, document: EncodedDocument,
         uid_to_node: dict[str, MindmapNode], now: datetime,
+        *, for_update: bool = False,
     ) -> None:
+        query = select(MindmapRelation).where(MindmapRelation.file_id == file_id)
         existing = list((await db.execute(
-            select(MindmapRelation).where(MindmapRelation.file_id == file_id)
+            _locking_current_read(query, for_update)
         )).scalars())
         by_uid = {row.relation_uid: row for row in existing}
         desired = {row['relation_uid'] for row in document.relations}
@@ -442,9 +476,11 @@ class MindmapContentDao:
     async def _sync_summaries(
         cls, db: AsyncSession, file_id: int, document: EncodedDocument,
         uid_to_node: dict[str, MindmapNode], now: datetime,
+        *, for_update: bool = False,
     ) -> None:
+        query = select(MindmapSummary).where(MindmapSummary.file_id == file_id)
         existing = list((await db.execute(
-            select(MindmapSummary).where(MindmapSummary.file_id == file_id)
+            _locking_current_read(query, for_update)
         )).scalars())
         by_uid = {row.summary_uid: row for row in existing}
         desired = {row['summary_uid'] for row in document.summaries}
@@ -481,16 +517,21 @@ class MindmapContentDao:
     async def _sync_groups(
         cls, db: AsyncSession, file_id: int, document: EncodedDocument,
         uid_to_node: dict[str, MindmapNode], now: datetime,
+        *, for_update: bool = False,
     ) -> None:
+        query = select(MindmapGroup).where(MindmapGroup.file_id == file_id)
         existing = list((await db.execute(
-            select(MindmapGroup).where(MindmapGroup.file_id == file_id)
+            _locking_current_read(query, for_update)
         )).scalars())
         by_uid = {row.group_uid: row for row in existing}
         existing_group_ids = [row.id for row in existing]
-        existing_members = list((await db.execute(
+        member_query = (
             select(MindmapGroupMember)
             .where(MindmapGroupMember.group_id.in_(existing_group_ids))
             .order_by(MindmapGroupMember.group_id, MindmapGroupMember.sort_order)
+        )
+        existing_members = list((await db.execute(
+            _locking_current_read(member_query, for_update)
         )).scalars()) if existing_group_ids else []
         member_ids_by_group: dict[int, list[int]] = {}
         for member in existing_members:
@@ -534,10 +575,17 @@ class MindmapContentDao:
 
     @classmethod
     async def _sync_assets(
-        cls, db: AsyncSession, file_id: int, document: EncodedDocument, now: datetime,
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        document: EncodedDocument,
+        now: datetime,
+        *,
+        for_update: bool = False,
     ) -> None:
+        query = select(MindmapAsset).where(MindmapAsset.file_id == file_id)
         existing = list((await db.execute(
-            select(MindmapAsset).where(MindmapAsset.file_id == file_id)
+            _locking_current_read(query, for_update)
         )).scalars())
         by_key = {row.asset_key: row for row in existing}
         desired = {row['asset_key'] for row in document.assets}
@@ -562,33 +610,59 @@ class MindmapContentDao:
 
     @classmethod
     async def get_change_by_mutation(
-        cls, db: AsyncSession, file_id: int, client_mutation_id: str,
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        client_mutation_id: str,
+        *,
+        for_update: bool = False,
     ) -> MindmapChangeLog | None:
-        return (await db.execute(select(MindmapChangeLog).where(
+        query = select(MindmapChangeLog).where(
             MindmapChangeLog.file_id == file_id,
             MindmapChangeLog.client_mutation_id == client_mutation_id,
-        ))).scalars().first()
+        )
+        if for_update:
+            # MySQL REPEATABLE READ 下，文件锁前由认证依赖建立的一致读快照
+            # 不会因随后取得 Mindmap 行锁而自动推进。幂等检查必须使用当前读。
+            query = query.with_for_update().execution_options(populate_existing=True)
+        return (await db.execute(query)).scalars().first()
 
     @classmethod
     async def get_changes_after(
-        cls, db: AsyncSession, file_id: int, after_revision: int, limit: int = 500,
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        after_revision: int,
+        limit: int = 500,
+        *,
+        for_update: bool = False,
     ) -> list[MindmapChangeLog]:
-        return list((await db.execute(
+        query = (
             select(MindmapChangeLog)
             .where(MindmapChangeLog.file_id == file_id, MindmapChangeLog.revision > after_revision)
             .order_by(MindmapChangeLog.revision)
             .limit(limit)
-        )).scalars())
+        )
+        if for_update:
+            query = query.with_for_update().execution_options(populate_existing=True)
+        return list((await db.execute(query)).scalars())
 
     @classmethod
-    async def load_document(  # noqa: PLR0912, PLR0915
-        cls, db: AsyncSession, file_id: int,
+    async def load_document(
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        *,
+        for_update: bool = False,
     ) -> EncodedDocument | None:
-        node_models = list((await db.execute(
+        node_query = (
             select(MindmapNode).where(
                 MindmapNode.file_id == file_id,
                 MindmapNode.is_deleted == 0,
             ).order_by(MindmapNode.parent_id, MindmapNode.sort_order, MindmapNode.id)
+        )
+        node_models = list((await db.execute(
+            _locking_current_read(node_query, for_update)
         )).scalars())
         if not node_models:
             return None
@@ -618,11 +692,14 @@ class MindmapContentDao:
             'payload_schema_version': node.payload_schema_version,
         } for node in node_models]
 
-        tag_rows = (await db.execute(
+        tag_query = (
             select(MindmapNodeTag, MindmapTag)
             .join(MindmapTag, MindmapTag.id == MindmapNodeTag.tag_id)
             .where(MindmapNodeTag.file_id == file_id)
             .order_by(MindmapNodeTag.node_id, MindmapNodeTag.sort_order)
+        )
+        tag_rows = (await db.execute(
+            _locking_current_read(tag_query, for_update)
         )).all()
         node_tags = []
         for binding, tag in tag_rows:
@@ -644,8 +721,9 @@ class MindmapContentDao:
                 'resolved': resolved,
             })
 
+        relation_query = select(MindmapRelation).where(MindmapRelation.file_id == file_id)
         relation_models = list((await db.execute(
-            select(MindmapRelation).where(MindmapRelation.file_id == file_id)
+            _locking_current_read(relation_query, for_update)
         )).scalars())
         relations = [{
             'relation_uid': row.relation_uid,
@@ -658,8 +736,9 @@ class MindmapContentDao:
             'sort_order': row.sort_order,
         } for row in relation_models]
 
+        summary_query = select(MindmapSummary).where(MindmapSummary.file_id == file_id)
         summary_models = list((await db.execute(
-            select(MindmapSummary).where(MindmapSummary.file_id == file_id)
+            _locking_current_read(summary_query, for_update)
         )).scalars())
         if any(
             (row.start_child_id is not None and row.start_child_id not in id_to_uid)
@@ -676,14 +755,18 @@ class MindmapContentDao:
             'sort_order': row.sort_order,
         } for row in summary_models]
 
+        group_query = select(MindmapGroup).where(MindmapGroup.file_id == file_id)
         group_models = list((await db.execute(
-            select(MindmapGroup).where(MindmapGroup.file_id == file_id)
+            _locking_current_read(group_query, for_update)
         )).scalars())
         group_ids = [group.id for group in group_models]
-        member_models = list((await db.execute(
+        member_query = (
             select(MindmapGroupMember)
             .where(MindmapGroupMember.group_id.in_(group_ids))
             .order_by(MindmapGroupMember.group_id, MindmapGroupMember.sort_order)
+        )
+        member_models = list((await db.execute(
+            _locking_current_read(member_query, for_update)
         )).scalars()) if group_ids else []
         members_by_group: dict[int, list[MindmapGroupMember]] = {}
         for member in member_models:
@@ -704,8 +787,9 @@ class MindmapContentDao:
                 'member_uids': [id_to_uid.get(member.node_id) for member in members],
             })
 
+        asset_query = select(MindmapAsset).where(MindmapAsset.file_id == file_id)
         asset_models = list((await db.execute(
-            select(MindmapAsset).where(MindmapAsset.file_id == file_id)
+            _locking_current_read(asset_query, for_update)
         )).scalars())
         assets = [{
             'asset_key': row.asset_key,

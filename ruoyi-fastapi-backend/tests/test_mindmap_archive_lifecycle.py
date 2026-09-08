@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_dao import MindmapDao
+from module_mindmap.dao.mindmap_share_dao import MindmapShareDao
 from module_mindmap.entity.vo.mindmap_share_vo import MindmapShareCreateModel
 from module_mindmap.entity.vo.mindmap_vo import (
     MindmapBatchStatusUpdateModel,
@@ -304,8 +305,8 @@ class MindmapArchiveServiceTest(unittest.IsolatedAsyncioTestCase):
         db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
         with (
             patch.object(
-                MindmapDao,
-                'get_mindmap_for_update',
+                MindmapShareDao,
+                'get_mindmap_ownership_snapshot',
                 new=AsyncMock(return_value=mindmap(status=1)),
             ),
             self.assertRaises(ServiceException) as context,

@@ -53,6 +53,7 @@ class MindmapLifecycleServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_success)
         self.assertEqual(result.message, '已移入回收站')
         self.assertEqual(db.execute.await_count, 1)
+        self.assertIn('ORDER BY mindmap.id', str(db.execute.await_args_list[0].args[0]))
         delete_files_mock.assert_not_awaited()
         move_to_trash_mock.assert_awaited_once_with(db, [8, 9], 42, 'owner')
         self.assertEqual(close_room_mock.await_count, 2)
@@ -106,6 +107,11 @@ class MindmapLifecycleServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         persist_tree_mock.assert_not_awaited()
+        self.assertIn('ORDER BY mindmap.id', str(db.execute.await_args_list[0].args[0]))
+        structured_query = db.execute.await_args_list[2].args[0]
+        self.assertIsNotNone(structured_query._for_update_arg)
+        self.assertTrue(structured_query._for_update_arg.read)
+        self.assertTrue(structured_query.get_execution_options()['populate_existing'])
         restore_mock.assert_awaited_once_with(db, [8], 42, 'owner', {8})
         self.assertEqual(result.result['movedToRootIds'], [8])
         self.assertEqual(result.result['legacyRecoveredIds'], [])
@@ -143,7 +149,15 @@ class MindmapLifecycleServiceTest(unittest.IsolatedAsyncioTestCase):
                 db, DeleteMindmapModel(mindmapIds='8'), 42, 'owner',
             )
 
-        persist_tree_mock.assert_awaited_once()
+        persist_tree_mock.assert_awaited_once_with(
+            db,
+            8,
+            root,
+            owner_id=42,
+            operator='owner',
+            allow_disabled_bindings=True,
+            for_update=True,
+        )
         edit_mock.assert_awaited_once_with(db, {
             'id': 8,
             'root_node_id': 11,
@@ -206,6 +220,7 @@ class MindmapLifecycleServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.message, '已永久删除')
         self.assertEqual(db.execute.await_count, 9)
+        self.assertIn('ORDER BY mindmap.id', str(db.execute.await_args_list[0].args[0]))
         dependency_deletes = [
             call.args[0].table.name for call in db.execute.await_args_list[1:]
         ]

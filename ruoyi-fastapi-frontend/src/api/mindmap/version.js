@@ -18,10 +18,11 @@ export function getVersionDetail(versionId) {
 }
 
 // 回滚到指定版本
-export function restoreVersion(versionId) {
+export function restoreVersion(versionId, data) {
   return request({
     url: '/mindmap/version/restore/' + versionId,
-    method: 'post'
+    method: 'post',
+    data
   })
 }
 

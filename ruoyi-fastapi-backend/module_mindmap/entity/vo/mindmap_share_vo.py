@@ -24,5 +24,14 @@ class MindmapShareCreateModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel)
 
     mindmap_id: int = Field(description='脑图ID')
-    share_type: int = Field(default=0, description='0=查看 1=编辑')
+    share_type: int = Field(default=0, ge=0, le=1, description='0=查看 1=编辑邀请')
     expire_time: datetime | None = Field(default=None, description='过期时间（不传=永久）')
+
+
+class MindmapShareJoinModel(BaseModel):
+    """编辑邀请领取结果。"""
+    model_config = ConfigDict(alias_generator=to_camel)
+
+    mindmap_id: int = Field(description='脑图ID')
+    permission: int = Field(default=1, description='领取后的协作者权限')
+    already_joined: bool = Field(default=False, description='是否已拥有编辑权限')

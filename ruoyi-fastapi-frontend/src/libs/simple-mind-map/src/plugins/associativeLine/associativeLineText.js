@@ -121,16 +121,22 @@ function updateTextEditBoxPos(g) {
   }
 }
 
+// Read the current DOM value without committing it to the runtime tree. The
+// host editor uses this to build a complete recovery snapshot before a remote
+// document apply that may fail part-way through rendering.
+function getEditText() {
+  if (!this.textEditNode) return ''
+  const text = getStrWithBrFromHtml(this.textEditNode.innerHTML)
+  return text === this.mindMap.opt.defaultAssociativeLineText ? '' : text
+}
+
 //  隐藏文本编辑框
 function hideEditTextBox() {
   if (!this.showTextEdit) {
     return
   }
   let [path, , text, node, toNode] = this.activeLine
-  let str = getStrWithBrFromHtml(this.textEditNode.innerHTML)
-  // 如果是默认文本，那么不保存
-  let isDefaultText = str === this.mindMap.opt.defaultAssociativeLineText
-  str = isDefaultText ? '' : str
+  const str = this.getEditText()
   this.mindMap.execCommand('SET_NODE_DATA', node, {
     associativeLineText: {
       ...(node.getData('associativeLineText') || {}),
@@ -209,6 +215,7 @@ export default {
   showEditTextBox,
   setIsShowTextEdit,
   removeTextEditEl,
+  getEditText,
   hideEditTextBox,
   updateTextEditBoxPos,
   renderText,

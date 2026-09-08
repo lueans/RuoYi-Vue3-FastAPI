@@ -12,7 +12,10 @@ from config.database import async_engine
 from module_mindmap.entity.do.mindmap_do import Mindmap
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
 from module_mindmap.entity.do.mindmap_version_do import MindmapVersion
-from module_mindmap.entity.vo.mindmap_version_vo import MindmapVersionSaveModel
+from module_mindmap.entity.vo.mindmap_version_vo import (
+    MindmapVersionRestoreModel,
+    MindmapVersionSaveModel,
+)
 from module_mindmap.service.mindmap_document_service import MindmapDocumentService
 from module_mindmap.service.mindmap_version_service import MindmapVersionService
 
@@ -82,7 +85,14 @@ async def verify() -> None:
             await session.flush()
 
             await MindmapVersionService.restore_version_services(
-                session, formal.id, user_id=1, user_name='verify',
+                session,
+                formal.id,
+                MindmapVersionRestoreModel(
+                    expectedRevision=mindmap.content_revision,
+                    clientMutationId=f'verify-restore-{marker}',
+                ),
+                user_id=1,
+                user_name='verify',
             )
             restored = await MindmapDocumentService.load_tree(session, mindmap.id)
             assert restored['data']['tag'][0]['tagId'] == tag.id

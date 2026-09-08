@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from common.vo import PageModel
 from exceptions.exception import ServiceException
@@ -12,6 +12,46 @@ from module_mindmap.service.mindmap_service import MindmapService
 
 
 class MindmapAccessServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_write_lock_refreshes_an_object_loaded_by_authentication(self) -> None:
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = object()
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+        await MindmapDao.get_mindmap_for_update(db, 8)
+
+        query = db.execute.await_args.args[0]
+        self.assertIsNotNone(query._for_update_arg)
+        self.assertTrue(query.get_execution_options()['populate_existing'])
+
+    async def test_write_access_reads_migration_status_from_current_state(self) -> None:
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = 'failed'
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+        status = await MindmapDao.get_migration_status(db, 8, for_update=True)
+
+        self.assertEqual(status, 'failed')
+        query = db.execute.await_args.args[0]
+        self.assertIsNotNone(query._for_update_arg)
+        self.assertTrue(query._for_update_arg.read)
+
+    async def test_websocket_session_registration_can_share_the_write_lock_order(self) -> None:
+        mindmap = SimpleNamespace(id=8, owner_id=42, status=0)
+        with (
+            patch.object(MindmapDao, 'get_mindmap_for_update', new=AsyncMock(return_value=mindmap)) as locked,
+            patch.object(MindmapDao, 'get_mindmap_by_id', new=AsyncMock()) as unlocked,
+        ):
+            result = await MindmapService.resolve_mindmap_access(
+                object(),
+                8,
+                42,
+                lock_for_session=True,
+            )
+
+        self.assertEqual(result, (mindmap, 1, True))
+        locked.assert_awaited_once_with(unittest.mock.ANY, 8)
+        unlocked.assert_not_awaited()
+
     async def test_owner_resolves_full_permission_without_collaborator_query(self) -> None:
         mindmap = SimpleNamespace(id=8, owner_id=42)
         with (
@@ -28,28 +68,38 @@ class MindmapAccessServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_viewer_cannot_resolve_edit_access(self) -> None:
         mindmap = SimpleNamespace(id=8, owner_id=42, status=0)
+        permission = AsyncMock(return_value=0)
         with (
             patch.object(MindmapDao, 'get_mindmap_for_update', new=AsyncMock(return_value=mindmap)),
             patch(
                 'module_mindmap.service.mindmap_service.MindmapCollaboratorDao.get_collaborator_permission',
-                new=AsyncMock(return_value=0),
+                new=permission,
             ),
             self.assertRaises(ServiceException) as context,
         ):
             await MindmapService.resolve_mindmap_access(object(), 8, 9, require_edit=True)
 
         self.assertEqual(context.exception.message, '无编辑权限')
+        permission.assert_awaited_once_with(
+            unittest.mock.ANY,
+            8,
+            9,
+            for_update=True,
+        )
 
     async def test_failed_migration_keeps_owner_in_readonly_mode(self) -> None:
         mindmap = SimpleNamespace(id=8, owner_id=42, status=0)
+        db = object()
+        migration_status = AsyncMock(return_value='failed')
         with (
             patch.object(MindmapDao, 'get_mindmap_for_update', new=AsyncMock(return_value=mindmap)),
-            patch.object(MindmapDao, 'get_migration_status', new=AsyncMock(return_value='failed')),
+            patch.object(MindmapDao, 'get_migration_status', new=migration_status),
             self.assertRaises(ServiceException) as context,
         ):
-            await MindmapService.resolve_mindmap_access(object(), 8, 42, require_edit=True)
+            await MindmapService.resolve_mindmap_access(db, 8, 42, require_edit=True)
 
         self.assertIn('仅可只读访问', context.exception.message)
+        migration_status.assert_awaited_once_with(db, 8, for_update=True)
 
     async def test_shared_list_is_scoped_by_authenticated_user(self) -> None:
         query_model = MindmapPageQueryModel(ownerId=9, accessScope='shared')

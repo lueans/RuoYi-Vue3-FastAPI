@@ -36,13 +36,23 @@ class MindmapDao:
             select(Mindmap)
             .where(Mindmap.id == mindmap_id, Mindmap.del_flag == '0')
             .with_for_update()
+            .execution_options(populate_existing=True)
         )).scalars().first()
 
     @classmethod
-    async def get_migration_status(cls, db: AsyncSession, mindmap_id: int) -> str | None:
-        return (await db.execute(
-            select(MindmapMigrationRecord.status).where(MindmapMigrationRecord.file_id == mindmap_id)
-        )).scalar_one_or_none()
+    async def get_migration_status(
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        *,
+        for_update: bool = False,
+    ) -> str | None:
+        query = select(MindmapMigrationRecord.status).where(
+            MindmapMigrationRecord.file_id == mindmap_id
+        )
+        if for_update:
+            query = query.with_for_update(read=True)
+        return (await db.execute(query)).scalar_one_or_none()
 
     @classmethod
     async def get_mindmap_list(

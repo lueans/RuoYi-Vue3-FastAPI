@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import runpy
 import sys
 from collections.abc import Iterator
 from datetime import datetime
@@ -16,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from common.annotation.log_annotation import Log, RequestLogFieldRoot, ResponseLogFieldRoot
 from common.enums import BusinessType
 from config.env import LogConfig
+from exceptions.exception import INTERNAL_SERVER_ERROR_MESSAGE
 from utils.log_util import LoggerInitializer, LogSanitizer, _build_text_assignment_patterns, _build_text_key_pattern
 
 
@@ -45,6 +47,15 @@ def test_sanitize_nested_log_payload() -> None:
     assert sanitized['jsonBody']['phonenumber'] == '138****5678'
     assert sanitized['jsonBody']['email'] == 'a***n@example.com'
     assert sanitized['jsonBody']['ipaddr'] == '192.168.1.10'
+
+
+def test_sanitize_composite_token_field() -> None:
+    share_token = 'invite-token-that-must-not-enter-the-operation-log'
+
+    sanitized = LogSanitizer.sanitize_data({'path_params': {'share_token': share_token}})
+
+    assert sanitized['path_params']['share_token'] == '******'
+    assert share_token not in json.dumps(sanitized)
 
 
 def test_ip_masking_can_be_enabled_by_partial_mask_field_configuration() -> None:
@@ -187,6 +198,33 @@ def test_sanitize_text_returns_original_when_mask_disabled() -> None:
         sanitized = LogSanitizer.sanitize_text(text)
 
     assert sanitized == text
+
+
+@pytest.mark.parametrize('action', ['view', 'join'])
+def test_access_log_always_masks_share_route_token(action: str) -> None:
+    share_token = '0123456789abcdef0123456789abcdef'
+    access_log = f'127.0.0.1:12345 - "GET /mindmap/share/{action}/{share_token} HTTP/1.1" 200'
+
+    with patch.object(LogConfig, 'log_mask_enabled', False):
+        sanitized = LogSanitizer.sanitize_text(access_log)
+
+    assert share_token not in sanitized
+    assert f'/mindmap/share/{action}/******' in sanitized
+
+
+def test_app_entrypoint_preserves_sanitizing_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    run_kwargs: dict = {}
+
+    def capture_uvicorn_run(**kwargs) -> None:
+        run_kwargs.update(kwargs)
+
+    monkeypatch.setattr('uvicorn.run', capture_uvicorn_run)
+    runpy.run_path(
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), 'app.py'),
+        run_name='__main__',
+    )
+
+    assert run_kwargs['log_config'] is None
 
 
 def test_build_json_payload_sanitizes_exception_and_extra() -> None:
@@ -335,6 +373,69 @@ def test_get_request_params_returns_structured_payload() -> None:
 
     assert params['query_params']['page'] == '1'
     assert params['json_body']['password'] == 'plain-password'
+
+
+def test_get_oper_url_uses_route_template_instead_of_secret_path_value() -> None:
+    share_token = 'a-secret-share-token'
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'POST',
+            'path': f'/mindmap/share/join/{share_token}',
+            'headers': [],
+            'query_string': b'',
+            'route': SimpleNamespace(path='/mindmap/share/join/{share_token}'),
+        }
+    )
+
+    oper_url = Log._get_oper_url(request)
+
+    assert oper_url == '/mindmap/share/join/{share_token}'
+    assert share_token not in oper_url
+
+
+def test_log_unhandled_exception_returns_generic_message() -> None:
+    async def receive() -> dict:
+        return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+    request = Request(
+        {
+            'type': 'http',
+            'method': 'POST',
+            'path': '/explode/secret-value',
+            'headers': [],
+            'query_string': b'',
+            'path_params': {'share_token': 'secret-value'},
+            'route': SimpleNamespace(path='/explode/{share_token}'),
+            'client': ('127.0.0.1', 12345),
+        },
+        receive=receive,
+    )
+
+    async def explode(request: Request) -> None:
+        raise RuntimeError('SELECT secret_column FROM private_table')
+
+    decorated = Log(
+        title='测试日志',
+        business_type=BusinessType.OTHER,
+        request_log_mode='none',
+    )(explode)
+    current_user = SimpleNamespace(user=SimpleNamespace(user_name='tester', dept=None))
+
+    with (
+        patch.object(LogConfig, 'log_mask_enabled', False),
+        patch('common.annotation.log_annotation.RequestContext.get_current_user', return_value=current_user),
+        patch('common.annotation.log_annotation.LogQueueService.enqueue_operation_log') as enqueue_log,
+    ):
+        result = asyncio.run(decorated(request=request))
+
+    payload = json.loads(result.body)
+    assert payload['msg'] == INTERNAL_SERVER_ERROR_MESSAGE
+    assert 'secret_column' not in result.body.decode()
+    operation_log = enqueue_log.await_args.args[1]
+    assert operation_log.oper_url == '/explode/{share_token}'
+    assert operation_log.oper_param == ''
+    assert 'secret-value' not in operation_log.model_dump_json()
 
 
 def test_get_request_params_falls_back_to_raw_body_when_json_invalid() -> None:

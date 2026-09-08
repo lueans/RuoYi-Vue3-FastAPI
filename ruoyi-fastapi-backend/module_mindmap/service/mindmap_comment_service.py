@@ -302,10 +302,12 @@ class MindmapCommentService:
             await db.rollback()
             raise ServiceException(message='只能删除自己的评论')
         if comment.del_flag != '0' or thread.del_flag != '0':
+            persisted_thread_id = thread.id
+            thread_deleted = thread.del_flag != '0'
             await db.rollback()
             return {
-                'threadId': thread.id,
-                'threadDeleted': thread.del_flag != '0',
+                'threadId': persisted_thread_id,
+                'threadDeleted': thread_deleted,
                 'alreadyDeleted': True,
             }
         await cls._ensure_comment_writable(db, thread.mindmap_id, user_id)

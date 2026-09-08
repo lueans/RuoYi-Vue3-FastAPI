@@ -57,6 +57,10 @@ def create_async_db_engine(echo: bool | None = None) -> AsyncEngine:
     return create_async_engine(
         ASYNC_SQLALCHEMY_DATABASE_URL,
         echo=DataBaseConfig.db_echo if echo is None else echo,
+        # SQLAlchemy 异常默认会把绑定参数追加到错误文本。分享 token、密码等
+        # 可能因此绕过字段级日志脱敏进入 error.log；保留 SQL 结构即可诊断，
+        # 真实参数不得写入日志或异常字符串。
+        hide_parameters=True,
         max_overflow=DataBaseConfig.db_max_overflow,
         pool_size=DataBaseConfig.db_pool_size,
         pool_recycle=DataBaseConfig.db_pool_recycle,
@@ -74,6 +78,7 @@ def create_sync_db_engine(echo: bool | None = None) -> Engine:
     return create_engine(
         SYNC_SQLALCHEMY_DATABASE_URL,
         echo=DataBaseConfig.db_echo if echo is None else echo,
+        hide_parameters=True,
         max_overflow=DataBaseConfig.db_max_overflow,
         pool_size=DataBaseConfig.db_pool_size,
         pool_recycle=DataBaseConfig.db_pool_recycle,
@@ -88,7 +93,15 @@ def create_async_session_local(engine: AsyncEngine) -> async_sessionmaker:
     :param engine: 异步 SQLAlchemy Engine
     :return: 异步 Session 工厂
     """
-    return async_sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    # AsyncSession 无法像同步 Session 一样在普通属性访问中隐式执行 IO。
+    # 若提交后自动过期 ORM 对象，随后读取已加载字段会触发 MissingGreenlet。
+    # 请求内需要最新值的场景应显式 refresh/重新查询，而不是依赖懒加载。
+    return async_sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+        bind=engine,
+    )
 
 
 def create_sync_session_local(engine: Engine) -> sessionmaker:

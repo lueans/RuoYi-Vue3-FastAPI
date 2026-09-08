@@ -27,6 +27,35 @@ export function getMindmapSaveRecoveryAction(saveStatus, recoveryKind) {
   }
 }
 
+export function getMindmapResumeRecoveryReason({
+  cloudRevision,
+  localRevision,
+  cloudNodeCount,
+  localNodeCount,
+  hasLocalChanges = false,
+}) {
+  if (
+    !Number.isInteger(cloudRevision)
+    || cloudRevision <= 0
+    || !Number.isInteger(localRevision)
+    || localRevision <= 0
+  ) return null
+  if (cloudRevision > localRevision) return 'newer-revision'
+  if (cloudRevision < localRevision) return null
+  // 同 revision 下节点数减少也可能是用户刚执行了删除、尚未自动保存。
+  // 只有干净会话才可将其判定为运行时/Yjs 残缺并自动用云端修复。
+  if (hasLocalChanges) return null
+  return (
+    Number.isInteger(cloudNodeCount)
+    && cloudNodeCount > 0
+    && Number.isInteger(localNodeCount)
+    && localNodeCount >= 0
+    && localNodeCount < cloudNodeCount
+  )
+    ? 'incomplete-runtime'
+    : null
+}
+
 /**
  * Flush editor changes before route navigation without treating one successful
  * request as proof that the document is clean. A user can continue editing

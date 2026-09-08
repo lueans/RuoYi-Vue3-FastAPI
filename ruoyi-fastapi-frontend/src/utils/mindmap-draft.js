@@ -65,8 +65,31 @@ export function getMindmapDraftDisplayName(draft = {}) {
 
 export function getMindmapDraftSourceLabel(draft = {}) {
   if (!draft?.sessionId) return '兼容草稿'
+  if (/-conflict-r(?:\d+|unknown)(?:-|$)/.test(String(draft.sessionId))) {
+    return '冲突保护'
+  }
   const suffix = String(draft.sessionId).replace(/[^a-zA-Z0-9]/g, '').slice(-6).toUpperCase()
   return suffix ? `编辑窗口 ${suffix}` : '独立编辑窗口'
+}
+
+/**
+ * 普通打开脑图时，其他窗口留下的草稿不能用模态框阻断云端编辑。
+ * 草稿中心通过 draftKey 明确打开某一记录时，才进入恢复/放弃决策；仍在
+ * 活动的窗口则始终由原窗口负责保存。
+ */
+export function resolveMindmapDraftOpenMode({
+  draftSessionId,
+  currentSessionId,
+  requestedDraftKey = '',
+  otherSessionActive = false,
+} = {}) {
+  const belongsToOtherSession = Boolean(
+    draftSessionId
+    && String(draftSessionId) !== String(currentSessionId || ''),
+  )
+  if (!belongsToOtherSession) return 'prompt'
+  if (otherSessionActive) return 'skip-active'
+  return requestedDraftKey ? 'prompt' : 'preserve-background'
 }
 
 export function stableSerialize(value) {
@@ -529,9 +552,14 @@ export async function saveMindmapDraft({
 
 export async function getMindmapDraft(userId, mindmapId, { key } = {}) {
   const baseKey = createMindmapDraftKey(userId, mindmapId)
-  const requestedKey = typeof key === 'string' && (key === baseKey || key.startsWith(`${baseKey}:`))
-    ? key
-    : null
+  const hasRequestedKey = key !== undefined && key !== null && key !== ''
+  const requestedKey = (
+    typeof key === 'string'
+    && (key === baseKey || key.startsWith(`${baseKey}:`))
+  ) ? key : null
+  // draftKey 表示用户从草稿中心明确选择的一条记录。伪造、过期或属于
+  // 另一脑图的 key 必须返回空，不能静默退化为“最新草稿”并恢复错窗口。
+  if (hasRequestedKey && !requestedKey) return null
   const drafts = await listMindmapDrafts(userId)
   return drafts.find(record => (
     String(record.mindmapId) === String(mindmapId)

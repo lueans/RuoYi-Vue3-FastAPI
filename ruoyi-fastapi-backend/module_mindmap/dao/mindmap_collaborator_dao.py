@@ -37,24 +37,62 @@ class MindmapCollaboratorDao:
         return list(result)
 
     @classmethod
-    async def get_collaborator_by_id(cls, db: AsyncSession, collab_id: int) -> MindmapCollaborator | None:
-        """根据 ID 获取协作者记录"""
-        result = (await db.execute(
-            select(MindmapCollaborator).where(MindmapCollaborator.id == collab_id)
-        )).scalars().first()
+    async def get_collaborator_by_id(
+        cls,
+        db: AsyncSession,
+        collab_id: int,
+        *,
+        for_update: bool = False,
+    ) -> MindmapCollaborator | None:
+        """根据 ID 获取协作者记录；权限变更事务可请求行锁。"""
+        statement = select(MindmapCollaborator).where(MindmapCollaborator.id == collab_id)
+        if for_update:
+            # 同一请求会先做无锁探测，再按 Mindmap→Collaborator 顺序取锁。
+            # 强制刷新 identity map，避免等待主记录锁期间已变更的权限仍以
+            # Session 中的旧 ORM 实例返回。
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        result = (await db.execute(statement)).scalars().first()
         return result
 
     @classmethod
+    async def get_collaborator(
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        user_id: int,
+        *,
+        for_update: bool = False,
+    ) -> MindmapCollaborator | None:
+        """按脑图与用户读取协作者记录；编辑邀请领取可锁定既有权限。"""
+        statement = select(MindmapCollaborator).where(
+            MindmapCollaborator.mindmap_id == mindmap_id,
+            MindmapCollaborator.user_id == user_id,
+        )
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return (await db.execute(statement)).scalars().first()
+
+    @classmethod
     async def get_collaborator_permission(
-        cls, db: AsyncSession, mindmap_id: int, user_id: int,
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        user_id: int,
+        *,
+        for_update: bool = False,
     ) -> int | None:
         """获取用户对某脑图的协作者权限，返回 permission 值或 None（不是协作者）"""
+        statement = select(MindmapCollaborator.permission).where(
+            MindmapCollaborator.mindmap_id == mindmap_id,
+            MindmapCollaborator.user_id == user_id,
+        )
+        if for_update:
+            # MySQL REPEATABLE READ 下普通 SELECT 可能继续读取请求早期建立的
+            # 一致性快照。写路径已先锁 Mindmap，再以当前读锁定权限行，确保
+            # 撤权提交后等待中的旧请求不能凭历史 permission 继续写入。
+            statement = statement.with_for_update()
         result = (await db.execute(
-            select(MindmapCollaborator.permission)
-            .where(
-                MindmapCollaborator.mindmap_id == mindmap_id,
-                MindmapCollaborator.user_id == user_id,
-            )
+            statement
         )).scalar_one_or_none()
         return result
 

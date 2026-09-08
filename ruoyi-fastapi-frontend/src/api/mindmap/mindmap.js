@@ -147,14 +147,15 @@ export function resetMindmapCollaboration(mindmapId, data) {
   })
 }
 
-// 视图状态采用后写覆盖，不进入正文 revision/冲突日志。
-export function updateMindmapView(mindmapId, viewData) {
+// 视图状态不推进正文 revision，但旧 revision 的迟到请求会被服务端拒绝。
+export function updateMindmapView(mindmapId, viewData, expectedContentRevision) {
   return request({
     url: '/mindmap/file/' + mindmapId + '/view',
     method: 'patch',
-    data: { viewData },
+    data: { viewData, expectedContentRevision },
     headers: { repeatSubmit: false },
     timeout: 5000,
+    silentError: true,
   })
 }
 

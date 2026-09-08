@@ -120,16 +120,21 @@ function updateTextEditBoxPos(g) {
   }
 }
 
+// Return the uncommitted DOM text for host-level recovery snapshots without
+// changing the live outer-frame record or closing the editor.
+function getEditText() {
+  if (!this.textEditNode) return ''
+  const text = getStrWithBrFromHtml(this.textEditNode.innerHTML)
+  return text === this.mindMap.opt.defaultOuterFrameText ? '' : text
+}
+
 //  隐藏文本编辑框
 function hideEditTextBox() {
   if (!this.showTextEdit) {
     return
   }
   let { el, textNode, node, range } = this.activeOuterFrame
-  let str = getStrWithBrFromHtml(this.textEditNode.innerHTML)
-  // 如果是默认文本，那么不保存
-  let isDefaultText = str === this.mindMap.opt.defaultOuterFrameText
-  str = isDefaultText ? '' : str
+  const str = this.getEditText()
   this.updateActiveOuterFrame({
     text: str
   })
@@ -231,6 +236,7 @@ export default {
   showEditTextBox,
   setIsShowTextEdit,
   removeTextEditEl,
+  getEditText,
   hideEditTextBox,
   updateTextEditBoxPos,
   renderText

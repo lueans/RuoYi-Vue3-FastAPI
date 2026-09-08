@@ -15,6 +15,7 @@ import {
   CONSTANTS,
   noneRichTextNodeLineHeight
 } from '../../constants/constant'
+import { resolveCurrentNodeTextEditTarget } from './node/nodeCooperateState'
 
 const SMM_NODE_EDIT_WRAP = 'smm-node-edit-wrap'
 
@@ -218,6 +219,29 @@ export default class TextEdit {
     }
   }
 
+  // Presence 中的选区不会阻止编辑；仅当另一个会话明确声明正在编辑该
+  // 节点文本时才拒绝进入。beforeTextEdit 可能异步，因此调用方会在其
+  // 前后各检查一次，避免等待期间收到的远端占用被漏掉。
+  isTextEditBlockedByRemote(node) {
+    if (
+      typeof this.mindMap.opt.isNodeTextEditLeaseAuthoritative === 'function'
+      && this.mindMap.opt.isNodeTextEditLeaseAuthoritative()
+    ) return false
+    return Boolean(
+      this.mindMap.opt.onlyOneEnableTextEditOnCooperate
+      && this.getCurrentEditNode() !== node
+      && node?.isTextEditOccupied?.()
+    )
+  }
+
+  emitTextEditBlocked(node) {
+    this.mindMap.emit(
+      'node_text_edit_blocked',
+      node,
+      [...(node?.editingUserList || [])]
+    )
+  }
+
   // 显示文本编辑框
   // isInserting：是否是刚创建的节点
   // isFromKeyDown：是否是在按键事件进入的编辑
@@ -229,6 +253,10 @@ export default class TextEdit {
   }) {
     // 使用了自定义节点内容那么不响应编辑事件
     if (node.isUseCustomNodeContent()) {
+      return
+    }
+    if (this.isTextEditBlockedByRemote(node)) {
+      this.emitTextEditBlocked(node)
       return
     }
     // 如果有正在编辑中的节点，那么先结束它
@@ -248,31 +276,70 @@ export default class TextEdit {
       }
       if (!isShow) return
     }
-    const { offsetLeft, offsetTop } = checkNodeOuter(this.mindMap, node)
-    this.mindMap.view.translateXY(offsetLeft, offsetTop)
-    const g = node._textData.node
-    // 需要先显示，不然宽高获取到的可能是0
-    if (openRealtimeRenderOnNodeTextEdit) {
-      g.show()
+    let leasedNodeUid = ''
+    let opened = false
+    try {
+      const authoritativeNodeEditLease = (
+        typeof this.mindMap.opt.isNodeTextEditLeaseAuthoritative === 'function'
+        && this.mindMap.opt.isNodeTextEditLeaseAuthoritative()
+      )
+      if (authoritativeNodeEditLease) {
+        leasedNodeUid = node?.uid || node?.getData?.('uid') || ''
+        const currentNode = resolveCurrentNodeTextEditTarget(node, this.renderer, {
+          authoritative: true,
+          readonly: this.mindMap.opt.readonly,
+        })
+        // 租约等待期间远端可能删除节点或整树重建。只允许当前 renderer 中
+        // 仍有效的 UID 实例继续，未真正打开编辑器的任何退出路径都在 finally 归还租约。
+        if (!currentNode) return
+        node = currentNode
+      }
+      if (this.isTextEditBlockedByRemote(node)) {
+        this.emitTextEditBlocked(node)
+        return
+      }
+      const { offsetLeft, offsetTop } = checkNodeOuter(this.mindMap, node)
+      this.mindMap.view.translateXY(offsetLeft, offsetTop)
+      const g = node._textData.node
+      // 需要先显示，不然宽高获取到的可能是0
+      if (openRealtimeRenderOnNodeTextEdit) {
+        g.show()
+      }
+      const rect = g.node.getBoundingClientRect()
+      // 如果开启了大小实时更新，那么直接隐藏节点原文本
+      if (openRealtimeRenderOnNodeTextEdit) {
+        g.hide()
+      }
+      const params = {
+        node,
+        rect,
+        isInserting,
+        isFromKeyDown,
+        isFromScale
+      }
+      if (this.mindMap.richText) {
+        this.mindMap.richText.showEditText(params)
+      } else {
+        this.currentNode = node
+        this.showEditTextBox(params)
+      }
+      opened = (
+        this.isShowTextEdit()
+        && this.getCurrentEditNode() === node
+      )
+    } catch (error) {
+      // show() 被事件直接调用，因此内部吸收 DOM/渲染异常，避免产生
+      // unhandled rejection；同时仍通过统一 errorHandler 暴露错误。
+      opened = (
+        this.isShowTextEdit()
+        && this.getCurrentEditNode() === node
+      )
+      this.mindMap.opt.errorHandler(ERROR_TYPES.BEFORE_TEXT_EDIT_ERROR, error)
+    } finally {
+      if (leasedNodeUid && !opened) {
+        this.mindMap.opt.releaseNodeTextEditLease?.(leasedNodeUid)
+      }
     }
-    const rect = g.node.getBoundingClientRect()
-    // 如果开启了大小实时更新，那么直接隐藏节点原文本
-    if (openRealtimeRenderOnNodeTextEdit) {
-      g.hide()
-    }
-    const params = {
-      node,
-      rect,
-      isInserting,
-      isFromKeyDown,
-      isFromScale
-    }
-    if (this.mindMap.richText) {
-      this.mindMap.richText.showEditText(params)
-      return
-    }
-    this.currentNode = node
-    this.showEditTextBox(params)
   }
 
   // 当openRealtimeRenderOnNodeTextEdit配置更新后需要更新编辑框样式
@@ -407,6 +474,7 @@ export default class TextEdit {
       this.textEditNode.style.lineHeight = 'normal'
     }
     this.setIsShowTextEdit(true)
+    this.mindMap.emit('node_text_edit_start', node)
     // 选中文本
     // if (!this.cacheEditingText) {
     //   selectAllInput(this.textEditNode)
@@ -501,12 +569,22 @@ export default class TextEdit {
     this.textEditNode.style.fontWeight = 'normal'
     this.textEditNode.style.transform = 'translateY(0)'
     this.setIsShowTextEdit(false)
-    this.mindMap.execCommand('SET_NODE_TEXT', currentNode, text)
-    // if (currentNode.isGeneralization) {
-    //   // 概要节点
-    //   currentNode.generalizationBelongNode.updateGeneralization()
-    // }
-    this.mindMap.render()
+    try {
+      this.mindMap.execCommand('SET_NODE_TEXT', currentNode, text)
+      // SET_NODE_TEXT 只同步修改运行时模型，data_change_detail 默认仍在
+      // Command 的节流队列中。释放服务端租约前必须同步冲刷，使最终文本
+      // 已经进入 Yjs/WebSocket 的有序发送队列。
+      this.mindMap.command?.flushPendingHistory?.()
+      // if (currentNode.isGeneralization) {
+      //   // 概要节点
+      //   currentNode.generalizationBelongNode.updateGeneralization()
+      // }
+      this.mindMap.render()
+    } finally {
+      // 正常路径必须先提交/Yjs 同步再释放；命令或渲染异常时也不能
+      // 把服务端租约留到 TTL 才恢复。
+      this.mindMap.emit('node_text_edit_end', currentNode)
+    }
     this.mindMap.emit(
       'hide_text_edit',
       this.textEditNode,

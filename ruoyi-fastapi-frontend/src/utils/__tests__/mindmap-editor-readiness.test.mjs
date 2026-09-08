@@ -15,10 +15,15 @@ test('页面只在画布、插件和事件生命周期完成后进入就绪态',
   const mountedBlock = editorSource.match(/onMounted\(async \(\) => \{[\s\S]*?\n\}\)/)?.[0] || ''
 
   assert.ok(mountedBlock.indexOf('bindBusEvents()') < mountedBlock.indexOf("emit('ready')"))
-  assert.match(editorSource, /await waitForInitialMindmapRender\(mm\)/)
-  assert.match(editorSource, /instance\.on\('node_tree_render_end', onRenderEnd\)/)
-  assert.match(editorSource, /setTimeout\(\(\) => \{[\s\S]*?脑图首次渲染超时/)
-  assert.match(mountedBlock, /catch \(error\) \{[\s\S]*?emit\('load-error'/)
+  assert.match(editorSource, /await waitForMindmapInitialRender\(mm\)/)
+  assert.match(editorSource, /await waitForMindmapInitialRender\(mm\)[\s\S]*?initialRenderReady = true[\s\S]*?startYjsSyncIfReady\(\)/)
+  assert.match(editorSource, /function startYjsSyncIfReady[\s\S]*?!initialRenderReady/)
+  assert.match(editorSource, /import \{ waitForMindmapInitialRender \} from '@\/utils\/mindmap-initial-render'/)
+  assert.match(mountedBlock, /catch \(error\) \{[\s\S]*?sessionCancelled\(sessionController\?\.signal\)[\s\S]*?emit\('load-error'/)
+  assert.ok(
+    mountedBlock.indexOf('sessionCancelled(sessionController?.signal)')
+      < mountedBlock.indexOf("console.error('脑图编辑器初始化失败:'"),
+  )
   assert.match(editorSource, /if \(!container\) \{[\s\S]*?emit\('load-error'/)
   assert.match(pageSource, /@ready="onEditorReady"/)
   assert.match(pageSource, /:key="editorInstanceKey"/)
@@ -46,6 +51,9 @@ test('快速切换会取消旧详情请求并关闭所属草稿确认', async ()
   assert.match(editorSource, /if \(localDraftDialogOpen \|\| conflictDialogOpen\) ElMessageBox\.close\(\)/)
   assert.match(editorSource, /finally \{\s*localDraftDialogOpen = false/)
   assert.match(requestSource, /if \(axios\.isCancel\(error\) \|\| error\?\.code === 'ERR_CANCELED'\) \{\s*return Promise\.reject\(error\)/)
+  assert.match(requestSource, /const returnPath = getCurrentLoginReturnPath\(location\)/)
+  assert.match(requestSource, /location\.href = returnPath/)
+  assert.doesNotMatch(requestSource, /location\.href = ['"]\/index['"]/)
 })
 
 test('运行期协作重载和冲突处理也服从当前会话取消边界', async () => {
@@ -61,13 +69,18 @@ test('运行期协作重载和冲突处理也服从当前会话取消边界', as
   assert.match(conflictEntryBlock, /if \(conflictResolutionPromise\) return conflictResolutionPromise/)
   assert.match(conflictEntryBlock, /conflictResolutionPromise = operation/)
   assert.match(conflictEntryBlock, /conflictResolutionPromise === operation/)
+  assert.equal(
+    (conflictEntryBlock.match(/conflictResolutionPromise === operation/g) || []).length,
+    1,
+  )
   assert.match(conflictBlock, /conflictDialogOpen = true/)
   assert.match(conflictBlock, /finally \{\s*conflictDialogOpen = false/)
-  assert.match(conflictBlock, /getMindmap\(props\.mindmapId, \{ signal \}\)/)
+  assert.match(conflictBlock, /recoverFromSaveRevisionConflict\(conflictData, localFullData\)/)
+  assert.doesNotMatch(conflictBlock, /downloadConflictBackup/)
   assert.match(conflictBlock, /if \(sessionCancelled\(signal\)\) return false/)
   assert.match(editorSource, /if \(localDraftDialogOpen \|\| conflictDialogOpen\) ElMessageBox\.close\(\)/)
   assert.match(editorSource, /const reloaded = authoritativeReloadRequired[\s\S]*?reloadLatestServerDocument\(\)[\s\S]*?if \(!reloaded\) return/)
-  assert.match(editorSource, /const reloaded = await reloadLatestServerDocument\(\{ preserveLocalDraft \}\)[\s\S]*?if \(!reloaded\) return/)
+  assert.match(editorSource, /const reloaded = await reloadLatestServerDocument\(\{[\s\S]*?preserveLocalDraft: false,[\s\S]*?expectedDraftChangeVersion:[\s\S]*?if \(!reloaded\)/)
 })
 
 test('会话终止会关闭异步工作且忽略迟到的保存响应', async () => {

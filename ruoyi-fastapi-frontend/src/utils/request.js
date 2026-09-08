@@ -19,6 +19,7 @@ import {
   isDuplicateRepeatSubmit,
   isRepeatSubmitMethod
 } from '@/utils/requestDedupe'
+import { getCurrentLoginReturnPath } from '@/utils/login-redirect'
 
 let downloadLoadingInstance;
 // 是否显示重新登录
@@ -106,8 +107,11 @@ service.interceptors.response.use(async res => {
         isRelogin.show = true;
         ElMessageBox.confirm('登录状态已过期，您可以继续留在该页面，或者重新登录', '系统提示', { confirmButtonText: '重新登录', cancelButtonText: '取消', type: 'warning' }).then(() => {
           isRelogin.show = false;
+          const returnPath = getCurrentLoginReturnPath(location)
           useUserStore().logOut().then(() => {
-            location.href = '/index';
+            // 退出后重新访问原站内地址，由路由守卫安全生成登录 redirect。
+            // 不能固定跳转 /index，否则协作会话、脑图 ID 和节点定位都会丢失。
+            location.href = returnPath;
           })
       }).catch(() => {
         isRelogin.show = false;

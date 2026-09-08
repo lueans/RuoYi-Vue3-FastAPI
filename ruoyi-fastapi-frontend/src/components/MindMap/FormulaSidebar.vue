@@ -16,13 +16,14 @@
             resize="none"
             type="textarea"
             placeholder="请输入 LaTeX 公式"
-            :disabled="isReadonly"
+            :disabled="isReadonly || formulaSubmitting"
             @keydown.stop
           />
           <el-button
             size="small"
             style="width: 100%; margin-top: 20px"
             :disabled="!canInsertFormula"
+            :loading="formulaSubmitting"
             @click="confirm"
           >确认</el-button>
         </div>
@@ -40,7 +41,7 @@
               class="text"
               :aria-label="`使用公式 ${item.text}`"
               :title="item.text"
-              :disabled="isReadonly"
+              :disabled="isReadonly || formulaSubmitting"
               @click="formulaText = item.text"
             >
               {{ item.text }}
@@ -72,22 +73,27 @@ const activeNodes = ref([])
 const list = ref([])
 const pluginLoading = ref(false)
 const pluginError = ref('')
+const formulaSubmitting = ref(false)
 const formulaReady = computed(() => Boolean(props.mindMap?.formula && window.katex))
 const canInsertFormula = computed(() => {
   const activeMindMap = props.mindMap
   return !isReadonly.value
     && !pluginLoading.value
+    && !formulaSubmitting.value
     && !pluginError.value
     && formulaReady.value
     && store.activeSidebar === 'formulaSidebar'
     && activeNodes.value.some(node => node?.mindMap === activeMindMap)
 })
 let pluginRequestId = 0
+let formulaSubmissionId = 0
 let componentAlive = true
 
 function resetFormulaSession({ clearInput = true } = {}) {
   pluginRequestId += 1
+  formulaSubmissionId += 1
   pluginLoading.value = false
+  formulaSubmitting.value = false
   pluginError.value = ''
   list.value = []
   activeNodes.value = []
@@ -134,7 +140,7 @@ async function loadFormulaPlugin() {
   }
 }
 
-function confirm() {
+async function confirm() {
   const activeMindMap = props.mindMap
   if (!canInsertFormula.value || !activeMindMap) return
   if (!store.localConfig.openNodeRichText) {
@@ -147,8 +153,42 @@ function confirm() {
   }
   const str = formulaText.value.trim()
   if (!str) return
-  activeMindMap.execCommand('INSERT_FORMULA', str)
-  formulaText.value = ''
+  const targetNodes = activeNodes.value.filter(
+    node => node?.mindMap === activeMindMap,
+  )
+  if (targetNodes.length === 0) return
+  const submissionId = ++formulaSubmissionId
+  formulaSubmitting.value = true
+  try {
+    const insertedCount = await activeMindMap.formula.insertFormulaToNodes(
+      targetNodes,
+      str,
+    )
+    if (
+      !componentAlive
+      || submissionId !== formulaSubmissionId
+      || activeMindMap !== props.mindMap
+      || store.activeSidebar !== 'formulaSidebar'
+    ) return
+    // 提交期间理论上所有输入入口都已禁用；仍用提交快照作最后一道代际
+    // 栅栏，避免脚本赋值或迟到的 UI 事件把一份更新后的 LaTeX 清空。
+    if (insertedCount > 0 && formulaText.value.trim() === str) {
+      formulaText.value = ''
+    }
+  } catch (error) {
+    if (
+      componentAlive
+      && submissionId === formulaSubmissionId
+      && activeMindMap === props.mindMap
+    ) {
+      console.error('插入公式失败:', error)
+      ElMessage.error('公式插入失败，请稍后重试')
+    }
+  } finally {
+    if (submissionId === formulaSubmissionId) {
+      formulaSubmitting.value = false
+    }
+  }
 }
 
 function handleNodeActive(_, nodeList, sourceMindMap = null) {

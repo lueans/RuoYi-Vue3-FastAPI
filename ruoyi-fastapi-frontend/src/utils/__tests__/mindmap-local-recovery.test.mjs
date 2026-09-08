@@ -12,6 +12,7 @@ import {
   listMindmapDrafts,
   removeInactiveMindmapDrafts,
   removeMindmapDraft,
+  resolveMindmapDraftOpenMode,
   saveMindmapDraft,
   saveMindmapDraftFallbackSync,
   startMindmapDraftSessionLease,
@@ -48,6 +49,30 @@ class MemoryStorage {
     this.values.delete(key)
   }
 }
+
+test('普通打开云端脑图不会被其他窗口草稿阻断', () => {
+  assert.equal(resolveMindmapDraftOpenMode({
+    draftSessionId: 'window-a',
+    currentSessionId: 'window-b',
+    otherSessionActive: true,
+  }), 'skip-active')
+  assert.equal(resolveMindmapDraftOpenMode({
+    draftSessionId: 'window-a',
+    currentSessionId: 'window-b',
+    otherSessionActive: false,
+  }), 'preserve-background')
+  assert.equal(resolveMindmapDraftOpenMode({
+    draftSessionId: 'window-a',
+    currentSessionId: 'window-b',
+    requestedDraftKey: '7:127:window-a',
+    otherSessionActive: false,
+  }), 'prompt')
+  assert.equal(resolveMindmapDraftOpenMode({
+    draftSessionId: 'window-a',
+    currentSessionId: 'window-a',
+  }), 'prompt')
+  assert.equal(resolveMindmapDraftOpenMode({ currentSessionId: 'window-a' }), 'prompt')
+})
 
 class MemoryLockManager {
   constructor() {
@@ -195,9 +220,22 @@ test('同一脑图的多个编辑窗口使用独立草稿并可精确恢复删�
       getMindmapDraftSourceLabel(drafts[1]),
     )
     assert.equal(getMindmapDraftSourceLabel({}), '兼容草稿')
+    assert.equal(getMindmapDraftSourceLabel({
+      sessionId: 'window-a-conflict-r17',
+    }), '冲突保护')
+    assert.equal(getMindmapDraftSourceLabel({
+      sessionId: 'window-a-conflict-r17-deleted-child-2',
+    }), '冲突保护')
     assert.equal((await getMindmapDraft(7, 107)).name, '窗口 B')
     const windowAKey = createMindmapDraftKey(7, 107, 'window-a')
     assert.equal((await getMindmapDraft(7, 107, { key: windowAKey })).name, '窗口 A')
+    assert.equal(
+      await getMindmapDraft(7, 107, {
+        key: createMindmapDraftKey(7, 999, 'other-mindmap'),
+      }),
+      null,
+    )
+    assert.equal(await getMindmapDraft(7, 107, { key: 107 }), null)
 
     await removeMindmapDraft(7, 107, { key: windowAKey })
     assert.deepEqual((await listMindmapDrafts(7)).map(item => item.name), ['窗口 B'])
@@ -548,9 +586,17 @@ test('草稿中心把指定记录键传给编辑器并只删除该编辑窗口�
   assert.match(pageSource, /nextDraftKey === requestedDraftKey\.value/)
   assert.match(editorSource, /getMindmapDraft\(userStore\.id, props\.mindmapId, \{\s*key: props\.draftKey \|\| undefined/)
   assert.match(editorSource, /clearDraftRecord\(draft\)/)
+  const resolveDraftBlock = editorSource.match(
+    /async function resolveLocalDraft[\s\S]*?function recordContentOperations/,
+  )?.[0] || ''
+  assert.ok(
+    resolveDraftBlock.indexOf("draftOpenMode === 'skip-active'")
+      < resolveDraftBlock.indexOf('areMindmapDraftDocumentsEqual'),
+    '必须先保护其他活跃窗口草稿，再清理与云端等价的记录',
+  )
 })
 
-test('明确使用云端版本先删除本地草稿并重置整个旧 revision 协作基线', async () => {
+test('明确使用云端版本只删除当前本地草稿并重新读取云端数据', async () => {
   const editorSource = await readFile(
     new URL('../../components/MindMap/Edit.vue', import.meta.url),
     'utf8',
@@ -570,20 +616,26 @@ test('明确使用云端版本先删除本地草稿并重置整个旧 revision �
   )?.[0] || ''
 
   assert.match(draftBlock, /action === 'cancel'[\s\S]*?useAuthoritativeCloudVersion\(draft, signal\)/)
-  assert.match(discardBlock, /removeDraftRecordRequired\([\s\S]*?resetMindmapCollaboration/)
+  assert.match(discardBlock, /removeDraftRecordRequired\([\s\S]*?getMindmap\(mindmapId, \{ signal \}\)/)
   assert.ok(
     discardBlock.indexOf('removeDraftRecordRequired')
-      < discardBlock.indexOf('resetMindmapCollaboration'),
+      < discardBlock.indexOf('getMindmap(mindmapId, { signal })'),
   )
-  assert.match(discardBlock, /clientMutationId: createMutationId\(\)/)
+  assert.doesNotMatch(discardBlock, /resetCurrentCollaborationToCloud/)
+  assert.match(discardBlock, /const observedRevision = contentRevision/)
+  assert.match(discardBlock, /latestResponse\.data\?\.contentRevision[\s\S]*?observedRevision/)
+  assert.doesNotMatch(discardBlock, /clientMutationId: createMutationId\(\)/)
   assert.doesNotMatch(discardBlock, /collaborationSessionId/)
   assert.match(discardBlock, /if \(localDraftRemoved\)[\s\S]*?restoreDraftRecordPersistence\(record\)/)
   assert.match(discardBlock, /draftProtection\.markClean\(\)/)
   assert.match(draftBlock, /cancelButtonText: '使用云端版本'/)
+  assert.match(draftBlock, /使用云端版本只放弃这份草稿，不会中断其他窗口的协作/)
   assert.match(draftBlock, /closeOnPressEscape: false/)
   assert.match(draftBlock, /showClose: false/)
   assert.doesNotMatch(createSyncBlock, /preferAuthoritativeDocument/)
-  assert.match(conflictBlock, /discardCurrentConflictDrafts\(\)[\s\S]*?resetCurrentCollaborationToCloud/)
+  assert.match(conflictBlock, /recoverFromSaveRevisionConflict\(conflictData, localFullData\)/)
+  assert.doesNotMatch(conflictBlock, /downloadConflictBackup/)
+  assert.doesNotMatch(conflictBlock, /discardCurrentConflictDrafts/)
   assert.match(editorSource, /async function resetCurrentCollaborationToCloud\(observedRevision\)[\s\S]*?stopCurrentCollaborationSource\(\)[\s\S]*?resetMindmapCollaboration/)
   assert.doesNotMatch(conflictBlock, /startYjsSyncIfReady\(\)/)
   assert.doesNotMatch(editorSource, /discardCurrentSource/)
@@ -609,12 +661,19 @@ test('终止编辑采用同步草稿与 JSON 下载双保险，列表提供恢�
     readFile(pageUrl, 'utf8'),
     readFile(listUrl, 'utf8'),
   ])
+  const terminateBlock = editorSource.match(
+    /function terminateEditingSession[\s\S]*?function commitActiveEditorsBeforeTermination/,
+  )?.[0] || ''
 
-  assert.match(editorSource, /localDraftPreserved = saveMindmapDraftFallbackSync/)
-  assert.match(editorSource, /localBackupCreated = downloadConflictBackup/)
-  assert.match(editorSource, /saveMindmapDraft\(terminalDraftOptions\)/)
+  assert.match(terminateBlock, /entry\.fallbackSaved = saveMindmapDraftFallbackSync\(entry\.options\)/)
+  assert.match(terminateBlock, /downloadConflictBackup\(entry\.document, entry\.downloadPrefix\)/)
+  assert.match(
+    terminateBlock,
+    /terminalDraftEntries\.map\(entry => \([\s\S]*?saveMindmapDraft\(entry\.options\)/,
+  )
+  assert.match(terminateBlock, /Promise\.all\(durableDraftResults\)/)
   assert.doesNotMatch(
-    editorSource.match(/function terminateEditingSession[\s\S]*?async function reloadLatestServerDocument/)?.[0] || '',
+    terminateBlock,
     /clearLocalDraft\(\)/,
   )
   assert.match(pageSource, /保留在本地草稿中心/)
@@ -637,12 +696,20 @@ test('终止编辑先提交所有活动编辑器，再备份并立即锁定只�
   )?.[0] || ''
 
   assert.ok(
-    terminateBlock.indexOf('commitActiveEditorsBeforeTermination()')
-      < terminateBlock.indexOf('const needsLocalBackup = hasUnsavedChanges()'),
+    terminateBlock.indexOf('const frozenMutationSnapshot = captureRejectedMindmapMutationSnapshot')
+      < terminateBlock.indexOf('const activeEditorChangesCommitted = commitActiveEditorsBeforeTermination()'),
   )
   assert.ok(
-    terminateBlock.indexOf('const needsLocalBackup = hasUnsavedChanges()')
+    terminateBlock.indexOf('const activeEditorChangesCommitted = commitActiveEditorsBeforeTermination()')
+      < terminateBlock.indexOf('const needsLocalBackup = Boolean(mindMap.value)'),
+  )
+  assert.ok(
+    terminateBlock.indexOf('const needsLocalBackup = Boolean(mindMap.value)')
       < terminateBlock.indexOf('terminalState = eventName'),
+  )
+  assert.match(
+    terminateBlock,
+    /hasUnsavedChanges\(\) \|\| activeEditorChangesCommitted/,
   )
   assert.match(terminateBlock, /actions\.setIsReadonly\(true\)/)
   assert.match(terminateBlock, /mindMap\.value\?\.setMode\?\.\('readonly'\)/)
@@ -650,5 +717,50 @@ test('终止编辑先提交所有活动编辑器，再备份并立即锁定只�
   assert.match(commitBlock, /mindMap\.value\?\.renderer\?\.textEdit/)
   assert.match(commitBlock, /mindMap\.value\?\.associativeLine/)
   assert.match(commitBlock, /mindMap\.value\?\.outerFrame/)
+  assert.match(commitBlock, /flushPendingHistory\?\.\(\)/)
+  assert.match(commitBlock, /terminatingSession[\s\S]*?draftProtection\.markDirty\(\)/)
   assert.match(editorSource, /if \(terminatingSession \|\| isChangeTrackingSuspended\(\)\) return/)
+  assert.match(
+    editorSource,
+    /function isContentDetailTrackingSuspended\(\)[\s\S]*?\|\| terminatingSession/,
+  )
+  assert.match(
+    editorSource,
+    /function isChangeTrackingSuspended\(\)[\s\S]*?\|\| terminatingSession/,
+  )
+})
+
+test('终止编辑分别保护在途冻结批次与不同的冻结后运行态', async () => {
+  const editorSource = await readFile(
+    new URL('../../components/MindMap/Edit.vue', import.meta.url),
+    'utf8',
+  )
+  const terminateBlock = editorSource.match(
+    /function terminateEditingSession[\s\S]*?function commitActiveEditorsBeforeTermination/,
+  )?.[0] || ''
+
+  assert.match(
+    terminateBlock,
+    /captureRejectedMindmapMutationSnapshot\(\{[\s\S]*?mutation: activeSaveMutation/,
+  )
+  assert.match(
+    terminateBlock,
+    /!areMindmapDraftDocumentsEqual\(frozenMutationSnapshot\.document, fullData\)/,
+  )
+  assert.match(
+    terminateBlock,
+    /terminal-\$\{eventName\}-mutation-\$\{frozenMutationSnapshot\.clientMutationId \|\| 'local'\}/,
+  )
+  assert.match(
+    terminateBlock,
+    /terminal-\$\{eventName\}-runtime-v\$\{draftProtection\.getChangeVersion\(\)\}/,
+  )
+  assert.ok(
+    terminateBlock.indexOf('terminalDraftEntries.push({')
+      < terminateBlock.indexOf('activeSaveMutation = null'),
+  )
+  assert.match(
+    terminateBlock,
+    /results\.every\(Boolean\)/,
+  )
 })

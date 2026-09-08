@@ -97,10 +97,15 @@ const props = defineProps({
   mindmapId: { type: Number, default: null },
   yjsSync: { type: Object, default: null },
   flushChanges: { type: Function, default: null },
+  getContentRevision: { type: Function, default: null },
+  getContentChangeVersion: { type: Function, default: null },
+  fenceAuthoritativeWrite: { type: Function, default: null },
+  applyAuthoritativeDocument: { type: Function, default: null },
+  authoritativeResetGeneration: { type: Number, default: 0 },
   readonly: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['yjs-reinit', 'change-tracking'])
+const emit = defineEmits(['change-tracking', 'editing-transition'])
 
 const { proxy } = getCurrentInstance()
 const sidebarRef = ref(null)
@@ -122,7 +127,10 @@ let operationSequence = 0
 // 预览前保存的状态，用于退出预览时恢复
 let _prePreviewState = null
 let _previewSession = null
+let _previewAuthoritativeResetGeneration = 0
+let _previewAuthoritativeRecoveryFenced = false
 let exitPreviewPromise = null
+let _editingTransitionSession = null
 
 function captureSession() {
   return {
@@ -130,8 +138,77 @@ function captureSession() {
     mindMap: props.mindMap,
     yjsSync: props.yjsSync,
     flushChanges: props.flushChanges,
+    getContentRevision: props.getContentRevision,
+    getContentChangeVersion: props.getContentChangeVersion,
+    fenceAuthoritativeWrite: props.fenceAuthoritativeWrite,
+    applyAuthoritativeDocument: props.applyAuthoritativeDocument,
     readonly: isReadonly.value,
   }
+}
+
+function beginEditingTransition(session) {
+  if (!isCurrentSession(session)) return false
+  if (_editingTransitionSession === session) return true
+  if (_editingTransitionSession) return false
+  _editingTransitionSession = session
+  // 父编辑器同步提交当前 Plain/Rich/Outline DOM，再切换只读。该事件
+  // 返回后才允许进入任何 HTTP 等待窗口。
+  emit('editing-transition', true)
+  return true
+}
+
+function endEditingTransition(session = _editingTransitionSession) {
+  if (!session || _editingTransitionSession !== session) return false
+  _editingTransitionSession = null
+  emit('editing-transition', false)
+  return true
+}
+
+function closeSessionEditors(session) {
+  bus.emit('closeOutlineEdit')
+  session?.mindMap?.renderer?.textEdit?.hideEditTextBox?.()
+}
+
+function getSessionContentChangeVersion(session) {
+  const version = Number(session?.getContentChangeVersion?.())
+  return Number.isSafeInteger(version) && version >= 0 ? version : null
+}
+
+async function settleSessionChanges(session, failureMessage) {
+  closeSessionEditors(session)
+  await nextTick()
+  if (!isCurrentSession(session)) return false
+  if (session.flushChanges && await session.flushChanges() === false) {
+    ElMessage.warning(failureMessage)
+    return false
+  }
+  if (!isCurrentSession(session)) return false
+
+  // flush 的网络等待期间理论上已由 editing-transition 门闩禁止新编辑。
+  // 在最终暂停/替换边界仍再收一次所有编辑器；若这一收口推进了代际，
+  // 必须重跑 flush，随后以一个无 await 的稳定代际作为线性化点。
+  let settledVersion = getSessionContentChangeVersion(session)
+  closeSessionEditors(session)
+  await nextTick()
+  if (!isCurrentSession(session)) return false
+  let boundaryVersion = getSessionContentChangeVersion(session)
+  if (settledVersion !== null && boundaryVersion !== settledVersion) {
+    if (session.flushChanges && await session.flushChanges() === false) {
+      ElMessage.warning(failureMessage)
+      return false
+    }
+    if (!isCurrentSession(session)) return false
+    settledVersion = getSessionContentChangeVersion(session)
+    closeSessionEditors(session)
+    await nextTick()
+    if (!isCurrentSession(session)) return false
+    boundaryVersion = getSessionContentChangeVersion(session)
+    if (settledVersion !== null && boundaryVersion !== settledVersion) {
+      ElMessage.warning('等待期间检测到新的本地修改，请重试当前操作')
+      return false
+    }
+  }
+  return true
 }
 
 function isCurrentSession(session) {
@@ -139,8 +216,27 @@ function isCurrentSession(session) {
     session &&
     componentActive &&
     session.mindmapId === props.mindmapId &&
-    session.mindMap === props.mindMap
+    session.mindMap === props.mindMap &&
+    session.yjsSync === props.yjsSync
   )
+}
+
+function fencePreviewApplyFailure(session, error) {
+  if (_previewAuthoritativeRecoveryFenced) return true
+  _previewAuthoritativeRecoveryFenced = true
+  const revision = Number(session?.getContentRevision?.())
+  const fenced = Number.isSafeInteger(revision)
+    && revision > 0
+    && session?.fenceAuthoritativeWrite?.(revision) === true
+  if (!fenced) {
+    console.error('历史预览渲染失败后未能建立权威恢复门闩:', error)
+  }
+  return fenced
+}
+
+function createMutationId() {
+  return globalThis.crypto?.randomUUID?.()
+    || `mindmap-version-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
 function getListedVersionId(item, { formalOnly = false } = {}) {
@@ -219,6 +315,7 @@ async function handleSaveVersion() {
   const session = captureSession()
   const operationToken = beginOperation('confirm-save')
   let versionName
+  let editingTransitionStarted = false
   try {
     const { value } = await ElMessageBox.prompt('请输入版本名称（可选）', '保存正式版本', {
       confirmButtonText: '保存',
@@ -238,11 +335,12 @@ async function handleSaveVersion() {
   }
   updateOperation(operationToken, 'save')
   try {
-    if (session.flushChanges && await session.flushChanges() === false) {
-      ElMessage.warning('当前修改尚未成功保存，暂不能创建正式版本')
-      return
-    }
-    if (!isCurrentSession(session)) return
+    editingTransitionStarted = beginEditingTransition(session)
+    if (!editingTransitionStarted) return
+    if (!await settleSessionChanges(
+      session,
+      '当前修改尚未成功保存，暂不能创建正式版本',
+    )) return
     await saveFormalVersion({
       mindmapId: session.mindmapId,
       name: versionName?.trim() || undefined,
@@ -255,6 +353,7 @@ async function handleSaveVersion() {
     console.error('保存版本失败:', error)
     ElMessage.error('保存版本失败')
   } finally {
+    if (editingTransitionStarted) endEditingTransition(session)
     finishOperation(operationToken)
   }
 }
@@ -265,39 +364,64 @@ async function handlePreview(item) {
   if (!versionId) return
   const session = captureSession()
   const operationToken = beginOperation(`preview:${versionId}`)
+  let editingTransitionStarted = false
   try {
     // 如果已经在预览中，先退出上一次预览
     if (isPreviewing.value) {
       await exitPreview()
     }
+    if (!isCurrentSession(session)) return
+    editingTransitionStarted = beginEditingTransition(session)
+    if (!editingTransitionStarted) return
 
     const res = await getVersionDetail(versionId)
     if (!isCurrentSession(session)) return
     const versionData = res.data
     if (versionData?.nodeTree && session.mindMap) {
+      // 历史预览会暂停 Yjs 和自动保存。只有当前编辑批次已经完整落云后，
+      // 才能把实时树换成历史树；否则预览期间到达的 reset/stale 事件可能
+      // 把历史树误当成待保护草稿，或正常退出后让原修改永久失去自动保存。
+      if (!await settleSessionChanges(
+        session,
+        '当前修改尚未成功保存，暂不能预览历史版本',
+      )) return
       // 保存当前实时状态，用于退出预览时恢复
       _prePreviewState = session.mindMap.getData(true)
       _previewSession = session
+      _previewAuthoritativeResetGeneration = props.authoritativeResetGeneration
+      _previewAuthoritativeRecoveryFenced = false
       isPreviewing.value = true
       emit('change-tracking', true)
 
+      // 编辑器已提交并释放租约，再切只读和暂停实时同步。
+      session.mindMap.setMode?.('readonly')
       // 暂停 Yjs 同步，防止预览数据广播给协作者
       if (session.yjsSync) {
         session.yjsSync.pause()
       }
-      session.mindMap.setMode?.('readonly')
 
       // 以版本数据替换当前显示
-      await applyFullDataAndWait({
+      const previewApplied = await applyFullDataAndWait({
         root: versionData.nodeTree,
         layout: versionData.layout,
         theme: versionData.theme,
         view: versionData.viewData,
-      }, 1500, session.mindMap)
+      }, 1500, session.mindMap, () => (
+        isCurrentSession(session)
+        && _editingTransitionSession === session
+        && !hasAuthoritativeResetSincePreview()
+      ))
+      if (previewApplied === false) {
+        await exitPreview({ notify: false })
+        return
+      }
       if (!isCurrentSession(session)) return
       ElMessage.info('正在预览版本，点击"退出预览"或关闭侧边栏可恢复')
     }
   } catch (e) {
+    if (isPreviewing.value && isCurrentSession(session)) {
+      fencePreviewApplyFailure(session, e)
+    }
     if (isPreviewing.value) {
       await exitPreview({ notify: false })
     }
@@ -306,13 +430,22 @@ async function handlePreview(item) {
       ElMessage.error('预览版本失败')
     }
   } finally {
+    if (editingTransitionStarted && !isPreviewing.value) {
+      endEditingTransition(session)
+    }
     finishOperation(operationToken)
   }
 }
 
-async function applyFullDataAndWait(data, timeout = 1500, mindMap = props.mindMap) {
+async function applyFullDataAndWait(
+  data,
+  timeout = 1500,
+  mindMap = props.mindMap,
+  shouldApply = () => true,
+) {
   if (!mindMap) return Promise.resolve()
   await ensureMindmapDocumentPlugins(data, mindMap)
+  if (!shouldApply()) return false
   return new Promise((resolve, reject) => {
     let settled = false
     let timer = null
@@ -335,23 +468,63 @@ async function applyFullDataAndWait(data, timeout = 1500, mindMap = props.mindMa
   })
 }
 
+function hasAuthoritativeResetSincePreview() {
+  return (
+    _previewAuthoritativeRecoveryFenced
+    ||
+    props.authoritativeResetGeneration !== _previewAuthoritativeResetGeneration
+    || !isCurrentSession(_previewSession)
+  )
+}
+
 function exitPreview({ notify = true } = {}) {
   if (exitPreviewPromise) return exitPreviewPromise
   if (!isPreviewing.value) return Promise.resolve()
   const state = _prePreviewState
   const previewSession = _previewSession
   exitPreviewPromise = (async () => {
+    let authoritativeResetPending = hasAuthoritativeResetSincePreview()
     try {
-      if (state) await applyFullDataAndWait(state, 1500, previewSession?.mindMap)
-      if (notify && isCurrentSession(previewSession)) ElMessage.success('已恢复到编辑状态')
+      if (state && !authoritativeResetPending) {
+        try {
+          await applyFullDataAndWait(
+            state,
+            1500,
+            previewSession?.mindMap,
+            () => !hasAuthoritativeResetSincePreview(),
+          )
+        } catch (error) {
+          // 恢复预览前快照也可能在 renderer 半应用后失败。此时不能 resume
+          // 旧 Y.Doc 或解除为它建立的交互门闩；切换到父级权威 GET 恢复。
+          fencePreviewApplyFailure(previewSession, error)
+          authoritativeResetPending = true
+          console.error('退出历史预览时恢复实时画布失败:', error)
+          if (notify && isCurrentSession(previewSession)) {
+            ElMessage.warning('实时画布恢复失败，正在从服务器重新加载')
+          }
+        }
+      }
+      authoritativeResetPending = hasAuthoritativeResetSincePreview()
+      if (notify && isCurrentSession(previewSession)) {
+        if (authoritativeResetPending) {
+          ElMessage.info('云端版本已更新，正在退出预览并同步最新画布')
+        } else {
+          ElMessage.success('已恢复到编辑状态')
+        }
+      }
     } finally {
-      previewSession?.yjsSync?.resume()
-      const readonly = isCurrentSession(previewSession) ? isReadonly.value : previewSession?.readonly
-      previewSession?.mindMap?.setMode?.(readonly ? 'readonly' : 'edit')
+      authoritativeResetPending = hasAuthoritativeResetSincePreview()
+      // reset 已让旧 Yjs 建立 authoritative fence。此时既不能恢复预览前
+      // 快照，也不能 resume 旧实例；父编辑器会在 tracking 恢复后以完整
+      // HTTP 文档重建画布和协作实例。
+      if (!authoritativeResetPending) previewSession?.yjsSync?.resume()
       _prePreviewState = null
       _previewSession = null
+      _previewAuthoritativeResetGeneration = 0
       isPreviewing.value = false
-      emit('change-tracking', false)
+      emit('change-tracking', false, { authoritativeResetPending })
+      endEditingTransition(previewSession)
+      _previewAuthoritativeRecoveryFenced = false
       exitPreviewPromise = null
     }
   })()
@@ -364,6 +537,7 @@ onBeforeUnmount(() => {
   operationSequence += 1
   operationType.value = ''
   if (isPreviewing.value) void exitPreview({ notify: false })
+  else endEditingTransition()
 })
 
 async function handleRestore(item) {
@@ -372,6 +546,8 @@ async function handleRestore(item) {
   if (!versionId) return
   const session = captureSession()
   const operationToken = beginOperation(`confirm-restore:${versionId}`)
+  let editingTransitionStarted = false
+  let changeTrackingStarted = false
   try {
     await ElMessageBox.confirm(
       `确认恢复到「${item.name || '版本 ' + item.versionNumber}」？当前修改会先保存，随后以该版本替换当前内容。历史预览使用当时标签样式；恢复后将按当前标签定义显示。`,
@@ -394,16 +570,36 @@ async function handleRestore(item) {
       await exitPreview()
     }
 
-    if (session.flushChanges && await session.flushChanges() === false) {
-      ElMessage.warning('当前修改尚未成功保存，暂不能恢复历史版本')
+    if (!isCurrentSession(session)) return
+    editingTransitionStarted = beginEditingTransition(session)
+    if (!editingTransitionStarted) return
+    if (!await settleSessionChanges(
+      session,
+      '当前修改尚未成功保存，暂不能恢复历史版本',
+    )) return
+
+    // flush 可能刚提交了一批本地编辑，因此在它完成后冻结当前权威 revision。
+    // 恢复请求通过 CAS 拒绝随后到达的协作者保存，不能用额外 GET 把基线
+    // 静默抬高；同一个 mutationId 则让传输层重试保持幂等。
+    const expectedRevision = Number(session.getContentRevision?.())
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
+      ElMessage.warning('当前云端版本尚未确认，暂不能恢复历史版本')
       return
     }
-    if (!isCurrentSession(session)) return
+    const clientMutationId = createMutationId()
+    emit('change-tracking', true)
+    changeTrackingStarted = true
 
     // 第一步：后端恢复（不可逆操作）
-    const restoreResponse = await restoreVersion(versionId)
+    const restoreResponse = await restoreVersion(versionId, {
+      expectedRevision,
+      clientMutationId,
+    })
     const restoredRevision = restoreResponse.data?.contentRevision
     if (!isCurrentSession(session)) return
+    if (session.fenceAuthoritativeWrite?.(restoredRevision) !== true) {
+      throw new Error('版本已恢复，但当前画布未能进入安全重载状态')
+    }
     ElMessage.success('版本恢复成功')
 
     // 第二步：获取恢复后的数据并更新本地显示
@@ -414,27 +610,24 @@ async function handleRestore(item) {
         if (!isCurrentSession(session)) return
         const versionData = res.data
         if (versionData?.nodeTree) {
-          emit('change-tracking', true)
-          try {
-            await applyFullDataAndWait({
-              root: versionData.nodeTree,
-              layout: versionData.layout,
-              theme: versionData.theme,
-              view: versionData.viewData,
-            }, 1500, session.mindMap)
-            if (!isCurrentSession(session)) return
-            // 通知父组件重新初始化 Yjs，使协作者也看到恢复后的内容
-            emit('yjs-reinit', versionData.nodeTree, versionData.contentRevision || restoredRevision)
-          } finally {
-            emit('change-tracking', false)
+          if (typeof session.applyAuthoritativeDocument !== 'function') {
+            throw new Error('编辑器未提供权威文档应用入口')
           }
+          // 恢复写请求已经返回了新的 revision，但紧随其后的详情读取仍可能
+          // 命中滞后副本。不要把旧树改标成 restoredRevision；由编辑器把写
+          // 响应 revision 作为独立下限校验，等真正的新快照到达后再应用。
+          const applied = await session.applyAuthoritativeDocument(versionData, {
+            minimumContentRevision: restoredRevision,
+          })
+          if (!isCurrentSession(session)) return
+          if (applied !== true) throw new Error('服务器恢复结果尚未应用到当前画布')
         }
       } catch (fetchErr) {
         if (!isCurrentSession(session)) return
         console.warn('恢复成功但获取版本详情失败，请刷新页面:', fetchErr)
         ElMessage.warning('版本已恢复，但获取详情失败，建议刷新页面')
         // 后端已经广播 document_reset。这里不能用恢复前的本地树重建
-        // Yjs，否则会把刚完成的服务端恢复再次覆盖。
+        // Yjs；父编辑器会通过 reset 队列继续加载完整权威文档。
       }
     }
     await loadVersions()
@@ -443,6 +636,8 @@ async function handleRestore(item) {
     console.error('恢复版本失败:', e)
     ElMessage.error('恢复版本失败')
   } finally {
+    if (changeTrackingStarted) emit('change-tracking', false)
+    if (editingTransitionStarted) endEditingTransition(session)
     finishOperation(operationToken)
   }
 }

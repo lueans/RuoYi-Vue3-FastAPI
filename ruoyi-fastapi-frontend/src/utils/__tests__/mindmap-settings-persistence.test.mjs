@@ -34,7 +34,10 @@ test('编辑器将 documentData 纳入草稿、自动保存、冲突快照和 Yj
 
   assert.match(source, /function getCurrentDocument\(\)/)
   assert.match(source, /documentData: normalizeMindmapDocumentData\(documentData\.value\)/)
-  assert.match(source, /document: fullData/)
+  assert.match(
+    source,
+    /const mutationDocument = applyMindmapOperationIntents\(\s*fullData,[\s\S]*?document: mutationDocument/,
+  )
   assert.match(mutationSource, /documentData: frozenDocument\.documentData/)
   assert.match(source, /getDocumentData: \(\) => normalizeMindmapDocumentData\(documentData\.value\)/)
   assert.match(source, /onDocumentMetaChange\(\{ documentData: documentData\.value \}\)/)
@@ -75,7 +78,7 @@ test('布局和主题元数据由编辑器按文件类型统一持久化', async
   assert.match(editor, /function onDocumentMetaChange\(patch\)/)
   assert.match(editor, /normalizedPatch = normalizeMindmapDocumentMetaPatch\(patch\)/)
   assert.match(editor, /if \(!props\.mindmapId\) \{\s*persistLocalWorkspace\(normalizedPatch\)\s*return/)
-  assert.match(editor, /recordDocumentOperations\(current\)/)
+  assert.match(editor, /recordDocumentOperations\(current, Object\.keys\(normalizedPatch\)\)/)
   assert.match(editor, /scheduleYjsMetaSync\(normalizedPatch\)/)
   assert.match(editor, /scheduleLocalDraftPersist\(\)/)
   assert.match(editor, /autoSaveTimer = setTimeout\(\(\) => saveToBackend\(\), AUTO_SAVE_DELAY\)/)

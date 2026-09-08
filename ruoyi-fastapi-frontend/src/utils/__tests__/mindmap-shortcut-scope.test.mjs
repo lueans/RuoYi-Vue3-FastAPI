@@ -10,6 +10,10 @@ const textEditUrl = new URL(
   '../../libs/simple-mind-map/src/core/render/TextEdit.js',
   import.meta.url,
 )
+const mindMapNodeUrl = new URL(
+  '../../libs/simple-mind-map/src/core/render/node/MindMapNode.js',
+  import.meta.url,
+)
 
 test('文本编辑结束后恢复快捷键的画布作用域', async () => {
   const source = await readFile(keyCommandUrl, 'utf8')
@@ -70,4 +74,38 @@ test('节点、富文本、关联线和外框编辑器都成对暂停并恢复�
     assert.match(source, /stopCheckInSvg\(\)/, file)
     assert.match(source, /recoveryCheckInSvg\(\)/, file)
   }
+})
+
+test('节点重绘后第二次连续点击仍能稳定进入文字编辑', async () => {
+  const source = await readFile(mindMapNodeUrl, 'utf8')
+  const bindBody = source.match(
+    /bindGroupEvent\(\) \{([\s\S]*?)\n  \}\n\n  getStableClickUid/,
+  )?.[1] || ''
+  const repeatedClickBody = source.match(
+    /isRepeatedPrimaryClick\(e\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
+  const nativeDedupeBody = source.match(
+    /wasDoubleClickHandledRecently\(\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
+  const doubleClickBody = source.match(
+    /handleNodeDoubleClick\(e\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
+
+  assert.match(bindBody, /this\.isRepeatedPrimaryClick\(e\)/)
+  assert.match(bindBody, /this\.handleNodeDoubleClick\(e\)/)
+  assert.match(bindBody, /this\.wasDoubleClickHandledRecently\(\)/)
+  assert.match(
+    bindBody,
+    /if \(this\.wasDoubleClickHandledRecently\(\)\) \{[\s\S]*?e\.stopPropagation\(\)[\s\S]*?return/,
+  )
+  assert.match(repeatedClickBody, /this\.mindMap\._lastNodePrimaryClick/)
+  assert.match(repeatedClickBody, /Number\(e\.detail\) === 2/)
+  assert.doesNotMatch(repeatedClickBody, /Number\(e\.detail\) >= 2/)
+  assert.match(repeatedClickBody, /previous\?\.uid === uid/)
+  assert.match(repeatedClickBody, /now - previous\.at <= 500/)
+  assert.match(repeatedClickBody, /repeated \? null : \{ uid, at: now \}/)
+  assert.match(nativeDedupeBody, /handled\?\.uid === this\.getStableClickUid\(\)/)
+  assert.match(doubleClickBody, /if \(readonly \|\| e\.ctrlKey \|\| e\.metaKey\) return false/)
+  assert.match(doubleClickBody, /this\.mindMap\._lastHandledNodeDoubleClick/)
+  assert.match(doubleClickBody, /this\.mindMap\.emit\('node_dblclick', this, e\)/)
 })

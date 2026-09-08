@@ -36,11 +36,23 @@ class Command {
     // 注册快捷键
     this.registerShortcutKeys()
     this.originAddHistory = this.addHistory.bind(this)
-    this.addHistory = throttle(
-      this.addHistory,
+    this._pendingHistoryCommit = false
+    const scheduleHistoryCommit = throttle(
+      () => {
+        this._pendingHistoryCommit = false
+        this.originAddHistory()
+      },
       this.mindMap.opt.addHistoryTime,
       this
     )
+    this.addHistory = (...args) => {
+      this._pendingHistoryCommit = true
+      scheduleHistoryCommit(...args)
+    }
+    this.addHistory.cancel = () => {
+      this._pendingHistoryCommit = false
+      scheduleHistoryCommit.cancel()
+    }
     // 是否暂停收集历史数据
     this.isPause = false
   }
@@ -57,9 +69,37 @@ class Command {
 
   //  清空历史数据
   clearHistory() {
+    // “清空”也必须覆盖仍在节流窗口中的旧快照，否则调用方刚清空，
+    // 旧任务又会在稍后把过期画布重新写回历史并派发本地变更事件。
+    this.addHistory?.cancel?.()
     this.history = []
     this.activeHistoryIndex = 0
     this.mindMap.emit('back_forward', 0, 0)
+  }
+
+  // 同步提交已排队的历史快照。浮层编辑器在关闭时会通过命令
+  // 修改模型，但默认 addHistory 还要等待节流定时器；离开页面或
+  // 应用远端树前必须显式穿过这个边界。
+  flushPendingHistory() {
+    if (!this._pendingHistoryCommit) return false
+    this.addHistory.cancel()
+    return this.originAddHistory() === true
+  }
+
+  // 用当前画布建立唯一的撤销基线，不派发本地数据变更事件。
+  // 权威文档替换旧历史后仍需保留一份基线，否则下一次本地
+  // 命令因缺少 lastData 而无法产生 data_change_detail。
+  resetHistoryBaseline() {
+    this.addHistory.cancel()
+    const data = this.getCopyData()
+    if (!data) {
+      this.clearHistory()
+      return false
+    }
+    this.history = [stringifyJsonValueIterative(data)]
+    this.activeHistoryIndex = 0
+    this.mindMap.emit('back_forward', 0, 1)
+    return true
   }
 
   //  注册快捷键
@@ -124,7 +164,7 @@ class Command {
   //  添加回退数据
   addHistory() {
     if (this.mindMap.opt.readonly || this.isPause) {
-      return
+      return false
     }
     this.mindMap.emit('beforeAddHistory')
     const lastDataStr =
@@ -133,7 +173,7 @@ class Command {
     const dataStr = stringifyJsonValueIterative(data)
     // 此次数据和上次一样则不重复添加
     if (lastDataStr && lastDataStr === dataStr) {
-      return
+      return false
     }
     this.emitDataUpdatesEvent(lastDataStr, dataStr)
     // 删除当前历史指针后面的数据
@@ -151,6 +191,7 @@ class Command {
       this.activeHistoryIndex,
       this.history.length
     )
+    return true
   }
 
   //  回退

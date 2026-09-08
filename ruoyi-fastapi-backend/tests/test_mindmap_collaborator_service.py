@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +16,32 @@ from module_mindmap.service.mindmap_collaborator_service import MindmapCollabora
 
 
 class MindmapCollaboratorServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_locked_collaborator_reads_refresh_the_session_identity_map(self) -> None:
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = None
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+        await MindmapCollaboratorDao.get_collaborator_by_id(db, 3, for_update=True)
+        by_id_statement = db.execute.await_args.args[0]
+        self.assertTrue(by_id_statement.get_execution_options()['populate_existing'])
+        self.assertIsNotNone(by_id_statement._for_update_arg)
+
+        db.execute.reset_mock()
+        await MindmapCollaboratorDao.get_collaborator(db, 5, 7, for_update=True)
+        by_identity_statement = db.execute.await_args.args[0]
+        self.assertTrue(by_identity_statement.get_execution_options()['populate_existing'])
+        self.assertIsNotNone(by_identity_statement._for_update_arg)
+
+        db.execute.reset_mock()
+        await MindmapCollaboratorDao.get_collaborator_permission(
+            db,
+            5,
+            7,
+            for_update=True,
+        )
+        permission_statement = db.execute.await_args.args[0]
+        self.assertIsNotNone(permission_statement._for_update_arg)
+
     def test_permission_models_only_accept_view_or_edit(self) -> None:
         for permission in (-1, 2, 999):
             with self.subTest(permission=permission), self.assertRaises(ValidationError):
@@ -110,7 +136,7 @@ class MindmapCollaboratorServiceTest(unittest.IsolatedAsyncioTestCase):
             patch(
                 'module_mindmap.service.mindmap_collaborator_service.MindmapCollaboratorDao.get_collaborator_by_id',
                 new=AsyncMock(return_value=collab),
-            ),
+            ) as get_collaborator_mock,
             patch(
                 'module_mindmap.service.mindmap_collaborator_service.MindmapDao.get_mindmap_for_update',
                 new=AsyncMock(return_value=mindmap),
@@ -128,8 +154,17 @@ class MindmapCollaboratorServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.is_success)
+        self.assertEqual(
+            get_collaborator_mock.await_args_list,
+            [call(db, 3), call(db, 3, for_update=True)],
+        )
         db.commit.assert_awaited_once()
-        notify_mock.assert_awaited_once_with(5, 7, unittest.mock.ANY)
+        notify_mock.assert_awaited_once_with(
+            5,
+            7,
+            unittest.mock.ANY,
+            revocation_scope='edit',
+        )
 
     async def test_unchanged_permission_skips_write_and_disconnect(self) -> None:
         collab = SimpleNamespace(id=3, mindmap_id=5, user_id=7, permission=0)
@@ -139,7 +174,7 @@ class MindmapCollaboratorServiceTest(unittest.IsolatedAsyncioTestCase):
             patch(
                 'module_mindmap.service.mindmap_collaborator_service.MindmapCollaboratorDao.get_collaborator_by_id',
                 new=AsyncMock(return_value=collab),
-            ),
+            ) as get_collaborator_mock,
             patch(
                 'module_mindmap.service.mindmap_collaborator_service.MindmapDao.get_mindmap_for_update',
                 new=AsyncMock(return_value=mindmap),
@@ -157,6 +192,10 @@ class MindmapCollaboratorServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.is_success)
+        self.assertEqual(
+            get_collaborator_mock.await_args_list,
+            [call(db, 3), call(db, 3, for_update=True)],
+        )
         update_mock.assert_not_awaited()
         notify_mock.assert_not_awaited()
 
@@ -242,9 +281,9 @@ class MindmapCollaboratorServiceTest(unittest.IsolatedAsyncioTestCase):
             patch(
                 'module_mindmap.service.mindmap_collaborator_service.MindmapCollaboratorDao.get_collaborator_by_id',
                 new=AsyncMock(return_value=collab),
-            ),
+            ) as get_collaborator_mock,
             patch(
-                'module_mindmap.service.mindmap_collaborator_service.MindmapDao.get_mindmap_by_id',
+                'module_mindmap.service.mindmap_collaborator_service.MindmapDao.get_mindmap_for_update',
                 new=AsyncMock(return_value=mindmap),
             ),
             patch(
@@ -260,8 +299,47 @@ class MindmapCollaboratorServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.is_success)
+        self.assertEqual(
+            get_collaborator_mock.await_args_list,
+            [call(db, 3), call(db, 3, for_update=True)],
+        )
         db.commit.assert_awaited_once()
-        notify_mock.assert_awaited_once_with(5, 7, unittest.mock.ANY)
+        notify_mock.assert_awaited_once_with(
+            5,
+            7,
+            unittest.mock.ANY,
+            revocation_scope='access',
+        )
+
+    async def test_permission_change_rejects_collaborator_removed_while_waiting_for_document_lock(
+        self,
+    ) -> None:
+        observed_collab = SimpleNamespace(id=3, mindmap_id=5, user_id=7, permission=1)
+        mindmap = SimpleNamespace(id=5, owner_id=42, status=0)
+        db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+        with (
+            patch(
+                'module_mindmap.service.mindmap_collaborator_service.MindmapCollaboratorDao.get_collaborator_by_id',
+                new=AsyncMock(side_effect=[observed_collab, None]),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_collaborator_service.MindmapDao.get_mindmap_for_update',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_collaborator_service.MindmapCollaboratorDao.update_permission',
+                new=AsyncMock(),
+            ) as update_mock,
+            self.assertRaises(Exception) as context,
+        ):
+            await MindmapCollaboratorService.update_permission(
+                db, MindmapCollaboratorUpdateModel(id=3, permission=0), operator_id=42,
+            )
+
+        self.assertEqual(context.exception.message, '协作者记录不存在')
+        db.rollback.assert_awaited_once()
+        db.commit.assert_not_awaited()
+        update_mock.assert_not_awaited()
 
 
 if __name__ == '__main__':

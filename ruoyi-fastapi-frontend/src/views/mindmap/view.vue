@@ -6,9 +6,13 @@
           <span class="eyebrow">在线脑图</span>
           <h1 :title="mindmapData.name">{{ mindmapData.name }}</h1>
         </div>
-        <el-tag type="info" effect="plain" round>只读分享</el-tag>
+        <el-tag :type="isEditInvite ? 'primary' : 'info'" effect="plain" round>
+          {{ isEditInvite ? '编辑邀请' : '只读分享' }}
+        </el-tag>
       </div>
-      <span class="headerHint">拖动画布浏览，滚轮缩放</span>
+      <span class="headerHint">
+        {{ isEditInvite ? '登录后加入实时协作' : '拖动画布浏览，滚轮缩放' }}
+      </span>
     </div>
     <div class="share-view-body">
       <div v-if="loading" class="loadingState">
@@ -19,9 +23,37 @@
         <el-result icon="error" :title="error">
           <template #extra>
             <el-button type="primary" :loading="loading" @click="loadShare">重新加载</el-button>
-            <el-button @click="$router.push('/login')">登录工作台</el-button>
+            <el-button @click="router.push('/login')">登录工作台</el-button>
           </template>
         </el-result>
+      </div>
+      <div v-else-if="mindmapData && isEditInvite" class="editInviteState">
+        <div class="editInviteCard">
+          <span class="editInviteIcon" aria-hidden="true">
+            <el-icon :size="30"><EditPen /></el-icon>
+          </span>
+          <span class="editInviteEyebrow">脑图编辑邀请</span>
+          <h2>{{ mindmapData.name }}</h2>
+          <p>加入后你可以修改节点，并与当前在线成员实时协作。</p>
+          <el-alert
+            v-if="joinError"
+            :title="joinError"
+            type="error"
+            :closable="false"
+            show-icon
+            class="joinError"
+          />
+          <el-button
+            type="primary"
+            size="large"
+            :loading="joining"
+            :disabled="joining"
+            @click="handleJoinEditShare"
+          >
+            {{ hasLoginToken ? '加入并开始编辑' : '登录后加入编辑' }}
+          </el-button>
+          <span class="editInviteHint">分享者可以随时在协作者管理中调整或移除你的权限。</span>
+        </div>
       </div>
       <template v-else-if="mindmapData">
         <div
@@ -51,30 +83,38 @@
 </template>
 
 <script setup name="MindmapShareView">
-import { ref, onMounted, onBeforeUnmount, shallowRef, nextTick, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { Loading } from '@element-plus/icons-vue'
-import { viewByShareToken } from '@/api/mindmap/share'
+import { computed, ref, onMounted, onBeforeUnmount, shallowRef, nextTick, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { EditPen, Loading } from '@element-plus/icons-vue'
+import { joinEditShare, viewByShareToken } from '@/api/mindmap/share'
 import MindMap from '@mind-map'
 import { registerPreviewPlugins } from '@/components/MindMap/usePreviewPlugins'
 import Themes from 'simple-mind-map-plugin-themes'
 import { resolveMindmapPerformanceOptions } from '@/utils/mindmap-performance'
 import { applyMindmapDocumentConfig, getMindmapDocumentConfig } from '@/utils/mindmap-document-config'
 import { createScopedAsyncSession } from '@/utils/mindmap-async'
+import { getToken } from '@/utils/auth'
+import { createLoginRedirectLocation } from '@/utils/login-redirect'
 
 Themes.init(MindMap)
 
 const route = useRoute()
+const router = useRouter()
 const loading = ref(true)
 const error = ref('')
+const joining = ref(false)
+const joinError = ref('')
 const mindmapData = ref(null)
 const sharePage = ref(null)
 const mindMapContainer = ref(null)
 const mindMap = shallowRef(null)
 const scalePercent = ref(100)
 const isFullscreen = ref(false)
+const isEditInvite = computed(() => Number(mindmapData.value?.shareType) === 1)
+const hasLoginToken = computed(() => Boolean(getToken()))
 const shareSession = createScopedAsyncSession()
 let shareRequestController = null
+let joinRequestController = null
 let componentActive = false
 
 function getRouteShareToken() {
@@ -95,6 +135,10 @@ function cancelShareLoad() {
   shareSession.invalidate()
   shareRequestController?.abort()
   shareRequestController = null
+  joinRequestController?.abort()
+  joinRequestController = null
+  joining.value = false
+  joinError.value = ''
 }
 
 async function loadShare() {
@@ -118,6 +162,11 @@ async function loadShare() {
     const res = await viewByShareToken(token, { signal })
     if (!isShareSessionCurrent(session, signal)) return false
     const data = res.data
+    if (Number(data?.shareType) === 1) {
+      mindmapData.value = data
+      loading.value = false
+      return true
+    }
     await registerPreviewPlugins({
       root: data.nodeTree,
       layout: data.layout,
@@ -141,6 +190,45 @@ async function loadShare() {
     if (isShareSessionCurrent(session, signal)) loading.value = false
     if (shareRequestController === controller) shareRequestController = null
   }
+}
+
+async function handleJoinEditShare() {
+  const token = getRouteShareToken()
+  const session = shareSession.capture()
+  if (!token || joining.value || !isShareSessionCurrent(session)) return
+  joinError.value = ''
+  if (!getToken()) {
+    await goToInviteLogin()
+    return
+  }
+
+  joinRequestController?.abort()
+  const controller = new AbortController()
+  const { signal } = controller
+  joinRequestController = controller
+  joining.value = true
+  try {
+    const res = await joinEditShare(token, { signal })
+    if (!isShareSessionCurrent(session, signal)) return
+    const mindmapId = Number(res.data?.mindmapId)
+    if (!Number.isSafeInteger(mindmapId) || mindmapId <= 0) {
+      throw new Error('编辑邀请返回了无效的脑图信息')
+    }
+    await router.replace({
+      path: '/mindmap/edit',
+      query: { id: String(mindmapId), from: 'shared' },
+    })
+  } catch (e) {
+    if (!isShareSessionCurrent(session, signal)) return
+    joinError.value = e?.message || '加入编辑失败，请稍后重试'
+  } finally {
+    if (isShareSessionCurrent(session, signal)) joining.value = false
+    if (joinRequestController === controller) joinRequestController = null
+  }
+}
+
+function goToInviteLogin() {
+  return router.push(createLoginRedirectLocation(route.fullPath))
 }
 
 onMounted(() => {
@@ -347,6 +435,78 @@ onBeforeUnmount(() => {
     background: rgba(255, 255, 255, 0.54);
   }
 
+  .editInviteState {
+    display: grid;
+    min-height: 100%;
+    padding: 32px 16px;
+    place-items: center;
+  }
+
+  .editInviteCard {
+    display: flex;
+    width: min(440px, 100%);
+    padding: 36px;
+    border: 1px solid rgba(216, 222, 232, 0.94);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 20px 60px rgba(27, 39, 61, 0.12);
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+
+    .editInviteIcon {
+      display: grid;
+      width: 64px;
+      height: 64px;
+      margin-bottom: 18px;
+      border-radius: 16px;
+      background: #ecf5ff;
+      color: var(--el-color-primary);
+      place-items: center;
+    }
+
+    .editInviteEyebrow {
+      color: var(--el-color-primary);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0.08em;
+    }
+
+    h2 {
+      max-width: 100%;
+      margin: 8px 0 10px;
+      overflow: hidden;
+      color: #172033;
+      font-size: 22px;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    p {
+      margin: 0 0 22px;
+      color: #657086;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .joinError {
+      margin-bottom: 16px;
+      text-align: left;
+    }
+
+    .el-button {
+      min-width: 180px;
+    }
+
+    .editInviteHint {
+      margin-top: 16px;
+      color: #8a94a6;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+  }
+
   .viewerToolbar {
     position: absolute;
     bottom: 20px;
@@ -435,6 +595,10 @@ onBeforeUnmount(() => {
     .fitButton {
       display: none;
     }
+  }
+
+  .share-view-body .editInviteCard {
+    padding: 28px 20px;
   }
 }
 

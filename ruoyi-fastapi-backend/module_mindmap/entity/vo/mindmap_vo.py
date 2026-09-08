@@ -23,11 +23,13 @@ FILE_OPERATION_FIELDS = {
 }
 LEGACY_DOCUMENT_OPERATION_TYPES = frozenset({'document.update'})
 CONTENT_SNAPSHOT_OPERATION_TYPES = frozenset({'document.content.update'})
+COLLABORATION_OPERATION_TYPES = frozenset({'collaboration.sync.confirm'})
 SUPPORTED_CONTENT_OPERATION_TYPES = (
     TREE_OPERATION_TYPES
     | frozenset(FILE_OPERATION_FIELDS)
     | LEGACY_DOCUMENT_OPERATION_TYPES
     | CONTENT_SNAPSHOT_OPERATION_TYPES
+    | COLLABORATION_OPERATION_TYPES
 )
 MAX_MINDMAP_NAME_LENGTH = 200
 MAX_MINDMAP_DESCRIPTION_LENGTH = 500
@@ -37,6 +39,7 @@ ASCII_DELETE = 127
 MAX_DOCUMENT_DATA_BYTES = 128 * 1024
 MAX_DOCUMENT_DATA_DEPTH = 20
 MAX_DOCUMENT_DATA_ITEMS = 5_000
+MAX_YJS_UPDATES_PER_MUTATION = 10_000
 
 
 def normalize_mindmap_name(value: Any) -> Any:
@@ -206,31 +209,65 @@ class MindmapPageQueryModel(MindmapQueryModel):
 
 
 class MindmapContentUpdateModel(BaseModel):
-    """思维导图内容更新模型（自动保存）"""
+    """旧版整树保存模型；仍必须携带 CAS 和稳定幂等标识。"""
 
     model_config = ConfigDict(alias_generator=to_camel, from_attributes=True, populate_by_name=True)
 
     id: int = Field(description='思维导图ID')
-    node_tree: dict[str, Any] = Field(description='完整节点树')
+    node_tree: dict[str, Any] | None = Field(default=None, description='完整节点树')
     view_data: dict[str, Any] | None = Field(default=None, description='视图状态')
     layout: str | None = Field(default=None, description='布局类型')
     theme: dict[str, Any] | None = Field(default=None, description='主题配置')
     document_data: dict[str, Any] | None = Field(default=None, description='文档级扩展配置')
-    base_revision: int | None = Field(default=None, description='客户端基准内容修订号')
-    client_mutation_id: str | None = Field(default=None, max_length=100, description='客户端幂等标识')
+    base_revision: int = Field(ge=1, description='客户端基准内容修订号')
+    client_mutation_id: str = Field(min_length=1, max_length=100, description='客户端幂等标识')
+
+    @field_validator('client_mutation_id', mode='before')
+    @classmethod
+    def normalize_client_mutation_id(cls, value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('clientMutationId 不能为空')
+        return value.strip()
+
+    @field_validator('layout')
+    @classmethod
+    def validate_layout(cls, value: Any) -> Any:
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError('layout 不能为空')
+        return value.strip() if isinstance(value, str) else value
 
     @field_validator('document_data')
     @classmethod
     def validate_document_data_field(cls, value: Any) -> Any:
         return validate_document_data(value)
 
+    @model_validator(mode='after')
+    def require_content_change(self) -> 'MindmapContentUpdateModel':
+        if all(
+            value is None
+            for value in (
+                self.node_tree,
+                self.view_data,
+                self.layout,
+                self.theme,
+                self.document_data,
+            )
+        ):
+            raise ValueError('旧版内容保存请求不能为空')
+        return self
+
 
 class MindmapViewUpdateModel(BaseModel):
-    """与正文修订号解耦的画布视图偏好。"""
+    """不推进正文修订号、但受正文修订号栅栏保护的画布视图。"""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     view_data: dict[str, Any] | None = Field(default=None, description='平移、缩放等视图状态')
+    expected_content_revision: StrictInt | None = Field(
+        default=None,
+        ge=1,
+        description='发起视图保存时观察到的正文修订号；旧客户端缺失时安全忽略写入',
+    )
 
 
 class MindmapCollaborationResetModel(BaseModel):
@@ -240,6 +277,13 @@ class MindmapCollaborationResetModel(BaseModel):
 
     observed_revision: int = Field(ge=1, description='用户作出选择时看到的云端修订号')
     client_mutation_id: str = Field(min_length=1, max_length=100, description='客户端幂等标识')
+
+    @field_validator('client_mutation_id', mode='before')
+    @classmethod
+    def normalize_client_mutation_id(cls, value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('clientMutationId 不能为空')
+        return value.strip()
 
 
 class MindmapContentOperationModel(BaseModel):
@@ -255,7 +299,8 @@ class MindmapContentOperationModel(BaseModel):
             'node.tag.bind/node.tag.unbind/node.tag.reorder/'
             'relation|summary|group|asset.upsert|delete/'
             'file.layout.update/file.theme.update/file.view.update/'
-            'file.document_data.update/document.content.update/document.update'
+            'file.document_data.update/document.content.update/document.update/'
+            'collaboration.sync.confirm'
         ),
     )
     node_uid: str | None = Field(default=None, max_length=64, description='目标节点UID')
@@ -293,12 +338,29 @@ class MindmapContentBatchModel(BaseModel):
 
     base_revision: int = Field(ge=1, description='客户端基准内容修订号')
     client_mutation_id: str = Field(min_length=1, max_length=100, description='客户端幂等标识')
+    yjs_update_count: int = Field(
+        default=0,
+        ge=0,
+        le=MAX_YJS_UPDATES_PER_MUTATION,
+        description='该批次在实时通道中发送的 Yjs 更新总数',
+    )
+    yjs_delivery_mode: Literal['sequenced', 'reload'] = Field(
+        default='sequenced',
+        description='sequenced=可按序号确认完整；reload=观察端必须权威回源',
+    )
     operations: list[MindmapContentOperationModel] = Field(min_length=1, max_length=2000)
     node_tree: dict[str, Any] = Field(description='本批操作后的物化节点树')
     view_data: dict[str, Any] | None = Field(default=None, description='视图状态')
     layout: str | None = Field(default=None, description='布局类型')
     theme: dict[str, Any] | None = Field(default=None, description='主题配置')
     document_data: dict[str, Any] | None = Field(default=None, description='文档级扩展配置')
+
+    @field_validator('client_mutation_id', mode='before')
+    @classmethod
+    def normalize_client_mutation_id(cls, value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('clientMutationId 不能为空')
+        return value.strip()
 
     @field_validator('document_data')
     @classmethod
@@ -308,6 +370,11 @@ class MindmapContentBatchModel(BaseModel):
     @model_validator(mode='after')
     def validate_file_operation_values(self) -> 'MindmapContentBatchModel':
         operation_types = {operation.type for operation in self.operations}
+        if 'collaboration.sync.confirm' in operation_types:
+            if len(self.operations) != 1:
+                raise ValueError('collaboration.sync.confirm 必须作为独立操作提交')
+            if self.yjs_update_count < 1:
+                raise ValueError('collaboration.sync.confirm 必须确认至少一条 Yjs 更新')
         if 'file.layout.update' in operation_types and not self.layout:
             raise ValueError('file.layout.update 必须提供 layout')
         if 'file.theme.update' in operation_types and self.theme is None:

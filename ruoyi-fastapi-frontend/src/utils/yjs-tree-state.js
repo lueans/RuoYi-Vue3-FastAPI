@@ -108,9 +108,21 @@ export function replaceYArrayValues(yArray, values = []) {
   return true
 }
 
-export function synchronizeYjsParentUids(yNodes, preferredRootUid = '') {
+/**
+ * Derive one deterministic, valid tree topology from the converged Yjs node
+ * records without mutating the document. Remote replicas must use this form
+ * for rendering: a receive-time repair would create client-local Yjs structs
+ * that are deliberately not rebroadcast and can make later updates diverge.
+ */
+export function deriveNormalizedYjsTopology(yNodes, preferredRootUid = '') {
   const nodeUids = Array.from(yNodes.keys()).map(String).sort()
-  if (!nodeUids.length) return ''
+  if (!nodeUids.length) {
+    return {
+      rootUid: '',
+      childrenByParent: new Map(),
+      parentByChild: new Map(),
+    }
+  }
   const nodeUidSet = new Set(nodeUids)
   const normalizedPreferredRoot = String(preferredRootUid || '')
   const previousParentByChild = new Map(nodeUids.map(uid => [
@@ -215,7 +227,18 @@ export function synchronizeYjsParentUids(yNodes, preferredRootUid = '') {
     parentByChild.set(uid, rootUid)
   }
 
-  for (const parentUid of nodeUids) {
+  return { rootUid, childrenByParent, parentByChild }
+}
+
+export function synchronizeYjsParentUids(yNodes, preferredRootUid = '') {
+  const {
+    rootUid,
+    childrenByParent,
+    parentByChild,
+  } = deriveNormalizedYjsTopology(yNodes, preferredRootUid)
+  if (!rootUid) return ''
+
+  for (const parentUid of childrenByParent.keys()) {
     const yChildren = yNodes.get(parentUid)?.get('children')
     if (yChildren) replaceYArrayValues(yChildren, childrenByParent.get(parentUid))
   }

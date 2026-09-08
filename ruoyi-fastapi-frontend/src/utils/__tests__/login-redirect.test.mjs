@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   createLoginRedirectLocation,
+  getCurrentLoginReturnPath,
   normalizeLoginRedirect,
   resolvePostLoginLocation,
 } from '../login-redirect.js'
@@ -23,6 +24,18 @@ test('登录成功后恢复目标路径、查询参数和锚点', () => {
     }),
     '/mindmap/edit?id=122&readonly=1#node-a',
   )
+})
+
+test('会话过期重新登录会保留当前脑图、完整查询参数和节点位置', () => {
+  assert.equal(
+    getCurrentLoginReturnPath({
+      pathname: '/mindmap/edit',
+      search: '?id=127&returnList=%7B%22sort%22%3A%22updated-desc%22%7D',
+      hash: '#node-a',
+    }),
+    '/mindmap/edit?id=127&returnList=%7B%22sort%22%3A%22updated-desc%22%7D#node-a',
+  )
+  assert.equal(getCurrentLoginReturnPath(undefined), '/')
 })
 
 test('兼容旧链接中被拆成登录页查询参数的脑图 ID', () => {

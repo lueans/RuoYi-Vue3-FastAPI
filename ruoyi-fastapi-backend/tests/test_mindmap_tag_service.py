@@ -471,8 +471,8 @@ class MindmapTagServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn('1 个受影响脑图无编辑权限', context.exception.message)
-        db.execute.assert_awaited_once()
-        permission_query = db.execute.await_args.args[0]
+        self.assertEqual(db.execute.await_count, 2)
+        permission_query = db.execute.await_args_list[-1].args[0]
         self.assertIn('mindmap_collaborator.permission', str(permission_query))
         self.assertIsNotNone(permission_query._for_update_arg)
 
@@ -489,6 +489,27 @@ class MindmapTagServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         db.execute.assert_not_awaited()
+
+    async def test_batch_file_access_does_not_restore_failed_migration_via_collaboration(
+        self,
+    ) -> None:
+        migration_result = MagicMock()
+        migration_result.all.return_value = [(102, 'failed')]
+        db = SimpleNamespace(execute=AsyncMock(return_value=migration_result))
+        mindmaps = {
+            102: SimpleNamespace(id=102, owner_id=99, del_flag='0', status=0),
+        }
+
+        with self.assertRaises(ServiceException) as context:
+            await MindmapTagService._check_locked_files_edit_access(
+                db, mindmaps, [102], user_id=42,
+            )
+
+        self.assertIn('1 个受影响脑图无编辑权限', context.exception.message)
+        db.execute.assert_awaited_once()
+        migration_query = db.execute.await_args.args[0]
+        self.assertIn('mindmap_migration_record.status', str(migration_query))
+        self.assertNotIn('mindmap_collaborator.permission', str(migration_query))
 
     def test_parse_tag_ids_deduplicates_and_rejects_invalid_values(self) -> None:
         self.assertEqual(MindmapTagService._parse_tag_ids('3, 2,3'), [3, 2])
@@ -534,7 +555,7 @@ class MindmapTagServiceTest(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(side_effect=RuntimeError('redis unavailable')),
         ):
             await MindmapTagService._safe_broadcast(
-                101, {'type': 'tag_unbound'}, revision=7, operation='测试通知',
+                101, {'type': 'tag_unbound'}, operation='测试通知',
             )
 
     async def test_delete_tags_uses_batch_queries_and_one_access_check(self) -> None:

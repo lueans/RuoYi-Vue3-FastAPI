@@ -332,11 +332,7 @@ class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
         update_content.assert_not_awaited()
         db.commit.assert_not_awaited()
         db.rollback.assert_awaited_once()
-        room_manager.set_content_revision.assert_called_once_with(
-            8,
-            5,
-            transition_type='document_reset',
-        )
+        room_manager.set_content_revision.assert_not_called()
         room_manager.broadcast.assert_awaited_once()
 
     async def test_cloud_selection_controller_forwards_only_authenticated_user_id(self) -> None:

@@ -8,7 +8,6 @@ function isMindmapInitialRenderComplete(instance) {
     && !renderer.renderTimer
   )
 }
-
 /**
  * 等待 simple-mind-map 首次画布渲染完成。
  *
@@ -79,4 +78,3 @@ export function waitForMindmapInitialRender(instance, {
     armVisibleWatchdog()
   })
 }
-

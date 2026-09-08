@@ -75,7 +75,6 @@ test('后台标签页暂停首次渲染超时并在回到前台后等待真实�
   assert.equal(result, 'resolved')
   assert.equal(documentRef.listeners.get('visibilitychange')?.size || 0, 0)
 })
-
 test('首次完成事件先于等待器时由渲染器状态直接确认就绪', async () => {
   const documentRef = new FakeEventTarget('visible')
   const mindMap = new FakeMindMap({ root: { uid: 'root' } })
@@ -95,4 +94,3 @@ test('前台标签页真实卡住时仍会有界失败', async () => {
   )
   assert.equal(documentRef.listeners.get('visibilitychange')?.size || 0, 0)
 })
-

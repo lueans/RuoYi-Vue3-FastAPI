@@ -289,11 +289,7 @@ class MindmapVersionConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('DELETE FROM mindmap_ws_state', str(delete_statement))
         self.assertIn('mindmap_ws_state.mindmap_id', str(delete_statement))
         db.commit.assert_awaited_once()
-        room_manager.set_content_revision.assert_called_once_with(
-            7,
-            6,
-            transition_type='document_reset',
-        )
+        room_manager.set_content_revision.assert_not_called()
         room_manager.broadcast.assert_awaited_once()
 
     async def test_restore_rejects_stale_confirmation_before_reading_snapshot(self) -> None:
@@ -402,11 +398,7 @@ class MindmapVersionConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         lock_version.assert_not_awaited()
         db.commit.assert_not_awaited()
         db.rollback.assert_awaited_once()
-        room_manager.set_content_revision.assert_called_once_with(
-            7,
-            6,
-            transition_type='document_reset',
-        )
+        room_manager.set_content_revision.assert_not_called()
         room_manager.broadcast.assert_awaited_once()
 
     async def test_restore_rejects_reused_mutation_id_for_another_intent(self) -> None:

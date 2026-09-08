@@ -11,9 +11,13 @@ from sqlalchemy.sql import Select
 from common.vo import CrudResponseModel, PageModel
 from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_tag_dao import MindmapTagDao
-from module_mindmap.dao.mindmap_dao import MindmapDao
 from module_mindmap.entity.do.mindmap_collaborator_do import MindmapCollaborator
-from module_mindmap.entity.do.mindmap_content_do import MindmapChangeLog, MindmapNode, MindmapNodeTag
+from module_mindmap.entity.do.mindmap_content_do import (
+    MindmapChangeLog,
+    MindmapMigrationRecord,
+    MindmapNode,
+    MindmapNodeTag,
+)
 from module_mindmap.entity.do.mindmap_do import Mindmap
 from module_mindmap.entity.do.mindmap_tag_do import MindmapTag
 from module_mindmap.entity.do.mindmap_ws_state_do import MindmapWsState
@@ -1021,21 +1025,46 @@ class MindmapTagService:
     ) -> None:
         """在文件锁后读取当前状态和协作者权限，消除预检 TOCTOU。"""
         requested_ids = set(file_ids)
-        failed_migration_ids = {
+        if not requested_ids:
+            return
+        unavailable_ids = {
             file_id
             for file_id in requested_ids
-            if await MindmapDao.get_migration_status(db, file_id) == 'failed'
+            if file_id not in mindmaps
+            or mindmaps[file_id].del_flag != '0'
+            or mindmaps[file_id].status != 0
+        }
+        if unavailable_ids:
+            raise ServiceException(
+                message=(
+                    f'有 {len(unavailable_ids)} 个受影响脑图无编辑权限，'
+                    '无法执行批量标签治理'
+                )
+            )
+
+        migration_rows = (await db.execute(
+            select(
+                MindmapMigrationRecord.file_id,
+                MindmapMigrationRecord.status,
+            )
+            .where(MindmapMigrationRecord.file_id.in_(sorted(requested_ids)))
+            .order_by(MindmapMigrationRecord.file_id.asc())
+        )).all()
+        failed_migration_ids = {
+            int(file_id)
+            for file_id, status in migration_rows
+            if status == 'failed'
         }
         allowed_ids = {
             file_id
             for file_id, mindmap in mindmaps.items()
             if file_id in requested_ids
             and file_id not in failed_migration_ids
-            and mindmap.del_flag == '0'
-            and mindmap.status == 0
             and user_id in (1, mindmap.owner_id)
         }
-        collaborator_file_ids = sorted(requested_ids - allowed_ids)
+        collaborator_file_ids = sorted(
+            requested_ids - allowed_ids - failed_migration_ids
+        )
         if user_id != 1 and collaborator_file_ids:
             rows = (await db.execute(
                 select(

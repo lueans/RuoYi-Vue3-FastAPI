@@ -48,6 +48,7 @@ from module_mindmap.websocket.room_manager import (
     CONDITIONAL_NODE_PATCH_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
     NODE_EDIT_LEASE_CAPABILITY,
+    NODE_EDIT_LEASE_RENEWAL_CAPABILITY,
     STRUCTURED_NODE_PATCH_CAPABILITY,
     YJS_CHECKPOINT_CAPABILITY,
     YJS_LINEAGE_CAPABILITY,
@@ -220,6 +221,7 @@ def _create_endpoint_room_manager(
         acquire_seed_lease=AsyncMock(return_value=True),
         consume_seed_lease=AsyncMock(return_value=True),
         acquire_node_edit_lease=AsyncMock(return_value=True),
+        renew_node_edit_lease=AsyncMock(return_value=True),
         release_node_edit_lease=AsyncMock(return_value=True),
         release_connection_node_edit_leases=AsyncMock(),
         owns_node_edit_lease=AsyncMock(return_value=True),
@@ -522,6 +524,7 @@ class MindmapWebsocketProtocolTest(unittest.TestCase):
                 YJS_MUTATION_SEQUENCE_CAPABILITY,
                 CROSS_NODE_CRDT_V2_CAPABILITY,
                 NODE_EDIT_LEASE_CAPABILITY,
+                NODE_EDIT_LEASE_RENEWAL_CAPABILITY,
                 'future-unknown-capability',
                 7,
             ]),
@@ -532,6 +535,7 @@ class MindmapWebsocketProtocolTest(unittest.TestCase):
                 YJS_MUTATION_SEQUENCE_CAPABILITY,
                 CROSS_NODE_CRDT_V2_CAPABILITY,
                 NODE_EDIT_LEASE_CAPABILITY,
+                NODE_EDIT_LEASE_RENEWAL_CAPABILITY,
             },
         )
         self.assertEqual(normalize_ws_capabilities('structured-node-patch-v1'), set())
@@ -753,6 +757,38 @@ class MindmapWebsocketAuthenticationBoundaryTest(unittest.IsolatedAsyncioTestCas
             access_mock.await_args_list[0].kwargs,
             {'require_edit': True},
         )
+
+    async def test_owned_lease_renewal_rechecks_permission_without_old_revision_rejection(
+        self,
+    ) -> None:
+        current_revision = None
+
+        def set_revision(_mindmap_id: int, revision: int) -> None:
+            nonlocal current_revision
+            current_revision = revision
+
+        manager = SimpleNamespace(
+            set_content_revision=set_revision,
+            is_current_revision=lambda _mindmap_id, revision: revision == current_revision,
+            get_content_revision=lambda _mindmap_id: current_revision,
+        )
+        access_mock = AsyncMock(return_value=SimpleNamespace(content_revision=13))
+        with patch(
+            'module_mindmap.websocket.mindmap_ws.MindmapService.check_mindmap_access',
+            new=access_mock,
+        ):
+            result = await get_authorized_ws_revision_fence_payload(
+                object(),
+                manager,
+                7,
+                42,
+                12,
+                require_current_revision=False,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(current_revision, 13)
+        access_mock.assert_awaited_once()
 
     async def test_revoked_shared_write_cannot_reach_revision_fence(self) -> None:
         manager = SimpleNamespace(
@@ -1136,6 +1172,83 @@ class MindmapWebsocketAuthenticationBoundaryTest(unittest.IsolatedAsyncioTestCas
             'nodeUid': 'child',
             'granted': True,
         })
+
+    async def test_node_edit_lease_renewal_uses_owner_fence_across_revision_advance(
+        self,
+    ) -> None:
+        websocket = _ScriptedWebSocket([
+            {
+                'type': 'auth',
+                'token': 'opaque-token',
+                'capabilities': [
+                    NODE_EDIT_LEASE_CAPABILITY,
+                    NODE_EDIT_LEASE_RENEWAL_CAPABILITY,
+                ],
+            },
+            {
+                'type': 'node_edit_lease_acquire',
+                'requestId': 'renew-request',
+                'nodeUid': 'child',
+                'contentRevision': 3,
+                'renewal': True,
+            },
+        ])
+        manager = _create_endpoint_room_manager(websocket)
+
+        await _run_scripted_endpoint(
+            websocket,
+            manager,
+            load_snapshot=(4, {'source': b'complete-state'}, {}),
+        )
+
+        manager.acquire_node_edit_lease.assert_not_awaited()
+        manager.renew_node_edit_lease.assert_awaited_once_with(
+            7,
+            'child',
+            websocket,
+        )
+        self.assertFalse(any(
+            payload.get('type') == 'stale_state'
+            for payload in websocket.sent
+        ))
+        lease_result = next(
+            payload
+            for payload in websocket.sent
+            if payload.get('type') == 'node_edit_lease_result'
+        )
+        self.assertTrue(lease_result['granted'])
+
+    async def test_unnegotiated_node_edit_renewal_keeps_legacy_revision_fence(
+        self,
+    ) -> None:
+        websocket = _ScriptedWebSocket([
+            {
+                'type': 'auth',
+                'token': 'opaque-token',
+                'capabilities': [NODE_EDIT_LEASE_CAPABILITY],
+            },
+            {
+                'type': 'node_edit_lease_acquire',
+                'requestId': 'legacy-renew-request',
+                'nodeUid': 'child',
+                'contentRevision': 3,
+                'renewal': True,
+            },
+        ])
+        manager = _create_endpoint_room_manager(websocket)
+
+        await _run_scripted_endpoint(
+            websocket,
+            manager,
+            load_snapshot=(4, {'source': b'complete-state'}, {}),
+        )
+
+        manager.renew_node_edit_lease.assert_not_awaited()
+        manager.acquire_node_edit_lease.assert_not_awaited()
+        self.assertTrue(any(
+            payload.get('type') == 'stale_state'
+            for payload in websocket.sent
+        ))
 
     async def test_node_edit_lease_denial_distinguishes_occupancy_from_outage(
         self,

@@ -13,6 +13,7 @@ const WS_CAPABILITIES = [
   'yjs-source-cas-v1',
   'cross-node-crdt-v2',
   'node-edit-lease-v1',
+  'node-edit-lease-renewal-v1',
 ]
 const DEFAULT_CONNECT_TIMEOUT_MS = 10000
 const DEFAULT_AUTH_TIMEOUT_MS = 15000

@@ -26,6 +26,7 @@ from module_mindmap.websocket.room_manager import (
     CONDITIONAL_NODE_PATCH_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
     NODE_EDIT_LEASE_CAPABILITY,
+    NODE_EDIT_LEASE_RENEWAL_CAPABILITY,
     STRUCTURED_NODE_PATCH_CAPABILITY,
     YJS_CHECKPOINT_CAPABILITY,
     YJS_LINEAGE_CAPABILITY,
@@ -296,6 +297,8 @@ async def get_authorized_ws_revision_fence_payload(
     mindmap_id: int,
     user_id: int,
     client_revision: object,
+    *,
+    require_current_revision: bool = True,
 ) -> dict | None:
     """以数据库权限和正文 revision 作为每条共享写消息的线性化点。"""
     mindmap = await MindmapService.check_mindmap_access(
@@ -308,6 +311,8 @@ async def get_authorized_ws_revision_fence_payload(
     # 状态并拒绝；若本次校验先获得锁，则该增量在线性化顺序上早于随后
     # 的管理操作，后者会通过重置/终止事件统一收敛所有客户端。
     manager.set_content_revision(mindmap_id, mindmap.content_revision)
+    if not require_current_revision:
+        return None
     return get_ws_revision_fence_payload(
         manager,
         mindmap_id,
@@ -331,6 +336,7 @@ def normalize_ws_capabilities(payload: object) -> set[str]:
             YJS_SOURCE_CAS_CAPABILITY,
             CROSS_NODE_CRDT_V2_CAPABILITY,
             NODE_EDIT_LEASE_CAPABILITY,
+            NODE_EDIT_LEASE_RENEWAL_CAPABILITY,
         }
     }
 
@@ -1253,6 +1259,8 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
 
     async def authorize_shared_document_mutation(
         client_revision: object,
+        *,
+        require_current_revision: bool = True,
     ) -> tuple[bool, bool]:
         """返回 (允许继续, 需要终止当前消息循环)。"""
         nonlocal missing_write_capabilities
@@ -1280,6 +1288,7 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                     mindmap_id,
                     user_info['id'],
                     client_revision,
+                    require_current_revision=require_current_revision,
                 )
         except ServiceException:
             # 数据库已经确认权限/文件状态失效；立即移除该用户在所有本地及
@@ -1914,6 +1923,10 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                 )
                 node_uid = normalize_node_edit_lease_uid(data.get('nodeUid'))
                 client_revision = data.get('contentRevision')
+                renewal = (
+                    data.get('renewal') is True
+                    and NODE_EDIT_LEASE_RENEWAL_CAPABILITY in capabilities
+                )
                 if (
                     request_id is None
                     or node_uid is None
@@ -1931,7 +1944,10 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                     and NODE_EDIT_LEASE_CAPABILITY in capabilities
                 ):
                     mutation_allowed, terminate_loop = (
-                        await authorize_shared_document_mutation(client_revision)
+                        await authorize_shared_document_mutation(
+                            client_revision,
+                            require_current_revision=not renewal,
+                        )
                     )
                     if not mutation_allowed:
                         if terminate_loop:
@@ -1939,13 +1955,20 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                         continue
                     if not connection_write_remains_enabled():
                         break
-                    lease_result = await room_manager.acquire_node_edit_lease(
-                        mindmap_id,
-                        client_revision,
-                        node_uid,
-                        websocket,
-                    )
-                    if lease_result is False:
+                    if renewal:
+                        lease_result = await room_manager.renew_node_edit_lease(
+                            mindmap_id,
+                            node_uid,
+                            websocket,
+                        )
+                    else:
+                        lease_result = await room_manager.acquire_node_edit_lease(
+                            mindmap_id,
+                            client_revision,
+                            node_uid,
+                            websocket,
+                        )
+                    if lease_result is False and not renewal:
                         failure_reason = 'occupied'
                 granted = lease_result is True
                 response = {

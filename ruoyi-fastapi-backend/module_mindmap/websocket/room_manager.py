@@ -25,6 +25,7 @@ YJS_LINEAGE_CAPABILITY = 'yjs-lineage-v1'
 YJS_SOURCE_CAS_CAPABILITY = 'yjs-source-cas-v1'
 CROSS_NODE_CRDT_V2_CAPABILITY = 'cross-node-crdt-v2'
 NODE_EDIT_LEASE_CAPABILITY = 'node-edit-lease-v1'
+NODE_EDIT_LEASE_RENEWAL_CAPABILITY = 'node-edit-lease-renewal-v1'
 ROOM_WRITE_CAPABILITIES = frozenset({
     YJS_LINEAGE_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
@@ -123,6 +124,24 @@ if current == ARGV[2] then
     return 1
 end
 return 0
+"""
+_RENEW_OWNED_NODE_EDIT_LEASE_SCRIPT = """
+local raw_fence = redis.call('get', KEYS[1])
+if not raw_fence then
+    return -1
+end
+local decoded, fence = pcall(cjson.decode, raw_fence)
+if not decoded
+    or fence.version ~= 1
+    or fence.status ~= 'active'
+    or fence.epoch ~= ARGV[1] then
+    return -1
+end
+if redis.call('get', KEYS[2]) ~= ARGV[2] then
+    return 0
+end
+redis.call('expire', KEYS[2], ARGV[3])
+return 1
 """
 _VERIFY_NODE_EDIT_LEASE_SCRIPT = """
 local raw_fence = redis.call('get', KEYS[1])
@@ -1542,6 +1561,192 @@ class RoomManager:
             failure_value=_REDIS_CALL_FAILED,
         )
         return verified == 1
+
+    async def renew_node_edit_lease(
+        self,
+        mindmap_id: int,
+        node_uid: str,
+        websocket: WebSocket,
+    ) -> bool | None:
+        """仅续期当前连接在当前 lineage 已持有的节点租约。
+
+        正文 revision 可在长时间输入期间因其他节点保存而连续推进；续租
+        绑定稳定 lineage epoch 和 owner，而不能重新执行“无锁则获取”。因此
+        reset 后的新 epoch、过期锁和伪造 renewal 都无法借此获得租约。
+        """
+        websocket_id = id(websocket)
+        presence = self._connection_presence.get(websocket_id)
+        if (
+            not node_uid
+            or not presence
+            or presence[0] != mindmap_id
+            or NODE_EDIT_LEASE_CAPABILITY
+            not in self._connection_capabilities.get(websocket_id, set())
+            or not self.is_connection_write_enabled(mindmap_id, websocket)
+        ):
+            return None
+        owner = presence[1]
+
+        redis = self._redis
+        if redis:
+            return await self._renew_redis_node_edit_lease(
+                mindmap_id,
+                node_uid,
+                websocket,
+                websocket_id,
+                owner,
+                redis,
+            )
+
+        if AppConfig.app_workers > 1:
+            record_mindmap_event('node_edit_lease_unavailable')
+            return None
+        return await self._renew_local_node_edit_lease(
+            mindmap_id,
+            node_uid,
+            websocket,
+            websocket_id,
+            owner,
+        )
+
+    async def _renew_redis_node_edit_lease(
+        self,
+        mindmap_id: int,
+        node_uid: str,
+        websocket: WebSocket,
+        websocket_id: int,
+        owner: str,
+        redis: Any,
+    ) -> bool | None:
+        fence = await self._get_active_lineage_lease_fence(mindmap_id)
+        if fence is None:
+            return None
+        _fence_snapshot, lineage_epoch = fence
+        key = (mindmap_id, lineage_epoch, node_uid)
+        result = await self._safe_redis_call(
+            redis.eval(
+                _RENEW_OWNED_NODE_EDIT_LEASE_SCRIPT,
+                2,
+                self._lineage_fence_key(mindmap_id),
+                self._node_edit_lease_key(
+                    mindmap_id,
+                    lineage_epoch,
+                    node_uid,
+                ),
+                lineage_epoch,
+                owner,
+                self._node_edit_lease_ttl_seconds,
+            ),
+            operation='按 owner 和 lineage 续期节点编辑租约',
+            failure_value=_REDIS_CALL_FAILED,
+        )
+        if result is _REDIS_CALL_FAILED or result == -1:
+            record_mindmap_event('node_edit_lease_unavailable')
+            return None
+        if result != 1:
+            return False
+        # Lua 与 fence 校验原子，但另一个 worker 可在 Lua 返回后立刻执行
+        # document_reset。续租结果对调用方可见前必须再次确认 epoch；否则
+        # 会把已经失效的旧世代登记为本地有效并继续接受节点文本写入。
+        current_fence = await self._get_active_lineage_lease_fence(mindmap_id)
+        still_same_generation = bool(
+            current_fence is not None and current_fence[1] == lineage_epoch
+        )
+        if not still_same_generation:
+            async with self._lock:
+                current = self._local_node_edit_leases.get(key)
+                if (
+                    current
+                    and current[0] == websocket_id
+                    and current[1] == owner
+                ):
+                    self._local_node_edit_leases.pop(key, None)
+            await self._release_redis_node_edit_lease(
+                key,
+                owner,
+                redis_client=redis,
+            )
+            return None
+        locally_valid = False
+        async with self._lock:
+            current = self._local_node_edit_leases.get(key)
+            locally_valid = bool(
+                current
+                and current[0] == websocket_id
+                and current[1] == owner
+                and websocket_id not in self._retiring_connections
+                and self.is_connection_write_enabled(mindmap_id, websocket)
+            )
+            if locally_valid:
+                self._local_node_edit_leases[key] = (
+                    websocket_id,
+                    owner,
+                    time.monotonic() + self._node_edit_lease_ttl_seconds,
+                )
+        if locally_valid:
+            return True
+        # Redis 仍属于本 owner，但本连接已经失去本地资格（例如断线清理
+        # 并发发生）。立即归还刚续期的锁，不能留到 TTL。
+        await self._release_redis_node_edit_lease(
+            key,
+            owner,
+            redis_client=redis,
+        )
+        return False
+
+    async def _renew_local_node_edit_lease(
+        self,
+        mindmap_id: int,
+        node_uid: str,
+        websocket: WebSocket,
+        websocket_id: int,
+        owner: str,
+    ) -> bool | None:
+        async with self._lock:
+            # 前置资格检查与进入临界区之间，leave()/stop() 可能已经把连接
+            # 标为 retiring。续租必须在锁内重新确认同一 connection owner
+            # 仍可写，否则会给已退出的浏览器延长本地独占时间。
+            current_presence = self._connection_presence.get(websocket_id)
+            if (
+                current_presence is None
+                or current_presence[0] != mindmap_id
+                or current_presence[1] != owner
+                or websocket_id in self._retiring_connections
+                or not self.is_connection_write_enabled(mindmap_id, websocket)
+            ):
+                return None
+            # epoch 与租约记录必须在同一无 await 临界区内解析。否则 renewal
+            # 等锁期间发生 reset 时，会拿旧 key 续期并向客户端错误返回 grant。
+            current_epoch = self._local_lineage_epochs.get(mindmap_id)
+            if current_epoch is None:
+                # 数据库重检可能先看到 r+1，正式 content_revision_changed 事件
+                # 尚未到达。set_content_revision 会只为这种连续间隙保留旧 epoch。
+                pending = self._pending_content_lineages.get(mindmap_id)
+                current_revision = self._content_revisions.get(mindmap_id)
+                if pending is not None and pending[0] == current_revision:
+                    current_epoch = pending[2]
+            if current_epoch is None:
+                return None
+            key = (mindmap_id, current_epoch, node_uid)
+            # 锁外读时钟会把排队时间错误计入新租期；更严重的是等待期间
+            # 已过期的锁会被旧时间复活。资格、世代、时钟和写入必须原子。
+            now = time.monotonic()
+            current = self._local_node_edit_leases.get(key)
+            if (
+                not current
+                or current[2] <= now
+                or current[0] != websocket_id
+                or current[1] != owner
+            ):
+                if current and current[2] <= now:
+                    self._local_node_edit_leases.pop(key, None)
+                return False
+            self._local_node_edit_leases[key] = (
+                websocket_id,
+                owner,
+                now + self._node_edit_lease_ttl_seconds,
+            )
+            return True
 
     async def release_node_edit_lease(
         self,

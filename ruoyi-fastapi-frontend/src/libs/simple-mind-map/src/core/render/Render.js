@@ -42,6 +42,7 @@ import { lineStyleProps } from '../../theme/default'
 import { CONSTANTS, ERROR_TYPES } from '../../constants/constant'
 import { Polygon } from '@svgdotjs/svg.js'
 import { createAsyncRenderSession } from '../../utils/asyncRenderSession'
+import { rebindRuntimeNodesToRenderTree } from '../../utils/nodeData'
 
 // 布局列表
 const layouts = {
@@ -145,6 +146,12 @@ class Render {
   // 重新设置思维导图数据
   setData(data) {
     this.cancelPerformanceRender()
+    const runtimeRoots = [
+      this.root,
+      ...Object.values(this.nodeCache || {}),
+      ...Object.values(this.lastNodeCache || {})
+    ].filter(Boolean)
+    rebindRuntimeNodesToRenderTree(runtimeRoots, data)
     this.renderTree = data || null
   }
 
@@ -1189,6 +1196,7 @@ class Render {
       }
       const newNode = {
         inserting,
+        insertingType: inserting ? 'parent' : '',
         data: {
           text: text,
           uid: createUid(),

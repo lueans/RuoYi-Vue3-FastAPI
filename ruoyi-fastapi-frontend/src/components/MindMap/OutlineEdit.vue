@@ -101,8 +101,7 @@ function openOutlineEdit() {
 }
 
 function close() {
-  outlineLeaseGeneration += 1
-  pendingOutlineLeaseUid = ''
+  cancelPendingOutlineLease()
   blurActiveOutlineEditor()
   releaseDetachedOutlineLease()
   isOutlineEdit.value = false
@@ -145,12 +144,23 @@ function onNodeBlur(e, data) {
   }
 }
 
+function cancelPendingOutlineLease() {
+  if (!pendingOutlineLeaseUid) return false
+  const nodeUid = pendingOutlineLeaseUid
+  pendingOutlineLeaseUid = ''
+  outlineLeaseGeneration += 1
+  props.mindMap?.opt?.releaseNodeTextEditLease?.(nodeUid)
+  outlineRefreshGate.flush()
+  return true
+}
+
 async function onNodeFocus(e, data) {
   if (isReadonly.value) return
   if (
     activeOutlineLeaseUid === data.uid
     || pendingOutlineLeaseUid === data.uid
   ) return
+  if (pendingOutlineLeaseUid) cancelPendingOutlineLease()
   // 同一浏览器只声明一个节点文本占用；从画布切到大纲前先安全提交画布
   // 浮层，再重新获取可能因渲染而替换的运行时节点实例。
   props.mindMap?.renderer?.textEdit?.hideEditTextBox?.()
@@ -187,12 +197,21 @@ async function onNodeFocus(e, data) {
       granted = false
     }
   }
-  if (
-    !granted
-    || generation !== outlineLeaseGeneration
-    || !isOutlineEdit.value
-    || isReadonly.value
-  ) {
+  const requestStillCurrent = Boolean(
+    generation === outlineLeaseGeneration
+    && isOutlineEdit.value
+    && !isReadonly.value
+  )
+  if (!granted || !requestStillCurrent) {
+    if (!granted && requestStillCurrent && usesAuthoritativeLease) {
+      props.mindMap?.emit?.(
+        'node_text_edit_blocked',
+        runtimeNode,
+        [...(runtimeNode.editingUserList || [])],
+        props.mindMap?.opt?.getNodeTextEditLeaseFailureReason?.()
+          || 'unavailable',
+      )
+    }
     if (pendingOutlineLeaseUid === data.uid) pendingOutlineLeaseUid = ''
     if (granted) releaseOutlineLease(data.uid, runtimeNode)
     outlineRefreshGate.flush()
@@ -325,12 +344,16 @@ function onNodeKeydown(e, node, data) {
         recoverFromStaleOutline('目标节点已变化，大纲已重新加载')
         return
       }
-      siblings.splice(index + 1, 0, newNode)
-      treeData.value = [...treeData.value]
-      props.mindMap.execCommand('INSERT_NODE', false, [runtimeNode], {
+      const inserted = props.mindMap.execCommand('INSERT_NODE', false, [runtimeNode], {
         ...newNode.originalData,
         richText: false,
       })
+      if (inserted === false) {
+        refreshOutlineFromRuntime()
+        return
+      }
+      siblings.splice(index + 1, 0, newNode)
+      treeData.value = [...treeData.value]
     }
   } else if (e.key === 'Tab') {
     e.preventDefault()
@@ -341,14 +364,18 @@ function onNodeKeydown(e, node, data) {
       recoverFromStaleOutline('目标节点已变化，大纲已重新加载')
       return
     }
-    if (!data.children) data.children = []
     const newChild = createNewOutlineNode(createUid)
-    data.children.push(newChild)
-    treeData.value = [...treeData.value]
-    props.mindMap.execCommand('INSERT_CHILD_NODE', false, [runtimeNode], {
+    const inserted = props.mindMap.execCommand('INSERT_CHILD_NODE', false, [runtimeNode], {
       ...newChild.originalData,
       richText: false,
     })
+    if (inserted === false) {
+      refreshOutlineFromRuntime()
+      return
+    }
+    if (!data.children) data.children = []
+    data.children.push(newChild)
+    treeData.value = [...treeData.value]
   }
 }
 
@@ -366,16 +393,24 @@ function findRuntimeNode(uid) {
 
 function recoverFromStaleOutline(message) {
   ElMessage.warning(message)
+  refreshOutlineFromRuntime()
+}
+
+function refreshOutlineFromRuntime() {
   outlineRefreshGate.clear()
   refresh()
 }
 
 function allowDrag(node) {
-  return !isReadonly.value && node.level > 1
+  return !isReadonly.value
+    && props.mindMap?.opt?.isStructureWriteBlocked?.() !== true
+    && node.level > 1
 }
 
 function allowDrop(_, dropNode, type) {
-  return !isReadonly.value && (dropNode.level > 1 || type === 'inner')
+  return !isReadonly.value
+    && props.mindMap?.opt?.isStructureWriteBlocked?.() !== true
+    && (dropNode.level > 1 || type === 'inner')
 }
 
 function onNodeDrop(draggingNode, dropNode, dropType) {
@@ -386,12 +421,16 @@ function onNodeDrop(draggingNode, dropNode, dropType) {
     recoverFromStaleOutline('拖拽期间脑图结构已变化，大纲已重新加载')
     return
   }
+  let moved
   if (dropType === 'inner') {
-    props.mindMap.execCommand('MOVE_NODE_TO', runtimeNode, targetNode)
+    moved = props.mindMap.execCommand('MOVE_NODE_TO', runtimeNode, targetNode)
   } else if (dropType === 'before') {
-    props.mindMap.execCommand('INSERT_BEFORE', runtimeNode, targetNode)
+    moved = props.mindMap.execCommand('INSERT_BEFORE', runtimeNode, targetNode)
   } else if (dropType === 'after') {
-    props.mindMap.execCommand('INSERT_AFTER', runtimeNode, targetNode)
+    moved = props.mindMap.execCommand('INSERT_AFTER', runtimeNode, targetNode)
+  }
+  if (moved === false) {
+    refreshOutlineFromRuntime()
   }
 }
 
@@ -415,8 +454,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  outlineLeaseGeneration += 1
-  pendingOutlineLeaseUid = ''
+  cancelPendingOutlineLease()
   blurActiveOutlineEditor()
   releaseDetachedOutlineLease()
   outlineRefreshGate.clear()

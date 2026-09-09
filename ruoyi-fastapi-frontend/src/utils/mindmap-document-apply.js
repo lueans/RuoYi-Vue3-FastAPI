@@ -6,20 +6,76 @@ import {
 } from './yjs-cross-node-state.js'
 import { normalizeNodeDataForYjs } from './yjs-tree-state.js'
 
-function captureRuntimeSelectionUids(mindMap) {
+export function captureMindmapRuntimeSelectionUids(mindMap) {
   const uids = new Set()
   for (const node of (mindMap?.renderer?.activeNodeList || [])) {
-    const uid = node?.uid || node?.getData?.('uid')
+    // 概要节点的 runtime uid 每次渲染都会变化；持久化 uid 才能在
+    // updateData 生成的新树中恢复本地选区和正在编辑状态。
+    const uid = node?.getData?.('uid') || node?.uid
     if (uid) uids.add(String(uid))
   }
   const editingNode = mindMap?.renderer?.textEdit?.getCurrentEditNode?.()
-  const editingUid = editingNode?.uid || editingNode?.getData?.('uid')
+  const editingUid = editingNode?.getData?.('uid') || editingNode?.uid
   if (editingUid) uids.add(String(editingUid))
   return uids
 }
 
+function resolveRuntimeSelectionUids(mindMap, explicitUids) {
+  if (explicitUids === undefined) {
+    return captureMindmapRuntimeSelectionUids(mindMap)
+  }
+  return new Set(
+    (Array.isArray(explicitUids) || explicitUids instanceof Set
+      ? [...explicitUids]
+      : []
+    ).map(uid => String(uid || '').trim()).filter(Boolean),
+  )
+}
+
+function getGeneralizationDataList(node) {
+  const generalization = node?.data?.generalization
+  if (Array.isArray(generalization)) return generalization
+  return generalization && typeof generalization === 'object'
+    ? [generalization]
+    : []
+}
+
+/**
+ * Expose a generalization entry through the same `node.data` contract used by
+ * ordinary tree nodes. The setter deliberately writes through to the owning
+ * node because simple-mind-map stores summaries in data.generalization rather
+ * than in children.
+ */
+function createGeneralizationNodeReference(owner, index) {
+  const getGeneralization = () => owner?.data?.generalization
+  return {
+    isGeneralization: true,
+    generalizationOwner: owner,
+    children: [],
+    get uid() {
+      return this.data?.uid
+    },
+    get data() {
+      const generalization = getGeneralization()
+      return Array.isArray(generalization)
+        ? generalization[index]
+        : index === 0
+          ? generalization
+          : undefined
+    },
+    set data(value) {
+      const generalization = getGeneralization()
+      if (Array.isArray(generalization)) {
+        generalization[index] = value
+      } else if (index === 0 && owner?.data) {
+        owner.data.generalization = value
+      }
+    },
+  }
+}
+
 function applyRuntimeSelection(root, activeUids) {
-  if (!root || activeUids.size === 0) return
+  if (!root) return
   const pending = [root]
   const visited = new WeakSet()
   while (pending.length) {
@@ -28,6 +84,12 @@ function applyRuntimeSelection(root, activeUids) {
     visited.add(node)
     if (node.data && typeof node.data === 'object') {
       node.data.isActive = activeUids.has(String(node.data.uid || ''))
+      for (const generalization of getGeneralizationDataList(node)) {
+        if (!generalization || typeof generalization !== 'object') continue
+        generalization.isActive = activeUids.has(
+          String(generalization.uid || ''),
+        )
+      }
     }
     for (const child of (Array.isArray(node.children) ? node.children : [])) {
       pending.push(child)
@@ -46,11 +108,57 @@ export function findMindmapTreeNodeByUid(root, targetUid) {
     if (!node || typeof node !== 'object' || visited.has(node)) continue
     visited.add(node)
     if (String(node.data?.uid || node.uid || '') === normalizedTarget) return node
+    const generalizationList = getGeneralizationDataList(node)
+    for (let index = 0; index < generalizationList.length; index += 1) {
+      const generalization = generalizationList[index]
+      if (
+        generalization
+        && typeof generalization === 'object'
+        && String(generalization.uid || '') === normalizedTarget
+      ) {
+        return createGeneralizationNodeReference(node, index)
+      }
+    }
     for (const child of (Array.isArray(node.children) ? node.children : [])) {
       pending.push(child)
     }
   }
   return null
+}
+
+/**
+ * Whether simple-mind-map can keep a runtime node instance after applying the
+ * supplied tree. A collapsed node remains visible itself but hides descendants;
+ * a generalization additionally disappears when its owning node is collapsed.
+ */
+export function mindmapTreeNodeIsRuntimeVisible(root, targetUid) {
+  root = root?.root || root
+  const normalizedTarget = typeof targetUid === 'string' ? targetUid.trim() : ''
+  if (!root || !normalizedTarget) return false
+  const pending = [{ node: root, ancestorsExpanded: true }]
+  const visited = new WeakSet()
+  while (pending.length) {
+    const { node, ancestorsExpanded } = pending.pop()
+    if (!node || typeof node !== 'object' || visited.has(node)) continue
+    visited.add(node)
+    const nodeUid = String(node.data?.uid || node.uid || '')
+    if (nodeUid === normalizedTarget) return ancestorsExpanded
+
+    const ownerExpanded = node.data?.expand !== false
+    for (const generalization of getGeneralizationDataList(node)) {
+      if (
+        generalization
+        && typeof generalization === 'object'
+        && String(generalization.uid || '') === normalizedTarget
+      ) return ancestorsExpanded && ownerExpanded
+    }
+
+    const descendantsVisible = ancestorsExpanded && ownerExpanded
+    for (const child of (Array.isArray(node.children) ? node.children : [])) {
+      pending.push({ node: child, ancestorsExpanded: descendantsVisible })
+    }
+  }
+  return false
 }
 
 /**
@@ -243,10 +351,21 @@ export function mindmapDocumentRequiresFullRuntimeReplacement(
  * 应用来自协作或保存合并的文档，同时尽量保留当前节点实例、选区和编辑器。
  * 只有布局或主题确实变化时才允许 simple-mind-map 执行完整数据替换。
  */
-export function applyMindmapDocumentPreservingRuntimeState(mindMap, document) {
+export function applyMindmapDocumentPreservingRuntimeState(
+  mindMap,
+  document,
+  { runtimeSelectionUids: explicitRuntimeSelectionUids } = {},
+) {
   if (!mindMap || !document?.root) return false
   const currentDocument = mindMap.getData?.(true) || {}
-  const runtimeSelectionUids = captureRuntimeSelectionUids(mindMap)
+  const runtimeSelectionUids = resolveRuntimeSelectionUids(
+    mindMap,
+    explicitRuntimeSelectionUids,
+  )
+
+  // isActive 永远是当前客户端状态，包括会替换全部 runtime 的布局/主题
+  // 分支。必须在分支判断前覆盖，避免 setFullData 采用协作者共享的旧选区。
+  applyRuntimeSelection(document.root, runtimeSelectionUids)
 
   if (mindmapDocumentRequiresFullRuntimeReplacement(
     mindMap,
@@ -260,7 +379,6 @@ export function applyMindmapDocumentPreservingRuntimeState(mindMap, document) {
   // 节点的 isActive 不是服务端文档状态。尤其在文本编辑期间，协作回放
   // 可能早于防抖后的 node_active 事件到达，因此还要把编辑节点作为本地
   // 选区恢复，避免编辑框存在但节点选中标记丢失。
-  applyRuntimeSelection(document.root, runtimeSelectionUids)
   mindMap.updateData(document.root)
   if (
     document.view !== undefined
@@ -280,11 +398,19 @@ export function applyMindmapDocumentPreservingRuntimeState(mindMap, document) {
  * that flag has already been released.  Cancel it on both sides of the apply and
  * replace the undo baseline before command tracking is resumed.
  */
-export function applyAuthoritativeMindmapDocument(mindMap, document) {
+export function applyAuthoritativeMindmapDocument(
+  mindMap,
+  document,
+  options = {},
+) {
   if (!mindMap || !document?.root) return false
   const command = mindMap.command
   if (!command) {
-    return applyMindmapDocumentPreservingRuntimeState(mindMap, document)
+    return applyMindmapDocumentPreservingRuntimeState(
+      mindMap,
+      document,
+      options,
+    )
   }
 
   command.addHistory?.cancel?.()
@@ -304,7 +430,11 @@ export function applyAuthoritativeMindmapDocument(mindMap, document) {
   command.pause?.()
 
   try {
-    const result = applyMindmapDocumentPreservingRuntimeState(mindMap, document)
+    const result = applyMindmapDocumentPreservingRuntimeState(
+      mindMap,
+      document,
+      options,
+    )
     // updateData/setData schedule addHistory even while the command is paused;
     // cancelling before recovery is what closes the trailing-timer window.
     command.addHistory?.cancel?.()

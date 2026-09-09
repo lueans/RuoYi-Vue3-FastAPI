@@ -735,9 +735,11 @@ class MindMapNode {
   finishRender() {
     // 手动插入的节点立即获得焦点并且开启编辑模式
     if (this.nodeData.inserting) {
+      const insertionType = this.nodeData.insertingType || 'node'
       delete this.nodeData.inserting
+      delete this.nodeData.insertingType
       this.active()
-      this.mindMap.emit('node_dblclick', this, null, true)
+      this.mindMap.emit('node_dblclick', this, null, true, insertionType)
     }
   }
 

@@ -6,11 +6,15 @@ import {
   flushPendingMindmapChanges,
   getMindmapSaveRecoveryAction,
   getMindmapResumeRecoveryReason,
+  mindmapCommandStartsNodeTextEdit,
+  shouldBlockMindmapStructureWrite,
 } from '../mindmap-save-lifecycle.js'
 import {
+  mindmapDocumentRequiresFullRuntimeReplacement,
   mindmapTreeContainsAssociativeLine,
   mindmapTreeContainsExactOuterFrame,
   mindmapTreeContainsNodeUid,
+  mindmapTreeNodeIsRuntimeVisible,
   mindmapTreeNodesHaveSameEditableData,
   mindmapTreesHaveSameCrossNodeState,
 } from '../mindmap-document-apply.js'
@@ -69,6 +73,99 @@ test('resume recovery detects newer revisions and same-revision incomplete trees
     cloudNodeCount: 93,
     localNodeCount: 93,
   }), null)
+})
+
+test('recovery gate blocks structure writes without swallowing final editor commits', () => {
+  for (const commandName of [
+    'INSERT_NODE',
+    'INSERT_CHILD_NODE',
+    'MOVE_NODE_TO',
+    'REMOVE_NODE',
+    'PASTE_NODE',
+    'BACK',
+    'ADD_GENERALIZATION',
+    'ADD_ASSOCIATIVE_LINE',
+    'REMOVE_ASSOCIATIVE_LINE',
+    'SET_ASSOCIATIVE_LINE_CONTROL_POINTS',
+    'ADD_OUTER_FRAME',
+    'REMOVE_OUTER_FRAME',
+    'SET_NODE_EXPAND',
+    'EXPAND_ALL',
+    'UNEXPAND_ALL',
+    'UNEXPAND_TO_LEVEL',
+  ]) {
+    assert.equal(shouldBlockMindmapStructureWrite(commandName, true), true)
+    assert.equal(shouldBlockMindmapStructureWrite(commandName, false), false)
+  }
+
+  // Enter/Tab first closes the active editor through SET_NODE_TEXT, then asks
+  // the mind-map runtime to insert a sibling/child. Recovery must preserve the
+  // former while rejecting the latter, otherwise the last typed text is lost.
+  assert.equal(shouldBlockMindmapStructureWrite('SET_NODE_TEXT', true), false)
+  assert.equal(shouldBlockMindmapStructureWrite('SET_NODE_DATA', true), false)
+  assert.equal(shouldBlockMindmapStructureWrite('GO_TARGET_NODE', true), false)
+
+  assert.equal(mindmapCommandStartsNodeTextEdit('INSERT_NODE'), true)
+  assert.equal(mindmapCommandStartsNodeTextEdit('INSERT_CHILD_NODE', [true]), true)
+  assert.equal(mindmapCommandStartsNodeTextEdit('INSERT_PARENT_NODE', [false]), false)
+  assert.equal(mindmapCommandStartsNodeTextEdit('ADD_GENERALIZATION', [null]), true)
+  assert.equal(mindmapCommandStartsNodeTextEdit('ADD_GENERALIZATION', [null, false]), false)
+  assert.equal(mindmapCommandStartsNodeTextEdit('INSERT_MULTI_NODE'), false)
+  assert.equal(mindmapCommandStartsNodeTextEdit('INSERT_NODE', [], {
+    createNewNodeBehavior: 'activeOnly',
+  }), false)
+  assert.equal(mindmapCommandStartsNodeTextEdit('INSERT_NODE', [], {
+    activeNodeCount: 0,
+  }), false)
+  assert.equal(mindmapCommandStartsNodeTextEdit('INSERT_NODE', [], {
+    activeNodeCount: 2,
+  }), false)
+  assert.equal(mindmapCommandStartsNodeTextEdit(
+    'INSERT_CHILD_NODE',
+    [true, [{ uid: 'one-appointed-node' }]],
+    { activeNodeCount: 2 },
+  ), true)
+})
+
+test('关联线控制点更新通过恢复门闩且拒绝时从未修改模型重建连线', async () => {
+  const [pluginSource, controlsSource] = await Promise.all([
+    readFile(
+      new URL('../../libs/simple-mind-map/src/plugins/AssociativeLine.js', import.meta.url),
+      'utf8',
+    ),
+    readFile(
+      new URL(
+        '../../libs/simple-mind-map/src/plugins/associativeLine/associativeLineControls.js',
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  ])
+  const mouseupBlock = controlsSource.match(
+    /function onControlPointMouseup[\s\S]*?\n\}/,
+  )?.[0] || ''
+
+  assert.match(
+    pluginSource,
+    /command\.add\([\s\S]*?'SET_ASSOCIATIVE_LINE_CONTROL_POINTS'[\s\S]*?this\.setLineControlPoints/,
+  )
+  assert.match(
+    pluginSource,
+    /command\.remove\([\s\S]*?'SET_ASSOCIATIVE_LINE_CONTROL_POINTS'[\s\S]*?this\.setLineControlPoints/,
+  )
+  assert.match(controlsSource, /import \{ simpleDeepClone \} from '\.\.\/\.\.\/utils\/index'/)
+  assert.match(
+    mouseupBlock,
+    /simpleDeepClone\([\s\S]*?getData\('associativeLinePoint'\)[\s\S]*?simpleDeepClone\([\s\S]*?getData\('associativeLineTargetControlOffsets'\)/,
+  )
+  assert.match(
+    mouseupBlock,
+    /execCommand\([\s\S]*?'SET_ASSOCIATIVE_LINE_CONTROL_POINTS'[\s\S]*?if \(updated === false\) \{[\s\S]*?isNotRenderAllLines = false[\s\S]*?renderAllLines\(\)/,
+  )
+  assert.doesNotMatch(
+    mouseupBlock,
+    /let \{ associativeLinePoint, associativeLineTargetControlOffsets \}[\s\S]*?node\.getData\(\)/,
+  )
 })
 
 test('conflict recovery keeps the rejected runtime fenced until authoritative apply succeeds', async () => {
@@ -388,7 +485,7 @@ test('editor persists drafts on page hide and background freeze boundaries', asy
   )
   assert.match(
     automaticConflictRecovery,
-    /draftProtection\.getChangeVersion\(\) !== protectedDraftChangeVersion[\s\S]*?pendingAutomaticConflictRecovery[\s\S]*?return false/,
+    /draftProtection\.getChangeVersion\(\) !== protectedDraftChangeVersion[\s\S]*?setPendingAutomaticConflictRecovery\(createDeferredRecoveryState\([\s\S]*?return false/,
   )
   assert.match(source, /async function settlePendingViewSave/)
   assert.match(
@@ -438,7 +535,7 @@ test('editor persists drafts on page hide and background freeze boundaries', asy
   )
   assert.match(
     automaticConflictRecovery,
-    /if \(!collaborationResetCompleted\)[\s\S]*?pendingAutomaticConflictRecovery = createDeferredRecoveryState\([\s\S]*?protectedDraftChangeVersion/,
+    /if \(!collaborationResetCompleted\)[\s\S]*?setPendingAutomaticConflictRecovery\(createDeferredRecoveryState\([\s\S]*?protectedDraftChangeVersion/,
   )
   assert.match(
     automaticConflictRecovery,
@@ -547,6 +644,7 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
   assert.match(targetCollectionBlock, /outlineEditRef\.value\?\.getActiveTextEditor\?\.\(\)/)
   assert.match(targetCollectionBlock, /kind: 'outline-node'/)
   assert.match(targetCollectionBlock, /mindmapTreeContainsNodeUid\(remoteRoot, editingNodeUid\)/)
+  assert.match(targetCollectionBlock, /mindmapTreeNodeIsRuntimeVisible\(/)
   assert.match(targetCollectionBlock, /mindmapTreeNodesHaveSameEditableData\(/)
   assert.match(targetCollectionBlock, /associativeLine\?\.showTextEdit === true/)
   assert.match(targetCollectionBlock, /mindmapTreeContainsAssociativeLine\(/)
@@ -565,13 +663,14 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
     protectionBlock,
     /queuedHistoryCommitted[\s\S]*?draftProtection\.getChangeVersion\(\) !== queuedChangeVersion[\s\S]*?return 'local-edit-committed'/,
   )
+  assert.doesNotMatch(protectionBlock, /active-editor-deferred/)
   assert.match(
     protectionBlock,
     /impactedTargets[\s\S]*?hideProtectedActiveEditors\(impactedTargets\)[\s\S]*?flushPendingHistory\?\.\(\)[\s\S]*?draftProtection\.getChangeVersion\(\)/,
   )
   assert.match(
     protectionBlock,
-    /removedTargets\.length === 0[\s\S]*?protectingActiveEditorFromRemoteDelete = true[\s\S]*?hideProtectedActiveEditors\(impactedTargets\)[\s\S]*?getCurrentDocument\(\)[\s\S]*?saveMindmapDraftFallbackSync[\s\S]*?saveMindmapDraft/,
+    /removedImpactedTargets\.length === 0[\s\S]*?protectingActiveEditorFromRemoteDelete = true[\s\S]*?hideProtectedActiveEditors\(impactedTargets\)[\s\S]*?getCurrentDocument\(\)[\s\S]*?saveMindmapDraftFallbackSync[\s\S]*?saveMindmapDraft/,
   )
   assert.match(
     protectionBlock,
@@ -590,6 +689,7 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
   const collectProtectionTargets = Function(
     'outlineEditRef',
     'mindmapTreeContainsNodeUid',
+    'mindmapTreeNodeIsRuntimeVisible',
     'mindmapTreeContainsAssociativeLine',
     'mindmapTreeContainsExactOuterFrame',
     'mindmapTreeNodesHaveSameEditableData',
@@ -598,6 +698,7 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
   )(
     { value: null },
     mindmapTreeContainsNodeUid,
+    mindmapTreeNodeIsRuntimeVisible,
     mindmapTreeContainsAssociativeLine,
     mindmapTreeContainsExactOuterFrame,
     mindmapTreeNodesHaveSameEditableData,
@@ -629,6 +730,7 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
   const currentRoot = structuredClone(remoteRoot)
   const editorMindMap = {
     getData: () => structuredClone(currentRoot),
+    updateData() {},
     renderer: { textEdit: { getCurrentEditNode: () => sourceNode } },
     associativeLine: {
       showTextEdit: true,
@@ -668,6 +770,41 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
     ],
     '无关节点更新不得关闭当前浮层编辑器',
   )
+  const collapsedRemoteRoot = structuredClone(remoteRoot)
+  collapsedRemoteRoot.data.expand = false
+  const collapsedNodeTarget = collectProtectionTargets(
+    collapsedRemoteRoot,
+    editorMindMap,
+  ).find(target => target.kind === 'node')
+  assert.equal(collapsedNodeTarget.retained, true)
+  assert.equal(
+    collapsedNodeTarget.requiresCommit,
+    true,
+    '远端折叠祖先会销毁编辑节点实例，应用前必须提交并关闭编辑器',
+  )
+  const protectRemoteApply = Function(
+    'mindMap',
+    'terminalState',
+    'isReadonly',
+    'protectingActiveEditorFromRemoteDelete',
+    'draftProtection',
+    'collectActiveEditorProtectionTargets',
+    'mindmapDocumentRequiresFullRuntimeReplacement',
+    `'use strict'; ${protectionBlock}; return protectActiveTextEditorBeforeRemoteDocumentApply`,
+  )(
+    { value: editorMindMap },
+    false,
+    { value: false },
+    false,
+    { getChangeVersion: () => 0 },
+    collectProtectionTargets,
+    mindmapDocumentRequiresFullRuntimeReplacement,
+  )
+  assert.equal(
+    protectRemoteApply(remoteRoot, editorMindMap, { root: remoteRoot }),
+    false,
+    '编辑节点未受影响时必须立即应用其他节点的远端更新',
+  )
   const fullReplacementTargets = collectProtectionTargets(
     remoteRoot,
     editorMindMap,
@@ -699,6 +836,7 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
   const collectOutlineProtectionTargets = Function(
     'outlineEditRef',
     'mindmapTreeContainsNodeUid',
+    'mindmapTreeNodeIsRuntimeVisible',
     'mindmapTreeContainsAssociativeLine',
     'mindmapTreeContainsExactOuterFrame',
     'mindmapTreeNodesHaveSameEditableData',
@@ -707,11 +845,21 @@ test('remote deletion protects every active DOM editor without rebroadcasting de
   )(
     { value: { getActiveTextEditor: () => outlineEditor } },
     mindmapTreeContainsNodeUid,
+    mindmapTreeNodeIsRuntimeVisible,
     mindmapTreeContainsAssociativeLine,
     mindmapTreeContainsExactOuterFrame,
     mindmapTreeNodesHaveSameEditableData,
     mindmapTreesHaveSameCrossNodeState,
   )
+  const collapsedOutlineRoot = structuredClone(currentRoot)
+  collapsedOutlineRoot.data.expand = false
+  const collapsedOutlineTarget = collectOutlineProtectionTargets(
+    collapsedOutlineRoot,
+    editorMindMap,
+  ).find(target => target.kind === 'outline-node')
+  assert.equal(collapsedOutlineTarget.retained, true)
+  assert.equal(collapsedOutlineTarget.requiresCommit, true)
+
   const remoteWithoutOutlineNode = structuredClone(remoteRoot)
   remoteWithoutOutlineNode.children = remoteWithoutOutlineNode.children.filter(
     node => node.data.uid !== 'source',
@@ -809,7 +957,7 @@ test('remote document resets remain queued until authoritative reload succeeds a
   )
   assert.match(
     source,
-    /function acknowledgeRemoteDocumentReset[\s\S]*?pendingRemoteDocumentReset = null/,
+    /function acknowledgeRemoteDocumentReset[\s\S]*?setPendingRemoteDocumentReset\(null\)/,
   )
   assert.match(
     source,
@@ -1009,18 +1157,134 @@ test('node leases span final editor publish and saves close editors before retir
   const createSyncBlock = source.match(
     /function createYjsSyncInstance[\s\S]*?function startYjsSyncIfReady/,
   )?.[0] || ''
+  const recoveryWriteGateBlock = source.match(
+    /function isRecoveryStructureWriteBlocked[\s\S]*?\n\}/,
+  )?.[0] || ''
+  const structureWriteGateBlock = source.match(
+    /function isMindmapStructureWriteBlocked[\s\S]*?\n\}/,
+  )?.[0] || ''
+  const commandGuardBlock = source.match(
+    /function installRecoveryStructureCommandGuard[\s\S]*?\n\}/,
+  )?.[0] || ''
   const saveBlock = source.match(
     /async function saveToBackend[\s\S]*?function queueRemoteDocumentReset/,
   )?.[0] || ''
   const leaseGate = saveBlock.indexOf('yjsSync?.hasActiveNodeEditLease?.()')
+  const pendingLeaseGate = saveBlock.indexOf(
+    'yjsSync?.hasPendingNodeEditLeaseAcquire?.()',
+  )
   const freezeSave = saveBlock.indexOf('isSaving.value = true')
 
   assert.match(
     createSyncBlock,
-    /canAcquireNodeEditLease: \(\) => \([\s\S]*?!isReadonly\.value[\s\S]*?!isSaving\.value[\s\S]*?!activeSaveMutation/,
+    /canAcquireNodeEditLease: \(\) => \([\s\S]*?!isReadonly\.value[\s\S]*?!isSaving\.value[\s\S]*?!activeSaveMutation[\s\S]*?!isRecoveryStructureWriteBlocked\(\)/,
   )
+  assert.match(
+    recoveryWriteGateBlock,
+    /resolvingStaleState[\s\S]*?authoritativeReloadInProgress[\s\S]*?authoritativeReloadRequired[\s\S]*?pendingAutomaticConflictRecovery[\s\S]*?pendingRemoteDocumentReset/,
+  )
+  assert.doesNotMatch(recoveryWriteGateBlock, /isSaving|activeSaveMutation/)
+  assert.match(
+    structureWriteGateBlock,
+    /isRecoveryStructureWriteBlocked\(\)[\s\S]*?isStructureWriteBlocked/,
+  )
+  const pendingAdmissionStructureGate = Function(
+    'isRecoveryStructureWriteBlocked',
+    'yjsSync',
+    `'use strict'; ${structureWriteGateBlock}; return isMindmapStructureWriteBlocked`,
+  )(
+    () => false,
+    { isStructureWriteBlocked: () => true },
+  )
+  assert.equal(pendingAdmissionStructureGate(), true)
+  assert.match(
+    commandGuardBlock,
+    /isMindmapStructureWriteBlocked\(\)[\s\S]*?shouldBlockMindmapStructureWrite\([\s\S]*?mindmapCommandStartsNodeTextEdit\(commandName, args,[\s\S]*?canAcquireNodeEditLease[\s\S]*?return false[\s\S]*?return execCommand\(commandName, \.\.\.args\)/,
+  )
+  assert.match(source, /installRecoveryStructureCommandGuard\(mm\)/)
+  assert.match(source, /isStructureWriteBlocked: isMindmapStructureWriteBlocked/)
+  assert.match(source, /const structureWriteBlocked = ref\(false\)/)
+  assert.match(
+    createSyncBlock,
+    /onNodeEditLeaseSettled:[\s\S]*?refreshStructureWriteBlockedState\(\)[\s\S]*?resumePendingSaveAfterNodeEditLeaseSettles\(\)/,
+  )
+  assert.match(
+    createSyncBlock,
+    /onStructureWriteBlockedChange:[\s\S]*?wasBlocked[\s\S]*?refreshStructureWriteBlockedState\(\)[\s\S]*?wasBlocked && !isBlocked[\s\S]*?resumePendingSaveAfterNodeEditLeaseSettles\(\)/,
+  )
+  const resumePendingSaveBlock = source.match(
+    /function resumePendingSaveAfterNodeEditLeaseSettles[\s\S]*?\n\}/,
+  )?.[0] || ''
+  assert.match(
+    resumePendingSaveBlock,
+    /isMindmapStructureWriteBlocked\(\)/,
+  )
+  assert.match(
+    source,
+    /function setAuthoritativeReloadRequiredState[\s\S]*?refreshStructureWriteBlockedState\(\)/,
+  )
+  assert.match(
+    source,
+    /function setPendingRemoteDocumentReset[\s\S]*?refreshStructureWriteBlockedState\(\)/,
+  )
+  assert.match(
+    source,
+    /function setResolvingStaleState[\s\S]*?refreshStructureWriteBlockedState\(\)/,
+  )
+
+  let recoveryActive = false
+  let nodeEditLeaseAvailable = true
+  const forwardedCommands = []
+  const rejectedCommands = []
+  const installCommandGuard = Function(
+    'shouldBlockMindmapStructureWrite',
+    'mindmapCommandStartsNodeTextEdit',
+    'isMindmapStructureWriteBlocked',
+    'props',
+    'yjsSync',
+    `'use strict'; ${commandGuardBlock}; return installRecoveryStructureCommandGuard`,
+  )(
+    shouldBlockMindmapStructureWrite,
+    mindmapCommandStartsNodeTextEdit,
+    () => recoveryActive,
+    { mindmapId: 1 },
+    {
+      canAcquireNodeEditLease: () => nodeEditLeaseAvailable,
+      getNodeEditLeaseFailureReason: () => 'unavailable',
+    },
+  )
+  const guardedMindMap = {
+    execCommand(commandName, ...args) {
+      forwardedCommands.push([commandName, ...args])
+      return 'executed'
+    },
+    emit(...args) {
+      rejectedCommands.push(args)
+    },
+  }
+  assert.equal(installCommandGuard(guardedMindMap), true)
+  assert.equal(guardedMindMap.execCommand('INSERT_NODE', 'normal-save'), 'executed')
+  recoveryActive = true
+  assert.equal(guardedMindMap.execCommand('SET_NODE_TEXT', 'final-text'), 'executed')
+  assert.equal(guardedMindMap.execCommand('INSERT_CHILD_NODE', 'ghost-node'), false)
+  recoveryActive = false
+  nodeEditLeaseAvailable = false
+  assert.equal(guardedMindMap.execCommand('INSERT_NODE'), false)
+  assert.equal(guardedMindMap.execCommand('INSERT_NODE', false), 'executed')
+  assert.deepEqual(forwardedCommands, [
+    ['INSERT_NODE', 'normal-save'],
+    ['SET_NODE_TEXT', 'final-text'],
+    ['INSERT_NODE', false],
+  ])
+  assert.deepEqual(rejectedCommands, [
+    ['readonly_command_rejected', 'INSERT_CHILD_NODE'],
+    ['node_text_edit_blocked', null, [], 'unavailable'],
+  ])
+
   assert.ok(leaseGate >= 0)
+  assert.ok(pendingLeaseGate > leaseGate)
   assert.ok(freezeSave > leaseGate)
+  assert.ok(freezeSave > pendingLeaseGate)
   assert.match(
     saveBlock,
     /responseSuperseded[\s\S]*?commitActiveEditorsBeforeTermination\(\)[\s\S]*?stopCurrentCollaborationSource\(\)/,
@@ -1032,5 +1296,13 @@ test('node leases span final editor publish and saves close editors before retir
   assert.match(
     source,
     /mm\.on\('node_text_edit_end'[\s\S]*?pendingSave\.value[\s\S]*?saveToBackend\(\)/,
+  )
+  assert.match(
+    source,
+    /function resumePendingSaveAfterNodeEditLeaseSettles[\s\S]*?hasActiveNodeEditLease[\s\S]*?hasPendingNodeEditLeaseAcquire[\s\S]*?saveToBackend\(\)/,
+  )
+  assert.match(
+    source,
+    /function commitActiveEditorsBeforeTermination[\s\S]*?cancelPendingTextEditAdmission\?\.\(\)[\s\S]*?hideEditTextBox\?\.\(\)/,
   )
 })

@@ -1,5 +1,10 @@
 <template>
-  <div class="nodeStylePanel" :class="{ embedded: props.embedded }">
+  <div
+    class="nodeStylePanel"
+    :class="{ embedded: props.embedded, isWriteBlocked }"
+    :inert="isWriteBlocked ? '' : null"
+    :aria-disabled="isWriteBlocked"
+  >
     <div
       class="styleBox"
       :class="{ isDark: isDark }"
@@ -16,6 +21,7 @@
             <div class="fieldBlock">
               <span class="fieldLabel">字体</span>
               <el-select
+                :disabled="isWriteBlocked"
                 size="small"
                 style="width: 100%"
                 v-model="style.fontFamily"
@@ -35,6 +41,7 @@
 
             <div class="typographyToolbar" role="group" aria-label="文字样式">
               <el-select
+                :disabled="isWriteBlocked"
                 class="fontSizeSelect"
                 size="small"
                 v-model="style.fontSize"
@@ -57,7 +64,7 @@
                     type="button"
                     aria-label="加粗"
                     :aria-pressed="style.fontWeight === 'bold'"
-                    :disabled="store.isReadonly"
+                    :disabled="isWriteBlocked"
                     :class="{ actived: style.fontWeight === 'bold' }"
                     @click="toggleFontWeight"
                   >B</button>
@@ -68,7 +75,7 @@
                     type="button"
                     aria-label="斜体"
                     :aria-pressed="style.fontStyle === 'italic'"
-                    :disabled="store.isReadonly"
+                    :disabled="isWriteBlocked"
                     :class="{ actived: style.fontStyle === 'italic' }"
                     @click="toggleFontStyle"
                   >I</button>
@@ -79,7 +86,7 @@
                     type="button"
                     aria-label="下划线"
                     :aria-pressed="style.textDecoration === 'underline'"
-                    :disabled="store.isReadonly"
+                    :disabled="isWriteBlocked"
                     :class="{ actived: style.textDecoration === 'underline' }"
                     @click="toggleTextDecoration('underline')"
                   >U</button>
@@ -90,7 +97,7 @@
                     type="button"
                     aria-label="中划线"
                     :aria-pressed="style.textDecoration === 'line-through'"
-                    :disabled="store.isReadonly"
+                    :disabled="isWriteBlocked"
                     :class="{ actived: style.textDecoration === 'line-through' }"
                     @click="toggleTextDecoration('line-through')"
                   >S</button>
@@ -100,7 +107,7 @@
                     class="styleBtn fontStepBtn"
                     type="button"
                     aria-label="减小字号"
-                    :disabled="store.isReadonly"
+                    :disabled="isWriteBlocked"
                     @click="stepFontSize(-1)"
                   >A<sup>−</sup></button>
                 </el-tooltip>
@@ -109,7 +116,7 @@
                     class="styleBtn fontStepBtn"
                     type="button"
                     aria-label="增大字号"
-                    :disabled="store.isReadonly"
+                    :disabled="isWriteBlocked"
                     @click="stepFontSize(1)"
                   >A<sup>+</sup></button>
                 </el-tooltip>
@@ -128,19 +135,24 @@
                     type="button"
                     :aria-label="`文字颜色 ${color}`"
                     :aria-pressed="normalizeColor(style.color) === normalizeColor(color)"
-                    :disabled="store.isReadonly"
+                    :disabled="isWriteBlocked"
                     @click="changeFontColor(color)"
                   >
                     <span class="quickColorSwatch" :style="{ backgroundColor: color }"></span>
                   </button>
                 </div>
-                <el-popover placement="bottom-end" trigger="click" :width="260">
+                <el-popover
+                  placement="bottom-end"
+                  trigger="click"
+                  :width="260"
+                  :disabled="isWriteBlocked"
+                >
                   <template #reference>
                     <button
                       class="moreColorButton"
                       type="button"
                       aria-label="选择更多文字颜色"
-                      :disabled="store.isReadonly"
+                      :disabled="isWriteBlocked"
                     >
                       <span>更多</span>
                       <el-icon><ArrowDown /></el-icon>
@@ -161,7 +173,7 @@
                   type="button"
                   :aria-label="item.name"
                   :aria-pressed="style.textAlign === item.value"
-                  :disabled="store.isReadonly"
+                  :disabled="isWriteBlocked"
                   :class="{ active: style.textAlign === item.value }"
                   @click="setTextAlign(item.value)"
                 >{{ alignShortName[item.value] }}</button>
@@ -178,7 +190,12 @@
           <div class="sectionBody controlGrid">
           <div class="fieldBlock">
             <span class="fieldLabel">颜色</span>
-            <el-popover placement="bottom" trigger="click" :width="260">
+            <el-popover
+              placement="bottom"
+              trigger="click"
+              :width="260"
+              :disabled="isWriteBlocked"
+            >
               <template #reference>
                 <ColorTrigger :color="style.borderColor" label="选择节点边框颜色" :width="124" />
               </template>
@@ -191,6 +208,7 @@
           <div class="fieldBlock">
             <span class="fieldLabel">宽度</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 100%"
               v-model="style.borderWidth"
@@ -216,6 +234,7 @@
           <div class="fieldBlock fullSpanField">
             <span class="fieldLabel">样式</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 100%"
               v-model="style.borderDasharray"
@@ -243,6 +262,7 @@
           <div class="fieldBlock fullSpanField" v-show="style.shape === 'rectangle'">
             <span class="fieldLabel">圆角</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 100%"
               v-model="style.borderRadius"
@@ -270,7 +290,12 @@
         <div class="fillControlRow">
           <div class="fieldBlock fillColorField">
             <span class="fieldLabel">颜色</span>
-            <el-popover placement="bottom" trigger="click" :width="260">
+            <el-popover
+              placement="bottom"
+              trigger="click"
+              :width="260"
+              :disabled="isWriteBlocked"
+            >
               <template #reference>
                 <ColorTrigger :color="style.fillColor" label="选择节点填充颜色" :width="124" />
               </template>
@@ -291,7 +316,12 @@
         <div class="row" v-if="style.gradientStyle">
           <div class="rowItem">
             <span class="name">起始</span>
-            <el-popover placement="bottom" trigger="click" :width="260">
+            <el-popover
+              placement="bottom"
+              trigger="click"
+              :width="260"
+              :disabled="isWriteBlocked"
+            >
               <template #reference>
                 <ColorTrigger :color="style.startColor" label="选择渐变起始颜色" />
               </template>
@@ -303,7 +333,12 @@
           </div>
           <div class="rowItem">
             <span class="name">结束</span>
-            <el-popover placement="bottom" trigger="click" :width="260">
+            <el-popover
+              placement="bottom"
+              trigger="click"
+              :width="260"
+              :disabled="isWriteBlocked"
+            >
               <template #reference>
                 <ColorTrigger :color="style.endColor" label="选择渐变结束颜色" />
               </template>
@@ -316,6 +351,7 @@
           <div class="rowItem">
             <span class="name">方向</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 80px"
               v-model="style.linearGradientDir"
@@ -343,6 +379,7 @@
         <div class="fieldBlock">
             <span class="fieldLabel">形状</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 100%"
               v-model="style.shape"
@@ -384,7 +421,12 @@
         <div class="row">
           <div class="rowItem">
             <span class="name">颜色</span>
-            <el-popover placement="bottom" trigger="click" :width="260">
+            <el-popover
+              placement="bottom"
+              trigger="click"
+              :width="260"
+              :disabled="isWriteBlocked"
+            >
               <template #reference>
                 <ColorTrigger :color="style.lineColor" label="选择节点线条颜色" :width="80" />
               </template>
@@ -397,6 +439,7 @@
           <div class="rowItem">
             <span class="name">样式</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 80px"
               v-model="style.lineDasharray"
@@ -425,6 +468,7 @@
           <div class="rowItem">
             <span class="name">宽度</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 80px"
               v-model="style.lineWidth"
@@ -449,6 +493,7 @@
           <div class="rowItem">
             <span class="name">箭头位置</span>
             <el-select
+              :disabled="isWriteBlocked"
               size="small"
               style="width: 80px"
               v-model="style.lineMarkerDir"
@@ -566,13 +611,15 @@ import {
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
-  embedded: { type: Boolean, default: false }
+  embedded: { type: Boolean, default: false },
+  writeBlocked: { type: Boolean, default: false }
 })
 
 const { activeNodes, syncActiveNodes } = useMindMapActiveNodes({
   resolveMindMap: () => props.mindMap,
 })
 const isDark = computed(() => store.localConfig.isDark)
+const isWriteBlocked = computed(() => store.isReadonly || props.writeBlocked)
 const fontQuickColors = Object.freeze([
   '#000000',
   '#3370FF',
@@ -667,7 +714,7 @@ function initLinearGradientDir() {
 }
 
 function update(prop) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   if (prop === 'linearGradientDir') {
     const target = linearGradientDirList.find(item => {
       return item.value === style.linearGradientDir
@@ -688,25 +735,25 @@ function update(prop) {
 }
 
 function toggleFontWeight() {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.fontWeight = style.fontWeight === 'bold' ? 'normal' : 'bold'
   update('fontWeight')
 }
 
 function toggleFontStyle() {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.fontStyle = style.fontStyle === 'italic' ? 'normal' : 'italic'
   update('fontStyle')
 }
 
 function toggleTextDecoration(decoration) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.textDecoration = style.textDecoration === decoration ? 'none' : decoration
   update('textDecoration')
 }
 
 function stepFontSize(step) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   const current = Number(style.fontSize)
   const currentIndex = fontSizeList.indexOf(current)
   const closestIndex = currentIndex >= 0
@@ -719,43 +766,43 @@ function stepFontSize(step) {
 }
 
 function setTextAlign(value) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.textAlign = value
   update('textAlign')
 }
 
 function changeFontColor(color) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.color = color
   update('color')
 }
 
 function changeBorderColor(color) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.borderColor = color
   update('borderColor')
 }
 
 function changeLineColor(color) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.lineColor = color
   update('lineColor')
 }
 
 function changeFillColor(color) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.fillColor = color
   update('fillColor')
 }
 
 function changeStartColor(color) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.startColor = color
   update('startColor')
 }
 
 function changeEndColor(color) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   style.endColor = color
   update('endColor')
 }
@@ -775,12 +822,25 @@ watch(activeNodes, (nodes) => {
 watch(() => store.activeSidebar, (val) => {
   if (val === 'nodeStyle') syncActiveNodes()
 }, { immediate: true })
+
+watch(isWriteBlocked, (blocked) => {
+  if (blocked) return
+  syncActiveNodes()
+  nextTick(() => {
+    if (!isWriteBlocked.value) initNodeStyle()
+  })
+})
 </script>
 
 <style lang="less" scoped>
 .nodeStylePanel {
   width: 100%;
   min-height: 100%;
+
+  &.isWriteBlocked {
+    opacity: 0.68;
+    pointer-events: none;
+  }
 }
 
 .styleBox {

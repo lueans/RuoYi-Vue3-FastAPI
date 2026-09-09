@@ -2,7 +2,7 @@
   <aside
     ref="inspectorRef"
     class="propertyInspector"
-    :class="{ isDark }"
+    :class="{ isDark, isWriteBlocked: props.structureWriteBlocked }"
     role="complementary"
     aria-labelledby="mindmap-property-inspector-title"
     @click.stop
@@ -44,9 +44,18 @@
       <div class="contextTarget">
         <span class="contextLabel" :title="contextLabel">{{ contextLabel }}</span>
       </div>
-      <div v-show="feedbackActive" class="applicationState" role="status" aria-live="polite">
-        <span class="stateDot" :class="{ applied: feedbackActive }" aria-hidden="true"></span>
-        <span>{{ applicationText }}</span>
+      <div
+        v-show="props.structureWriteBlocked || feedbackActive"
+        class="applicationState"
+        role="status"
+        aria-live="polite"
+      >
+        <span
+          class="stateDot"
+          :class="{ applied: feedbackActive && !props.structureWriteBlocked }"
+          aria-hidden="true"
+        ></span>
+        <span>{{ props.structureWriteBlocked ? '正在同步，暂不可修改' : applicationText }}</span>
       </div>
     </div>
 
@@ -62,6 +71,7 @@
           v-if="activeNodes.length > 0"
           :key="nodePanelKey"
           :mindMap="mindMap"
+          :write-blocked="props.structureWriteBlocked"
           embedded
         />
         <div v-else class="nodeEmptyState">
@@ -97,6 +107,7 @@
           <div class="canvasSectionBody">
             <Structure
               :mindMap="mindMap"
+              :structure-write-blocked="props.structureWriteBlocked"
               embedded
               @document-meta-change="handleDocumentMetaChange('canvas', $event)"
             />
@@ -113,6 +124,7 @@
           <div class="canvasSectionBody">
             <BaseStyle
               :mindMap="mindMap"
+              :write-blocked="props.structureWriteBlocked"
               embedded
               @document-meta-change="handleDocumentMetaChange('canvas', $event)"
             />
@@ -129,6 +141,7 @@
       >
         <Theme
           :mindMap="mindMap"
+          :write-blocked="props.structureWriteBlocked"
           embedded
           @document-meta-change="handleDocumentMetaChange('theme', $event)"
         />
@@ -140,7 +153,7 @@
         v-if="activeTab === 'node'"
         class="resetStyleButton"
         type="button"
-        :disabled="activeNodes.length === 0 || isReadonly"
+        :disabled="activeNodes.length === 0 || isReadonly || props.structureWriteBlocked"
         @click="resetSelectedNodeStyles"
       >
         <el-icon><RefreshRight /></el-icon>
@@ -170,6 +183,7 @@ import { layoutList } from './config'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
+  structureWriteBlocked: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['document-meta-change'])
@@ -239,12 +253,14 @@ function announceApplied(message) {
 }
 
 function handleDocumentMetaChange(scope, payload) {
+  if (props.structureWriteBlocked) return
   if (payload?.layout) currentLayout.value = payload.layout
   emit('document-meta-change', payload)
   announceApplied(scope === 'theme' ? '主题已应用' : '画布设置已应用')
 }
 
 function handleMindMapDataChange() {
+  if (props.structureWriteBlocked) return
   if (activeTab.value === 'node' && activeNodes.value.length > 0) {
     announceApplied('节点样式已应用')
   }
@@ -290,7 +306,12 @@ function focusWhenOpen() {
 }
 
 function resetSelectedNodeStyles() {
-  if (!props.mindMap || isReadonly.value || activeNodes.value.length === 0) return
+  if (
+    !props.mindMap
+    || isReadonly.value
+    || props.structureWriteBlocked
+    || activeNodes.value.length === 0
+  ) return
   props.mindMap.execCommand('REMOVE_ALL_NODE_CUSTOM_STYLES', [...activeNodes.value])
   nodePanelKey.value += 1
   announceApplied('节点样式已重置')
@@ -298,6 +319,14 @@ function resetSelectedNodeStyles() {
 }
 
 watch(() => props.mindMap, bindMindMap, { immediate: true })
+
+watch(() => props.structureWriteBlocked, (blocked) => {
+  if (!blocked) return
+  if (feedbackTimer) clearTimeout(feedbackTimer)
+  applicationText.value = '修改自动保存'
+  feedbackActive.value = false
+  feedbackTimer = null
+})
 
 watch(activeTab, () => {
   if (feedbackTimer) clearTimeout(feedbackTimer)

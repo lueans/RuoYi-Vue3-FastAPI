@@ -15,6 +15,7 @@
       role="region"
       :aria-label="isReadonly ? '脑图只读画布' : '脑图编辑画布'"
       tabindex="0"
+      @transitionend="onMindMapContainerTransitionEnd"
     ></div>
     <WorkspaceActivityBar v-if="!isZenMode" />
     <Navigator v-if="mindMap" :mindMap="mindMap" />
@@ -23,6 +24,7 @@
     <PropertyInspector
       v-if="mindMap && hasPropertyInspector"
       :mindMap="mindMap"
+      :structure-write-blocked="structureWriteBlocked"
       @document-meta-change="onDocumentMetaChange"
     />
     <ShortcutKey v-if="mindMap && activeSidebar === 'shortcutKey'" />
@@ -114,7 +116,11 @@ import {
   resolveMindmapPerformanceOptions,
 } from '@/utils/mindmap-performance'
 import { waitForMindmapInitialRender } from '@/utils/mindmap-initial-render'
-import { getMindmapResumeRecoveryReason } from '@/utils/mindmap-save-lifecycle'
+import {
+  getMindmapResumeRecoveryReason,
+  mindmapCommandStartsNodeTextEdit,
+  shouldBlockMindmapStructureWrite,
+} from '@/utils/mindmap-save-lifecycle'
 import { ensureMindmapDocumentPlugins } from '@/utils/mindmap-plugin-loader'
 import { getNodeEditLeaseBlockedMessage } from '@/utils/mindmap-node-edit-lease'
 import {
@@ -184,6 +190,7 @@ import {
   mindmapTreeContainsAssociativeLine,
   mindmapTreeContainsExactOuterFrame,
   mindmapTreeContainsNodeUid,
+  mindmapTreeNodeIsRuntimeVisible,
   mindmapTreeNodesHaveSameEditableData,
   mindmapTreesHaveSameCrossNodeState,
 } from '@/utils/mindmap-document-apply'
@@ -267,6 +274,9 @@ let enableShowLoading = true
 let autoSaveTimer = null
 let yjsSync = null
 const yjsSyncRef = shallowRef(null)
+// Yjs/恢复门闩本身是普通类字段和闭包变量。单独桥接成 Vue ref，确保
+// 属性面板中的结构控件会即时更新 disabled/无障碍状态，而不只是点击后拒绝。
+const structureWriteBlocked = ref(false)
 const isSaving = ref(false)
 const pendingSave = ref(false)
 const saveStatus = ref('idle') // idle | pending | saving | retrying | syncing | offline | saved | error
@@ -889,6 +899,7 @@ function stopCurrentCollaborationSource() {
   yjsSync.destroy({ flushCheckpoint: false })
   yjsSync = null
   yjsSyncRef.value = null
+  refreshStructureWriteBlockedState()
   return true
 }
 
@@ -1061,12 +1072,12 @@ function cancelSessionAsyncWork() {
   sessionController = null
   clearTimeout(authoritativeReloadTimer)
   authoritativeReloadTimer = null
-  authoritativeReloadInProgress = false
+  setAuthoritativeReloadInProgress(false)
   if (localDraftDialogOpen || conflictDialogOpen) ElMessageBox.close()
   localDraftDialogOpen = false
   conflictDialogOpen = false
-  pendingAutomaticConflictRecovery = null
-  pendingRemoteDocumentReset = null
+  setPendingAutomaticConflictRecovery(null)
+  setPendingRemoteDocumentReset(null)
   remoteDocumentResetRetryBlocked = false
 }
 
@@ -1341,6 +1352,10 @@ function collectActiveEditorProtectionTargets(
 
   if (editingNodeUid) {
     const retained = mindmapTreeContainsNodeUid(remoteRoot, editingNodeUid)
+    const runtimeVisible = retained && mindmapTreeNodeIsRuntimeVisible(
+      remoteRoot,
+      editingNodeUid,
+    )
     targets.push({
       kind: 'node',
       identity: `node:${editingNodeUid}`,
@@ -1350,6 +1365,7 @@ function collectActiveEditorProtectionTargets(
       // 只有远端也改了当前节点本身时才需要先提交 DOM-only 输入。
       requiresCommit: retained && (
         forceCommit
+        || !runtimeVisible
         || !mindmapTreeNodesHaveSameEditableData(
           currentRoot,
           remoteRoot,
@@ -1364,6 +1380,10 @@ function collectActiveEditorProtectionTargets(
       remoteRoot,
       outlineEditingNodeUid,
     )
+    const runtimeVisible = retained && mindmapTreeNodeIsRuntimeVisible(
+      remoteRoot,
+      outlineEditingNodeUid,
+    )
     targets.push({
       kind: 'outline-node',
       identity: `node:${outlineEditingNodeUid}`,
@@ -1371,6 +1391,7 @@ function collectActiveEditorProtectionTargets(
       retained,
       requiresCommit: retained && (
         forceCommit
+        || !runtimeVisible
         || !mindmapTreeNodesHaveSameEditableData(
           currentRoot,
           remoteRoot,
@@ -1569,13 +1590,14 @@ function protectActiveTextEditorBeforeRemoteDocumentApply(
   )
   if (protectionTargets.length === 0) return false
   // 远端只改了其他节点时，增量渲染不会替换当前节点实例；保持编辑框和
-  // 光标不动，避免协作频繁更新导致输入被无意义地打断。
+  // 光标不动并立即更新其他节点。异步准入已经在 TextEdit 内按持久 UID
+  // 重新解析当前实例，因此不能再为了本地文本框把整份远端文档无限积压。
   const impactedTargets = protectionTargets.filter(
     target => !target.retained || target.requiresCommit === true,
   )
   if (impactedTargets.length === 0) return false
-  const removedTargets = impactedTargets.filter(target => !target.retained)
-  if (removedTargets.length === 0) {
+  const removedImpactedTargets = impactedTargets.filter(target => !target.retained)
+  if (removedImpactedTargets.length === 0) {
     const previousChangeVersion = draftProtection.getChangeVersion()
     const editorsCommitted = hideProtectedActiveEditors(impactedTargets)
     // 所有浮层编辑器都只会把最终命令放入 Command 的节流历史队列。
@@ -1597,7 +1619,7 @@ function protectActiveTextEditorBeforeRemoteDocumentApply(
   protectingActiveEditorFromRemoteDelete = true
   let fallbackSaved = false
   const protectionIdentity = createRemoteDeletedEditorProtectionIdentity(
-    removedTargets.map(target => target.identity).sort().join('|'),
+    removedImpactedTargets.map(target => target.identity).sort().join('|'),
     contentRevision,
   )
   try {
@@ -1655,6 +1677,104 @@ function setupTextEditExitDetection() {
   bus.on('hide_text_edit', onHideTextEdit)
 }
 
+function isRecoveryStructureWriteBlocked() {
+  return Boolean(
+    resolvingStaleState
+    || authoritativeReloadInProgress
+    || authoritativeReloadRequired
+    || pendingAutomaticConflictRecovery
+    || pendingRemoteDocumentReset
+  )
+}
+
+function isMindmapStructureWriteBlocked() {
+  return Boolean(
+    isRecoveryStructureWriteBlocked()
+    || yjsSync?.isStructureWriteBlocked?.()
+  )
+}
+
+function refreshStructureWriteBlockedState() {
+  const nextBlocked = isMindmapStructureWriteBlocked()
+  if (structureWriteBlocked.value !== nextBlocked) {
+    structureWriteBlocked.value = nextBlocked
+  }
+  return nextBlocked
+}
+
+function setAuthoritativeReloadRequiredState(required) {
+  authoritativeReloadRequired = required === true
+  refreshStructureWriteBlockedState()
+}
+
+function setAuthoritativeReloadInProgress(inProgress) {
+  authoritativeReloadInProgress = inProgress === true
+  refreshStructureWriteBlockedState()
+}
+
+function setPendingAutomaticConflictRecovery(recovery) {
+  pendingAutomaticConflictRecovery = recovery || null
+  refreshStructureWriteBlockedState()
+  return pendingAutomaticConflictRecovery
+}
+
+function setPendingRemoteDocumentReset(reset) {
+  pendingRemoteDocumentReset = reset || null
+  refreshStructureWriteBlockedState()
+  return pendingRemoteDocumentReset
+}
+
+function setResolvingStaleState(resolving) {
+  resolvingStaleState = resolving === true
+  refreshStructureWriteBlockedState()
+}
+
+function installRecoveryStructureCommandGuard(activeMindMap) {
+  if (!activeMindMap || typeof activeMindMap.execCommand !== 'function') return false
+  const execCommand = activeMindMap.execCommand.bind(activeMindMap)
+  activeMindMap.execCommand = (commandName, ...args) => {
+    const structureWriteBlocked = isMindmapStructureWriteBlocked()
+    if (shouldBlockMindmapStructureWrite(commandName, structureWriteBlocked)) {
+      activeMindMap.emit?.('readonly_command_rejected', commandName)
+      return false
+    }
+    if (
+      props.mindmapId
+      && mindmapCommandStartsNodeTextEdit(commandName, args, {
+        createNewNodeBehavior: activeMindMap.opt?.createNewNodeBehavior,
+        activeNodeCount: Array.isArray(activeMindMap.renderer?.activeNodeList)
+          ? activeMindMap.renderer.activeNodeList.length
+          : 1,
+      })
+      && yjsSync?.canAcquireNodeEditLease?.() !== true
+    ) {
+      activeMindMap.emit?.(
+        'node_text_edit_blocked',
+        null,
+        [],
+        yjsSync?.getNodeEditLeaseFailureReason?.() || 'connecting',
+      )
+      return false
+    }
+    return execCommand(commandName, ...args)
+  }
+  return true
+}
+
+function resumePendingSaveAfterNodeEditLeaseSettles() {
+  if (
+    !pendingSave.value
+    || isSaving.value
+    || terminalState
+    || isChangeTrackingSuspended()
+    || isMindmapStructureWriteBlocked()
+    || yjsSync?.hasActiveNodeEditLease?.()
+    || yjsSync?.hasPendingNodeEditLeaseAcquire?.()
+  ) return
+  clearTimeout(autoSaveTimer)
+  autoSaveTimer = setTimeout(() => { void saveToBackend() }, 0)
+}
+
 function createYjsSyncInstance() {
   let documentPrepareFailureNotified = false
   return new YjsMindmapSync(props.mindmapId, mindMap.value, contentRevision, {
@@ -1678,7 +1798,23 @@ function createYjsSyncInstance() {
       !isReadonly.value
       && !isSaving.value
       && !activeSaveMutation
+      && !isRecoveryStructureWriteBlocked()
     ),
+    // 初次租约等待期间自动保存同样必须停住；结果落定后用下一轮任务恢复，
+    // 让 TextEdit 先完成打开或幽灵节点补偿，再冻结 HTTP 保存快照。
+    onNodeEditLeaseSettled: () => {
+      refreshStructureWriteBlockedState()
+      resumePendingSaveAfterNodeEditLeaseSettles()
+    },
+    onStructureWriteBlockedChange: () => {
+      const wasBlocked = structureWriteBlocked.value
+      const isBlocked = refreshStructureWriteBlockedState()
+      // 租约 settled 可能恰好落在远端 prepare/apply 窗口，首次恢复会被
+      // 门闩挡住。最后一个结构门闩解除时必须再次唤醒已登记的自动保存。
+      if (wasBlocked && !isBlocked) {
+        resumePendingSaveAfterNodeEditLeaseSettles()
+      }
+    },
     // 当前保存请求提交后会推进全房间 revision。它在途期间新建的下一批
     // Yjs 帧无法保证全部落在同一 revision，先仅保留本地并由紧随其后的
     // HTTP 批次权威提交，避免连续输入时被服务端误判成旧基线写入。
@@ -1816,6 +1952,7 @@ function startYjsSyncIfReady() {
   yjsSync = createYjsSyncInstance()
   yjsSyncRef.value = yjsSync
   yjsSync.start()
+  refreshStructureWriteBlockedState()
   bindYjsDetailTracking()
   return true
 }
@@ -1833,6 +1970,17 @@ watch([activeSidebar, hasSearchPanel], async () => {
   await nextTick()
   mindMap.value?.resize?.()
 })
+
+function onMindMapContainerTransitionEnd(event) {
+  if (
+    event.target !== mindMapContainerRef.value
+    || !['left', 'right'].includes(event.propertyName)
+  ) return
+  // 侧栏和搜索面板通过 left/right 动画改变画布宽度。watch 中的 resize
+  // 发生在动画开始时，此处在最终尺寸落定后再次同步内部 SVG，避免关闭
+  // 侧栏后残留一个与侧栏等宽的空白（看起来像透明侧栏）。
+  mindMap.value?.resize?.()
+}
 
 // All events to forward from mindMap instance to bus
 const forwardEvents = [
@@ -1948,6 +2096,7 @@ onBeforeUnmount(() => {
     yjsSync.destroy()
     yjsSync = null
     yjsSyncRef.value = null
+    refreshStructureWriteBlockedState()
   }
   clearTimeout(autoSaveTimer)
   clearTimeout(saveStatusTimer)
@@ -2131,21 +2280,17 @@ async function initMindMap(signal) {
     // 会话才通过 editingNodeUid 提供短租约式占用。
     onlyOneEnableActiveNodeOnCooperate: false,
     onlyOneEnableTextEditOnCooperate: Boolean(props.mindmapId && !isReadonly.value),
+    isStructureWriteBlocked: isMindmapStructureWriteBlocked,
     isNodeTextEditLeaseAuthoritative: () => (
       yjsSync?.usesAuthoritativeNodeEditLease?.() === true
     ),
     releaseNodeTextEditLease: nodeUid => yjsSync?.releaseNodeEditLease?.(nodeUid),
+    getNodeTextEditLeaseFailureReason: () => (
+      yjsSync?.getNodeEditLeaseFailureReason?.() || 'unavailable'
+    ),
     beforeTextEdit: async (node) => {
       if (!props.mindmapId) return true
-      const granted = await yjsSync?.acquireNodeEditLease?.(node)
-      if (granted === true) return true
-      mm?.emit?.(
-        'node_text_edit_blocked',
-        node,
-        [...(node?.editingUserList || [])],
-        yjsSync?.getNodeEditLeaseFailureReason?.() || 'unavailable',
-      )
-      return false
+      return await yjsSync?.acquireNodeEditLease?.(node) === true
     },
     nodeTextEditZIndex: 1000,
     nodeNoteTooltipZIndex: 1000,
@@ -2235,7 +2380,18 @@ async function initMindMap(signal) {
       })
     }
   })
+  installRecoveryStructureCommandGuard(mm)
   noteContentMindMap = mm
+
+  mm.on('readonly_command_rejected', () => {
+    if (!isMindmapStructureWriteBlocked()) return
+    ElMessage.info({
+      message: yjsSync?.hasPendingNodeEditLeaseAcquire?.()
+        ? '正在获取节点编辑权限，请稍后再修改脑图结构'
+        : '正在同步云端最新版本，请稍后再修改脑图结构',
+      grouping: true,
+    })
+  })
 
   mm.on('node_text_edit_blocked', (_node, users = [], reason = 'occupied') => {
     ElMessage.warning({
@@ -2258,14 +2414,7 @@ async function initMindMap(signal) {
   mm.on('node_text_edit_end', () => {
     // 自动保存定时器若恰在 DOM 编辑期间触发，会被租约门闩延后。无论
     // 本次 blur 是否改变文本，都在释放后恢复那次已登记的保存请求。
-    if (
-      !pendingSave.value
-      || isSaving.value
-      || terminalState
-      || isChangeTrackingSuspended()
-    ) return
-    clearTimeout(autoSaveTimer)
-    autoSaveTimer = setTimeout(() => { void saveToBackend() }, 0)
+    resumePendingSaveAfterNodeEditLeaseSettles()
   })
 
   mindMap.value = mm
@@ -2862,7 +3011,7 @@ function markAuthoritativeReloadRequired() {
     // stale/reload 要求时推进代际，让退出流程跳过旧树和旧 Yjs 实例。
     authoritativeResetGeneration.value += 1
   }
-  authoritativeReloadRequired = true
+  setAuthoritativeReloadRequiredState(true)
 }
 
 function resolveAuthoritativeReload() {
@@ -2873,15 +3022,15 @@ function resolveAuthoritativeReload() {
     !terminalState
     && contentRevision < authoritativeReloadMinimumRevision
   ) {
-    authoritativeReloadRequired = true
+    setAuthoritativeReloadRequiredState(true)
     return false
   }
   clearTimeout(authoritativeReloadTimer)
   authoritativeReloadTimer = null
   authoritativeReloadAttempt = 0
-  authoritativeReloadInProgress = false
+  setAuthoritativeReloadInProgress(false)
   authoritativeReloadNoticeShown = false
-  authoritativeReloadRequired = false
+  setAuthoritativeReloadRequiredState(false)
   authoritativeReloadMinimumRevision = 0
   if (saveRecoveryKind.value === 'sync') saveRecoveryKind.value = ''
   return true
@@ -2939,7 +3088,7 @@ async function performAuthoritativeReload({ allowDuringEditingTransition = false
     || viewSaveInProgress
   ) return false
 
-  authoritativeReloadInProgress = true
+  setAuthoritativeReloadInProgress(true)
   if (saveRecoveryKind.value !== 'draft') setSaveStatus('syncing')
   try {
     const reloaded = await reloadLatestServerDocument({
@@ -2961,7 +3110,7 @@ async function performAuthoritativeReload({ allowDuringEditingTransition = false
     }
     return false
   } finally {
-    authoritativeReloadInProgress = false
+    setAuthoritativeReloadInProgress(false)
     drainPendingRemoteDocumentReset()
   }
 }
@@ -2971,7 +3120,7 @@ async function recoverFromSaveRevisionConflict(
   localFullData,
   recoveryState = {},
 ) {
-  pendingAutomaticConflictRecovery = null
+  setPendingAutomaticConflictRecovery(null)
   clearTimeout(autoSaveTimer)
   // HTTP 批次在发出前已经冻结了用户真正提交的文档。冲突响应到达之前，
   // 远端 Yjs 预览可能已在同字段竞争中覆盖运行时画布，因此必须在任何
@@ -3040,7 +3189,7 @@ async function recoverFromSaveRevisionConflict(
       }
     }
     if (!allDraftsSaved) {
-      pendingAutomaticConflictRecovery = createDeferredRecoveryState(null)
+      setPendingAutomaticConflictRecovery(createDeferredRecoveryState(null))
       saveRecoveryKind.value = 'retry'
       setSaveStatus('error')
       ElNotification.error({
@@ -3064,9 +3213,9 @@ async function recoverFromSaveRevisionConflict(
   if (draftProtection.getChangeVersion() !== protectedDraftChangeVersion) {
     // IndexedDB 写入期间用户仍可能继续编辑。此时刚保存的快照只覆盖旧版本，
     // 不能清空新产生的操作或加载云端正文；下一轮会先保护最新画布再恢复。
-    pendingAutomaticConflictRecovery = createDeferredRecoveryState(
+    setPendingAutomaticConflictRecovery(createDeferredRecoveryState(
       protectedDraftChangeVersion,
-    )
+    ))
     saveRecoveryKind.value = 'retry'
     return false
   }
@@ -3130,9 +3279,9 @@ async function recoverFromSaveRevisionConflict(
     if (!collaborationResetCompleted) {
       // 必需的重置请求失败时不能直接走普通重载，否则仍会重新接入旧检查点。
       // 保留明确的无弹窗重试入口，并继续让本地草稿承担兜底保护。
-      pendingAutomaticConflictRecovery = createDeferredRecoveryState(
+      setPendingAutomaticConflictRecovery(createDeferredRecoveryState(
         protectedDraftChangeVersion,
-      )
+      ))
       saveRecoveryKind.value = 'retry'
       return false
     }
@@ -3151,7 +3300,10 @@ async function saveToBackend() {
   if (isChangeTrackingSuspended()) return false
   // 节点租约必须覆盖“最终文本已进入可发送 Yjs”这一线性化点。保存请求
   // 在途会暂时关闭新实时批次，所以现有编辑结束前不能冻结 HTTP mutation。
-  if (yjsSync?.hasActiveNodeEditLease?.()) {
+  if (
+    yjsSync?.hasActiveNodeEditLease?.()
+    || yjsSync?.hasPendingNodeEditLeaseAcquire?.()
+  ) {
     pendingSave.value = true
     return
   }
@@ -3501,7 +3653,7 @@ async function saveToBackend() {
     }
     activeSaveMutation = null
     activeSaveDocumentDataGeneration = null
-    pendingAutomaticConflictRecovery = null
+    setPendingAutomaticConflictRecovery(null)
     conflictBlocked = false
     const recoveredFromRetry = retryNoticeShown || saveRetryAttempt > 0
     clearSaveRetryState()
@@ -3567,7 +3719,7 @@ function queueRemoteDocumentReset(data = {}) {
       && (!Number.isInteger(queuedRevision) || nextRevision >= queuedRevision)
     )
   ) {
-    pendingRemoteDocumentReset = data
+    setPendingRemoteDocumentReset(data)
     return true
   }
   return false
@@ -3589,7 +3741,7 @@ function acknowledgeRemoteDocumentReset(data) {
   if (
     (pendingRemoteDocumentReset === data && handledRevisionApplied)
     || (Number.isInteger(queuedRevision) && queuedRevision <= contentRevision)
-  ) pendingRemoteDocumentReset = null
+  ) setPendingRemoteDocumentReset(null)
   if (!pendingRemoteDocumentReset) {
     remoteDocumentResetRetryBlocked = false
     if (saveRecoveryKind.value === 'sync') saveRecoveryKind.value = ''
@@ -3652,7 +3804,7 @@ async function handleStaleCollaborationState(data) {
   // 历史版本画布不是可保存/可备份的当前文档。先只记录单调 revision
   // 下界，退出预览后再由 onVersionChangeTracking 锁定编辑并权威回源。
   if (versionChangeTrackingPaused || resolvingStaleState || !mindMap.value) return
-  resolvingStaleState = true
+  setResolvingStaleState(true)
   try {
     clearTimeout(autoSaveTimer)
     commitActiveEditorsBeforeTermination()
@@ -3684,7 +3836,7 @@ async function handleStaleCollaborationState(data) {
     console.error('恢复协作状态失败:', error)
     setSaveStatus('error')
   } finally {
-    resolvingStaleState = false
+    setResolvingStaleState(false)
     drainPendingRemoteDocumentReset()
   }
 }
@@ -3704,7 +3856,7 @@ async function handleRemoteDocumentReset(data) {
     acknowledgeRemoteDocumentReset(data)
     return true
   }
-  resolvingStaleState = true
+  setResolvingStaleState(true)
   const isCloudReset = data?.reason === 'authoritative_cloud_reset'
   const actionTitle = isCloudReset ? '协作者选择了云端版本' : '协作者恢复了历史版本'
   try {
@@ -3759,7 +3911,7 @@ async function handleRemoteDocumentReset(data) {
     blockRemoteDocumentResetRetry(actionTitle, error?.message || '加载服务器最新内容失败')
     return false
   } finally {
-    resolvingStaleState = false
+    setResolvingStaleState(false)
     if (!remoteDocumentResetRetryBlocked) drainPendingRemoteDocumentReset()
   }
 }
@@ -3855,6 +4007,7 @@ function terminateEditingSession(eventName, data) {
   const terminatedSync = yjsSync
   yjsSync = null
   yjsSyncRef.value = null
+  refreshStructureWriteBlockedState()
   terminatedSync?.destroy?.({ flushCheckpoint: false })
   const emitTerminalEvent = (draftPreserved) => emit(eventName, {
     ...data,
@@ -3887,6 +4040,7 @@ function commitActiveEditorsBeforeTermination() {
   ]
   for (const editor of activeEditors) {
     try {
+      editor?.cancelPendingTextEditAdmission?.()
       editor?.hideEditTextBox?.()
     } catch (error) {
       // 单个插件编辑器异常不应阻断终止流程和其余内容的本地备份。
@@ -4195,7 +4349,7 @@ async function recoverSave() {
   }
   if (pendingAutomaticConflictRecovery) {
     const recovery = pendingAutomaticConflictRecovery
-    pendingAutomaticConflictRecovery = null
+    setPendingAutomaticConflictRecovery(null)
     return recoverFromSaveRevisionConflict(
       recovery.conflictData,
       getCurrentDocument(),
@@ -4753,6 +4907,7 @@ function onYjsReinit(_restoredRoot, revision) {
     yjsSync.destroy({ flushCheckpoint: false })
     yjsSync = null
     yjsSyncRef.value = null
+    refreshStructureWriteBlockedState()
   }
   // 移除旧的 data_change_detail 监听器（使用具名引用）
   if (dataChangeDetailHandler) {

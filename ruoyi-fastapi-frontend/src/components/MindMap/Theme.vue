@@ -1,5 +1,10 @@
 <template>
-  <div class="themePanel" :class="{ embedded: props.embedded }">
+  <div
+    class="themePanel"
+    :class="{ embedded: props.embedded, isWriteBlocked }"
+    :inert="isWriteBlocked ? '' : null"
+    :aria-disabled="isWriteBlocked"
+  >
     <div class="themeGroupList" :class="{ isDark: isDark }">
       <el-tabs v-model="activeName" class="tabBox">
         <el-tab-pane
@@ -24,7 +29,7 @@
           type="button"
           :aria-label="`使用主题：${item.name}`"
           :aria-pressed="item.value === currentTheme"
-          :disabled="themeChangePending || isReadonly"
+          :disabled="themeChangePending || isWriteBlocked"
           @click="useTheme(item)"
           :class="{ active: item.value === currentTheme }"
         >
@@ -58,7 +63,8 @@ const themeList = themeListRaw || []
 const props = defineProps({
   data: { type: [Object, null], default: null },
   mindMap: { type: Object, default: null },
-  embedded: { type: Boolean, default: false }
+  embedded: { type: Boolean, default: false },
+  writeBlocked: { type: Boolean, default: false }
 })
 const emit = defineEmits(['document-meta-change'])
 
@@ -66,6 +72,7 @@ const currentTheme = ref('default')
 const activeName = ref('')
 const isDark = computed(() => store.localConfig.isDark)
 const isReadonly = computed(() => store.isReadonly)
+const isWriteBlocked = computed(() => isReadonly.value || props.writeBlocked)
 const themeChangePending = ref(false)
 let boundMindMap = null
 let themeOperationId = 0
@@ -137,7 +144,7 @@ function handleDark() {
 }
 
 async function useTheme(theme) {
-  if (!props.mindMap || themeChangePending.value || isReadonly.value) return
+  if (!props.mindMap || themeChangePending.value || isWriteBlocked.value) return
   if (theme.value === currentTheme.value) return
   const activeMindMap = props.mindMap
   const operationId = ++themeOperationId
@@ -146,7 +153,7 @@ async function useTheme(theme) {
     && operationId === themeOperationId
     && activeMindMap === props.mindMap
     && store.activeSidebar === 'theme'
-    && !isReadonly.value
+    && !isWriteBlocked.value
   )
   const customThemeConfig = activeMindMap.getCustomThemeConfig() || {}
   const hasCustomThemeConfig = Object.keys(customThemeConfig).length > 0
@@ -181,7 +188,11 @@ async function useTheme(theme) {
 }
 
 function changeTheme(theme, config, targetMindMap = props.mindMap) {
-  if (!targetMindMap || targetMindMap !== props.mindMap || isReadonly.value) return
+  if (
+    !targetMindMap
+    || targetMindMap !== props.mindMap
+    || isWriteBlocked.value
+  ) return
   targetMindMap.setThemeConfig(config, true)
   targetMindMap.setTheme(theme.value)
   emit('document-meta-change', {
@@ -212,6 +223,14 @@ onBeforeUnmount(() => {
 
 watch(() => props.mindMap, bindMindMap, { immediate: true })
 
+watch(isWriteBlocked, (blocked) => {
+  if (!blocked) return
+  // 覆盖确认可能跨越一次远端应用。阻塞开始时使旧确认失效，避免用户在
+  // 同步结束后点击旧弹窗，把基于旧主题配置的选择重新写回当前文档。
+  themeOperationId += 1
+  themeChangePending.value = false
+})
+
 watch(() => store.activeSidebar, (val) => {
   if (val === 'theme') {
     if (props.mindMap) {
@@ -226,6 +245,11 @@ watch(() => store.activeSidebar, (val) => {
 .themePanel {
   width: 100%;
   min-height: 100%;
+
+  &.isWriteBlocked {
+    opacity: 0.68;
+    pointer-events: none;
+  }
 }
 
 .themeGroupList {

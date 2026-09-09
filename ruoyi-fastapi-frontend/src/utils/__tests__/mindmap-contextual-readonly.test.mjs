@@ -84,5 +84,8 @@ test('实例绑定浮层在首次挂载和切换脑图时成对订阅并清理�
   assert.match(outerFrame, /let currentMindMap = null/)
   assert.match(outerFrame, /watch\(\(\) => props\.mindMap,[\s\S]*if \(mm !== oldMm\) onFrameDeactivate\(\)[\s\S]*\{ immediate: true \}/)
   assert.match(outerFrame, /currentMindMap !== props\.mindMap/)
-  assert.match(outerFrame, /removeActiveOuterFrame\?\.\(\)[\s\S]*onFrameDeactivate\(\)/)
+  assert.match(
+    outerFrame,
+    /execCommand\?\.\('REMOVE_OUTER_FRAME'\)[\s\S]*if \(removed === false\) return[\s\S]*onFrameDeactivate\(\)/,
+  )
 })

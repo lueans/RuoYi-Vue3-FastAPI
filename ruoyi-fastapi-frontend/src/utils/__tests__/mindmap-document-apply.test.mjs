@@ -11,6 +11,7 @@ import {
   mindmapTreeContainsAssociativeLine,
   mindmapTreeContainsExactOuterFrame,
   mindmapTreeContainsNodeUid,
+  mindmapTreeNodeIsRuntimeVisible,
   mindmapTreeNodesHaveSameEditableData,
   mindmapTreesHaveSameCrossNodeState,
 } from '../mindmap-document-apply.js'
@@ -44,6 +45,49 @@ test('活动 DOM 文本只写入恢复快照且保留未命中节点', () => {
   )
   assert.equal(document.root.children[1].data.richText, true)
   assert.equal(document.root.children.length, 2)
+})
+
+test('活动概要编辑文本写回所属节点的 generalization 槽位', () => {
+  const document = {
+    root: {
+      data: {
+        uid: 'owner',
+        text: '所属节点',
+        generalization: [
+          {
+            uid: 'summary',
+            text: '概要模型旧值',
+            range: [0, 1],
+            color: '#09f',
+          },
+        ],
+      },
+      children: [
+        { data: { uid: 'child-a' }, children: [] },
+        { data: { uid: 'child-b' }, children: [] },
+      ],
+    },
+  }
+
+  const summary = findMindmapTreeNodeByUid(document.root, 'summary')
+  assert.equal(summary.isGeneralization, true)
+  assert.strictEqual(summary.generalizationOwner, document.root)
+
+  applyMindmapActiveEditorTextSnapshots(document, [
+    { nodeUid: 'summary', text: '概要 DOM 最后输入', richText: false },
+  ])
+
+  assert.equal(document.root.data.text, '所属节点')
+  assert.equal(document.root.children.length, 2)
+  assert.deepEqual(document.root.data.generalization, [
+    {
+      uid: 'summary',
+      text: '概要 DOM 最后输入',
+      richText: false,
+      range: [0, 1],
+      color: '#09f',
+    },
+  ])
 })
 
 test('关联线和外框 DOM 文本只覆盖恢复快照中的精确跨节点实体', () => {
@@ -111,6 +155,55 @@ test('node identity lookup supports deep trees and ignores cycles', () => {
   assert.equal(findMindmapTreeNodeByUid(root, 'missing'), null)
 })
 
+test('运行时可见性遵循折叠祖先及概要所属节点状态', () => {
+  const root = {
+    data: { uid: 'root', expand: true },
+    children: [
+      {
+        data: { uid: 'parent', expand: false },
+        children: [
+          {
+            data: {
+              uid: 'collapsed-child',
+              expand: false,
+              generalization: {
+                uid: 'hidden-summary',
+                text: '隐藏概要',
+              },
+            },
+            children: [],
+          },
+        ],
+      },
+      {
+        data: {
+          uid: 'visible-owner',
+          expand: true,
+          generalization: [{ uid: 'visible-summary', text: '可见概要' }],
+        },
+        children: [],
+      },
+      {
+        data: {
+          uid: 'collapsed-owner',
+          expand: false,
+          generalization: [{ uid: 'owner-hidden-summary', text: '隐藏概要' }],
+        },
+        children: [],
+      },
+    ],
+  }
+
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'root'), true)
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'parent'), true)
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'collapsed-child'), false)
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'hidden-summary'), false)
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'visible-summary'), true)
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'collapsed-owner'), true)
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'owner-hidden-summary'), false)
+  assert.equal(mindmapTreeNodeIsRuntimeVisible(root, 'missing'), false)
+})
+
 test('节点编辑数据比较忽略无关结构、选区和跨节点记录', () => {
   const current = {
     data: { uid: 'root' },
@@ -147,6 +240,35 @@ test('节点编辑数据比较忽略无关结构、选区和跨节点记录', ()
   )
   assert.equal(
     mindmapTreeNodesHaveSameEditableData(current, remote, 'missing'),
+    false,
+  )
+})
+
+test('概要编辑数据比较读取 owner.data.generalization 中的真实对象', () => {
+  const current = {
+    data: {
+      uid: 'owner',
+      generalization: {
+        uid: 'summary',
+        text: '正在编辑概要',
+        range: [0, 0],
+        isActive: true,
+      },
+    },
+    children: [{ data: { uid: 'child', text: '旧值' }, children: [] }],
+  }
+  const remote = structuredClone(current)
+  remote.data.generalization.isActive = false
+  remote.children[0].data.text = '协作者修改普通节点'
+
+  assert.equal(
+    mindmapTreeNodesHaveSameEditableData(current, remote, 'summary'),
+    true,
+  )
+
+  remote.data.generalization.text = '协作者也修改概要'
+  assert.equal(
+    mindmapTreeNodesHaveSameEditableData(current, remote, 'summary'),
     false,
   )
 })
@@ -348,6 +470,94 @@ test('协作回放从正在编辑的节点恢复本地选中态且不重复应�
   assert.deepEqual(mindMap.calls, ['updateData'])
   assert.equal(next.root.data.isActive, false)
   assert.equal(next.root.children[0].data.isActive, true)
+})
+
+test('增量协作回放按持久 UID 保留概要节点的选中与编辑状态', () => {
+  const current = {
+    root: {
+      data: {
+        uid: 'root',
+        generalization: [
+          { uid: 'summary-active', text: '已选概要', range: [0, 0] },
+          { uid: 'summary-editing', text: '编辑概要', range: [1, 1] },
+        ],
+      },
+      children: [
+        { data: { uid: 'child-a' }, children: [] },
+        { data: { uid: 'remote-node', text: '旧值' }, children: [] },
+      ],
+    },
+    layout: 'logicalStructure',
+    theme: { template: 'default', config: {} },
+  }
+  const runtimeSummary = (runtimeUid, persistedUid) => ({
+    uid: runtimeUid,
+    getData: key => key === 'uid' ? persistedUid : undefined,
+  })
+  const mindMap = createMindMap(current)
+  mindMap.renderer = {
+    activeNodeList: [runtimeSummary('runtime-active-1', 'summary-active')],
+    textEdit: {
+      getCurrentEditNode: () => runtimeSummary(
+        'runtime-editing-1',
+        'summary-editing',
+      ),
+    },
+  }
+  const next = structuredClone(current)
+  next.root.children[1].data.text = '另一浏览器修改其他节点'
+
+  assert.equal(
+    applyMindmapDocumentPreservingRuntimeState(mindMap, next),
+    'incremental',
+  )
+  assert.equal(next.root.data.isActive, false)
+  assert.equal(next.root.data.generalization[0].isActive, true)
+  assert.equal(next.root.data.generalization[1].isActive, true)
+  assert.equal(next.root.children[0].data.isActive, false)
+  assert.equal(next.root.children[1].data.isActive, false)
+})
+
+test('本地没有活动选区时清除普通节点和概要遗留选中态', () => {
+  const current = {
+    root: {
+      data: { uid: 'root' },
+      children: [],
+    },
+    layout: 'logicalStructure',
+    theme: { template: 'default', config: {} },
+  }
+  const mindMap = createMindMap(current)
+  mindMap.renderer = {
+    activeNodeList: [],
+    textEdit: { getCurrentEditNode: () => null },
+  }
+  const next = {
+    ...structuredClone(current),
+    root: {
+      data: {
+        uid: 'root',
+        isActive: true,
+        generalization: [{
+          uid: 'summary',
+          text: '概要',
+          isActive: true,
+        }],
+      },
+      children: [{
+        data: { uid: 'child', isActive: true },
+        children: [],
+      }],
+    },
+  }
+
+  assert.equal(
+    applyMindmapDocumentPreservingRuntimeState(mindMap, next),
+    'incremental',
+  )
+  assert.equal(next.root.data.isActive, false)
+  assert.equal(next.root.data.generalization[0].isActive, false)
+  assert.equal(next.root.children[0].data.isActive, false)
 })
 
 test('权威树应用会取消延迟历史采集并在恢复命令前更新撤销基线', async () => {

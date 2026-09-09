@@ -18,7 +18,10 @@ import {
   cloneJsonValueIterative,
   stringifyJsonValueIterative,
 } from '../libs/simple-mind-map/src/utils/jsonClone.js'
-import { applyAuthoritativeMindmapDocument } from './mindmap-document-apply.js'
+import {
+  applyAuthoritativeMindmapDocument,
+  captureMindmapRuntimeSelectionUids,
+} from './mindmap-document-apply.js'
 import { MindmapWsClient } from './ws-client.js'
 import {
   applyCrossNodeState,
@@ -76,6 +79,7 @@ const YJS_MUTATION_SEQUENCE_CAPABILITY = 'yjs-mutation-sequence-v1'
 const YJS_LINEAGE_CAPABILITY = 'yjs-lineage-v1'
 const YJS_SOURCE_CAS_CAPABILITY = 'yjs-source-cas-v1'
 const NODE_EDIT_LEASE_CAPABILITY = 'node-edit-lease-v1'
+const NODE_EDIT_LEASE_RENEWAL_CAPABILITY = 'node-edit-lease-renewal-v1'
 const NODE_EDIT_LEASE_REQUEST_TIMEOUT_MS = 5000
 const NODE_EDIT_LEASE_REFRESH_INTERVAL_MS = 10 * 1000
 const NODE_EDIT_LEASE_FAILURE_REASONS = new Set([
@@ -687,9 +691,13 @@ export class YjsMindmapSync {
     this._nodeEditLeaseRequestSequence = 0
     this._nodeEditLeaseAcquireGeneration = 0
     this._nodeEditLeaseAcquireChain = Promise.resolve()
+    this._nodeEditLeaseAcquireTargets = new Map()
     this._pendingNodeEditLeaseRequests = new Map()
+    this._pendingNodeEditLeaseAcquireCount = 0
+    this._nodeEditLeaseRemoteIdleWaiters = new Set()
     this._nodeEditLeaseRefreshTimer = null
     this._nodeEditLeaseFailureReason = ''
+    this._lastStructureWriteBlocked = false
     this.sessionId = null
     this.contentRevision = contentRevision
     this.confirmedMutationDeliveryTimeoutMs = (
@@ -1073,9 +1081,16 @@ export class YjsMindmapSync {
   destroy({ flushCheckpoint = true } = {}) {
     if (this._destroyed) return
     if (flushCheckpoint) this._flushCheckpoint({ reschedule: false })
+    // 销毁期间归还租约会同步触发 lease-settled。先进入 destroyed 状态，
+    // 避免页面重建协同实例时旧实例误恢复一次自动保存。
+    this._destroyed = true
     this.releaseNodeEditLease()
     this._clearPendingNodeEditLeaseRequests()
-    this._destroyed = true
+    this._pendingNodeEditLeaseAcquireCount = 0
+    this._preparingRemote = false
+    this._applyingRemote = false
+    this._settleNodeEditLeaseRemoteIdleWaiters({ cancel: true })
+    this._notifyStructureWriteBlockedChange()
     clearTimeout(this._checkpointTimer)
     this._checkpointTimer = null
     this._checkpointDirty = false
@@ -1916,8 +1931,112 @@ export class YjsMindmapSync {
     return this.serverCapabilities.has(NODE_EDIT_LEASE_CAPABILITY)
   }
 
+  _supportsOwnedNodeEditLeaseRenewalProtocol() {
+    return this.serverCapabilities.has(NODE_EDIT_LEASE_RENEWAL_CAPABILITY)
+  }
+
   usesAuthoritativeNodeEditLease() {
     return this._supportsNodeEditLeaseProtocol()
+  }
+
+  /** 页面结构命令在租约准入或远端文档切换期间必须保持只读。 */
+  isStructureWriteBlocked() {
+    return this._isStructureWriteBlockedByNodeEditState()
+  }
+
+  _isStructureWriteBlockedByNodeEditState() {
+    return Boolean(
+      this._pendingNodeEditLeaseAcquireCount > 0
+      || this._preparingRemote
+      || this._applyingRemote
+    )
+  }
+
+  _notifyStructureWriteBlockedChange() {
+    const blocked = this._isStructureWriteBlockedByNodeEditState()
+    if (blocked === this._lastStructureWriteBlocked) return false
+    this._lastStructureWriteBlocked = blocked
+    if (typeof this.options.onStructureWriteBlockedChange === 'function') {
+      try {
+        this.options.onStructureWriteBlockedChange(blocked)
+      } catch {
+        // UI 状态通知不能改变协作协议状态。
+      }
+    }
+    return true
+  }
+
+  _notifyNodeEditLeaseSettled() {
+    if (
+      this._destroyed
+      || typeof this.options.onNodeEditLeaseSettled !== 'function'
+    ) return
+    try {
+      this.options.onNodeEditLeaseSettled()
+    } catch {
+      // 生命周期通知不能改变租约申请或释放的结果。
+    }
+  }
+
+  _isNodeEditLeaseRemoteIdle(generation) {
+    return Boolean(
+      generation === this._nodeEditLeaseAcquireGeneration
+      && !this._destroyed
+      && !this._paused
+      && !this.readonly
+      && this.isSynced.value === true
+      && this._authoritativeRevisionPending === null
+      && !this._preparingRemote
+      && !this._applyingRemote
+    )
+  }
+
+  _settleNodeEditLeaseRemoteIdleWaiters({ cancel = false } = {}) {
+    for (const waiter of [...this._nodeEditLeaseRemoteIdleWaiters]) {
+      const invalid = Boolean(
+        cancel
+        || waiter.generation !== this._nodeEditLeaseAcquireGeneration
+        || this._destroyed
+        || this._paused
+        || this.readonly
+        || this.isSynced.value !== true
+        || this._authoritativeRevisionPending !== null
+      )
+      if (!invalid && (this._preparingRemote || this._applyingRemote)) continue
+      this._nodeEditLeaseRemoteIdleWaiters.delete(waiter)
+      waiter.resolve(!invalid)
+    }
+  }
+
+  async _waitForNodeEditLeaseRemoteIdle(generation) {
+    while (true) {
+      if (this._isNodeEditLeaseRemoteIdle(generation)) return true
+      if (
+        generation !== this._nodeEditLeaseAcquireGeneration
+        || this._destroyed
+        || this._paused
+        || this.readonly
+        || this.isSynced.value !== true
+        || this._authoritativeRevisionPending !== null
+      ) return false
+      const idle = await new Promise((resolve) => {
+        this._nodeEditLeaseRemoteIdleWaiters.add({ generation, resolve })
+      })
+      if (!idle) return false
+      // 远端 render_end 后可能立刻接续另一批 apply。重新检查，直到运行时
+      // 节点树真正空闲，调用方才能按持久化 UID 解析最终实例。
+    }
+  }
+
+  canAcquireNodeEditLease() {
+    if (this.hasPendingNodeEditLeaseAcquire()) {
+      this._setNodeEditLeaseFailureReason('unavailable')
+      return false
+    }
+    const failureReason = this._getNodeEditLeaseAvailabilityFailureReason()
+    if (failureReason) this._setNodeEditLeaseFailureReason(failureReason)
+    else this._nodeEditLeaseFailureReason = ''
+    return !failureReason
   }
 
   getNodeEditLeaseFailureReason() {
@@ -1934,7 +2053,7 @@ export class YjsMindmapSync {
       : 'unavailable'
   }
 
-  _getNodeEditLeaseAvailabilityFailureReason() {
+  _getNodeEditLeaseAvailabilityFailureReason({ renewal = false } = {}) {
     if (this.readonly) return 'readonly'
     if (this._destroyed || this._paused) return 'unavailable'
     if (!this.wsClient?.isAuthenticated) {
@@ -1951,7 +2070,9 @@ export class YjsMindmapSync {
     // 认证完成并不代表已应用房间里的 Yjs 状态。握手完成前按 HTTP 旧树
     // 获锁会让下一位编辑者从前一位刚发布、尚未渲染的旧文本开始。
     if (this.isSynced.value !== true) return 'connecting'
-    if (typeof this.options.canAcquireNodeEditLease === 'function') {
+    // 上层门闩只禁止开始新的编辑。已有编辑器必须继续续租，否则恢复期
+    // 或保存期超过 TTL 后，本地仍以为持锁而服务端已允许另一浏览器获锁。
+    if (!renewal && typeof this.options.canAcquireNodeEditLease === 'function') {
       try {
         if (this.options.canAcquireNodeEditLease() === false) return 'unavailable'
       } catch {
@@ -1975,7 +2096,7 @@ export class YjsMindmapSync {
   hasNodeEditLease(nodeOrUid) {
     const nodeUid = this._normalizeAwarenessEditingNodeUid(
       typeof nodeOrUid === 'object'
-        ? nodeOrUid?.uid || nodeOrUid?.getData?.('uid')
+        ? nodeOrUid?.getData?.('uid') || nodeOrUid?.uid
         : nodeOrUid
     )
     return Boolean(
@@ -1993,11 +2114,15 @@ export class YjsMindmapSync {
     return Boolean(this._nodeEditLeaseUid)
   }
 
+  hasPendingNodeEditLeaseAcquire() {
+    return this._pendingNodeEditLeaseAcquireCount > 0
+  }
+
   async acquireNodeEditLease(nodeOrUid) {
     this._nodeEditLeaseFailureReason = ''
     const nodeUid = this._normalizeAwarenessEditingNodeUid(
       typeof nodeOrUid === 'object'
-        ? nodeOrUid?.uid || nodeOrUid?.getData?.('uid')
+        ? nodeOrUid?.getData?.('uid') || nodeOrUid?.uid
         : nodeOrUid
     )
     const availabilityFailure = this._getNodeEditLeaseAvailabilityFailureReason()
@@ -2013,6 +2138,8 @@ export class YjsMindmapSync {
     }
 
     const generation = ++this._nodeEditLeaseAcquireGeneration
+    this._nodeEditLeaseAcquireTargets.set(generation, nodeUid)
+    this._settleNodeEditLeaseRemoteIdleWaiters()
     const acquire = this._nodeEditLeaseAcquireChain.then(async () => {
       if (
         generation !== this._nodeEditLeaseAcquireGeneration
@@ -2026,6 +2153,12 @@ export class YjsMindmapSync {
         )
         return false
       }
+      // updateData/setFullData 会先换 renderTree，再到下一帧才完成运行时
+      // 节点重建。初次申请在这个窗口内必须等待，否则 TextEdit 会拿旧实例。
+      if (
+        (this._preparingRemote || this._applyingRemote)
+        && !await this._waitForNodeEditLeaseRemoteIdle(generation)
+      ) return false
       if (this._nodeEditLeaseUid && this._nodeEditLeaseUid !== nodeUid) {
         const previousNodeUid = this._nodeEditLeaseUid
         this._nodeEditLeaseUid = ''
@@ -2033,37 +2166,112 @@ export class YjsMindmapSync {
         this._nodeEditLeaseRefreshTimer = null
         this._sendNodeEditLeaseRelease(previousNodeUid)
       }
-      return this._requestNodeEditLease(nodeUid, { generation })
+      const granted = await this._requestNodeEditLease(nodeUid, { generation })
+      if (!granted) return false
+      // 请求出网后也可能开始一次远端回放。grant 只证明服务端互斥，不证明
+      // renderer 已稳定；等 render_end 后再让 TextEdit 按 UID 重新解析。
+      if (
+        (
+          (this._preparingRemote || this._applyingRemote)
+          && !await this._waitForNodeEditLeaseRemoteIdle(generation)
+        )
+        || !this.hasNodeEditLease(nodeUid)
+      ) {
+        if (this._nodeEditLeaseUid === nodeUid) this.releaseNodeEditLease(nodeUid)
+        return false
+      }
+      return true
     })
     this._nodeEditLeaseAcquireChain = acquire.catch(() => false)
-    return acquire
+    this._pendingNodeEditLeaseAcquireCount += 1
+    this._notifyStructureWriteBlockedChange()
+    try {
+      return await acquire
+    } finally {
+      this._nodeEditLeaseAcquireTargets.delete(generation)
+      this._pendingNodeEditLeaseAcquireCount = Math.max(
+        0,
+        this._pendingNodeEditLeaseAcquireCount - 1,
+      )
+      this._notifyStructureWriteBlockedChange()
+      this._notifyNodeEditLeaseSettled()
+    }
   }
 
-  releaseNodeEditLease(nodeOrUid = this._nodeEditLeaseUid) {
+  releaseNodeEditLease(nodeOrUid) {
+    const releaseAll = nodeOrUid === undefined
     const nodeUid = this._normalizeAwarenessEditingNodeUid(
       typeof nodeOrUid === 'object'
-        ? nodeOrUid?.uid || nodeOrUid?.getData?.('uid')
-        : nodeOrUid
+        ? nodeOrUid?.getData?.('uid') || nodeOrUid?.uid
+        : releaseAll ? '' : nodeOrUid
     )
-    if (nodeUid && this._nodeEditLeaseUid && nodeUid !== this._nodeEditLeaseUid) {
-      return false
+    // 只有省略参数才表示释放全部。DOM/节点销毁竞态可能传入空 UID，
+    // 不能把它误解释成 cancel-all 而中断另一个仍在等待的准入请求。
+    if (!releaseAll && !nodeUid) return false
+    const heldNodeUid = this._nodeEditLeaseUid
+    const heldLeaseReleased = Boolean(
+      heldNodeUid
+      && (releaseAll || heldNodeUid === nodeUid)
+    )
+    const matchingAcquireGenerations = [...this._nodeEditLeaseAcquireTargets]
+      .filter(([, targetUid]) => releaseAll || targetUid === nodeUid)
+      .map(([generation]) => generation)
+    const hasMatchingPendingRequest = [...this._pendingNodeEditLeaseRequests]
+      .some(([, pending]) => releaseAll || pending.nodeUid === nodeUid)
+    if (
+      !heldLeaseReleased
+      && matchingAcquireGenerations.length === 0
+      && !hasMatchingPendingRequest
+    ) return false
+
+    // generation 是“最新申请胜出”的栅栏。迟到的 A 关闭事件若只命中旧
+    // generation，绝不能推进全局栅栏使当前 B 申请失效；仅当前目标或
+    // release-all 才取消远端空闲等待链。
+    const cancelsCurrentAcquire = releaseAll || matchingAcquireGenerations.includes(
+      this._nodeEditLeaseAcquireGeneration
+    )
+    if (cancelsCurrentAcquire) {
+      this._nodeEditLeaseAcquireGeneration += 1
+      this._settleNodeEditLeaseRemoteIdleWaiters({ cancel: true })
     }
-    this._nodeEditLeaseAcquireGeneration += 1
-    clearTimeout(this._nodeEditLeaseRefreshTimer)
-    this._nodeEditLeaseRefreshTimer = null
-    if (!nodeUid || !this._nodeEditLeaseUid) return false
-    this._nodeEditLeaseUid = ''
-    this._sendNodeEditLeaseRelease(nodeUid)
+    if (heldLeaseReleased) {
+      clearTimeout(this._nodeEditLeaseRefreshTimer)
+      this._nodeEditLeaseRefreshTimer = null
+    }
+    const cancelledNodeUids = this._cancelPendingNodeEditLeaseRequests(
+      releaseAll ? '' : nodeUid,
+    )
+    for (const generation of matchingAcquireGenerations) {
+      const targetUid = this._nodeEditLeaseAcquireTargets.get(generation)
+      if (targetUid) cancelledNodeUids.add(targetUid)
+    }
+    if (heldLeaseReleased) {
+      this._nodeEditLeaseUid = ''
+      cancelledNodeUids.add(heldNodeUid)
+    }
+    if (cancelledNodeUids.size === 0) return false
+    // 初次申请的结果帧可能尚未返回，但服务端已经授予租约。取消 pending
+    // 时同样发送 owner-only release，不能等到超时才解锁其他浏览器。
+    for (const cancelledNodeUid of cancelledNodeUids) {
+      this._sendNodeEditLeaseRelease(cancelledNodeUid)
+    }
+    if (heldLeaseReleased) this._notifyNodeEditLeaseSettled()
     return true
   }
 
   _requestNodeEditLease(nodeUid, { generation, renewal = false } = {}) {
-    const availabilityFailure = this._getNodeEditLeaseAvailabilityFailureReason()
+    const availabilityFailure = this._getNodeEditLeaseAvailabilityFailureReason({
+      renewal,
+    })
     if (availabilityFailure) {
       this._setNodeEditLeaseFailureReason(
         availabilityFailure,
         generation,
       )
+      if (renewal && this._nodeEditLeaseUid === nodeUid) {
+        this._loseNodeEditLease(nodeUid)
+        this._sendNodeEditLeaseRelease(nodeUid)
+      }
       return Promise.resolve(false)
     }
     const requestId = [
@@ -2072,6 +2280,9 @@ export class YjsMindmapSync {
       (++this._nodeEditLeaseRequestSequence).toString(36),
     ].join('-')
     const requestContentRevision = this.contentRevision
+    const useOwnedRenewalProtocol = Boolean(
+      renewal && this._supportsOwnedNodeEditLeaseRenewalProtocol()
+    )
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         const pending = this._pendingNodeEditLeaseRequests.get(requestId)
@@ -2102,13 +2313,21 @@ export class YjsMindmapSync {
         requestId,
         nodeUid,
         contentRevision: requestContentRevision,
+        // 旧服务端把同一消息解释为普通 acquire，并要求精确 revision。
+        // 只有 auth_ok 明确协商新能力后才启用 owner-only 续租语义。
+        renewal: useOwnedRenewalProtocol,
       })) {
         clearTimeout(timer)
         this._pendingNodeEditLeaseRequests.delete(requestId)
         this._setNodeEditLeaseFailureReason(
-          this._getNodeEditLeaseAvailabilityFailureReason() || 'unavailable',
+          this._getNodeEditLeaseAvailabilityFailureReason({ renewal })
+            || 'unavailable',
           generation,
         )
+        if (renewal && this._nodeEditLeaseUid === nodeUid) {
+          this._loseNodeEditLease(nodeUid)
+          this._sendNodeEditLeaseRelease(nodeUid)
+        }
         resolve(false)
       }
     })
@@ -2129,10 +2348,12 @@ export class YjsMindmapSync {
       this._destroyed
       || this._paused
       || this.readonly
+      || this.isSynced.value !== true
+      || this._authoritativeRevisionPending !== null
       || pending.generation !== this._nodeEditLeaseAcquireGeneration
-      // 初次获锁必须绑定当前树快照；续租则延续同一所有权，其他节点的
-      // HTTP 保存可合法推进 room revision，不能因此打断正在编辑的节点。
-      || (!pending.renewal && pending.contentRevision !== this.contentRevision)
+      // 连续 revision 推进不会更换服务端 lineage epoch，节点租约仍有效；
+      // 若请求确实落后，服务端会返回 stale_state 而不是 grant。客户端不能
+      // 因响应到达前收到了别处保存广播，就误丢弃一个合法租约。
       || (pending.renewal && this._nodeEditLeaseUid !== pending.nodeUid)
     )
     if (granted && stale) {
@@ -2208,18 +2429,27 @@ export class YjsMindmapSync {
     this.mindMap?.emit?.('node_text_edit_lease_lost', runtimeNode, nodeUid)
   }
 
-  _clearPendingNodeEditLeaseRequests() {
-    for (const pending of this._pendingNodeEditLeaseRequests.values()) {
+  _cancelPendingNodeEditLeaseRequests(nodeUid = '') {
+    const cancelledNodeUids = new Set()
+    for (const [requestId, pending] of this._pendingNodeEditLeaseRequests) {
+      if (nodeUid && pending.nodeUid !== nodeUid) continue
+      this._pendingNodeEditLeaseRequests.delete(requestId)
       clearTimeout(pending.timer)
       pending.resolve(false)
+      if (pending.nodeUid) cancelledNodeUids.add(pending.nodeUid)
     }
-    this._pendingNodeEditLeaseRequests.clear()
+    return cancelledNodeUids
+  }
+
+  _clearPendingNodeEditLeaseRequests() {
+    this._cancelPendingNodeEditLeaseRequests()
   }
 
   _handleNodeEditLeaseDisconnect() {
     const nodeUid = this._nodeEditLeaseUid
     this._nodeEditLeaseUid = ''
     this._nodeEditLeaseAcquireGeneration += 1
+    this._settleNodeEditLeaseRemoteIdleWaiters({ cancel: true })
     clearTimeout(this._nodeEditLeaseRefreshTimer)
     this._nodeEditLeaseRefreshTimer = null
     this._clearPendingNodeEditLeaseRequests()
@@ -3350,6 +3580,7 @@ export class YjsMindmapSync {
 
   _beginRemoteApplication() {
     this._applyingRemote = true
+    this._notifyStructureWriteBlockedChange()
     clearTimeout(this._remoteApplyFallbackTimer)
     clearTimeout(this._remoteApplyReleaseTimer)
     if (this._remoteRenderEndHandler) {
@@ -3379,11 +3610,17 @@ export class YjsMindmapSync {
     this._applyingRemote = false
     this._remoteApplyFallbackTimer = null
     this._remoteApplyReleaseTimer = null
-    if (this._destroyed || !this._pendingRemoteApply) return
+    if (this._destroyed || !this._pendingRemoteApply) {
+      this._notifyStructureWriteBlockedChange()
+      this._settleNodeEditLeaseRemoteIdleWaiters()
+      return
+    }
     const applyMeta = this._pendingRemoteApplyMeta
     this._pendingRemoteApply = false
     this._pendingRemoteApplyMeta = false
     this._requestYjsApply({ applyMeta })
+    this._notifyStructureWriteBlockedChange()
+    this._settleNodeEditLeaseRemoteIdleWaiters()
   }
 
   _scheduleDocumentPrepareRetry(applyMeta) {
@@ -3460,10 +3697,13 @@ export class YjsMindmapSync {
           )
           if (!preparation || typeof preparation.then !== 'function') break
           this._preparingRemote = true
+          this._notifyStructureWriteBlockedChange()
           try {
             await preparation
           } finally {
             this._preparingRemote = false
+            this._notifyStructureWriteBlockedChange()
+            this._settleNodeEditLeaseRemoteIdleWaiters()
           }
           if (
             this._destroyed
@@ -3512,27 +3752,38 @@ export class YjsMindmapSync {
       return false
     }
 
-    // isActive 是当前客户端的 UI 状态，不属于共享文档。Yjs 回放可能由
-    // 本地刚完成的编辑或远端协作者触发，渲染前必须以本地 awareness
-    // 选区覆盖协作树，否则连续 Enter/Tab 后的异步刷新会清掉选中标记。
+    // isActive 是当前客户端的 UI 状态，不属于共享文档。activeNodeList 在
+    // 点击时同步更新，awareness 的 _localActiveNodeUids 则经 0ms 事件延迟，
+    // 因而必须在任何保护回调执行前冻结真实 runtime 选区，避免旧 awareness
+    // 让选中节点跳回。编辑器持有的节点也由该快照一并补入。
+    const runtimeSelectionUids = captureMindmapRuntimeSelectionUids(
+      targetMindMap,
+    )
     applyLocalActiveNodeState(
       preparedDocument.tree,
-      this._localActiveNodeUids,
+      runtimeSelectionUids,
     )
 
     // 浮层文本编辑器的最终输入通常只存在 DOM 中，直到编辑器被关闭才会
     // 写回 simple-mind-map。上层必须有机会在远端树替换画布前同步提交并
     // 保护这段输入，尤其是协作者恰好删除了当前正在编辑的节点时。
-    const beforeApplyResult = this.options.beforeRemoteDocumentApply?.(
-      preparedDocument.tree,
-      targetMindMap,
-      preparedDocument.document,
-    )
+    let beforeApplyResult
+    try {
+      beforeApplyResult = this.options.beforeRemoteDocumentApply?.(
+        preparedDocument.tree,
+        targetMindMap,
+        preparedDocument.document,
+      )
+    } catch (error) {
+      this._notifyStructureWriteBlockedChange()
+      throw error
+    }
     if (beforeApplyResult === 'local-edit-committed') {
       // 关闭浮层会把最后输入同步写入当前 Y.Doc。旧 preparedDocument 已
       // 失效，下一微任务从合并后的 Yjs 状态重建，不能先覆盖一遍旧树。
       this._pendingRemoteApply = true
       this._pendingRemoteApplyMeta ||= applyMeta
+      this._notifyStructureWriteBlockedChange()
       setTimeout(() => {
         if (!this._destroyed && !this._paused) this._requestYjsApply()
       }, 0)
@@ -3542,7 +3793,10 @@ export class YjsMindmapSync {
     // The preparation or editor-protection callback may synchronously start a
     // cloud-authoritative recovery. Never let its older staged Y.Doc cross the
     // fence or advance the runtime shadows.
-    if (this._authoritativeRevisionPending !== null) return false
+    if (this._authoritativeRevisionPending !== null) {
+      this._notifyStructureWriteBlockedChange()
+      return false
+    }
 
     const scheduleRelease = this._beginRemoteApplication()
     let protectedDocument = null
@@ -3559,6 +3813,7 @@ export class YjsMindmapSync {
         applyAuthoritativeMindmapDocument(
           targetMindMap,
           applyMeta ? preparedDocument.document : { root: preparedDocument.tree },
+          { runtimeSelectionUids },
         )
       } finally {
         this._mutatingMindmapFromRemote = false
@@ -4074,6 +4329,8 @@ export class YjsMindmapSync {
     this._clearConfirmedMutationDeliveryTimers()
     this._clearUnconfirmedMutationTimers()
     this._clearLegacyUnconfirmedMutationTimer()
+    this._settleNodeEditLeaseRemoteIdleWaiters({ cancel: true })
+    this._notifyStructureWriteBlockedChange()
     this.isSynced.value = false
     this.connectionState.value = 'stale'
     this.syncError.value = data?.message || '协作状态已落后，正在合并最新内容'
@@ -4199,6 +4456,7 @@ export class YjsMindmapSync {
     this._clearConfirmedMutationDeliveryTimers()
     this._clearUnconfirmedMutationTimers()
     this._clearLegacyUnconfirmedMutationTimer()
+    this._settleNodeEditLeaseRemoteIdleWaiters({ cancel: true })
     this.isSynced.value = false
     this.connectionState.value = 'syncing'
     this.syncError.value = data?.message || '协作基线已重置，正在加载最新内容'
@@ -4372,19 +4630,21 @@ export class YjsMindmapSync {
     if (this._awarenessEventsBound || !this.mindMap?.on) return
     this._localActiveNodeUids = this._normalizeAwarenessNodeUids(
       (this.mindMap?.renderer?.activeNodeList || [])
-        .map(node => node?.uid || node?.getData?.('uid'))
+        .map(node => node?.getData?.('uid') || node?.uid)
         .filter(Boolean)
     )
     const currentTextEditor = this.mindMap?.renderer?.textEdit
     if (currentTextEditor?.isShowTextEdit?.()) {
       const currentEditingNode = currentTextEditor.getCurrentEditNode?.()
       this._localEditingNodeUid = this._normalizeAwarenessEditingNodeUid(
-        currentEditingNode?.uid || currentEditingNode?.getData?.('uid')
+        currentEditingNode?.getData?.('uid') || currentEditingNode?.uid
       )
     }
     this._onNodeActive = (_node, nodeList = []) => {
       this._localActiveNodeUids = this._normalizeAwarenessNodeUids(
-        nodeList.map(node => node?.uid).filter(Boolean)
+        nodeList
+          .map(node => node?.getData?.('uid') || node?.uid)
+          .filter(Boolean)
       )
       if (!this.isApplyingRemote() && !this._paused) {
         this._sendAwareness(this._localActiveNodeUids)
@@ -4393,7 +4653,7 @@ export class YjsMindmapSync {
     this._onNodeTreeRenderEnd = () => this._renderAllRemoteAwareness()
     this._onNodeTextEditStart = (node) => {
       const editingNodeUid = this._normalizeAwarenessEditingNodeUid(
-        node?.uid || node?.getData?.('uid')
+        node?.getData?.('uid') || node?.uid
       )
       if (!editingNodeUid || editingNodeUid === this._localEditingNodeUid) return
       if (
@@ -4413,7 +4673,7 @@ export class YjsMindmapSync {
     }
     this._onNodeTextEditEnd = (node) => {
       const editingNodeUid = this._normalizeAwarenessEditingNodeUid(
-        node?.uid || node?.getData?.('uid')
+        node?.getData?.('uid') || node?.uid
       )
       // 迟到的旧编辑器关闭事件不能释放刚切换到另一节点的新租约。
       if (
@@ -4428,6 +4688,18 @@ export class YjsMindmapSync {
       this._localEditingNodeUid = ''
       if (!this.isApplyingRemote() && !this._paused) {
         this._sendAwareness(this._localActiveNodeUids)
+      }
+      if (this._pendingRemoteApply && !this._paused) {
+        // hideEditTextBox 会先同步提交文本再派发 end。让当前事件栈完整退出
+        // 后基于已经更新的 Y.Doc 重建一次，避免旧 prepared tree 插回默认标题。
+        queueMicrotask(() => {
+          if (
+            !this._destroyed
+            && !this._paused
+            && this._pendingRemoteApply
+            && !this._localEditingNodeUid
+          ) this._requestYjsApply()
+        })
       }
     }
     this.mindMap.on('node_active', this._onNodeActive)

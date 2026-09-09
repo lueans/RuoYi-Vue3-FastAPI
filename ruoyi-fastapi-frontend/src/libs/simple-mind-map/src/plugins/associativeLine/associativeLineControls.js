@@ -4,6 +4,7 @@ import {
   getNodePoint,
   getDefaultControlPointOffsets
 } from './associativeLineUtils'
+import { simpleDeepClone } from '../../utils/index'
 
 // 创建控制点、连线节点
 function createControlNodes(node, toNode) {
@@ -159,24 +160,22 @@ function onControlPointMouseup(e) {
   let { pos, startPoint, endPoint, targetIndex } =
     this.controlPointMousemoveState
   let [, , , node] = this.activeLine
-  let offsetList = []
-  let { associativeLinePoint, associativeLineTargetControlOffsets } =
-    node.getData()
-  if (!associativeLinePoint) {
-    associativeLinePoint = []
-  }
+  const associativeLinePoint = simpleDeepClone(
+    node.getData('associativeLinePoint') || []
+  )
+  const offsetList = simpleDeepClone(
+    node.getData('associativeLineTargetControlOffsets') || []
+  )
   associativeLinePoint[targetIndex] = associativeLinePoint[targetIndex] || {
     startPoint,
     endPoint
   }
-  if (!associativeLineTargetControlOffsets) {
+  if (!offsetList[targetIndex]) {
     // 兼容0.4.5版本，没有associativeLineTargetControlOffsets的情况
     offsetList[targetIndex] = getDefaultControlPointOffsets(
       startPoint,
       endPoint
     )
-  } else {
-    offsetList = associativeLineTargetControlOffsets
   }
   let offset1 = null
   let offset2 = null
@@ -198,11 +197,21 @@ function onControlPointMouseup(e) {
     associativeLinePoint[targetIndex].endPoint = endPoint
   }
   offsetList[targetIndex] = [offset1, offset2]
-  this.mindMap.execCommand('SET_NODE_DATA', node, {
-    associativeLineTargetControlOffsets: offsetList,
-    associativeLinePoint
-  })
-  this.isNotRenderAllLines = true
+  const updated = this.mindMap.execCommand(
+    'SET_ASSOCIATIVE_LINE_CONTROL_POINTS',
+    node,
+    {
+      associativeLineTargetControlOffsets: offsetList,
+      associativeLinePoint
+    }
+  )
+  if (updated === false) {
+    // 拖拽过程只更新了 SVG；恢复期拒绝持久化时必须用旧模型重建全部连线。
+    this.isNotRenderAllLines = false
+    this.renderAllLines()
+  } else {
+    this.isNotRenderAllLines = true
+  }
   // 这里要加个setTimeout0是因为draw_click事件比mouseup事件触发的晚，所以重置isControlPointMousedown需要等draw_click事件触发完以后
   setTimeout(() => {
     this.resetControlPoint()

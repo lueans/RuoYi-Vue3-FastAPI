@@ -1,32 +1,20 @@
 /** Yjs 脑图树状态的纯同步工具。 */
 
 import { isSameObject } from '../libs/simple-mind-map/src/utils/deepEqual.js'
+import {
+  normalizePersistedNodeData,
+  stripManagedTagDefinitions,
+} from '../libs/simple-mind-map/src/utils/nodeData.js'
+
+export { stripManagedTagDefinitions }
 
 function jsonEquals(left, right) {
   return isSameObject(left, right)
 }
 
-export function stripManagedTagDefinitions(data = {}) {
-  const output = { ...data }
-  if (Array.isArray(output.tag)) {
-    output.tag = output.tag.map(tag => {
-      if (!tag || typeof tag !== 'object' || !tag.tagId) return tag
-      return Object.fromEntries(Object.entries({
-        tagId: tag.tagId,
-        categoryId: tag.categoryId,
-        placement: tag.placement,
-        align: tag.align,
-      }).filter(([, value]) => value !== undefined))
-    })
-  }
-  return output
-}
-
 // 节点选中状态只属于当前客户端的 UI，不能进入共享 Yjs 文档。
 export function normalizeNodeDataForYjs(data = {}) {
-  const output = stripManagedTagDefinitions(data)
-  delete output.isActive
-  return output
+  return normalizePersistedNodeData(data)
 }
 
 // 协作树刷新前恢复当前客户端自己的选区，并清除其他客户端或旧数据中

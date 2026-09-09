@@ -1,5 +1,9 @@
 <template>
-  <div class="imgUploadContainer">
+  <div
+    class="imgUploadContainer"
+    :class="{ disabled: props.disabled }"
+    :aria-disabled="props.disabled"
+  >
     <div class="imgUploadPanel">
       <div class="upBtn" v-if="!modelValue">
         <input
@@ -7,11 +11,13 @@
           accept="image/*"
           id="imgUploadInput"
           aria-label="选择背景图片"
+          :disabled="props.disabled"
           @change="onImgUploadInputChange"
         />
         <label
           for="imgUploadInput"
           class="imgUploadInputArea"
+          :aria-disabled="props.disabled"
           @dragenter.stop.prevent
           @dragover.stop.prevent
           @drop.stop.prevent="onDrop"
@@ -22,7 +28,13 @@
           class="previewBox"
           :style="{ backgroundImage: `url('${modelValue}')` }"
         ></div>
-        <button class="delBtn" type="button" aria-label="删除背景图片" @click="deleteImg">
+        <button
+          class="delBtn"
+          type="button"
+          aria-label="删除背景图片"
+          :disabled="props.disabled"
+          @click="deleteImg"
+        >
           <el-icon><Close /></el-icon>
         </button>
       </div>
@@ -39,7 +51,8 @@ const props = defineProps({
   modelValue: {
     type: String,
     default: ''
-  }
+  },
+  disabled: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['update:modelValue', 'change'])
@@ -47,22 +60,28 @@ let imageReadToken = 0
 
 function onImgUploadInputChange(e) {
   const input = e.target
+  if (props.disabled) {
+    input.value = ''
+    return
+  }
   const file = input.files?.[0]
   if (file) void selectImg(file)
   input.value = ''
 }
 
 function onDrop(e) {
+  if (props.disabled) return
   const dt = e.dataTransfer
   const file = dt.files && dt.files[0]
   if (file) void selectImg(file)
 }
 
 async function selectImg(file) {
+  if (props.disabled) return
   const token = ++imageReadToken
   try {
     const result = await readMindmapImageFile(file)
-    if (token !== imageReadToken) return
+    if (token !== imageReadToken || props.disabled) return
     emit('update:modelValue', result)
     emit('change', result)
   } catch (error) {
@@ -72,6 +91,7 @@ async function selectImg(file) {
 }
 
 function deleteImg() {
+  if (props.disabled) return
   imageReadToken++
   emit('update:modelValue', '')
   emit('change', '')
@@ -79,6 +99,10 @@ function deleteImg() {
 
 onBeforeUnmount(() => {
   imageReadToken++
+})
+
+watch(() => props.disabled, (disabled) => {
+  if (disabled) imageReadToken++
 })
 </script>
 

@@ -65,7 +65,7 @@ export const defaultOpt = {
   // 默认插入的二级节点的文字
   defaultInsertSecondLevelNodeText: '二级节点',
   // 默认插入的二级以下节点的文字
-  defaultInsertBelowSecondLevelNodeText: '分支主题',
+  defaultInsertBelowSecondLevelNodeText: '节点内容',
   // 展开收起按钮的颜色
   expandBtnStyle: {
     color: '#4D73FF',

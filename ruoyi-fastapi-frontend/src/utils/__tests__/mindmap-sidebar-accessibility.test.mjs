@@ -18,6 +18,13 @@ const outlineSourceUrl = new URL('OutlineSidebar.vue', componentRoot)
 const shortcutSourceUrl = new URL('ShortcutKey.vue', componentRoot)
 const editSourceUrl = new URL('../../views/mindmap/edit.vue', import.meta.url)
 const editorSourceUrl = new URL('Edit.vue', componentRoot)
+const demonstrateSourceUrl = new URL('Demonstrate.vue', componentRoot)
+const outlineEditSourceUrl = new URL('OutlineEdit.vue', componentRoot)
+const richTextToolbarSourceUrl = new URL('RichTextToolbar.vue', componentRoot)
+const dragPluginSourceUrl = new URL(
+  '../../libs/simple-mind-map/src/plugins/Drag.js',
+  import.meta.url,
+)
 
 test('隐藏侧栏从可访问树和焦点顺序隔离，并提供语义化关闭入口', async () => {
   const source = await readFile(sidebarSourceUrl, 'utf8')
@@ -64,6 +71,42 @@ test('所有用户主动打开侧栏的入口都会请求聚焦侧栏', async ()
 
   assert.match(sources[0], /event: 'openSidebar'/)
   assert.equal(sources.slice(1).every(source => source.includes("bus.emit('focusActiveSidebar')")), true)
+})
+
+test('脑图详情页通知避开固定导航并在窄屏保持完整宽度', async () => {
+  const [source, ...knownOverlaySources] = await Promise.all([
+    readFile(editSourceUrl, 'utf8'),
+    // 演示控制为 10001，大纲/富文本浮层为 10000；编辑页与 Drag 插件
+    // 分别覆盖恢复遮罩和拖拽克隆节点。
+    readFile(demonstrateSourceUrl, 'utf8'),
+    readFile(outlineEditSourceUrl, 'utf8'),
+    readFile(richTextToolbarSourceUrl, 'utf8'),
+    readFile(editorSourceUrl, 'utf8'),
+    readFile(dragPluginSourceUrl, 'utf8'),
+  ])
+  const topmostToken = Number(source.match(
+    /--mindmap-topmost-overlay-z-index:\s*(\d+)/,
+  )?.[1])
+  const knownOverlayZIndexes = knownOverlaySources.flatMap(overlaySource => (
+    [
+      ...overlaySource.matchAll(/z-index:\s*(\d+)/g),
+      ...overlaySource.matchAll(/['"]z-index['"]\s*,\s*(\d+)/g),
+    ]
+      .map(match => Number(match[1]))
+  ))
+
+  assert.match(source, /document\.body\.classList\.add\(MINDMAP_DETAIL_PAGE_BODY_CLASS\)/)
+  assert.match(source, /document\.body\.classList\.remove\(MINDMAP_DETAIL_PAGE_BODY_CLASS\)/)
+  assert.match(source, /body\.mindmap-detail-page-active/)
+  assert.match(source, /body\.mindmap-detail-page-active \{[\s\S]*?\.el-notification \{/)
+  assert.doesNotMatch(source, /\.el-notification\.top-(?:left|right)/)
+  assert.match(source, /margin-top: 52px/)
+  assert.equal(topmostToken, 2147483647)
+  assert.ok(knownOverlayZIndexes.length > 0)
+  assert.equal(knownOverlayZIndexes.every(zIndex => topmostToken > zIndex), true)
+  assert.match(source, /z-index: var\(--mindmap-topmost-overlay-z-index\) !important/)
+  assert.match(source, /width: min\(var\(--el-notification-width, 330px\), calc\(100vw - 32px\)\)/)
+  assert.match(source, /@media \(max-width: 760px\)[\s\S]*?margin-top: 60px/)
 })
 
 test('服务端锁定的只读文件不会暴露可执行的整理布局命令', async () => {
@@ -187,6 +230,9 @@ test('统一属性检查器提供语义化页签、停靠布局和可撤销的�
     readFile(editorSourceUrl, 'utf8'),
     readFile(triggerSourceUrl, 'utf8'),
   ])
+  const transitionEndHandler = editor.match(
+    /function onMindMapContainerTransitionEnd[\s\S]*?^\}/m,
+  )?.[0] || ''
 
   assert.match(inspector, /role="tablist"/)
   assert.match(inspector, /role="tab"/)
@@ -195,13 +241,20 @@ test('统一属性检查器提供语义化页签、停靠布局和可撤销的�
   assert.match(inspector, /event\.key === 'ArrowRight'/)
   assert.match(inspector, /event\.key === 'ArrowLeft'/)
   assert.match(inspector, /REMOVE_ALL_NODE_CUSTOM_STYLES/)
-  assert.match(inspector, /activeNodes\.length === 0 \|\| isReadonly/)
+  assert.match(inspector, /activeNodes\.length === 0 \|\| isReadonly \|\| props\.structureWriteBlocked/)
   assert.match(inspector, /<MmStyle[\s\S]*?embedded/)
   assert.match(inspector, /<Structure[\s\S]*?embedded/)
-  assert.match(inspector, /<BaseStyle[\s\S]*?embedded/)
-  assert.match(inspector, /<Theme[\s\S]*?embedded/)
-  assert.match(inspector, /class="applicationState" role="status" aria-live="polite"/)
-  assert.match(inspector, /v-show="feedbackActive" class="applicationState"/)
+  assert.match(editor, /<PropertyInspector[\s\S]*?:structure-write-blocked="structureWriteBlocked"/)
+  assert.match(inspector, /structureWriteBlocked: \{ type: Boolean, default: false \}/)
+  assert.match(inspector, /<Structure[\s\S]*?:structure-write-blocked="props\.structureWriteBlocked"/)
+  assert.match(inspector, /<MmStyle[\s\S]*?:write-blocked="props\.structureWriteBlocked"/)
+  assert.match(inspector, /<BaseStyle[\s\S]*?:write-blocked="props\.structureWriteBlocked"[\s\S]*?embedded/)
+  assert.match(inspector, /<Theme[\s\S]*?:write-blocked="props\.structureWriteBlocked"[\s\S]*?embedded/)
+  assert.match(inspector, /class="applicationState"[\s\S]*?role="status"[\s\S]*?aria-live="polite"/)
+  assert.match(inspector, /v-show="props\.structureWriteBlocked \|\| feedbackActive"/)
+  assert.match(inspector, /正在同步，暂不可修改/)
+  assert.match(inspector, /function handleDocumentMetaChange[\s\S]*?if \(props\.structureWriteBlocked\) return/)
+  assert.match(inspector, /function resetSelectedNodeStyles[\s\S]*?props\.structureWriteBlocked[\s\S]*?REMOVE_ALL_NODE_CUSTOM_STYLES/)
   assert.match(inspector, /return `已选择 \$\{activeNodes\.value\.length\} 个节点`/)
   assert.match(inspector, /width: var\(--mindmap-inspector-width, 300px\)/)
   assert.match(inspector, /margin: 0;\s*padding: 0;/)
@@ -218,6 +271,10 @@ test('统一属性检查器提供语义化页签、停靠布局和可撤销的�
   assert.match(editor, /right: calc\(var\(--mindmap-workspace-right/)
   assert.match(editor, /watch\(\[activeSidebar, hasSearchPanel\]/)
   assert.match(editor, /mindMap\.value\?\.resize\?\.\(\)/)
+  assert.match(editor, /@transitionend="onMindMapContainerTransitionEnd"/)
+  assert.match(transitionEndHandler, /event\.target !== mindMapContainerRef\.value/)
+  assert.match(transitionEndHandler, /\['left', 'right'\]\.includes\(event\.propertyName\)/)
+  assert.match(transitionEndHandler, /mindMap\.value\?\.resize\?\.\(\)/)
   assert.match(trigger, /isPropertyInspectorActive/)
 })
 
@@ -281,6 +338,16 @@ test('画布属性与全局样式支持键盘折叠，布局卡片暴露当前�
   assert.match(structure, /<summary ref="layoutSummaryRef" class="currentLayoutCard">/)
   assert.match(structure, /当前布局 · 点击更换/)
   assert.match(structure, /item !== currentLayout\.value/)
+  assert.match(structure, /:disabled="isReadonly \|\| isStructureWriteBlocked\(\)"/)
+  assert.match(structure, /structureWriteBlocked: \{ type: Boolean, default: false \}/)
+  assert.match(
+    structure,
+    /function isStructureWriteBlocked\(\) \{\s*return props\.structureWriteBlocked\s*\}/,
+  )
+  assert.match(
+    structure,
+    /function useLayout\(layout\)[\s\S]*?isStructureWriteBlocked\(\)[\s\S]*?emit\?\.\('readonly_command_rejected', 'SET_LAYOUT'\)[\s\S]*?mindMap\.setLayout\(layout\)/,
+  )
   assert.match(structure, /layoutPickerRef\.value\.open = false/)
   assert.match(structure, /layoutSummaryRef\.value\?\.focus\(\)/)
   assert.match(structure, /class="layoutName"/)

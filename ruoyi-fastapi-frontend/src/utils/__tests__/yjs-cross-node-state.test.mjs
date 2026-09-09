@@ -55,6 +55,31 @@ test('跨节点状态可拆分并无损恢复 simple-mind-map 数据形态', () 
   assert.deepEqual(stripped, tree)
 })
 
+test('概要选中态不会进入协作记录且旧记录也不会恢复到画布', () => {
+  const tree = createCrossNodeTree()
+  tree.data.generalization[0].isActive = true
+
+  const state = extractCrossNodeState(tree)
+  const summary = state.summaries['root:summary-1']
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(summary.payload, 'isActive'),
+    false,
+  )
+
+  summary.payload.isActive = true
+  const stripped = structuredClone(tree)
+  stripped.data = stripCrossNodeData(stripped.data)
+  applyCrossNodeState(stripped, state)
+
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      stripped.data.generalization[0],
+      'isActive',
+    ),
+    false,
+  )
+})
+
 test('关联数据被移除时旧节点快照也会触发独立状态同步', () => {
   const oldNode = createCrossNodeTree()
   const nextNode = structuredClone(oldNode)

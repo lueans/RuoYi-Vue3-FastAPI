@@ -32,7 +32,7 @@
                 type="button"
                 :aria-label="`使用结构：${layoutNameMap[item] || item}`"
                 :aria-pressed="false"
-                :disabled="isReadonly"
+                :disabled="isReadonly || isStructureWriteBlocked()"
                 @click="useLayout(item)"
               >
                 <span class="layoutPreview">
@@ -55,7 +55,8 @@ import { layoutImgMap, layoutGroupList, layoutList } from './config'
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
-  embedded: { type: Boolean, default: false }
+  embedded: { type: Boolean, default: false },
+  structureWriteBlocked: { type: Boolean, default: false },
 })
 const emit = defineEmits(['document-meta-change'])
 
@@ -82,11 +83,24 @@ const layoutGroupListData = computed(() => {
 
 function useLayout(layout) {
   if (!props.mindMap || isReadonly.value) return
+  // prop 驱动即时 UI；运行时回调保留为最后一道同步完整性边界，覆盖同一
+  // 事件循环中 Vue 尚未完成子组件重渲染的极短窗口。
+  if (
+    isStructureWriteBlocked()
+    || props.mindMap.opt?.isStructureWriteBlocked?.() === true
+  ) {
+    props.mindMap.emit?.('readonly_command_rejected', 'SET_LAYOUT')
+    return
+  }
   currentLayout.value = layout
   props.mindMap.setLayout(layout)
   emit('document-meta-change', { layout })
   if (layoutPickerRef.value) layoutPickerRef.value.open = false
   nextTick(() => layoutSummaryRef.value?.focus())
+}
+
+function isStructureWriteBlocked() {
+  return props.structureWriteBlocked
 }
 
 watch(

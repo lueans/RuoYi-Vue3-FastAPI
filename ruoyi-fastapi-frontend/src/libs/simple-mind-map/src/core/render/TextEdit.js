@@ -15,7 +15,13 @@ import {
   CONSTANTS,
   noneRichTextNodeLineHeight
 } from '../../constants/constant'
-import { resolveCurrentNodeTextEditTarget } from './node/nodeCooperateState'
+import {
+  bufferPendingNodeTextEditInput,
+  captureInsertedNodeRollbackState,
+  resolveCurrentNodeTextEditTarget,
+  rollbackRejectedInsertedNode,
+  reusePendingNodeTextEditAdmission
+} from './node/nodeCooperateState'
 
 const SMM_NODE_EDIT_WRAP = 'smm-node-edit-wrap'
 
@@ -36,7 +42,15 @@ export default class TextEdit {
     this.hasBodyMousedown = false
     this.textNodePaddingX = 5
     this.textNodePaddingY = 3
-    this.isNeedUpdateTextEditNode = false
+    // beforeTextEdit 可能等待服务端租约。等待期间该临时插入仍未获准落库，
+    // 必须能在点击别处、离开页面或实例销毁时同步撤销。
+    this.pendingTextEditAdmission = null
+    // 概要运行时对象会按数组下标复用，重排时 getData('uid') 可在 render_end
+    // 前变成另一条概要。编辑开始时独立冻结持久 UID，后续换绑不能再读旧实例。
+    this.currentTextEditNodeUid = ''
+    // 连续录入可能跨过 INSERT_* 的 requestAnimationFrame 渲染边界。按新
+    // 节点持久 UID 暂存后续分段，待其 node_dblclick 准入时再移交。
+    this.deferredPendingTextEditSequence = null
     this.mindMap.addEditNodeClass(SMM_NODE_EDIT_WRAP)
     this.bindEvent()
   }
@@ -47,9 +61,12 @@ export default class TextEdit {
     this.onScale = this.onScale.bind(this)
     this.onKeydown = this.onKeydown.bind(this)
     // 节点双击事件
-    this.mindMap.on('node_dblclick', (node, e, isInserting) => {
-      this.show({ node, e, isInserting })
-    })
+    this.mindMap.on(
+      'node_dblclick',
+      (node, e, isInserting, insertionType) => {
+        this.show({ node, e, isInserting, insertionType })
+      }
+    )
     // 点击事件
     this.mindMap.on('draw_click', () => {
       // 隐藏文本编辑框
@@ -75,7 +92,19 @@ export default class TextEdit {
       this.hideEditTextBox()
     })
     // 节点激活前事件
-    this.mindMap.on('before_node_active', () => {
+    this.mindMap.on('before_node_active', node => {
+      const pendingUid = String(
+        this.pendingTextEditAdmission?.nodeUid || ''
+      ).trim()
+      const editingUid = String(this.currentTextEditNodeUid || '').trim()
+      const activeUid = String(node?.getData?.('uid') || node?.uid || '').trim()
+      // 完整重绘会用持久化 isActive 激活同 UID 的新运行时实例。此时旧
+      // renderer.root 可能已经清空，取消准入既无法补偿删除，还会留下幽灵
+      // 默认节点；保留申请并在 render_end/lease grant 后按 UID 换绑。
+      if (
+        activeUid
+        && (pendingUid === activeUid || editingUid === activeUid)
+      ) return
       this.hideEditTextBox()
     })
     // 鼠标滚动事件
@@ -96,11 +125,24 @@ export default class TextEdit {
       })
     })
     this.mindMap.on('scale', this.onScale)
-    // 监听按键事件，判断是否自动进入文本编辑模式
-    if (this.mindMap.opt.enableAutoEnterTextEditWhenKeydown) {
-      window.addEventListener('keydown', this.onKeydown)
-    }
+    this.mindMap.on('node_text_edit_end', node => {
+      const endedUid = String(node?.getData?.('uid') || node?.uid || '').trim()
+      if (
+        !this.isShowTextEdit()
+        || (endedUid && endedUid === this.currentTextEditNodeUid)
+      ) {
+        this.currentTextEditNodeUid = ''
+      }
+    })
+    // 始终监听待准入编辑器的降级输入。enableAutoEnterTextEditWhenKeydown
+    // 只控制“已有节点按字母进入编辑”，不能让显式 INSERT_* 新建节点在
+    // 等待服务端租约时丢字。
+    // capture 阶段必须早于 KeyCommand 的 window bubble listener。否则隐藏
+    // textarea 被 WebView 拒绝聚焦时，Enter/Tab/Delete 会先执行结构命令，
+    // 待准入输入兜底即使随后 stopPropagation 也已经来不及。
+    window.addEventListener('keydown', this.onKeydown, true)
     this.mindMap.on('beforeDestroy', () => {
+      this.cancelPendingTextEditAdmission()
       this.unBindEvent()
     })
     this.mindMap.on('after_update_config', (opt, lastOpt) => {
@@ -118,42 +160,72 @@ export default class TextEdit {
           )
         }
       }
-      if (
-        opt.enableAutoEnterTextEditWhenKeydown !==
-        lastOpt.enableAutoEnterTextEditWhenKeydown
-      ) {
-        window[
-          opt.enableAutoEnterTextEditWhenKeydown
-            ? 'addEventListener'
-            : 'removeEventListener'
-        ]('keydown', this.onKeydown)
-      }
     })
-    // 正在编辑文本时，给节点添加了图标等其他内容时需要更新编辑框的位置
-    this.mindMap.on('afterExecCommand', () => {
-      if (!this.isShowTextEdit()) return
-      this.isNeedUpdateTextEditNode = true
-    })
+    // 本地命令和远端增量都会改变布局；远端 updateData 不会触发
+    // afterExecCommand，因此只要编辑器仍显示，每次渲染完成都按当前节点
+    // 的新坐标重定位，避免输入框留在旧位置。
     this.mindMap.on('node_tree_render_end', () => {
+      // INSERT_* 若被插件拦截或没有生成预期节点，不能让旧输入串到未来
+      // 某次偶然复用 UID 的编辑。正常入口会在 render_end 前同步 consume。
+      this.scheduleDeferredPendingTextEditSequenceCleanup()
       if (!this.isShowTextEdit()) return
-      if (this.isNeedUpdateTextEditNode) {
-        this.isNeedUpdateTextEditNode = false
-        this.updateTextEditNode()
-      }
+      if (!this.rebindCurrentTextEditNodeAfterRender()) return
+      this.updateTextEditNode()
     })
   }
 
   // 解绑事件
   unBindEvent() {
-    window.removeEventListener('keydown', this.onKeydown)
+    window.removeEventListener('keydown', this.onKeydown, true)
+  }
+
+  scheduleDeferredPendingTextEditSequenceCleanup() {
+    const sequence = this.deferredPendingTextEditSequence
+    if (!sequence || this.pendingTextEditAdmission) return
+    // 同步渲染会先 emit render_end，再按 post-order 调用新节点 finishRender，
+    // 后者才触发 show()/takeDeferred。延后一微任务，给目标节点一次同步
+    // 消费机会；仍未消费才说明 INSERT_* 没有生成预期目标。
+    queueMicrotask(() => {
+      if (
+        this.deferredPendingTextEditSequence === sequence
+        && !this.pendingTextEditAdmission
+      ) this.deferredPendingTextEditSequence = null
+    })
   }
 
   // 按键事件
   onKeydown(e) {
-    if (e.target !== document.body) return
     const activeNodeList = this.mindMap.renderer.activeNodeList
     if (activeNodeList.length <= 0 || activeNodeList.length > 1) return
     const node = activeNodeList[0]
+    // 新节点可能仍在等待服务端租约。焦点若因浏览器策略仍停在工具栏或
+    // 菜单按钮，也要在 body 限制之前接管输入。真正的输入控件保持原生行为。
+    if (
+      !this.isEditableTextInputTarget(e.target)
+      && this.queuePendingTextEditContinuation(
+        this.pendingTextEditAdmission,
+        node,
+        e
+      )
+    ) {
+      e.preventDefault()
+      e.stopImmediatePropagation?.()
+      return
+    }
+    if (
+      !this.isEditableTextInputTarget(e.target)
+      && bufferPendingNodeTextEditInput(
+        this.pendingTextEditAdmission,
+        node,
+        e
+      )
+    ) {
+      e.preventDefault()
+      e.stopImmediatePropagation?.()
+      return
+    }
+    if (!this.mindMap.opt.enableAutoEnterTextEditWhenKeydown) return
+    if (e.target !== document.body) return
     // 当正在输入中文或英文或数字时，如果没有按下组合键，那么自动进入文本编辑模式
     if (node && this.checkIsAutoEnterTextEditKey(e)) {
       // 忽略第一个键值，避免中文输入法时进入编辑会导致第一个键值变成字母的问题
@@ -166,6 +238,16 @@ export default class TextEdit {
         isFromKeyDown: true
       })
     }
+  }
+
+  isEditableTextInputTarget(target) {
+    if (!target || target === document.body) return false
+    if (target.isContentEditable) return true
+    const tagName = String(target.tagName || '').toUpperCase()
+    if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') {
+      return true
+    }
+    return Boolean(target.closest?.('[contenteditable="true"]'))
   }
 
   // 判断是否是自动进入文本编模式的按钮
@@ -182,10 +264,24 @@ export default class TextEdit {
   // 提交当前编辑内容，并以编辑节点作为后续插入命令的明确目标
   finishTextEditAndInsert(command) {
     const currentNode = this.getCurrentEditNode()
+    const insertionOwner = command === 'INSERT_NODE'
+      ? currentNode?.parent
+      : currentNode
+    const children = insertionOwner?.nodeData?.children
+    const previousChildUids = new Set(
+      (Array.isArray(children) ? children : [])
+        .map(child => String(child?.data?.uid || '').trim())
+        .filter(Boolean)
+    )
     this.hideEditTextBox()
     if (currentNode) {
       this.mindMap.execCommand(command, true, [currentNode])
     }
+    const insertedNode = (Array.isArray(children) ? children : []).find(child => {
+      const uid = String(child?.data?.uid || '').trim()
+      return uid && !previousChildUids.has(uid)
+    })
+    return String(insertedNode?.data?.uid || '').trim()
   }
 
   //  注册临时快捷键
@@ -234,12 +330,258 @@ export default class TextEdit {
     )
   }
 
-  emitTextEditBlocked(node) {
+  emitTextEditBlocked(node, reason = 'occupied') {
     this.mindMap.emit(
       'node_text_edit_blocked',
       node,
-      [...(node?.editingUserList || [])]
+      [...(node?.editingUserList || [])],
+      reason
     )
+  }
+
+  // 新节点的真实编辑器需要等待服务端租约。同步创建并聚焦一个不可见的
+  // textarea，让浏览器原生处理选区、退格、粘贴和 IME composition；获锁
+  // 后再把最终值一次性移交给普通或 Quill 编辑器。
+  createPendingTextEditInput(admission, node, isInserting) {
+    if (!admission || !isInserting || typeof document === 'undefined') return
+    const input = document.createElement('textarea')
+    const rawText = String(node?.getData?.('text') || '')
+    let initialText = rawText
+    if (node?.getData?.('richText')) {
+      try {
+        initialText = getTextFromHtml(rawText)
+      } catch {
+        initialText = rawText
+      }
+    }
+    input.value = initialText
+    admission.pendingInputText = initialText
+    admission.pendingInputTouched = false
+    admission.pendingInputSegments = [{
+      text: initialText,
+      touched: false,
+      continuationCommand: ''
+    }]
+    admission.pendingInputSegmentIndex = 0
+    input.classList.add(SMM_NODE_EDIT_WRAP, 'smm-node-edit-admission-buffer')
+    input.setAttribute('aria-label', '正在准备节点文本编辑')
+    input.style.cssText = `
+      position: fixed;
+      left: -10000px;
+      top: 0;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      border: 0;
+      opacity: 0;
+      pointer-events: none;
+    `
+    const syncValue = () => {
+      if (this.pendingTextEditAdmission !== admission) return
+      admission.pendingInputText = input.value
+      admission.pendingInputTouched = true
+      const segment = admission.pendingInputSegments?.[
+        admission.pendingInputSegmentIndex
+      ]
+      if (segment) {
+        segment.text = input.value
+        segment.touched = true
+      }
+    }
+    input.addEventListener('input', syncValue)
+    input.addEventListener('compositionstart', () => {
+      if (this.pendingTextEditAdmission === admission) {
+        admission.pendingCompositionActive = true
+      }
+    })
+    input.addEventListener('compositionend', () => {
+      syncValue()
+      admission.pendingCompositionActive = false
+      const resolve = admission.resolvePendingComposition
+      admission.resolvePendingComposition = null
+      resolve?.(true)
+    })
+    input.addEventListener('keydown', event => {
+      // 防止节点/外框的全局 Delete、Enter、Tab 快捷键先于租约结果执行。
+      event.stopPropagation()
+      if (
+        !event.isComposing
+        && event.keyCode !== 229
+        && (event.key === 'Enter' || event.key === 'Tab')
+      ) {
+        event.preventDefault()
+        this.queuePendingTextEditContinuation(admission, node, event)
+        return
+      }
+      if (
+        (event.key === 'Backspace' || event.key === 'Delete')
+        && input.value === ''
+      ) {
+        syncValue()
+      }
+    })
+    input.addEventListener('keyup', event => event.stopPropagation())
+    const targetNode = this.mindMap.opt.customInnerElsAppendTo || document.body
+    targetNode.appendChild(input)
+    admission.pendingInputElement = input
+    try {
+      input.focus({ preventScroll: true })
+      input.select()
+    } catch {
+      // 某些嵌入式 WebView 会拒绝脚本聚焦；window keydown 缓存继续兜底。
+    }
+  }
+
+  removePendingTextEditInput(admission) {
+    const input = admission?.pendingInputElement
+    if (input) {
+      input.parentNode?.removeChild(input)
+      admission.pendingInputElement = null
+    }
+    admission.pendingCompositionActive = false
+    const resolve = admission.resolvePendingComposition
+    admission.resolvePendingComposition = null
+    resolve?.(false)
+  }
+
+  queuePendingTextEditContinuation(admission, node, event) {
+    if (
+      !admission
+      || event?.isComposing
+      || event?.keyCode === 229
+      || (event?.key !== 'Enter' && event?.key !== 'Tab')
+    ) return false
+    const pendingUid = String(admission.nodeUid || '').trim()
+    const nodeUid = String(node?.getData?.('uid') || node?.uid || '').trim()
+    if (!pendingUid || pendingUid !== nodeUid) return false
+    const segments = Array.isArray(admission.pendingInputSegments)
+      ? admission.pendingInputSegments
+      : [{
+          text: admission.pendingInputText || '',
+          touched: admission.pendingInputTouched === true,
+          continuationCommand: ''
+        }]
+    const currentIndex = Math.max(0, segments.length - 1)
+    const current = segments[currentIndex]
+    const input = admission.pendingInputElement
+    // textarea 获得焦点时浏览器原生值是权威输入；聚焦被拒绝时则由 window
+    // fallback 直接写 admission。不能再用从未接收按键的 textarea 空值覆盖。
+    if (
+      input
+      && (
+        event?.target === input
+        || input.ownerDocument?.activeElement === input
+      )
+    ) current.text = input.value
+    current.continuationCommand = event.key === 'Enter'
+      ? 'INSERT_NODE'
+      : 'INSERT_CHILD_NODE'
+    segments.push({ text: '', touched: false, continuationCommand: '' })
+    admission.pendingInputSegments = segments
+    admission.pendingInputSegmentIndex = segments.length - 1
+    admission.pendingInputText = ''
+    admission.pendingInputTouched = false
+    if (input) {
+      input.value = ''
+      input.setSelectionRange?.(0, 0)
+    }
+    return true
+  }
+
+  installPendingTextEditSegments(admission, segments) {
+    if (!admission || !Array.isArray(segments) || segments.length === 0) return
+    admission.pendingInputSegments = segments.map(segment => ({
+      text: String(segment?.text || ''),
+      touched: segment?.touched === true,
+      continuationCommand: segment?.continuationCommand || ''
+    }))
+    const inputSegmentIndex = admission.pendingInputSegments.length - 1
+    admission.pendingInputSegmentIndex = inputSegmentIndex
+    const inputSegment = admission.pendingInputSegments[inputSegmentIndex]
+    admission.pendingInputText = inputSegment.text
+    admission.pendingInputTouched = inputSegment.touched
+    const input = admission.pendingInputElement
+    if (input) {
+      input.value = inputSegment.text
+      input.setSelectionRange?.(inputSegment.text.length, inputSegment.text.length)
+    }
+  }
+
+  waitForPendingTextEditComposition(admission) {
+    if (!admission?.pendingCompositionActive) return Promise.resolve(true)
+    return new Promise(resolve => {
+      admission.resolvePendingComposition = resolve
+    })
+  }
+
+  takeDeferredPendingTextEditSegments(node, isInserting) {
+    if (!isInserting || !this.deferredPendingTextEditSequence) return []
+    const nodeUid = String(node?.getData?.('uid') || node?.uid || '').trim()
+    if (nodeUid !== this.deferredPendingTextEditSequence.nodeUid) return []
+    const segments = this.deferredPendingTextEditSequence.segments
+    this.deferredPendingTextEditSequence = null
+    return Array.isArray(segments) ? segments : []
+  }
+
+  continuePendingTextEditSequence(nodeUid, command, remainingSegments) {
+    const currentNode = this.getCurrentEditNode()
+    const currentUid = currentNode?.getData?.('uid') || currentNode?.uid || ''
+    if (!currentNode || currentUid !== nodeUid) return false
+    const insertedNodeUid = this.finishTextEditAndInsert(command)
+    if (!Array.isArray(remainingSegments) || remainingSegments.length === 0) {
+      return true
+    }
+    if (!insertedNodeUid) return false
+    // INSERT_* 只在下一帧创建运行时节点，不能假设 execCommand 返回前已经
+    // 有 nextAdmission。用刚写入 renderTree 的持久 UID 跨 RAF 精确移交。
+    this.deferredPendingTextEditSequence = {
+      nodeUid: insertedNodeUid,
+      segments: remainingSegments.map(segment => ({ ...segment }))
+    }
+    return true
+  }
+
+  // updateData 可重建概要运行时节点（同一 owner 的概要数量变化尤其常见）。
+  // DOM 编辑内容仍有效时按持久 UID 换绑当前实例，避免最终提交写回脱离树的旧对象。
+  rebindCurrentTextEditNodeAfterRender() {
+    const currentNode = this.getCurrentEditNode()
+    if (!currentNode) return false
+    const nodeUid = this.currentTextEditNodeUid
+    const currentRuntimeNode = nodeUid
+      ? this.renderer.findNodeByUid?.(nodeUid)
+      : null
+    if (!currentRuntimeNode) return false
+    if (this.mindMap.richText) {
+      this.mindMap.richText.node = currentRuntimeNode
+    } else {
+      this.currentNode = currentRuntimeNode
+    }
+    return true
+  }
+
+  rollbackRejectedInsertion(rollbackState) {
+    try {
+      return rollbackRejectedInsertedNode(
+        rollbackState,
+        this.renderer,
+        this.mindMap
+      )
+    } catch (error) {
+      this.mindMap.opt.errorHandler(ERROR_TYPES.BEFORE_TEXT_EDIT_ERROR, error)
+      return false
+    }
+  }
+
+  cancelPendingTextEditAdmission() {
+    const admission = this.pendingTextEditAdmission
+    if (!admission) return false
+    // 先让补偿删除进入历史/Yjs，再取消或释放服务端申请；否则另一浏览器
+    // 可能先获锁并从仍含默认节点的状态继续编辑。
+    this.pendingTextEditAdmission = null
+    this.removePendingTextEditInput(admission)
+    const rolledBack = this.rollbackRejectedInsertion(admission.rollbackState)
+    this.mindMap.opt.releaseNodeTextEditLease?.(admission.nodeUid)
+    return rolledBack
   }
 
   // 显示文本编辑框
@@ -247,16 +589,37 @@ export default class TextEdit {
   // isFromKeyDown：是否是在按键事件进入的编辑
   async show({
     node,
+    e,
     isInserting = false,
+    insertionType = 'node',
     isFromKeyDown = false,
     isFromScale = false
   }) {
+    // 键盘、双击等入口可能在同一节点仍等待服务端租约时再次触发。
+    // 这不是切换目标：复用原准入并缓存期间的可打印输入，避免误回滚
+    // INSERT_NODE/INSERT_CHILD_NODE 刚创建的节点。
+    if (reusePendingNodeTextEditAdmission(
+      this.pendingTextEditAdmission,
+      node,
+      e
+    )) return
+    const inheritedPendingSegments = this.takeDeferredPendingTextEditSegments(
+      node,
+      isInserting
+    )
+    // 真正切换目标时才撤销旧入口，防止两个迟到结果争用同一编辑框。
+    this.cancelPendingTextEditAdmission()
     // 使用了自定义节点内容那么不响应编辑事件
     if (node.isUseCustomNodeContent()) {
       return
     }
+    const insertionRollbackState = captureInsertedNodeRollbackState(node, {
+      isInserting,
+      insertionType
+    })
     if (this.isTextEditBlockedByRemote(node)) {
       this.emitTextEditBlocked(node)
+      this.rollbackRejectedInsertion(insertionRollbackState)
       return
     }
     // 如果有正在编辑中的节点，那么先结束它
@@ -266,7 +629,33 @@ export default class TextEdit {
     }
     const { beforeTextEdit, openRealtimeRenderOnNodeTextEdit } =
       this.mindMap.opt
+    let pendingInputText = ''
+    let pendingInputTouched = false
+    let pendingContinuationCommand = ''
+    let pendingRemainingSegments = []
+    if (inheritedPendingSegments.length > 0) {
+      const first = inheritedPendingSegments[0]
+      pendingInputText = String(first?.text || '')
+      pendingInputTouched = first?.touched === true
+      pendingContinuationCommand = first?.continuationCommand || ''
+      pendingRemainingSegments = inheritedPendingSegments.slice(1)
+    }
     if (typeof beforeTextEdit === 'function') {
+      const admission = {
+        nodeUid: node?.getData?.('uid') || node?.uid || '',
+        rollbackState: insertionRollbackState,
+        pendingInputText: '',
+        pendingInputTouched: false,
+        pendingInputSegments: null,
+        pendingInputSegmentIndex: 0,
+        pendingCompositionActive: false,
+        resolvePendingComposition: null
+      }
+      this.pendingTextEditAdmission = admission
+      this.createPendingTextEditInput(admission, node, isInserting)
+      if (inheritedPendingSegments.length > 0) {
+        this.installPendingTextEditSegments(admission, inheritedPendingSegments)
+      }
       let isShow = false
       try {
         isShow = await beforeTextEdit(node, isInserting)
@@ -274,7 +663,41 @@ export default class TextEdit {
         isShow = false
         this.mindMap.opt.errorHandler(ERROR_TYPES.BEFORE_TEXT_EDIT_ERROR, error)
       }
-      if (!isShow) return
+      // 服务端 grant 可能先于中文候选提交。保留临时输入焦点直到
+      // compositionend，避免强制换焦点把候选词变成拼音或直接丢弃。
+      if (
+        isShow
+        && this.pendingTextEditAdmission === admission
+        && !await this.waitForPendingTextEditComposition(admission)
+      ) return
+      // 点击别处、终止页面或新 show() 已取消本次准入。旧 Promise 即使
+      // 最终返回 true 也绝不能重新打开编辑器。
+      if (this.pendingTextEditAdmission !== admission) return
+      this.removePendingTextEditInput(admission)
+      this.pendingTextEditAdmission = null
+      const segments = Array.isArray(admission.pendingInputSegments)
+        && admission.pendingInputSegments.length > 0
+        ? admission.pendingInputSegments
+        : [{
+            text: admission.pendingInputText,
+            touched: admission.pendingInputTouched,
+            continuationCommand: ''
+          }]
+      pendingInputText = String(segments[0]?.text || '')
+      pendingInputTouched = segments[0]?.touched === true
+      pendingContinuationCommand = segments[0]?.continuationCommand || ''
+      pendingRemainingSegments = segments.slice(1)
+      if (!isShow) {
+        if (this.mindMap.opt.isNodeTextEditLeaseAuthoritative?.() === true) {
+          this.emitTextEditBlocked(
+            node,
+            this.mindMap.opt.getNodeTextEditLeaseFailureReason?.()
+              || 'unavailable'
+          )
+        }
+        this.rollbackRejectedInsertion(insertionRollbackState)
+        return
+      }
     }
     let leasedNodeUid = ''
     let opened = false
@@ -284,7 +707,7 @@ export default class TextEdit {
         && this.mindMap.opt.isNodeTextEditLeaseAuthoritative()
       )
       if (authoritativeNodeEditLease) {
-        leasedNodeUid = node?.uid || node?.getData?.('uid') || ''
+        leasedNodeUid = node?.getData?.('uid') || node?.uid || ''
         const currentNode = resolveCurrentNodeTextEditTarget(node, this.renderer, {
           authoritative: true,
           readonly: this.mindMap.opt.readonly,
@@ -317,6 +740,9 @@ export default class TextEdit {
         isFromKeyDown,
         isFromScale
       }
+      this.currentTextEditNodeUid = String(
+        node?.getData?.('uid') || node?.uid || ''
+      ).trim()
       if (this.mindMap.richText) {
         this.mindMap.richText.showEditText(params)
       } else {
@@ -327,6 +753,31 @@ export default class TextEdit {
         this.isShowTextEdit()
         && this.getCurrentEditNode() === node
       )
+      if (opened && pendingInputTouched) {
+        this.applyPendingTextEditInput(pendingInputText, {
+          replaceCurrentText: Boolean(
+            isInserting
+            || (
+              this.mindMap.opt.selectTextOnEnterEditText
+              && !isFromKeyDown
+            )
+          )
+        })
+      }
+      if (opened && pendingContinuationCommand) {
+        const openedNodeUid = node?.getData?.('uid') || node?.uid || ''
+        queueMicrotask(() => {
+          const current = this.getCurrentEditNode()
+          const currentUid = current?.getData?.('uid') || current?.uid || ''
+          if (currentUid === openedNodeUid) {
+            this.continuePendingTextEditSequence(
+              openedNodeUid,
+              pendingContinuationCommand,
+              pendingRemainingSegments
+            )
+          }
+        })
+      }
     } catch (error) {
       // show() 被事件直接调用，因此内部吸收 DOM/渲染异常，避免产生
       // unhandled rejection；同时仍通过统一 errorHandler 暴露错误。
@@ -339,7 +790,65 @@ export default class TextEdit {
       if (leasedNodeUid && !opened) {
         this.mindMap.opt.releaseNodeTextEditLease?.(leasedNodeUid)
       }
+      if (!opened) {
+        this.currentTextEditNodeUid = ''
+        this.rollbackRejectedInsertion(insertionRollbackState)
+      }
     }
+  }
+
+  // 把租约等待期间由 body keydown 拦截的输入恢复到刚打开的编辑器。
+  // 新建节点/全选进入时替换默认文字；普通节点则按当前光标或选区插入。
+  applyPendingTextEditInput(text, { replaceCurrentText = false } = {}) {
+    if (typeof text !== 'string' || (!text && !replaceCurrentText)) return false
+    const richText = this.mindMap.richText
+    const quill = richText?.showTextEdit ? richText.quill : null
+    if (quill) {
+      if (replaceCurrentText) {
+        quill.setText(text)
+        quill.setSelection(text.length, 0)
+        return true
+      }
+      const range = quill.getSelection?.() || {
+        index: Math.max(0, (quill.getLength?.() || 1) - 1),
+        length: 0
+      }
+      if (range.length > 0) quill.deleteText(range.index, range.length)
+      quill.insertText(range.index, text)
+      quill.setSelection(range.index + text.length, 0)
+      return true
+    }
+    if (!this.showTextEdit || !this.textEditNode) return false
+    if (replaceCurrentText) {
+      this.textEditNode.textContent = text
+      focusInput(this.textEditNode)
+      this.emitTextChangeEvent()
+      return true
+    }
+    const selection = window.getSelection?.()
+    let range = null
+    if (selection?.rangeCount) {
+      const candidate = selection.getRangeAt(0)
+      const container = candidate.commonAncestorContainer
+      if (
+        container === this.textEditNode
+        || this.textEditNode.contains(container)
+      ) range = candidate
+    }
+    if (!range) {
+      range = document.createRange()
+      range.selectNodeContents(this.textEditNode)
+      range.collapse(false)
+    }
+    range.deleteContents()
+    const inputNode = document.createTextNode(text)
+    range.insertNode(inputNode)
+    range.setStartAfter(inputNode)
+    range.collapse(true)
+    selection?.removeAllRanges?.()
+    selection?.addRange?.(range)
+    this.emitTextChangeEvent()
+    return true
   }
 
   // 当openRealtimeRenderOnNodeTextEdit配置更新后需要更新编辑框样式
@@ -361,18 +870,9 @@ export default class TextEdit {
   onScale() {
     const node = this.getCurrentEditNode()
     if (!node) return
-    if (this.mindMap.richText) {
-      this.mindMap.richText.cacheEditingText =
-        this.mindMap.richText.getEditText()
-      this.mindMap.richText.showTextEdit = false
-    } else {
-      this.cacheEditingText = this.getEditText()
-      this.setIsShowTextEdit(false)
-    }
-    this.show({
-      node,
-      isFromScale: true
-    })
+    // 缩放只改变浮层几何，不应关闭编辑器并重新申请服务端租约。保持同一
+    // DOM/Quill 实例也能保留光标、IME 候选与尚未提交的最后字符。
+    this.updateTextEditNode()
   }
 
   //  显示文本编辑框
@@ -506,12 +1006,28 @@ export default class TextEdit {
       return
     }
     const rect = this.currentNode._textData.node.node.getBoundingClientRect()
+    const scale = this.mindMap.view.scale
+    const fontSize = this.currentNode.style.merge('fontSize')
+    const isMultiLine = (
+      this.currentNode._textData.node.attr('data-ismultiLine') === 'true'
+    )
+    this.currentNode.style.domText(this.textEditNode, scale)
     this.textEditNode.style.minWidth =
       rect.width + this.textNodePaddingX * 2 + 'px'
     this.textEditNode.style.minHeight =
       rect.height + this.textNodePaddingY * 2 + 'px'
     this.textEditNode.style.left = Math.floor(rect.left) + 'px'
     this.textEditNode.style.top = Math.floor(rect.top) + 'px'
+    this.textEditNode.style.maxWidth =
+      this.mindMap.opt.textAutoWrapWidth * scale + 'px'
+    this.textEditNode.style.lineHeight = isMultiLine
+      ? noneRichTextNodeLineHeight
+      : 'normal'
+    this.textEditNode.style.transform = isMultiLine
+      ? `translateY(${(
+          ((noneRichTextNodeLineHeight - 1) * fontSize) / 2
+        ) * scale}px)`
+      : 'translateY(0)'
   }
 
   // 获取编辑区域的背景填充
@@ -553,8 +1069,11 @@ export default class TextEdit {
 
   //  隐藏文本编辑框
   hideEditTextBox() {
+    this.cancelPendingTextEditAdmission()
     if (this.mindMap.richText) {
-      return this.mindMap.richText.hideEditText()
+      const result = this.mindMap.richText.hideEditText()
+      if (!this.mindMap.richText.showTextEdit) this.currentTextEditNodeUid = ''
+      return result
     }
     if (!this.showTextEdit) {
       return
@@ -562,6 +1081,7 @@ export default class TextEdit {
     const currentNode = this.currentNode
     const text = this.getEditText()
     this.currentNode = null
+    this.currentTextEditNodeUid = ''
     this.textEditNode.style.display = 'none'
     this.textEditNode.innerHTML = ''
     this.textEditNode.style.fontFamily = 'inherit'

@@ -2862,7 +2862,12 @@ test('远程渲染结束前持续阻止异步 data_change 被当成本地修改'
   const mindMap = createMindmap(createDocument())
   const originalUpdateData = mindMap.updateData
   const applyingStates = []
-  const sync = new YjsMindmapSync(1, mindMap)
+  const structureWriteBlockedChanges = []
+  const sync = new YjsMindmapSync(1, mindMap, 1, {
+    onStructureWriteBlockedChange: blocked => {
+      structureWriteBlockedChanges.push(blocked)
+    },
+  })
   sync.initFromMindmap(createDocument())
   mindMap.updateData = root => {
     originalUpdateData(root)
@@ -2876,6 +2881,8 @@ test('远程渲染结束前持续阻止异步 data_change 被当成本地修改'
 
   assert.deepEqual(applyingStates, [true])
   assert.equal(sync.isApplyingRemote(), false)
+  assert.equal(sync.isStructureWriteBlocked(), false)
+  assert.deepEqual(structureWriteBlockedChanges, [true, false])
   sync.destroy()
 })
 
@@ -2908,7 +2915,11 @@ test('协作重渲染保留本地选中节点且不采用共享选中状态', as
   const mindMap = createMindmap(document)
   const sync = new YjsMindmapSync(1, mindMap)
   sync.initFromMindmap(document)
-  sync._localActiveNodeUids = ['child']
+  mindMap.renderer.activeNodeList = [
+    mindMap.renderer.findNodeByUid('child'),
+  ]
+  // 模拟 node_active 的 0ms 回调尚未刷新 awareness；runtime 才是 UI 真源。
+  sync._localActiveNodeUids = ['root']
 
   assert.equal(await sync._applyYjsToMindmap(), true)
   assert.equal(mindMap.getData().data.isActive, false)
@@ -3050,12 +3061,16 @@ test('远端公式能力准备完成前不更新画布且期间本地状态不�
   const mindMap = createMindmap(document)
   let releaseFirstPrepare
   let prepareCount = 0
+  const structureWriteBlockedChanges = []
   const sync = new YjsMindmapSync(1, mindMap, 1, {
     prepareDocument: async () => {
       prepareCount += 1
       if (prepareCount === 1) {
         await new Promise(resolve => { releaseFirstPrepare = resolve })
       }
+    },
+    onStructureWriteBlockedChange: blocked => {
+      structureWriteBlockedChanges.push(blocked)
     },
   })
   sync.initFromMindmap(document)
@@ -3068,14 +3083,20 @@ test('远端公式能力准备完成前不更新画布且期间本地状态不�
   await Promise.resolve()
   assert.equal(sync.isApplyingRemote(), false)
   assert.equal(sync.isPreparingRemoteDocument(), true)
+  assert.equal(sync.isStructureWriteBlocked(), true)
   assert.equal(mindMap.calls.length, 0)
+  assert.deepEqual(structureWriteBlockedChanges, [true])
 
   sync.yNodes.get('child').get('data').set('text', '加载期间到达的新内容')
   releaseFirstPrepare()
   assert.equal(await firstApply, true)
   assert.equal(prepareCount, 2)
   assert.equal(mindMap.getData().children[0].data.text, '加载期间到达的新内容')
+  assert.equal(structureWriteBlockedChanges.at(-1), true)
   mindMap.emit('node_tree_render_end')
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(sync.isStructureWriteBlocked(), false)
+  assert.equal(structureWriteBlockedChanges.at(-1), false)
   sync.destroy()
 })
 
@@ -3272,7 +3293,10 @@ test('旧版 Yjs 视图缓存不会覆盖本地视角或选区', async () => {
   const mindMap = createMindmap(document)
   const sync = new YjsMindmapSync(1, mindMap)
   sync.initFromMindmap(document)
-  sync._localActiveNodeUids = ['child']
+  mindMap.renderer.activeNodeList = [
+    mindMap.renderer.findNodeByUid('child'),
+  ]
+  sync._localActiveNodeUids = ['root']
   sync.yMeta.set('viewData', {
     transform: { scaleX: 1.25, scaleY: 1.25, translateX: -200 },
   })
@@ -3514,6 +3538,7 @@ test('节点编辑租约在连接期间返回 connecting 而非误报占用', as
 
 function enableAuthoritativeNodeEditLease(sync) {
   sync.serverCapabilities.add('node-edit-lease-v1')
+  sync.serverCapabilities.add('node-edit-lease-renewal-v1')
   sync.wsClient.isAuthenticated = true
   sync.isSynced.value = true
 }
@@ -3540,6 +3565,370 @@ test('节点编辑租约在房间状态尚未同步或保存栅栏关闭时 fail
   assert.equal(await sync.acquireNodeEditLease('child'), false)
   assert.equal(sync.getNodeEditLeaseFailureReason(), 'unavailable')
   assert.equal(sent.length, 0)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('初次租约等待状态阻止重复准入并在结果落定后通知保存层', async () => {
+  let settledCount = 0
+  const structureWriteBlockedChanges = []
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 1, {
+    onNodeEditLeaseSettled: () => { settledCount += 1 },
+    onStructureWriteBlockedChange: blocked => {
+      structureWriteBlockedChanges.push(blocked)
+    },
+  })
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+  const summaryNode = {
+    uid: 'runtime-summary',
+    getData: key => key === 'uid' ? 'summary-persisted' : undefined,
+  }
+
+  const leasePromise = sync.acquireNodeEditLease(summaryNode)
+  await Promise.resolve()
+  assert.equal(sync.hasPendingNodeEditLeaseAcquire(), true)
+  assert.equal(sync.isStructureWriteBlocked(), true)
+  assert.equal(sync.canAcquireNodeEditLease(), false)
+  const request = sent.find(message => message.type === 'node_edit_lease_acquire')
+  assert.equal(request.nodeUid, 'summary-persisted')
+  assert.equal(request.renewal, false)
+  assert.deepEqual(structureWriteBlockedChanges, [true])
+
+  sync._handleNodeEditLeaseResult({
+    requestId: request.requestId,
+    nodeUid: 'summary-persisted',
+    granted: true,
+  })
+  assert.equal(await leasePromise, true)
+  assert.equal(sync.hasPendingNodeEditLeaseAcquire(), false)
+  assert.equal(sync.isStructureWriteBlocked(), false)
+  assert.equal(sync.isStructureWriteBlocked(), false)
+  assert.equal(sync.hasNodeEditLease(summaryNode), true)
+  assert.equal(settledCount, 1)
+  assert.deepEqual(structureWriteBlockedChanges, [true, false])
+  assert.equal(sync.releaseNodeEditLease(summaryNode), true)
+  assert.equal(sent.at(-1).nodeUid, 'summary-persisted')
+  assert.equal(settledCount, 2)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('初次租约等待远端准备和渲染都空闲后才出网', async () => {
+  const document = createDocument()
+  const mindMap = createMindmap(document)
+  let releasePrepare
+  let firstPrepare = true
+  const sync = new YjsMindmapSync(1, mindMap, 1, {
+    prepareDocument: () => {
+      if (!firstPrepare) return undefined
+      firstPrepare = false
+      return new Promise(resolve => { releasePrepare = resolve })
+    },
+  })
+  sync.initFromMindmap(document)
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+
+  const remoteApply = sync._applyYjsToMindmap()
+  await Promise.resolve()
+  assert.equal(sync.isPreparingRemoteDocument(), true)
+  const leasePromise = sync.acquireNodeEditLease('child')
+  await Promise.resolve()
+  assert.equal(
+    sent.some(message => message.type === 'node_edit_lease_acquire'),
+    false,
+  )
+
+  releasePrepare()
+  assert.equal(await remoteApply, true)
+  assert.equal(sync.isApplyingRemote(), true)
+  assert.equal(
+    sent.some(message => message.type === 'node_edit_lease_acquire'),
+    false,
+  )
+
+  mindMap.emit('node_tree_render_end')
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const request = sent.find(message => message.type === 'node_edit_lease_acquire')
+  assert.ok(request)
+  sync._handleNodeEditLeaseResult({
+    requestId: request.requestId,
+    nodeUid: 'child',
+    granted: true,
+  })
+
+  assert.equal(await leasePromise, true)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('初次租约 grant 途中开始远端重绘时等待 render_end 后才准入', async () => {
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()))
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+
+  const leasePromise = sync.acquireNodeEditLease('child')
+  await Promise.resolve()
+  const request = sent.find(message => message.type === 'node_edit_lease_acquire')
+  assert.ok(request)
+  sync._applyingRemote = true
+  sync._handleNodeEditLeaseResult({
+    requestId: request.requestId,
+    nodeUid: 'child',
+    granted: true,
+  })
+  let settled = false
+  void leasePromise.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false)
+
+  sync._finishRemoteApplication()
+  assert.equal(await leasePromise, true)
+  assert.equal(settled, true)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('取消或销毁会唤醒尚未出网的远端空闲等待者', async () => {
+  for (const action of ['release', 'destroy']) {
+    const sync = new YjsMindmapSync(1, createMindmap(createDocument()))
+    enableAuthoritativeNodeEditLease(sync)
+    const sent = []
+    sync.wsClient.send = message => {
+      sent.push(message)
+      return true
+    }
+    sync._applyingRemote = true
+
+    const leasePromise = sync.acquireNodeEditLease('child')
+    await Promise.resolve()
+    if (action === 'release') sync.releaseNodeEditLease('child')
+    else sync.destroy({ flushCheckpoint: false })
+
+    assert.equal(await leasePromise, false, action)
+    assert.equal(
+      sent.some(message => message.type === 'node_edit_lease_acquire'),
+      false,
+      action,
+    )
+    if (action === 'release') {
+      sync._applyingRemote = false
+      sync.destroy({ flushCheckpoint: false })
+    }
+  }
+})
+
+test('暂停和销毁会逐个归还所有在途租约请求的服务端所有权', async () => {
+  for (const action of ['pause', 'destroy']) {
+    const sync = new YjsMindmapSync(1, createMindmap(createDocument()))
+    enableAuthoritativeNodeEditLease(sync)
+    const sent = []
+    sync.wsClient.send = message => {
+      sent.push(message)
+      return true
+    }
+    const generation = sync._nodeEditLeaseAcquireGeneration
+    const childLease = sync._requestNodeEditLease('child', { generation })
+    const rootLease = sync._requestNodeEditLease('root', { generation })
+
+    if (action === 'pause') sync.pause()
+    else sync.destroy({ flushCheckpoint: false })
+
+    assert.deepEqual(await Promise.all([childLease, rootLease]), [false, false])
+    assert.deepEqual(
+      sent
+        .filter(message => message.type === 'node_edit_lease_release')
+        .map(message => message.nodeUid)
+        .sort(),
+      ['child', 'root'],
+      action,
+    )
+    if (action === 'pause') sync.destroy({ flushCheckpoint: false })
+  }
+})
+
+test('取消待定初次租约会立即结算 Promise 并归还可能已授予的服务端锁', async () => {
+  let settledCount = 0
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 1, {
+    onNodeEditLeaseSettled: () => { settledCount += 1 },
+  })
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+
+  const leasePromise = sync.acquireNodeEditLease('child')
+  await Promise.resolve()
+  assert.equal(sync.hasPendingNodeEditLeaseAcquire(), true)
+  assert.equal(sync.releaseNodeEditLease(''), false)
+  assert.equal(sync.hasPendingNodeEditLeaseAcquire(), true)
+  assert.equal(sync.releaseNodeEditLease('child'), true)
+  assert.equal(await leasePromise, false)
+  assert.equal(sync.hasPendingNodeEditLeaseAcquire(), false)
+  assert.equal(settledCount, 1)
+  assert.deepEqual(sent.map(message => message.type), [
+    'node_edit_lease_acquire',
+    'node_edit_lease_release',
+  ])
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('迟到的无关节点释放不会使当前在途租约申请失效', async () => {
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()))
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+
+  const leasePromise = sync.acquireNodeEditLease('child')
+  await Promise.resolve()
+  const request = sent.find(message => (
+    message.type === 'node_edit_lease_acquire'
+    && message.nodeUid === 'child'
+  ))
+  assert.ok(request)
+  const generation = sync._nodeEditLeaseAcquireGeneration
+
+  assert.equal(sync.releaseNodeEditLease('stale-node'), false)
+  assert.equal(sync._nodeEditLeaseAcquireGeneration, generation)
+  sync._handleNodeEditLeaseResult({
+    requestId: request.requestId,
+    nodeUid: 'child',
+    granted: true,
+  })
+
+  assert.equal(await leasePromise, true)
+  assert.equal(sync.hasNodeEditLease('child'), true)
+  assert.equal(sent.some(message => (
+    message.type === 'node_edit_lease_release'
+    && message.nodeUid === 'child'
+  )), false)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('销毁持有租约的实例不会由旧回调恢复页面自动保存', () => {
+  let settledCount = 0
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 1, {
+    onNodeEditLeaseSettled: () => { settledCount += 1 },
+  })
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+  sync._nodeEditLeaseUid = 'child'
+
+  sync.destroy({ flushCheckpoint: false })
+
+  assert.equal(settledCount, 0)
+  assert.equal(
+    sent.some(message => (
+      message.type === 'node_edit_lease_release'
+      && message.nodeUid === 'child'
+    )),
+    true,
+  )
+})
+
+test('保存门闩关闭时现有节点租约仍可续期', async () => {
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 1, {
+    canAcquireNodeEditLease: () => false,
+  })
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+  sync._nodeEditLeaseUid = 'child'
+
+  const renewal = sync._requestNodeEditLease('child', {
+    generation: sync._nodeEditLeaseAcquireGeneration,
+    renewal: true,
+  })
+  const request = sent.find(message => message.type === 'node_edit_lease_acquire')
+  assert.ok(request)
+  assert.equal(request.renewal, true)
+  sync._handleNodeEditLeaseResult({
+    requestId: request.requestId,
+    nodeUid: 'child',
+    granted: true,
+  })
+  assert.equal(await renewal, true)
+  assert.equal(sync.hasNodeEditLease('child'), true)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('旧服务端未协商 owner 续租能力时使用带 revision 的兼容申请', async () => {
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()))
+  sync.serverCapabilities.add('node-edit-lease-v1')
+  sync.wsClient.isAuthenticated = true
+  sync.isSynced.value = true
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+  sync._nodeEditLeaseUid = 'child'
+
+  const renewal = sync._requestNodeEditLease('child', {
+    generation: sync._nodeEditLeaseAcquireGeneration,
+    renewal: true,
+  })
+  const request = sent.find(message => message.type === 'node_edit_lease_acquire')
+  assert.ok(request)
+  assert.equal(request.renewal, false)
+  assert.equal(request.contentRevision, sync.contentRevision)
+  sync._handleNodeEditLeaseResult({
+    requestId: request.requestId,
+    nodeUid: 'child',
+    granted: true,
+  })
+
+  assert.equal(await renewal, true)
+  assert.equal(sync.hasNodeEditLease('child'), true)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('续租帧发送失败会立即结束本地编辑态并尝试归还服务端锁', async () => {
+  const mindMap = createMindmap(createDocument())
+  const sync = new YjsMindmapSync(1, mindMap)
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  let lostNodeUid = ''
+  mindMap.on('node_text_edit_lease_lost', (_node, nodeUid) => {
+    lostNodeUid = nodeUid
+  })
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return message.type !== 'node_edit_lease_acquire'
+  }
+  sync._nodeEditLeaseUid = 'child'
+
+  assert.equal(await sync._requestNodeEditLease('child', {
+    generation: sync._nodeEditLeaseAcquireGeneration,
+    renewal: true,
+  }), false)
+  assert.equal(lostNodeUid, 'child')
+  assert.equal(sync.hasActiveNodeEditLease(), false)
+  assert.deepEqual(sent.map(message => message.type), [
+    'node_edit_lease_acquire',
+    'node_edit_lease_release',
+  ])
   sync.destroy({ flushCheckpoint: false })
 })
 
@@ -3767,7 +4156,7 @@ test('续租结果丢失时主动释放并立即结束本地编辑态', async ()
   sync.destroy({ flushCheckpoint: false })
 })
 
-test('节点租约请求携带内容世代且世代推进后的迟到 grant 会归还', async () => {
+test('节点租约请求携带内容世代且连续版本推进不丢弃合法 grant', async () => {
   const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 4)
   enableAuthoritativeNodeEditLease(sync)
   const sent = []
@@ -3788,6 +4177,35 @@ test('节点租约请求携带内容世代且世代推进后的迟到 grant 会�
     granted: true,
   })
 
+  assert.equal(await leasePromise, true)
+  assert.equal(sync.hasNodeEditLease('child'), true)
+  assert.equal(
+    sent.filter(message => message.type === 'node_edit_lease_release').length,
+    0,
+  )
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('权威重置栅栏开启后迟到的旧世代 grant 会被归还', async () => {
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 4)
+  enableAuthoritativeNodeEditLease(sync)
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+
+  const leasePromise = sync.acquireNodeEditLease('child')
+  await Promise.resolve()
+  const request = sent.find(message => message.type === 'node_edit_lease_acquire')
+  sync._authoritativeRevisionPending = 5
+  sync.isSynced.value = false
+  sync._handleNodeEditLeaseResult({
+    requestId: request.requestId,
+    nodeUid: 'child',
+    granted: true,
+  })
+
   assert.equal(await leasePromise, false)
   assert.equal(sync.hasNodeEditLease('child'), false)
   assert.deepEqual(
@@ -3795,7 +4213,7 @@ test('节点租约请求携带内容世代且世代推进后的迟到 grant 会�
     [{
       type: 'node_edit_lease_release',
       nodeUid: 'child',
-      contentRevision: 5,
+      contentRevision: 4,
     }],
   )
   sync.destroy({ flushCheckpoint: false })

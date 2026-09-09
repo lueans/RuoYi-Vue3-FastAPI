@@ -868,6 +868,6 @@ test('overlapping stale notifications keep a monotonic authoritative revision fl
   )
   assert.match(
     resolveBlock,
-    /contentRevision < authoritativeReloadMinimumRevision[\s\S]*?authoritativeReloadRequired = true[\s\S]*?return false[\s\S]*?authoritativeReloadMinimumRevision = 0/,
+    /contentRevision < authoritativeReloadMinimumRevision[\s\S]*?setAuthoritativeReloadRequiredState\(true\)[\s\S]*?return false[\s\S]*?authoritativeReloadMinimumRevision = 0/,
   )
 })

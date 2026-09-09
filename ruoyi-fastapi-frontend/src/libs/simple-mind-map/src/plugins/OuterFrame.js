@@ -93,9 +93,16 @@ class OuterFrame {
     this.mindMap.command.add('ADD_OUTER_FRAME', this.addOuterFrame)
 
     this.removeActiveOuterFrame = this.removeActiveOuterFrame.bind(this)
+    this.removeActiveOuterFrameByShortcut = () => {
+      this.mindMap.execCommand('REMOVE_OUTER_FRAME')
+    }
+    this.mindMap.command.add(
+      'REMOVE_OUTER_FRAME',
+      this.removeActiveOuterFrame
+    )
     this.mindMap.keyCommand.addShortcut(
       'Del|Backspace',
-      this.removeActiveOuterFrame
+      this.removeActiveOuterFrameByShortcut
     )
   }
 
@@ -108,9 +115,13 @@ class OuterFrame {
     this.mindMap.off('scale', this.onScale)
     this.mindMap.off('beforeDestroy', this.onBeforeDestroy)
     this.mindMap.command.remove('ADD_OUTER_FRAME', this.addOuterFrame)
+    this.mindMap.command.remove(
+      'REMOVE_OUTER_FRAME',
+      this.removeActiveOuterFrame
+    )
     this.mindMap.keyCommand.removeShortcut(
       'Del|Backspace',
-      this.removeActiveOuterFrame
+      this.removeActiveOuterFrameByShortcut
     )
   }
 
@@ -249,13 +260,24 @@ class OuterFrame {
       this.isNotRenderOuterFrames = false
       return
     }
-    this.clearActiveOuterFrame()
+    // 外框 SVG 在每次布局后都会重建。远端只改其他节点时保留活动输入框，
+    // 并在新 SVG 上按稳定 groupId/成员集合重新绑定，而不是误提交和关闭。
+    const activeTextEdit = this.captureActiveOuterFrameTextEditForRender()
+    if (activeTextEdit) {
+      this.activeOuterFrame = null
+    } else {
+      this.clearActiveOuterFrame()
+    }
     this.clearTextNodes()
     this.clearOuterFrameElList()
     let tree = this.mindMap.renderer.root
-    if (!tree) return
+    if (!tree) {
+      this.discardDetachedActiveOuterFrameTextEdit(activeTextEdit)
+      return
+    }
     const t = this.mindMap.draw.transform()
     const { outerFramePaddingX, outerFramePaddingY } = this.mindMap.opt
+    let restoredActiveTextEdit = false
     walk(
       tree,
       null,
@@ -293,6 +315,23 @@ class OuterFrame {
             const textNode = this.createText(el, cur, range)
             this.textNodeList.push(textNode)
             this.renderText(this.getText(nodeList[0]), el, textNode, cur, range)
+            if (
+              activeTextEdit
+              && !restoredActiveTextEdit
+              && this.matchesActiveOuterFrameTextEdit(
+                activeTextEdit,
+                nodeList
+              )
+            ) {
+              this.restoreActiveOuterFrameTextEditAfterRender(
+                el,
+                cur,
+                range,
+                textNode,
+                activeTextEdit
+              )
+              restoredActiveTextEdit = true
+            }
             el.on('click', e => {
               e.stopPropagation()
               this.setActiveOuterFrame(el, cur, range, textNode)
@@ -304,17 +343,114 @@ class OuterFrame {
       true,
       0
     )
+    if (activeTextEdit && !restoredActiveTextEdit) {
+      this.discardDetachedActiveOuterFrameTextEdit(activeTextEdit)
+    }
+  }
+
+  captureActiveOuterFrameTextEditForRender() {
+    if (!this.showTextEdit || !this.activeOuterFrame) return null
+    const {
+      node,
+      range,
+      groupId: cachedGroupId,
+      memberUids: cachedMemberUids
+    } = this.activeOuterFrame
+    // render_end 时 node.children 可能已经切到远端新顺序，而 range 仍属于
+    // 上一帧。优先使用首次激活时缓存的稳定身份，不能从 stale range 重算。
+    if (
+      cachedGroupId
+      && Array.isArray(cachedMemberUids)
+      && cachedMemberUids.length > 0
+    ) {
+      return {
+        groupId: cachedGroupId,
+        memberUids: [...cachedMemberUids]
+      }
+    }
+    const memberNodes = this.getRangeNodeList(node, range)
+    const memberUids = memberNodes
+      .map(member => String(member?.getData?.('uid') || '').trim())
+      .filter(Boolean)
+    const groupId = String(
+      memberNodes[0]?.getData?.('outerFrame')?.groupId || ''
+    ).trim()
+    return groupId && memberUids.length > 0
+      ? { groupId, memberUids }
+      : null
+  }
+
+  matchesActiveOuterFrameTextEdit(snapshot, nodeList) {
+    if (!snapshot || !Array.isArray(nodeList)) return false
+    const memberUids = nodeList
+      .map(node => String(node?.getData?.('uid') || '').trim())
+      .filter(Boolean)
+    const groupId = String(
+      nodeList[0]?.getData?.('outerFrame')?.groupId || ''
+    ).trim()
+    const expectedMemberUids = new Set(snapshot.memberUids)
+    const actualMemberUids = new Set(memberUids)
+    return (
+      groupId === snapshot.groupId
+      && actualMemberUids.size === expectedMemberUids.size
+      && [...expectedMemberUids].every(uid => actualMemberUids.has(uid))
+    )
+  }
+
+  restoreActiveOuterFrameTextEditAfterRender(el, node, range, textNode, identity) {
+    this.activeOuterFrame = {
+      el,
+      node,
+      range,
+      textNode,
+      groupId: identity.groupId,
+      memberUids: [...identity.memberUids]
+    }
+    el.stroke({ dasharray: 'none' })
+    const firstNode = this.getNodeRangeFirstNode(node, range)
+    if (!this.getText(firstNode)) {
+      this.renderText(
+        this.mindMap.opt.defaultOuterFrameText,
+        el,
+        textNode,
+        node,
+        range
+      )
+    }
+    this.updateTextEditBoxPos(textNode)
+  }
+
+  discardDetachedActiveOuterFrameTextEdit(snapshot) {
+    if (!snapshot || !this.showTextEdit) return false
+    if (this.textEditNode) {
+      this.textEditNode.style.display = 'none'
+      this.textEditNode.innerHTML = ''
+    }
+    this.setIsShowTextEdit(false)
+    this.activeOuterFrame = null
+    this.mindMap.emit('hide_text_edit')
+    this.mindMap.emit('outer_frame_deactivate')
+    return true
   }
 
   // 激活外框
   setActiveOuterFrame(el, node, range, textNode) {
     this.mindMap.execCommand('CLEAR_ACTIVE_NODE')
     this.clearActiveOuterFrame()
+    const memberNodes = this.getRangeNodeList(node, range)
+    const memberUids = memberNodes
+      .map(member => String(member?.getData?.('uid') || '').trim())
+      .filter(Boolean)
+    const groupId = String(
+      memberNodes[0]?.getData?.('outerFrame')?.groupId || ''
+    ).trim()
     this.activeOuterFrame = {
       el,
       node,
       range,
-      textNode
+      textNode,
+      groupId,
+      memberUids
     }
     el.stroke({
       dasharray: 'none'

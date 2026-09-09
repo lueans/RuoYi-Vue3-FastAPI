@@ -8,6 +8,12 @@ async function readComponent(file) {
   return readFile(new URL(file, componentRoot), 'utf8')
 }
 
+function countTagsWithAttribute(source, tag, attribute) {
+  return (source.match(new RegExp(`<${tag}\\b[^>]*>`, 'g')) || [])
+    .filter(item => item.includes(attribute))
+    .length
+}
+
 test('只读侧栏白名单由状态层统一执行且禅模式不再绕过关闭规则', async () => {
   const [store, trigger, editor] = await Promise.all([
     readComponent('useStore.js'),
@@ -46,12 +52,13 @@ test('只读状态允许查看节点备注但继续拒绝写入型侧栏', async
 })
 
 test('节点样式类侧栏在直接写入边界重新校验只读状态', async () => {
-  const [nodeIcon, formula, structure, style, baseStyle] = await Promise.all([
+  const [nodeIcon, formula, structure, style, baseStyle, imageUpload] = await Promise.all([
     readComponent('NodeIconSidebar.vue'),
     readComponent('FormulaSidebar.vue'),
     readComponent('Structure.vue'),
     readComponent('Style.vue'),
     readComponent('BaseStyle.vue'),
+    readComponent('ImgUpload/index.vue'),
   ])
 
   assert.match(nodeIcon, /:disabled="iconControlsDisabled \|\| !item\.tag"/)
@@ -71,15 +78,48 @@ test('节点样式类侧栏在直接写入边界重新校验只读状态', async
   )
   assert.match(formula, /formulaSubmitting\.value = true[\s\S]*finally \{[\s\S]*formulaSubmitting\.value = false/)
 
-  assert.match(structure, /:disabled="isReadonly"/)
-  assert.match(structure, /function useLayout[\s\S]*isReadonly\.value[\s\S]*props\.mindMap\.setLayout/)
+  assert.match(structure, /:disabled="isReadonly \|\| isStructureWriteBlocked\(\)"/)
+  assert.match(
+    structure,
+    /function useLayout[\s\S]*isReadonly\.value[\s\S]*isStructureWriteBlocked\(\)[\s\S]*readonly_command_rejected[\s\S]*props\.mindMap\.setLayout/,
+  )
 
-  assert.equal((style.match(/if \(store\.isReadonly\) return/g) || []).length >= 9, true)
-  assert.match(style, /function update[\s\S]*if \(store\.isReadonly\) return[\s\S]*node\.setStyle/)
+  assert.match(style, /writeBlocked: \{ type: Boolean, default: false \}/)
+  assert.match(style, /const isWriteBlocked = computed\(\(\) => store\.isReadonly \|\| props\.writeBlocked\)/)
+  assert.match(style, /:inert="isWriteBlocked \? '' : null"/)
+  assert.equal((style.match(/if \(isWriteBlocked\.value\) return/g) || []).length >= 9, true)
+  assert.match(style, /function update[\s\S]*if \(isWriteBlocked\.value\) return[\s\S]*node\.setStyle/)
+  assert.equal(
+    countTagsWithAttribute(style, 'el-popover', ':disabled="isWriteBlocked"'),
+    6,
+  )
+  assert.equal(
+    countTagsWithAttribute(style, 'el-select', ':disabled="isWriteBlocked"'),
+    10,
+  )
+  assert.match(
+    style,
+    /watch\(isWriteBlocked,[\s\S]*?if \(blocked\) return[\s\S]*?syncActiveNodes\(\)[\s\S]*?nextTick\([\s\S]*?initNodeStyle\(\)/,
+  )
 
-  assert.equal((baseStyle.match(/store\.isReadonly\) return/g) || []).length >= 4, true)
-  assert.match(baseStyle, /function updateRainbowLinesConfig[\s\S]*if \(store\.isReadonly\) return/)
-  assert.match(baseStyle, /function updateOuterFramePadding[\s\S]*if \(store\.isReadonly\) return/)
+  assert.match(baseStyle, /writeBlocked: \{ type: Boolean, default: false \}/)
+  assert.match(baseStyle, /const isWriteBlocked = computed\(\(\) => store\.isReadonly \|\| props\.writeBlocked\)/)
+  assert.match(baseStyle, /:inert="isWriteBlocked \? '' : null"/)
+  assert.equal((baseStyle.match(/isWriteBlocked\.value\) return/g) || []).length >= 4, true)
+  assert.match(baseStyle, /function updateRainbowLinesConfig[\s\S]*if \(isWriteBlocked\.value\) return/)
+  assert.match(baseStyle, /function updateOuterFramePadding[\s\S]*if \(isWriteBlocked\.value\) return/)
+  assert.equal(
+    countTagsWithAttribute(baseStyle, 'el-popover', ':disabled="isWriteBlocked"'),
+    6,
+  )
+  assert.equal(
+    countTagsWithAttribute(baseStyle, 'el-select', ':disabled="isWriteBlocked"'),
+    14,
+  )
+  assert.match(baseStyle, /<ImgUpload[\s\S]*?:disabled="isWriteBlocked"/)
+  assert.match(imageUpload, /disabled: \{ type: Boolean, default: false \}/)
+  assert.match(imageUpload, /if \(token !== imageReadToken \|\| props\.disabled\) return/)
+  assert.match(imageUpload, /watch\(\(\) => props\.disabled,[\s\S]*imageReadToken\+\+/)
 })
 
 test('公式侧栏隔离插件请求、节点事件与脑图实例切换', async () => {
@@ -99,11 +139,14 @@ test('公式侧栏隔离插件请求、节点事件与脑图实例切换', async
 test('主题覆盖确认绑定当前侧栏、实例和组件生命周期', async () => {
   const theme = await readComponent('Theme.vue')
 
-  assert.match(theme, /:disabled="themeChangePending \|\| isReadonly"/)
-  assert.match(theme, /if \(!props\.mindMap \|\| themeChangePending\.value \|\| isReadonly\.value\) return/)
+  assert.match(theme, /:disabled="themeChangePending \|\| isWriteBlocked"/)
+  assert.match(theme, /writeBlocked: \{ type: Boolean, default: false \}/)
+  assert.match(theme, /:inert="isWriteBlocked \? '' : null"/)
+  assert.match(theme, /if \(!props\.mindMap \|\| themeChangePending\.value \|\| isWriteBlocked\.value\) return/)
   assert.match(theme, /const operationId = \+\+themeOperationId/)
-  assert.match(theme, /componentAlive[\s\S]*operationId === themeOperationId[\s\S]*activeMindMap === props\.mindMap[\s\S]*store\.activeSidebar === 'theme'[\s\S]*!isReadonly\.value/)
+  assert.match(theme, /componentAlive[\s\S]*operationId === themeOperationId[\s\S]*activeMindMap === props\.mindMap[\s\S]*store\.activeSidebar === 'theme'[\s\S]*!isWriteBlocked\.value/)
   assert.match(theme, /if \(!isCurrentOperation\(\)\) return\s*changeTheme/)
-  assert.match(theme, /targetMindMap !== props\.mindMap \|\| isReadonly\.value/)
+  assert.match(theme, /targetMindMap !== props\.mindMap[\s\S]*isWriteBlocked\.value/)
+  assert.match(theme, /watch\(isWriteBlocked,[\s\S]*themeOperationId \+= 1[\s\S]*themeChangePending\.value = false/)
   assert.match(theme, /onBeforeUnmount[\s\S]*componentAlive = false[\s\S]*themeOperationId \+= 1/)
 })

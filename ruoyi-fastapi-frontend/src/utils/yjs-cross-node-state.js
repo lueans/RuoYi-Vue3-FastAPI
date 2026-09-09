@@ -190,6 +190,9 @@ export function extractCrossNodeState(root, { validateReferences = true } = {}) 
       delete payload.uid
       const range = payload.range
       delete payload.range
+      // Selection belongs to the local renderer. Persisting it in the summary
+      // record lets one collaborator steal another collaborator's selection.
+      delete payload.isActive
       const startIndex = Array.isArray(range) ? range[0] : undefined
       const endIndex = Array.isArray(range) ? range[1] : undefined
       summaries[`${sourceUid}:${summaryUid || `index:${sortOrder}`}`] = {
@@ -727,6 +730,9 @@ export function applyCrossNodeState(root, state = {}) {
     const childUids = (nodes.get(ownerUid).children || []).map(child => String(child.data?.uid || ''))
     nodes.get(ownerUid).data.generalization = rows.map(({ record: row }) => {
       const payload = cloneValue(row.payload || {})
+      // Ignore stale records produced by older clients as well as stripping
+      // new outgoing records above.
+      delete payload.isActive
       if (row.summaryUid) payload.uid = String(row.summaryUid)
       const startIndex = childUids.indexOf(String(row.startChildUid || ''))
       const endIndex = childUids.indexOf(String(row.endChildUid || ''))

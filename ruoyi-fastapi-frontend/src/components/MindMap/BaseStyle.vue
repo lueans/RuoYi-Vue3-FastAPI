@@ -1,5 +1,10 @@
 <template>
-  <div class="baseStylePanel" :class="{ embedded: props.embedded }">
+  <div
+    class="baseStylePanel"
+    :class="{ embedded: props.embedded, isWriteBlocked }"
+    :inert="isWriteBlocked ? '' : null"
+    :aria-disabled="isWriteBlocked"
+  >
     <div
       class="sidebarContent customScrollbar"
       :class="{ isDark: isDark }"
@@ -24,12 +29,14 @@
             <ImgUpload
               class="imgUpload"
               v-model="style.backgroundImage"
+              :disabled="isWriteBlocked"
               @change="img => update('backgroundImage', img)"
             />
             <!-- 图片重复方式 -->
             <div class="rowItem">
               <span class="name">图片重复</span>
               <el-select
+                :disabled="isWriteBlocked"
                 size="small"
                 style="width: 120px"
                 v-model="style.backgroundRepeat"
@@ -48,6 +55,7 @@
             <div class="rowItem">
               <span class="name">图片位置</span>
               <el-select
+                :disabled="isWriteBlocked"
                 size="small"
                 style="width: 120px"
                 v-model="style.backgroundPosition"
@@ -66,6 +74,7 @@
             <div class="rowItem">
               <span class="name">图片大小</span>
               <el-select
+                :disabled="isWriteBlocked"
                 size="small"
                 style="width: 120px"
                 v-model="style.backgroundSize"
@@ -95,7 +104,12 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
-          <el-popover placement="bottom" trigger="click" :width="260">
+          <el-popover
+            placement="bottom"
+            trigger="click"
+            :width="260"
+            :disabled="isWriteBlocked"
+          >
             <template #reference>
               <ColorTrigger :color="style.lineColor" label="选择连线颜色" />
             </template>
@@ -108,6 +122,7 @@
         <div class="rowItem">
           <span class="name">粗细</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.lineWidth"
@@ -135,6 +150,7 @@
         <div class="rowItem" v-if="lineStyleListShow.length > 1">
           <span class="name">风格</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.lineStyle"
@@ -162,6 +178,7 @@
         >
           <span class="name">根节点</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.rootLineKeepSameInCurve"
@@ -180,6 +197,7 @@
           <!-- 连线圆角大小 -->
           <span class="name">圆角大小</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.lineRadius"
@@ -203,6 +221,7 @@
         >
           <span class="name">根节点连线起始位置</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.rootLineStartPositionKeepSameInCurve"
@@ -238,6 +257,7 @@
             trigger="click"
             v-model:visible="rainbowLinesPopoverVisible"
             :width="220"
+            :disabled="isWriteBlocked"
           >
             <template #default>
               <div class="rainbowLinesOptionsBox" :class="{ isDark: isDark }">
@@ -299,7 +319,12 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
-          <el-popover placement="bottom" trigger="click" :width="260">
+          <el-popover
+            placement="bottom"
+            trigger="click"
+            :width="260"
+            :disabled="isWriteBlocked"
+          >
             <template #reference>
               <ColorTrigger :color="style.generalizationLineColor" label="选择概要连线颜色" />
             </template>
@@ -312,6 +337,7 @@
         <div class="rowItem">
           <span class="name">粗细</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.generalizationLineWidth"
@@ -346,7 +372,12 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
-          <el-popover placement="bottom" trigger="click" :width="260">
+          <el-popover
+            placement="bottom"
+            trigger="click"
+            :width="260"
+            :disabled="isWriteBlocked"
+          >
             <template #reference>
               <ColorTrigger :color="style.associativeLineColor" label="选择关联线颜色" />
             </template>
@@ -359,6 +390,7 @@
         <div class="rowItem">
           <span class="name">粗细</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.associativeLineWidth"
@@ -384,7 +416,12 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">激活颜色</span>
-          <el-popover placement="bottom" trigger="click" :width="260">
+          <el-popover
+            placement="bottom"
+            trigger="click"
+            :width="260"
+            :disabled="isWriteBlocked"
+          >
             <template #reference>
               <ColorTrigger :color="style.associativeLineActiveColor" label="选择关联线激活颜色" />
             </template>
@@ -397,6 +434,7 @@
         <div class="rowItem">
           <span class="name">激活粗细</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.associativeLineActiveWidth"
@@ -423,6 +461,7 @@
         <div class="rowItem">
           <span class="name">样式</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.associativeLineDasharray"
@@ -460,6 +499,7 @@
         <div class="rowItem">
           <span class="name">字体</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             v-model="style.associativeLineTextFontFamily"
             placeholder=""
@@ -478,7 +518,12 @@
       <div class="row">
         <div class="rowItem">
           <span class="name">颜色</span>
-          <el-popover placement="bottom" trigger="click" :width="260">
+          <el-popover
+            placement="bottom"
+            trigger="click"
+            :width="260"
+            :disabled="isWriteBlocked"
+          >
             <template #reference>
               <ColorTrigger :color="style.associativeLineTextColor" label="选择关联线文字颜色" />
             </template>
@@ -491,6 +536,7 @@
         <div class="rowItem">
           <span class="name">字号</span>
           <el-select
+            :disabled="isWriteBlocked"
             size="small"
             style="width: 80px"
             v-model="style.associativeLineTextFontSize"
@@ -708,11 +754,13 @@ const props = defineProps({
   data: { type: [Object, null], default: null },
   configData: { type: Object, default: () => ({}) },
   mindMap: { type: Object, default: null },
-  embedded: { type: Boolean, default: false }
+  embedded: { type: Boolean, default: false },
+  writeBlocked: { type: Boolean, default: false }
 })
 const emit = defineEmits(['document-meta-change'])
 
 const isDark = computed(() => store.localConfig.isDark)
+const isWriteBlocked = computed(() => store.isReadonly || props.writeBlocked)
 
 const activeTab = ref('color')
 const marginActiveTab = ref('second')
@@ -835,7 +883,7 @@ function initMarginStyle() {
 }
 
 function update(key, value) {
-  if (!props.mindMap || store.isReadonly) return
+  if (!props.mindMap || isWriteBlocked.value) return
   if (key === 'backgroundImage' && value === 'none') {
     style[key] = ''
   } else {
@@ -853,7 +901,7 @@ function update(key, value) {
 }
 
 function updateRainbowLinesConfig(item) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   rainbowLinesPopoverVisible.value = false
   curRainbowLineColorList.value = item.list || null
   let newConfig = null
@@ -877,7 +925,7 @@ function isRainbowOptionSelected(item) {
 }
 
 function updateOuterFramePadding(prop, value) {
-  if (store.isReadonly) return
+  if (isWriteBlocked.value) return
   outerFramePadding[prop] = value
   if (props.mindMap) {
     props.mindMap.updateConfig({ [prop]: value })
@@ -887,7 +935,7 @@ function updateOuterFramePadding(prop, value) {
 }
 
 function updateMargin(type, value) {
-  if (!props.mindMap || store.isReadonly) return
+  if (!props.mindMap || isWriteBlocked.value) return
   style[type] = value
   const currentConfig = { ...(props.mindMap.getCustomThemeConfig() || {}) }
   currentConfig[marginActiveTab.value] = {
@@ -924,11 +972,26 @@ watch(() => store.activeSidebar, (val) => {
     }
   }
 }, { immediate: true })
+
+watch(isWriteBlocked, (blocked) => {
+  if (blocked) {
+    rainbowLinesPopoverVisible.value = false
+    return
+  }
+  initStyle()
+  initRainbowLines()
+  initOuterFramePadding()
+})
 </script>
 
 <style lang="less" scoped>
 .baseStylePanel {
   width: 100%;
+
+  &.isWriteBlocked {
+    opacity: 0.68;
+    pointer-events: none;
+  }
 }
 
 .sidebarContent {

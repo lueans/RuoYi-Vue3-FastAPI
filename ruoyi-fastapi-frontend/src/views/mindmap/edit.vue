@@ -509,6 +509,7 @@ const saveStatusText = computed(() => {
 
 const shareDialogRef = ref(null)
 let terminalDialogShown = false
+const MINDMAP_DETAIL_PAGE_BODY_CLASS = 'mindmap-detail-page-active'
 const returnListRoute = computed(() => buildMindmapListRoute(
   serverAccessType.value,
   route.query.returnList,
@@ -834,6 +835,7 @@ watch([documentLoaded, isReadonly, isZenMode], ([loaded, readonly, zen]) => {
 })
 
 onMounted(() => {
+  document.body.classList.add(MINDMAP_DETAIL_PAGE_BODY_CLASS)
   window.addEventListener('keydown', handleMobileCommandKeydown)
   window.addEventListener('resize', handleMobileCommandResize)
   bus.on('searchPanelVisibilityChange', handleSearchPanelVisibilityChange)
@@ -841,6 +843,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   manualSaveRequestId += 1
+  document.body.classList.remove(MINDMAP_DETAIL_PAGE_BODY_CLASS)
   window.removeEventListener('keydown', handleMobileCommandKeydown)
   window.removeEventListener('resize', handleMobileCommandResize)
   bus.off('searchPanelVisibilityChange', handleSearchPanelVisibilityChange)
@@ -1758,6 +1761,30 @@ onBeforeUnmount(() => {
 
     :deep(.el-button) {
       width: 100%;
+    }
+  }
+}
+</style>
+
+<style lang="scss">
+body.mindmap-detail-page-active {
+  // 单一顶层 token：高于应用内全部浮层；通知仍挂在 body，避免被编辑器
+  // 任意局部 stacking context 限制。
+  --mindmap-topmost-overlay-z-index: 2147483647;
+
+  .el-notification {
+    // Element Plus 默认从视口顶部 16px 开始堆叠；脑图固定头部为 52px。
+    // 使用外边距整体下移，不改写通知的内联 top，保留多条通知的堆叠计算。
+    margin-top: 52px;
+    // 通知由 Element Plus 直接挂载到 body；覆盖它生成的内联层级，确保
+    // 通知始终位于脑图导航、侧栏、遮罩和业务弹窗之上。
+    z-index: var(--mindmap-topmost-overlay-z-index) !important;
+    width: min(var(--el-notification-width, 330px), calc(100vw - 32px));
+  }
+
+  @media (max-width: 760px) {
+    .el-notification {
+      margin-top: 60px;
     }
   }
 }

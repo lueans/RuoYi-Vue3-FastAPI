@@ -194,16 +194,23 @@ class _FakeRedis:
                 ))
             return 1
         if "redis.call('get', KEYS[2]) ~= ARGV[2]" in script:
-            expected_epoch, owner = args
+            expected_epoch, owner, *ttl_values = args
             raw_fence = self.broker.strings.get(key)
             fence = json.loads(raw_fence) if raw_fence is not None else None
-            return int(
+            valid = (
                 isinstance(fence, dict)
                 and fence.get('version') == 1
                 and fence.get('status') == 'active'
                 and fence.get('epoch') == expected_epoch
                 and self.broker.strings.get(keys[1]) == owner
             )
+            if valid and ttl_values:
+                self.broker.seed_lease_renewals.append((
+                    keys[1],
+                    owner,
+                    ttl_values[0],
+                ))
+            return int(valid)
         if "redis.call('publish'" in script:
             expected, channel, payload = args
             if self.broker.strings.get(key) != expected:
@@ -278,6 +285,20 @@ class _FenceRaceRedis(_FakeRedis):
             self.broker.strings[fence_key] = self.next_node_fence
             self.next_node_fence = None
         return await super().eval(script, numkeys, *keys_and_args)
+
+
+class _PostRenewFenceRaceRedis(_FakeRedis):
+    def __init__(self, broker: _FakeRedisBroker) -> None:
+        super().__init__(broker)
+        self.renew_succeeded = asyncio.Event()
+        self.release_renew_result = asyncio.Event()
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int:
+        result = await super().eval(script, numkeys, *keys_and_args)
+        if "redis.call('get', KEYS[2]) ~= ARGV[2]" in script and result == 1:
+            self.renew_succeeded.set()
+            await self.release_renew_result.wait()
+        return result
 
 
 class _FakeControlEventResult:
@@ -797,7 +818,178 @@ class MindmapRoomManagerTest(unittest.IsolatedAsyncioTestCase):
             'same-node',
             old_editor,
         ))
+        self.assertTrue(await manager.renew_node_edit_lease(
+            50,
+            'same-node',
+            old_editor,
+        ))
         self.assertIn(lease_key, broker.strings)
+
+    async def test_local_node_edit_renewal_survives_prebroadcast_revision_gap(
+        self,
+    ) -> None:
+        manager = RoomManager(instance_id='local-node-edit-renewal-gap')
+        editor = _FakeWebSocket()
+        await manager.join(
+            58,
+            editor,
+            {'id': 1},
+            OFFICIAL_WRITE_CAPABILITIES,
+        )
+        manager.set_content_revision(58, 4)
+        old_epoch = _establish_lineage(
+            manager,
+            58,
+            4,
+            'stable-local-lineage',
+        )
+        self.assertTrue(await manager.acquire_node_edit_lease(
+            58,
+            4,
+            'same-node',
+            editor,
+        ))
+
+        # DB 权限重检先观察到连续 r5，正式广播尚未恢复 active lineage。
+        manager.set_content_revision(58, 5)
+        self.assertNotIn(58, manager._content_lineages)
+        self.assertEqual(manager._pending_content_lineages[58][2], old_epoch)
+        self.assertTrue(await manager.renew_node_edit_lease(
+            58,
+            'same-node',
+            editor,
+        ))
+
+        # reset 不会留下 pending 连续世代，旧 owner 不能跨新 epoch 续租。
+        manager.set_content_revision(
+            58,
+            5,
+            transition_type='document_reset',
+        )
+        self.assertFalse(await manager.renew_node_edit_lease(
+            58,
+            'same-node',
+            editor,
+        ))
+
+    async def test_local_node_edit_renewal_does_not_cross_reset_while_waiting_for_lock(
+        self,
+    ) -> None:
+        manager = RoomManager(instance_id='local-node-edit-renewal-reset-race')
+        editor = _FakeWebSocket()
+        await manager.join(
+            59,
+            editor,
+            {'id': 1},
+            OFFICIAL_WRITE_CAPABILITIES,
+        )
+        manager.set_content_revision(59, 4)
+        _establish_lineage(manager, 59, 4, 'old-local-lineage')
+        self.assertTrue(await manager.acquire_node_edit_lease(
+            59,
+            4,
+            'same-node',
+            editor,
+        ))
+
+        await manager._lock.acquire()
+        renewal = asyncio.create_task(manager.renew_node_edit_lease(
+            59,
+            'same-node',
+            editor,
+        ))
+        await asyncio.sleep(0)
+        manager.set_content_revision(
+            59,
+            5,
+            transition_type='document_reset',
+        )
+        manager._lock.release()
+
+        self.assertIsNone(await renewal)
+
+    async def test_local_node_edit_renewal_rejects_connection_retiring_while_waiting_for_lock(
+        self,
+    ) -> None:
+        manager = RoomManager(instance_id='local-node-edit-renewal-leave-race')
+        editor = _FakeWebSocket()
+        await manager.join(
+            60,
+            editor,
+            {'id': 1},
+            OFFICIAL_WRITE_CAPABILITIES,
+        )
+        manager.set_content_revision(60, 4)
+        _establish_lineage(manager, 60, 4, 'leave-race-lineage')
+        self.assertTrue(await manager.acquire_node_edit_lease(
+            60,
+            4,
+            'same-node',
+            editor,
+        ))
+
+        await manager._lock.acquire()
+        renewal = asyncio.create_task(manager.renew_node_edit_lease(
+            60,
+            'same-node',
+            editor,
+        ))
+        await asyncio.sleep(0)
+        leaving = asyncio.create_task(manager.leave(60, editor))
+        await asyncio.sleep(0)
+        self.assertIn(id(editor), manager._retiring_connections)
+        manager._lock.release()
+
+        self.assertIsNone(await renewal)
+        await leaving
+        self.assertEqual(manager._local_node_edit_leases, {})
+
+    async def test_local_node_edit_renewal_reads_expiry_after_lock_wait(
+        self,
+    ) -> None:
+        manager = RoomManager(instance_id='local-node-edit-renewal-clock-race')
+        editor = _FakeWebSocket()
+        await manager.join(
+            61,
+            editor,
+            {'id': 1},
+            OFFICIAL_WRITE_CAPABILITIES,
+        )
+        manager.set_content_revision(61, 4)
+        _establish_lineage(manager, 61, 4, 'clock-race-lineage')
+        self.assertTrue(await manager.acquire_node_edit_lease(
+            61,
+            4,
+            'same-node',
+            editor,
+        ))
+        lease_key = next(iter(manager._local_node_edit_leases))
+        websocket_id, owner, _deadline = manager._local_node_edit_leases[lease_key]
+        manager._local_node_edit_leases[lease_key] = (
+            websocket_id,
+            owner,
+            100.0,
+        )
+
+        clock = [99.0]
+        await manager._lock.acquire()
+        with patch(
+            'module_mindmap.websocket.room_manager.time.monotonic',
+            side_effect=lambda: clock[0],
+        ):
+            try:
+                renewal = asyncio.create_task(manager.renew_node_edit_lease(
+                    61,
+                    'same-node',
+                    editor,
+                ))
+                await asyncio.sleep(0)
+                clock[0] = 101.0
+            finally:
+                manager._lock.release()
+            self.assertFalse(await renewal)
+
+        self.assertNotIn(lease_key, manager._local_node_edit_leases)
 
     async def test_reset_lineage_generation_does_not_reuse_old_node_lease(self) -> None:
         broker = _FakeRedisBroker()
@@ -932,6 +1124,65 @@ class MindmapRoomManagerTest(unittest.IsolatedAsyncioTestCase):
             52,
             'same-node',
             editor,
+        ))
+
+    async def test_redis_node_edit_renewal_rechecks_epoch_after_lua_success(
+        self,
+    ) -> None:
+        mindmap_id = 62
+        broker = _FakeRedisBroker()
+        redis = _PostRenewFenceRaceRedis(broker)
+        manager = RoomManager(instance_id='node-edit-renew-post-reset-race')
+        manager._redis = redis
+        editor = _FakeWebSocket()
+        await manager.join(
+            mindmap_id,
+            editor,
+            {'id': 1},
+            OFFICIAL_WRITE_CAPABILITIES,
+        )
+        manager.set_content_revision(mindmap_id, 4)
+        lineage_id = 'renew-old-lineage'
+        old_epoch = _establish_lineage(
+            manager,
+            mindmap_id,
+            4,
+            lineage_id,
+            broker,
+        )
+        self.assertTrue(await manager.acquire_node_edit_lease(
+            mindmap_id,
+            4,
+            'same-node',
+            editor,
+        ))
+        old_key = manager._node_edit_lease_key(
+            mindmap_id,
+            old_epoch,
+            'same-node',
+        )
+
+        renewal = asyncio.create_task(manager.renew_node_edit_lease(
+            mindmap_id,
+            'same-node',
+            editor,
+        ))
+        await redis.renew_succeeded.wait()
+        # 模拟另一 worker 在续租 Lua 成功后完成 reset；本 worker 尚未收到
+        # pub/sub，因此本地连接和旧租约记录表面上仍完全有效。
+        broker.strings[manager._lineage_fence_key(mindmap_id)] = (
+            manager._encode_lineage_fence(
+                5,
+                manager._lineage_digest('renew-new-lineage'),
+            )
+        )
+        redis.release_renew_result.set()
+
+        self.assertIsNone(await renewal)
+        self.assertNotIn(old_key, broker.strings)
+        self.assertFalse(any(
+            key[0] == mindmap_id and key[2] == 'same-node'
+            for key in manager._local_node_edit_leases
         ))
 
     async def test_configured_redis_failure_never_falls_back_to_local_edit_lock(self) -> None:

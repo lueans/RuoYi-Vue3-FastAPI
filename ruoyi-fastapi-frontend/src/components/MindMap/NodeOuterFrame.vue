@@ -135,7 +135,8 @@ function updateFrame(key, val) {
 
 function removeFrame() {
   if (isReadonly.value || !currentMindMap || currentMindMap !== props.mindMap) return
-  currentMindMap.outerFrame?.removeActiveOuterFrame?.()
+  const removed = currentMindMap.execCommand?.('REMOVE_OUTER_FRAME')
+  if (removed === false) return
   onFrameDeactivate()
 }
 

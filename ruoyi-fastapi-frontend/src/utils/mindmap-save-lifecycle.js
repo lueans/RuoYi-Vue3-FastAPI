@@ -1,5 +1,81 @@
 const wait = (delay) => new Promise(resolve => setTimeout(resolve, delay))
 
+const MINDMAP_STRUCTURE_WRITE_COMMANDS = new Set([
+  'BACK',
+  'FORWARD',
+  'INSERT_NODE',
+  'INSERT_MULTI_NODE',
+  'INSERT_CHILD_NODE',
+  'INSERT_MULTI_CHILD_NODE',
+  'INSERT_PARENT_NODE',
+  'UP_NODE',
+  'DOWN_NODE',
+  'MOVE_UP_ONE_LEVEL',
+  'INSERT_AFTER',
+  'INSERT_BEFORE',
+  'MOVE_NODE_TO',
+  'REMOVE_NODE',
+  'REMOVE_CURRENT_NODE',
+  'PASTE_NODE',
+  'CUT_NODE',
+  'ADD_GENERALIZATION',
+  'REMOVE_GENERALIZATION',
+  'ADD_ASSOCIATIVE_LINE',
+  'REMOVE_ASSOCIATIVE_LINE',
+  'SET_ASSOCIATIVE_LINE_CONTROL_POINTS',
+  'ADD_OUTER_FRAME',
+  'REMOVE_OUTER_FRAME',
+  'SET_NODE_CUSTOM_POSITION',
+  'SET_NODE_EXPAND',
+  'EXPAND_ALL',
+  'UNEXPAND_ALL',
+  'UNEXPAND_TO_LEVEL',
+  'RESET_LAYOUT',
+])
+
+const MINDMAP_AUTO_EDIT_COMMAND_ARG_INDEX = new Map([
+  ['INSERT_NODE', 0],
+  ['INSERT_CHILD_NODE', 0],
+  ['INSERT_PARENT_NODE', 0],
+  ['ADD_GENERALIZATION', 1],
+])
+
+const MINDMAP_APPOINTED_NODES_ARG_INDEX = new Map([
+  ['INSERT_NODE', 1],
+  ['INSERT_CHILD_NODE', 1],
+  ['INSERT_PARENT_NODE', 1],
+])
+
+export function shouldBlockMindmapStructureWrite(commandName, recoveryActive = false) {
+  return recoveryActive === true && MINDMAP_STRUCTURE_WRITE_COMMANDS.has(commandName)
+}
+
+export function mindmapCommandStartsNodeTextEdit(
+  commandName,
+  commandArgs = [],
+  { createNewNodeBehavior = 'default', activeNodeCount = 1 } = {},
+) {
+  const openEditArgIndex = MINDMAP_AUTO_EDIT_COMMAND_ARG_INDEX.get(commandName)
+  if (openEditArgIndex === undefined) return false
+  if (
+    commandArgs[openEditArgIndex] === false
+    || createNewNodeBehavior !== 'default'
+  ) return false
+
+  const appointedNodesArgIndex = MINDMAP_APPOINTED_NODES_ARG_INDEX.get(commandName)
+  const appointedNodes = appointedNodesArgIndex === undefined
+    ? null
+    : commandArgs[appointedNodesArgIndex]
+  const targetCount = Array.isArray(appointedNodes) && appointedNodes.length > 0
+    ? appointedNodes.length
+    : appointedNodes && typeof appointedNodes === 'object'
+      ? 1
+      : activeNodeCount
+  // Render.getNewNodeBehavior 在多目标操作时明确关闭自动文本编辑；零目标
+  // 也不会执行插入。只有单目标默认行为才需要提前检查文本租约能力。
+  return targetCount === 1
+}
+
 export function getMindmapSaveRecoveryAction(saveStatus, recoveryKind) {
   if (saveStatus !== 'error') return null
   if (recoveryKind === 'conflict') {

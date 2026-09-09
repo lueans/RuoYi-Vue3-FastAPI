@@ -106,7 +106,23 @@ test('大纲编辑使用节点级命令并在快捷新增前同步当前标题',
   assert.match(source, /execCommand\('INSERT_AFTER'/)
   assert.match(source, /updateNodeLabel\(e\.currentTarget, data\)[\s\S]*createNewOutlineNode/)
   assert.match(source, /:allow-drag="allowDrag"/)
-  assert.match(source, /return !isReadonly\.value && node\.level > 1/)
+  assert.match(
+    source,
+    /function allowDrag\(node\)[\s\S]*?!isReadonly\.value[\s\S]*?isStructureWriteBlocked\?\.\(\) !== true[\s\S]*?node\.level > 1/,
+  )
+  assert.match(
+    source,
+    /const inserted = props\.mindMap\.execCommand\('INSERT_NODE'[\s\S]*?if \(inserted === false\)[\s\S]*?refreshOutlineFromRuntime/,
+  )
+  assert.equal(
+    (source.match(/if \(inserted === false\) \{\s*refreshOutlineFromRuntime\(\)/g) || []).length,
+    2,
+  )
+  assert.match(source, /if \(moved === false\) \{\s*refreshOutlineFromRuntime\(\)/)
+  assert.match(
+    source,
+    /function recoverFromStaleOutline\(message\) \{\s*ElMessage\.warning\(message\)\s*refreshOutlineFromRuntime\(\)/,
+  )
   assert.match(source, /function close\(\) \{[\s\S]*blurActiveOutlineEditor\(\)/)
   assert.match(source, /onBeforeUnmount\(\(\) => \{[\s\S]*blurActiveOutlineEditor\(\)/)
   assert.match(source, /@focus="onNodeFocus\(\$event, data\)"/)

@@ -154,34 +154,36 @@ class Drag extends Base {
         beingDragNodeList: [...this.beingDragNodeList]
       })
       if (isCancel) {
+        if (this.isDragging) this.mindMap.emit('node_dragcancel')
         this.reset()
         return
       }
     }
+    let structureWriteRejected = false
     // 存在重叠子节点，则移动作为其子节点
     if (this.overlapNode) {
-      this.removeNodeActive(this.overlapNode)
-      this.mindMap.execCommand(
+      structureWriteRejected = this.mindMap.execCommand(
         'MOVE_NODE_TO',
         this.beingDragNodeList,
         this.overlapNode
-      )
+      ) === false
+      if (!structureWriteRejected) this.removeNodeActive(this.overlapNode)
     } else if (this.prevNode) {
       // 存在前一个相邻节点，作为其下一个兄弟节点
-      this.removeNodeActive(this.prevNode)
-      this.mindMap.execCommand(
+      structureWriteRejected = this.mindMap.execCommand(
         'INSERT_AFTER',
         this.beingDragNodeList,
         this.prevNode
-      )
+      ) === false
+      if (!structureWriteRejected) this.removeNodeActive(this.prevNode)
     } else if (this.nextNode) {
       // 存在下一个相邻节点，作为其前一个兄弟节点
-      this.removeNodeActive(this.nextNode)
-      this.mindMap.execCommand(
+      structureWriteRejected = this.mindMap.execCommand(
         'INSERT_BEFORE',
         this.beingDragNodeList,
         this.nextNode
-      )
+      ) === false
+      if (!structureWriteRejected) this.removeNodeActive(this.nextNode)
     } else if (
       this.clone &&
       enableFreeDrag &&
@@ -195,24 +197,30 @@ class Drag extends Base {
       let { scaleX, scaleY, translateX, translateY } = this.drawTransform
       x = (x - translateX) / scaleX
       y = (y - translateY) / scaleY
-      this.mousedownNode.left = x
-      this.mousedownNode.top = y
-      this.mousedownNode.customLeft = x
-      this.mousedownNode.customTop = y
-      this.mindMap.execCommand(
+      const positionUpdated = this.mindMap.execCommand(
         'SET_NODE_CUSTOM_POSITION',
         this.mousedownNode,
         x,
         y
       )
-      this.mindMap.render()
+      structureWriteRejected = positionUpdated === false
+      if (!structureWriteRejected) {
+        this.mousedownNode.left = x
+        this.mousedownNode.top = y
+        this.mousedownNode.customLeft = x
+        this.mousedownNode.customTop = y
+        this.mindMap.render()
+      }
     }
     if (this.isDragging) {
-      this.mindMap.emit('node_dragend', {
-        overlapNodeUid,
-        prevNodeUid,
-        nextNodeUid
-      })
+      this.mindMap.emit(
+        structureWriteRejected ? 'node_dragcancel' : 'node_dragend',
+        structureWriteRejected ? undefined : {
+          overlapNodeUid,
+          prevNodeUid,
+          nextNodeUid
+        }
+      )
     }
     this.reset()
   }

@@ -24,7 +24,7 @@ test('主题和结构卡片使用具名原生选择按钮', async () => {
   ])
 
   assert.match(theme, /<button[\s\S]*class="themeItem"[\s\S]*:aria-pressed="item\.value === currentTheme"/)
-  assert.match(theme, /:disabled="themeChangePending \|\| isReadonly"/)
+  assert.match(theme, /:disabled="themeChangePending \|\| isWriteBlocked"/)
   assert.doesNotMatch(theme, /<div\s+class="themeItem"/)
   assert.match(structure, /<summary ref="layoutSummaryRef" class="currentLayoutCard">[\s\S]*currentLayoutName[\s\S]*当前布局/)
   assert.match(structure, /<button[\s\S]*class="layoutItem"[\s\S]*:aria-label="`使用结构：/)

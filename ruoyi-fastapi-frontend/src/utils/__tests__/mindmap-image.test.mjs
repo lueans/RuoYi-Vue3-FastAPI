@@ -67,7 +67,7 @@ test('节点图片、渲染器和主题背景统一使用安全读取链路并�
   assert.match(nodeImagePreview, /watch\(\(\) => props\.mindMap,[\s\S]*closeViewer\(\)/)
   assert.match(backgroundUpload, /readMindmapImageFile\(file\)/)
   assert.match(backgroundUpload, /aria-label="选择背景图片"/)
-  assert.match(backgroundUpload, /<button class="delBtn"/)
+  assert.match(backgroundUpload, /<button[\s\S]*?class="delBtn"/)
   assert.match(nodeRenderer, /return getSafeMindMapImageUrl\(imageUrl\)/)
   assert.doesNotMatch(nodeRenderer, /new SVGImage\(\)\.load\(this\.getImageUrl\(\)\)/)
 })

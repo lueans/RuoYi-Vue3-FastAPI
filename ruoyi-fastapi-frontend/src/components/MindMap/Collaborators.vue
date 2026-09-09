@@ -33,6 +33,9 @@
             <el-avatar v-if="extraCount > 0" :size="28" class="extra-count">
               +{{ extraCount }}
             </el-avatar>
+            <el-avatar v-if="onlineUsers.length > 1" :size="28" class="extra-count mobile-extra-count">
+              +{{ onlineUsers.length - 1 }}
+            </el-avatar>
           </span>
           <span class="presence-label">{{ onlineUsers.length }} 人在线</span>
         </button>
@@ -183,6 +186,10 @@ function handlePopoverEscape() {
   background: #e9edf3 !important;
   color: #596273;
   font-size: 10px;
+}
+
+.avatar-stack :deep(.el-avatar.mobile-extra-count) {
+  display: none;
 }
 
 .presence-trigger.is-dark .avatar-stack :deep(.extra-count) {
@@ -343,6 +350,29 @@ function handlePopoverEscape() {
 
   .presence-trigger {
     padding-right: 4px;
+  }
+}
+
+@media (max-width: 760px) {
+  .avatar-stack {
+    position: relative;
+    padding-right: 5px;
+  }
+
+  .avatar-stack :deep(.el-avatar:nth-child(n + 2)) {
+    display: none;
+  }
+
+  .avatar-stack :deep(.el-avatar.mobile-extra-count) {
+    display: inline-flex;
+    position: absolute;
+    right: -1px;
+    bottom: -3px;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border-width: 1px;
+    font-size: 8px;
   }
 }
 </style>

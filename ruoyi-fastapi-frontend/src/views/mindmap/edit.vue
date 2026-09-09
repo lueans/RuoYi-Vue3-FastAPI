@@ -58,12 +58,6 @@
             </span>
           </div>
           <el-tag v-if="isReadonly" type="info" size="small" effect="plain" class="readonly-tag">只读</el-tag>
-          <Collaborators
-            v-if="collaborators.length > 0"
-            :collaborators="collaborators"
-            :dark="isDark"
-            class="collaborators"
-          />
         </div>
       </div>
       <div
@@ -94,7 +88,11 @@
         <Toolbar embedded class="header-command-toolbar" />
       </div>
       <div class="header-right">
-        <div v-if="documentLoaded" class="header-actions">
+        <div
+          v-if="documentLoaded"
+          class="header-actions"
+          :class="{ 'has-recovery-actions': !isReadonly && (canRetryRealtime || saveRecoveryAction) }"
+        >
           <div v-if="!isReadonly && (canRetryRealtime || saveRecoveryAction)" class="header-recovery-actions">
             <el-tooltip v-if="canRetryRealtime" content="立即重新连接实时协作" placement="bottom" :show-after="300">
               <button
@@ -120,11 +118,18 @@
               <span class="recovery-label">{{ saveRecoveryAction.label }}</span>
             </button>
           </div>
+          <Collaborators
+            v-if="collaborators.length > 0"
+            :collaborators="collaborators"
+            :max-display="5"
+            :dark="isDark"
+            class="header-collaborators"
+          />
           <template v-if="serverIsOwner && !isReadonly">
             <el-tooltip content="管理分享链接与访问权限" placement="bottom" :show-after="300">
-              <button class="share-btn" @click="openShareDialog" type="button" aria-label="分享脑图">
+              <button class="header-icon-btn share-btn" @click="openShareDialog" type="button" aria-label="分享脑图">
                 <svg-icon icon-class="share" />
-                <span>分享</span>
+                <span class="header-action-label">分享</span>
               </button>
             </el-tooltip>
           </template>
@@ -1082,9 +1087,8 @@ onBeforeUnmount(() => {
     flex-shrink: 0;
   }
 
-  .collaborators {
+  .header-collaborators {
     flex-shrink: 0;
-    margin-left: 4px;
   }
 
   .header-actions {
@@ -1216,39 +1220,6 @@ onBeforeUnmount(() => {
     }
   }
 
-  .share-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 64px;
-    height: 32px;
-    border-radius: 6px;
-    cursor: pointer;
-    color: #1f2329;
-    transition: all 0.2s;
-    font-size: 13px;
-    font-weight: 500;
-    gap: 6px;
-    border: 1px solid #dfe3e8;
-    background: #fff;
-    padding: 0 12px;
-    box-shadow: 0 1px 3px rgba(31, 35, 41, 0.08);
-    outline: none;
-    &:hover {
-      border-color: #b9c9eb;
-      background: #f8faff;
-      color: #245bdb;
-      box-shadow: 0 2px 6px rgba(31, 35, 41, 0.1);
-    }
-    &:focus-visible {
-      box-shadow: 0 0 0 2px #3370ff40;
-    }
-    .svg-icon {
-      width: 15px;
-      height: 15px;
-      color: #3370ff;
-    }
-  }
 }
 
 .header-command-center {
@@ -1599,7 +1570,6 @@ onBeforeUnmount(() => {
     }
 
     .document-meta,
-    .collaborators,
     .history-action-btn,
     .collaborator-action-btn {
       display: none;
@@ -1618,16 +1588,6 @@ onBeforeUnmount(() => {
 
     .mindmap-title {
       max-width: 140px;
-    }
-
-    .share-btn {
-      min-width: 34px;
-      width: 34px;
-      padding: 0;
-
-      span {
-        display: none;
-      }
     }
 
     .save-recovery-btn {
@@ -1761,6 +1721,21 @@ onBeforeUnmount(() => {
 
     :deep(.el-button) {
       width: 100%;
+    }
+  }
+}
+
+@media (max-width: 480px) {
+  .mindmap-edit-header {
+    .brand-mark {
+      display: none;
+    }
+
+    .header-actions.has-recovery-actions {
+      .filter-action-btn,
+      .comment-action-btn {
+        display: none;
+      }
     }
   }
 }

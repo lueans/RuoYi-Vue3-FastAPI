@@ -70,6 +70,22 @@ test('在线成员组件提供键盘入口、完整名单和有界溢出反馈',
   assert.match(component, /triggerRef\.value\?\.focus\?\.\(\)/)
   assert.match(component, /aria-label="在线协作者名单"/)
   assert.match(component, /panelOverflowCount/)
+  assert.match(component, /class="extra-count mobile-extra-count"[\s\S]*?onlineUsers\.length - 1/)
+  assert.match(component, /@media \(max-width: 760px\)[\s\S]*?\.mobile-extra-count[\s\S]*?display: inline-flex[\s\S]*?position: absolute/)
   assert.equal(/v-for="user in collaborators"/.test(component), false)
   assert.match(page, /:dark="isDark"/)
+
+  const headerActions = page.match(/class="header-actions"[\s\S]*?<div class="header-utility-group"/)?.[0] || ''
+  assert.match(headerActions, /<Collaborators[\s\S]*?:max-display="5"[\s\S]*?class="header-collaborators"/)
+  assert.match(headerActions, /has-recovery-actions/)
+  assert.ok(
+    headerActions.indexOf('<Collaborators') < headerActions.indexOf('share-btn'),
+    '在线协作者入口应位于分享按钮左侧',
+  )
+  assert.doesNotMatch(page.match(/<div class="header-left">[\s\S]*?<div[\s\S]*?class="header-command-center"/)?.[0] || '', /<Collaborators/)
+  assert.doesNotMatch(page, /\.document-meta,\s*\.header-collaborators,\s*\.history-action-btn/)
+  assert.match(headerActions, /class="header-icon-btn share-btn"[\s\S]*?<span class="header-action-label">分享<\/span>/)
+  assert.doesNotMatch(page, /\n\s*\.share-btn\s*\{/)
+  assert.match(page, /@media \(max-width: 480px\)[\s\S]*?\.brand-mark[\s\S]*?display: none/)
+  assert.match(page, /\.header-actions\.has-recovery-actions[\s\S]*?\.filter-action-btn,[\s\S]*?\.comment-action-btn[\s\S]*?display: none/)
 })

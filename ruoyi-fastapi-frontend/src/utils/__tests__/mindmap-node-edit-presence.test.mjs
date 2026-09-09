@@ -270,11 +270,13 @@ test('新节点租约等待期间的重复键盘入口复用准入并保留全�
     /bufferPendingNodeTextEditInput\([\s\S]*?e\.preventDefault\(\)[\s\S]*?return/,
   )
   const reuseIndex = showBody.indexOf('reusePendingNodeTextEditAdmission(')
+  const reuseCurrentIndex = showBody.indexOf('this.reuseCurrentTextEdit(')
   const cancelIndex = showBody.indexOf('this.cancelPendingTextEditAdmission()')
   const awaitIndex = showBody.indexOf('await beforeTextEdit(node, isInserting)')
   const replayIndex = showBody.indexOf('this.applyPendingTextEditInput(')
   assert.ok(reuseIndex >= 0)
-  assert.ok(cancelIndex > reuseIndex)
+  assert.ok(reuseCurrentIndex > reuseIndex)
+  assert.ok(cancelIndex > reuseCurrentIndex)
   assert.ok(awaitIndex > cancelIndex)
   assert.ok(replayIndex > awaitIndex)
   assert.match(
@@ -348,6 +350,219 @@ test('新节点租约等待期间的重复键盘入口复用准入并保留全�
   assert.match(source, /if \(opened && pendingInputTouched\)/)
 })
 
+test('画布容器持有焦点时仍能由键盘进入节点编辑', async () => {
+  const source = await readFile(
+    new URL('../../libs/simple-mind-map/src/core/render/TextEdit.js', import.meta.url),
+    'utf8',
+  )
+  const document = { body: {} }
+  const onKeydown = compileTextEditMethod(
+    source,
+    'onKeydown(e)',
+    {
+      document,
+      bufferPendingNodeTextEditInput: () => false,
+    },
+  )
+  const canvas = {}
+  const node = { getData: key => key === 'uid' ? 'selected' : undefined }
+  let shown = null
+  let prevented = false
+  onKeydown.call({
+    pendingTextEditAdmission: null,
+    mindMap: {
+      el: canvas,
+      renderer: { activeNodeList: [node] },
+      opt: { enableAutoEnterTextEditWhenKeydown: true },
+    },
+    isEditableTextInputTarget: () => false,
+    queuePendingTextEditContinuation: () => false,
+    isShowTextEdit: () => false,
+    checkIsAutoEnterTextEditKey: () => true,
+    show: params => { shown = params },
+  }, {
+    target: canvas,
+    key: '1',
+    keyCode: 49,
+    preventDefault: () => { prevented = true },
+  })
+
+  assert.equal(prevented, true)
+  assert.equal(shown?.node, node)
+  assert.equal(shown?.isFromKeyDown, true)
+
+  const pendingAdmission = {
+    nodeUid: 'pending-node',
+    pendingInputText: '',
+    pendingInputTouched: false,
+  }
+  let pendingPrevented = false
+  const pendingOnKeydown = compileTextEditMethod(
+    source,
+    'onKeydown(e)',
+    { document, bufferPendingNodeTextEditInput },
+  )
+  pendingOnKeydown.call({
+    pendingTextEditAdmission: pendingAdmission,
+    renderer: { findNodeByUid: () => null },
+    mindMap: {
+      el: canvas,
+      renderer: { activeNodeList: [] },
+      opt: { enableAutoEnterTextEditWhenKeydown: true },
+    },
+    isEditableTextInputTarget: () => false,
+    queuePendingTextEditContinuation: () => false,
+  }, {
+    target: document.body,
+    key: '1',
+    keyCode: 49,
+    preventDefault: () => { pendingPrevented = true },
+  })
+  assert.equal(pendingPrevented, true)
+  assert.equal(pendingAdmission.pendingInputText, '1')
+
+  // 概要数组重排时旧 runtime 可能已从 summary-a 复用成 summary-b。
+  // 键盘入口仍必须把冻结 UID 交给 same-editor reuse，不能关闭后在 B 上重开。
+  const reuseCurrent = compileTextEditMethod(
+    source,
+    'reuseCurrentTextEdit(node, event, isFromKeyDown = false)',
+  )
+  const reusedSummaryRuntime = { getData: () => 'summary-b' }
+  let frozenTargetUid = ''
+  let summaryInput = ''
+  let summaryFocusCount = 0
+  const summaryContext = {
+    currentNode: reusedSummaryRuntime,
+    currentTextEditNodeUid: 'summary-a',
+    pendingTextEditAdmission: null,
+    textEditNode: { focus: () => { summaryFocusCount += 1 } },
+    renderer: { findNodeByUid: () => null },
+    mindMap: {
+      el: canvas,
+      richText: null,
+      renderer: { activeNodeList: [] },
+      opt: { enableAutoEnterTextEditWhenKeydown: true },
+    },
+    isEditableTextInputTarget: () => false,
+    queuePendingTextEditContinuation: () => false,
+    isShowTextEdit: () => true,
+    getCurrentEditNode: () => reusedSummaryRuntime,
+    checkIsAutoEnterTextEditKey: () => true,
+    updateTextEditNode: () => assert.fail('runtime 空窗不应重绑概要旧实例'),
+    applyPendingTextEditInput: text => { summaryInput += text },
+  }
+  summaryContext.show = ({ node: target, e, isFromKeyDown }) => {
+    frozenTargetUid = target.uid || target.getData?.('uid') || ''
+    assert.equal(reuseCurrent.call(
+      summaryContext,
+      target,
+      e,
+      isFromKeyDown,
+    ), true)
+  }
+  onKeydown.call(summaryContext, {
+    target: canvas,
+    key: '3',
+    keyCode: 51,
+    preventDefault: () => {},
+  })
+  assert.equal(frozenTargetUid, 'summary-a')
+  assert.equal(summaryInput, '3')
+  assert.equal(summaryFocusCount, 1)
+  assert.equal(summaryContext.currentTextEditNodeUid, 'summary-a')
+})
+
+test('已打开的同一节点编辑器复用现有 DOM 并保留后续按键', async () => {
+  const source = await readFile(
+    new URL('../../libs/simple-mind-map/src/core/render/TextEdit.js', import.meta.url),
+    'utf8',
+  )
+  const reuseCurrent = compileTextEditMethod(
+    source,
+    'reuseCurrentTextEdit(node, event, isFromKeyDown = false)',
+  )
+  const oldNode = { getData: () => 'new-node' }
+  const currentNode = { getData: () => 'new-node' }
+  let appliedText = ''
+  let updates = 0
+  let focusCount = 0
+  const richOrder = []
+  const richText = {
+    node: oldNode,
+    quill: { focus: () => { focusCount += 1; richOrder.push('focus') } },
+  }
+  const context = {
+    currentTextEditNodeUid: 'new-node',
+    mindMap: { richText },
+    renderer: { findNodeByUid: () => currentNode },
+    isShowTextEdit: () => true,
+    getCurrentEditNode: () => richText.node,
+    updateTextEditNode: () => { updates += 1 },
+    applyPendingTextEditInput: text => {
+      richOrder.push('input')
+      appliedText += text
+    },
+  }
+
+  assert.equal(reuseCurrent.call(
+    context,
+    currentNode,
+    { key: '1' },
+    true,
+  ), true)
+  assert.strictEqual(richText.node, currentNode)
+  assert.equal(appliedText, '1')
+  assert.equal(updates, 1)
+  assert.equal(focusCount, 1)
+  assert.deepEqual(richOrder, ['focus', 'input'])
+  assert.equal(reuseCurrent.call(
+    context,
+    { getData: () => 'other-node' },
+    { type: 'dblclick' },
+    false,
+  ), false)
+
+  const plainNode = { getData: () => 'plain-node' }
+  let plainFocusCount = 0
+  let plainInput = ''
+  const plainOrder = []
+  const plainContext = {
+    currentNode: plainNode,
+    currentTextEditNodeUid: 'plain-node',
+    textEditNode: {
+      focus: () => { plainFocusCount += 1; plainOrder.push('focus') },
+    },
+    mindMap: { richText: null },
+    // 模拟 Render._render 暂时清空 runtime root 的窗口；已有编辑器仍须
+    // 接住按键，不能返回 show() 的关闭重开路径。
+    renderer: { findNodeByUid: () => null },
+    isShowTextEdit: () => true,
+    getCurrentEditNode: () => plainNode,
+    updateTextEditNode: () => assert.fail('换树窗口不应读取旧 SVG 几何'),
+    applyPendingTextEditInput: text => {
+      plainOrder.push('input')
+      plainInput += text
+    },
+  }
+  assert.equal(reuseCurrent.call(
+    plainContext,
+    plainNode,
+    { key: '2' },
+    true,
+  ), true)
+  assert.equal(plainInput, '2')
+  assert.equal(plainFocusCount, 1)
+  assert.deepEqual(plainOrder, ['focus', 'input'])
+
+  const showEditStart = source.indexOf('  showEditTextBox({')
+  const showEditEnd = source.indexOf('  // 派发节点文本编辑事件', showEditStart)
+  const showEditBody = source.slice(showEditStart, showEditEnd)
+  const explicitFocusIndex = showEditBody.indexOf('this.textEditNode.focus?.(')
+  const selectionIndex = showEditBody.indexOf('if (isInserting ||')
+  assert.ok(explicitFocusIndex >= 0)
+  assert.ok(selectionIndex > explicitFocusIndex)
+})
+
 test('待准入输入使用原生编辑控件保留 IME、分段命令和取消语义', async () => {
   const source = await readFile(
     new URL('../../libs/simple-mind-map/src/core/render/TextEdit.js', import.meta.url),
@@ -374,6 +589,10 @@ test('待准入输入使用原生编辑控件保留 IME、分段命令和取消�
   const removeInput = compileTextEditMethod(
     source,
     'removePendingTextEditInput(admission)',
+  )
+  const snapshotInput = compileTextEditMethod(
+    source,
+    'snapshotPendingTextEditInput(admission)',
   )
   const admission = { nodeUid: 'new-node' }
   const node = {
@@ -418,6 +637,14 @@ test('待准入输入使用原生编辑控件保留 IME、分段命令和取消�
     { text: '你', touched: true, continuationCommand: 'INSERT_NODE' },
     { text: '好', touched: true, continuationCommand: '' },
   ])
+
+  input.value = '好1111'
+  admission.pendingInputNativeActivity = true
+  assert.equal(snapshotInput.call(context, admission), true)
+  assert.strictEqual(context.pendingTextEditAdmission, admission)
+  assert.equal(input.isConnected, true)
+  assert.equal(admission.pendingInputText, '好1111')
+  assert.equal(admission.pendingInputSegments[1].text, '好1111')
 
   input.dispatchEvent(new window.Event('compositionstart'))
   const cancelledComposition = waitForComposition.call(context, admission)

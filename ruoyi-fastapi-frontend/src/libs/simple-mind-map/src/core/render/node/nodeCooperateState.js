@@ -38,6 +38,9 @@ function getPrintableTextEditKey(event) {
 }
 
 function updatePendingInputValue(admission, value) {
+  // window keydown 降级路径成为最新真源后，交接阶段不能再用未获焦点的
+  // textarea 旧值覆盖它。
+  admission.pendingInputNativeActivity = false
   admission.pendingInputText = value
   admission.pendingInputTouched = true
   const segments = admission.pendingInputSegments

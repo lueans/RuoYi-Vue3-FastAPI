@@ -9,7 +9,8 @@ import time
 import uuid
 from collections import deque
 from contextlib import suppress
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 
 from fastapi import WebSocket
 
@@ -26,10 +27,14 @@ YJS_SOURCE_CAS_CAPABILITY = 'yjs-source-cas-v1'
 CROSS_NODE_CRDT_V2_CAPABILITY = 'cross-node-crdt-v2'
 NODE_EDIT_LEASE_CAPABILITY = 'node-edit-lease-v1'
 NODE_EDIT_LEASE_RENEWAL_CAPABILITY = 'node-edit-lease-renewal-v1'
+COLLABORATION_MUTATION_BARRIER_CAPABILITY = 'collaboration-mutation-barrier-v1'
+COLLABORATION_MUTATION_BARRIER_TOKEN_HEX_LENGTH = 32
+MAX_COLLABORATION_MUTATION_BARRIER_PARTICIPANTS = 10_000
 ROOM_WRITE_CAPABILITIES = frozenset({
     YJS_LINEAGE_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
     NODE_EDIT_LEASE_CAPABILITY,
+    COLLABORATION_MUTATION_BARRIER_CAPABILITY,
 })
 STATIC_REQUIRED_WRITE_CAPABILITIES = ROOM_WRITE_CAPABILITIES
 LINEAGE_PRESERVING_REVISION_EVENTS = frozenset({
@@ -54,6 +59,8 @@ CROSS_INSTANCE_MESSAGE_TYPES = frozenset({
     'tag_replaced',
     'tag_unbound',
     'room_write_capability_required',
+    'collaboration_barrier_prepare',
+    'collaboration_barrier_released',
 })
 ACCESS_REVOCATION_SCOPES = frozenset({'access', 'edit'})
 MAX_REDIS_EVENT_IDENTITY_LENGTH = 128
@@ -71,6 +78,15 @@ REDIS_EVENT_SIGNING_CONTEXT = b'mindmap-redis-events-v2'
 REDIS_EVENT_MAX_AGE_MS = 2 * 60 * 1000
 REDIS_EVENT_MAX_FUTURE_SKEW_MS = 30 * 1000
 _REDIS_CALL_FAILED = object()
+
+
+def is_lower_hex(value: object, length: int) -> bool:
+    """校验是否为精确长度的小写十六进制字符串。"""
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in '0123456789abcdef' for character in value)
+    )
 _RELEASE_SEED_LEASE_SCRIPT = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     return redis.call('del', KEYS[1])
@@ -100,7 +116,87 @@ _VERIFY_LINEAGE_FENCE_AND_PUBLISH_SCRIPT = """
 if redis.call('get', KEYS[1]) ~= ARGV[1] then
     return -1
 end
+if redis.call('exists', KEYS[2]) == 1 then
+    return -2
+end
 return redis.call('publish', ARGV[2], ARGV[3])
+"""
+_ACK_COLLABORATION_BARRIER_SCRIPT = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return -1
+end
+if redis.call('sismember', KEYS[2], ARGV[2]) ~= 1 then
+    return -2
+end
+if ARGV[3] == '1' then
+    redis.call('sadd', KEYS[3], ARGV[2])
+else
+    redis.call('sadd', KEYS[4], ARGV[2])
+end
+redis.call('expire', KEYS[1], ARGV[4])
+redis.call('expire', KEYS[2], ARGV[4])
+redis.call('expire', KEYS[3], ARGV[4])
+redis.call('expire', KEYS[4], ARGV[4])
+return 1
+"""
+_RENEW_COLLABORATION_BARRIER_SCRIPT = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call('expire', KEYS[1], ARGV[2])
+if redis.call('exists', KEYS[2]) == 1 then redis.call('expire', KEYS[2], ARGV[2]) end
+if redis.call('exists', KEYS[3]) == 1 then redis.call('expire', KEYS[3], ARGV[2]) end
+if redis.call('exists', KEYS[4]) == 1 then redis.call('expire', KEYS[4], ARGV[2]) end
+return 1
+"""
+_REPORT_UNPROVEN_COLLABORATION_PARTICIPANT_SCRIPT = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call('sadd', KEYS[2], ARGV[2])
+redis.call('expire', KEYS[1], ARGV[3])
+redis.call('expire', KEYS[2], ARGV[3])
+return 1
+"""
+_PREPARE_COLLABORATION_BARRIER_COMMIT_SCRIPT = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return -1
+end
+local current_lineage = redis.call('get', KEYS[2])
+if ARGV[3] == '1' then
+    if current_lineage then return -2 end
+elseif current_lineage ~= ARGV[2] then
+    return -2
+end
+redis.call('set', KEYS[2], ARGV[4])
+redis.call('set', KEYS[1], ARGV[5], 'EX', ARGV[6])
+return 1
+"""
+_ABORT_COLLABORATION_BARRIER_SCRIPT = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+if ARGV[2] ~= '' then
+    if redis.call('get', KEYS[2]) ~= ARGV[2] then return -1 end
+    if ARGV[4] == '1' then
+        redis.call('del', KEYS[2])
+    else
+        redis.call('set', KEYS[2], ARGV[3])
+    end
+end
+redis.call('del', KEYS[1], KEYS[3], KEYS[4], KEYS[5])
+return 1
+"""
+_COMPLETE_COLLABORATION_BARRIER_SCRIPT = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return -1
+end
+if redis.call('get', KEYS[2]) ~= ARGV[2] then
+    return -2
+end
+local subscribers = redis.call('publish', ARGV[3], ARGV[4])
+redis.call('del', KEYS[1], KEYS[3], KEYS[4], KEYS[5])
+return subscribers
 """
 _ACQUIRE_OR_RENEW_NODE_EDIT_LEASE_SCRIPT = """
 local raw_fence = redis.call('get', KEYS[1])
@@ -178,6 +274,25 @@ return 0
 """
 
 
+@dataclass(frozen=True, slots=True)
+class CollaborationMutationBarrier:
+    """一次云端权威替换所持有的跨 worker 写入栅栏。"""
+
+    mindmap_id: int
+    token: str
+    expected_revision: int
+    expected_room_epoch: str | None
+    participants: frozenset[str]
+    barrier_raw: str
+    expected_lineage_raw: str | None
+    # prepare PUBLISH 返回的订阅 worker 数。每个收到事件的 worker 必须先
+    # 将本地可写连接与 participant 快照交叉校验，并写入唯一 witness；协调
+    # 端在 witness 齐全前不能把空 participant 快照当作已经排空。
+    expected_worker_witnesses: int = 0
+    stage: str = 'draining'
+    prepared_lineage_raw: str | None = None
+
+
 class RoomManager:
     """管理本地 WebSocket 房间，并通过 Redis 同步不同应用实例。"""
 
@@ -188,11 +303,15 @@ class RoomManager:
     _write_capability_key_prefix = 'mindmap:collaboration:write-capability:v1:'
     _lineage_fence_key_prefix = 'mindmap:collaboration:lineage-fence:v1:'
     _lineage_gap_key_prefix = 'mindmap:collaboration:lineage-gap:v1:'
+    _mutation_barrier_key_prefix = 'mindmap:collaboration:mutation-barrier:v1:'
     _presence_ttl_seconds = 120
     _seed_lease_ttl_seconds = 10
     _node_edit_lease_ttl_seconds = 30
     _lineage_gap_grace_ms = 2_000
     _lineage_gap_marker_ttl_ms = 60_000
+    _mutation_barrier_ttl_seconds = 30
+    _mutation_barrier_drain_timeout_seconds = 10
+    _mutation_barrier_poll_seconds = 0.05
     _redis_operation_timeout_seconds = 2
     _send_timeout_seconds = 2
     _slow_consumer_close_code = 1013
@@ -238,6 +357,16 @@ class RoomManager:
         # active lineage 必须立即清除以拒绝旧 revision 写，但暂存上一代候选，
         # 允许随后到达的同 revision 明确连续事件恢复；reset/seed 会丢弃它。
         self._pending_content_lineages: dict[int, tuple[int, str, str]] = {}
+        # 云端 AI 整图 apply/undo 会短暂冻结协作写。Redis 键是跨 worker
+        # 权威栅栏，本表只负责本 worker UI 通知与单进程安全降级。
+        self._collaboration_mutation_barriers: dict[
+            int, CollaborationMutationBarrier
+        ] = {}
+        self._local_collaboration_barrier_acks: dict[int, set[str]] = {}
+        self._local_collaboration_barrier_failures: dict[int, set[str]] = {}
+        self._local_collaboration_barrier_checkpoints: dict[
+            int, set[tuple[str, str]]
+        ] = {}
         # 持久化快照在查询期间可能与本 worker 收到的 Redis seed
         # 事件竞态。用单调代次做 compare-and-set，避免较早的数据库
         # 快照反向覆盖查询期间已经切换的更新 lineage。
@@ -330,6 +459,10 @@ class RoomManager:
         self._content_lineages.clear()
         self._local_lineage_epochs.clear()
         self._pending_content_lineages.clear()
+        self._collaboration_mutation_barriers.clear()
+        self._local_collaboration_barrier_acks.clear()
+        self._local_collaboration_barrier_failures.clear()
+        self._local_collaboration_barrier_checkpoints.clear()
         self._content_lineage_generations.clear()
         self._seen_event_ids.clear()
         self._seen_event_order.clear()
@@ -346,7 +479,6 @@ class RoomManager:
         can_edit: bool = True,
     ) -> bool:
         connection_id = uuid.uuid4().hex
-        member = self._serialize_presence(connection_id, user_info)
         negotiated_capabilities = set(capabilities or ())
         async with self._lock:
             required_capabilities = (
@@ -356,6 +488,12 @@ class RoomManager:
             effective_can_edit = (
                 can_edit is True
                 and required_capabilities.issubset(negotiated_capabilities)
+            )
+            member = self._serialize_presence(
+                connection_id,
+                user_info,
+                can_edit=effective_can_edit,
+                capabilities=negotiated_capabilities,
             )
             self._rooms.setdefault(mindmap_id, set()).add(websocket)
             self._user_info[id(websocket)] = user_info
@@ -368,8 +506,38 @@ class RoomManager:
             # 取消，标记可能来不及消费；Python 后续复用该 id 时，新连接不能
             # 继承旧会话的“禁止断开持久化”状态。
             self._blocked_disconnect_persistence.discard(id(websocket))
-        await self._write_presence(mindmap_id, member)
+        presence_written = await self._write_presence(mindmap_id, member)
+        admission_unbarred = (
+            await self._is_collaboration_admission_unbarred(mindmap_id)
+            if effective_can_edit and presence_written
+            else presence_written
+        )
+        if effective_can_edit and not admission_unbarred:
+            # 分布式 AI 栅栏只能够冻结 Redis presence 中可证明存在的写连接。
+            # 可写 admission 若在 zset 登记失败却继续放行，这条连接会被参与者
+            # 快照遗漏，随后整图 reset 可能覆盖它尚未排空的本地输入。
+            await self._detach_local_connection(websocket, mindmap_id)
+            self._send_locks.pop(id(websocket), None)
+            await self._remove_presence_record(
+                (mindmap_id, connection_id, member) if presence_written else None,
+                operation='回滚未获准的可写在线成员',
+            )
+            raise RuntimeError('协作在线状态登记失败')
         return effective_can_edit
+
+    async def _is_collaboration_admission_unbarred(self, mindmap_id: int) -> bool:
+        """可写连接登记后复核栅栏，封住 join 与 participant 快照的竞态。"""
+        redis = self._redis
+        if redis:
+            raw = await self._safe_redis_call(
+                redis.get(self._mutation_barrier_key(mindmap_id)),
+                operation='复核可写连接 admission 栅栏',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            return raw is None
+        if AppConfig.app_workers > 1:
+            return False
+        return mindmap_id not in self._collaboration_mutation_barriers
 
     async def leave(self, mindmap_id: int, websocket: WebSocket) -> None:
         # 必须在首次 await 前标记退休。否则一个已经通过前置校验、尚在等待
@@ -560,11 +728,18 @@ class RoomManager:
             'retryable': True,
         }
 
-    async def touch_presence(self, mindmap_id: int, websocket: WebSocket) -> None:
+    async def touch_presence(self, mindmap_id: int, websocket: WebSocket) -> bool:
         """刷新连接的分布式在线状态，供心跳任务调用。"""
         presence = self._connection_presence.get(id(websocket))
-        if presence and presence[0] == mindmap_id:
-            await self._write_presence(mindmap_id, presence[2])
+        if not presence or presence[0] != mindmap_id:
+            return False
+        written = await self._write_presence(mindmap_id, presence[2])
+        if not written and self._connection_can_edit.get(id(websocket), False):
+            # 先同步撤销本 worker 的写资格，再让 endpoint 通知并关闭连接。
+            # 正在等待 Redis/DB 的消息会在最终 connection_write 检查处失败。
+            self._connection_can_edit[id(websocket)] = False
+            self.block_disconnect_persistence(websocket)
+        return written
 
     def set_content_revision(
         self,
@@ -674,6 +849,859 @@ class RoomManager:
         current = self._content_lineages.get(mindmap_id)
         return type(revision) is int and current is not None and current[0] == revision
 
+    async def get_active_lineage_epoch(
+        self,
+        mindmap_id: int,
+        revision: int | None = None,
+    ) -> str | None:
+        """返回 AI/节点租约等写屏障可使用的当前稳定房间世代。"""
+        fence = await self._get_active_lineage_lease_fence(mindmap_id, revision)
+        return fence[1] if fence is not None else None
+
+    @staticmethod
+    def _encode_collaboration_mutation_barrier(
+        *,
+        token: str,
+        expected_revision: int,
+        expected_room_epoch: str | None,
+        operation: str,
+        stage: str,
+        new_revision: int | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                'expectedRevision': expected_revision,
+                'expectedRoomEpoch': expected_room_epoch,
+                'newRevision': new_revision,
+                'operation': operation,
+                'stage': stage,
+                'token': token,
+                'version': 1,
+            },
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+
+    @staticmethod
+    def _decode_collaboration_mutation_barrier(value: object) -> dict | None:
+        try:
+            if isinstance(value, bytes):
+                value = value.decode('utf-8')
+            if not isinstance(value, str):
+                return None
+            payload = json.loads(value)
+            token = payload.get('token')
+            revision = payload.get('expectedRevision')
+            epoch = payload.get('expectedRoomEpoch')
+            operation = payload.get('operation')
+            stage = payload.get('stage')
+            new_revision = payload.get('newRevision')
+            if (
+                not isinstance(payload, dict)
+                or payload.get('version') != 1
+                or not is_lower_hex(token, COLLABORATION_MUTATION_BARRIER_TOKEN_HEX_LENGTH)
+                or type(revision) is not int
+                or revision <= 0
+                or (epoch is not None and not is_lower_hex(epoch, LINEAGE_FENCE_EPOCH_HEX_LENGTH))
+                or operation not in {'apply', 'undo'}
+                or stage not in {'draining', 'committing'}
+                or (
+                    new_revision is not None
+                    and (type(new_revision) is not int or new_revision <= revision)
+                )
+                or (stage == 'draining' and new_revision is not None)
+                or (stage == 'committing' and new_revision is None)
+            ):
+                return None
+            return payload
+        except (AttributeError, TypeError, ValueError, UnicodeDecodeError):
+            return None
+
+    def _connection_id(self, websocket: WebSocket) -> str | None:
+        presence = self._connection_presence.get(id(websocket))
+        return presence[1] if presence else None
+
+    async def acquire_collaboration_mutation_barrier(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        mindmap_id: int,
+        expected_revision: int,
+        expected_room_epoch: str | None,
+        *,
+        operation: str,
+    ) -> CollaborationMutationBarrier | None:
+        """获取 AI 权威替换栅栏并冻结获取时已经在线的全部写连接。"""
+        if (
+            type(mindmap_id) is not int
+            or mindmap_id <= 0
+            or type(expected_revision) is not int
+            or expected_revision <= 0
+            or operation not in {'apply', 'undo'}
+            or (
+                expected_room_epoch is not None
+                and not is_lower_hex(expected_room_epoch, LINEAGE_FENCE_EPOCH_HEX_LENGTH)
+            )
+        ):
+            return None
+
+        token = uuid.uuid4().hex
+        barrier_raw = self._encode_collaboration_mutation_barrier(
+            token=token,
+            expected_revision=expected_revision,
+            expected_room_epoch=expected_room_epoch,
+            operation=operation,
+            stage='draining',
+        )
+        redis = self._redis
+        expected_lineage_raw: str | None = None
+        participants: set[str] = set()
+        if redis:
+            lineage_value = await self._safe_redis_call(
+                redis.get(self._lineage_fence_key(mindmap_id)),
+                operation='读取 AI 协作栅栏 lineage',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            if lineage_value is _REDIS_CALL_FAILED:
+                return None
+            lineage_record = self._decode_lineage_fence_record(lineage_value)
+            if (
+                lineage_value is not None
+                and (
+                    lineage_record is None
+                    or lineage_record[0] != expected_revision
+                )
+            ):
+                return None
+            active_epoch = (
+                lineage_record[3]
+                if lineage_record is not None
+                and lineage_record[0] == expected_revision
+                and lineage_record[2] == LINEAGE_FENCE_ACTIVE
+                else None
+            )
+            if active_epoch != expected_room_epoch:
+                return None
+            if lineage_value is not None:
+                expected_lineage_raw = (
+                    lineage_value.decode('utf-8')
+                    if isinstance(lineage_value, bytes)
+                    else lineage_value
+                )
+            acquired = await self._safe_redis_call(
+                redis.set(
+                    self._mutation_barrier_key(mindmap_id),
+                    barrier_raw,
+                    nx=True,
+                    ex=self._mutation_barrier_ttl_seconds,
+                ),
+                operation='获取 AI 协作写栅栏',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            if acquired is _REDIS_CALL_FAILED or acquired not in {True, b'OK', 'OK'}:
+                return None
+            try:
+                now = time.time()
+                cleanup = await self._safe_redis_call(
+                    redis.zremrangebyscore(self._presence_key(mindmap_id), 0, now),
+                    operation='清理 AI 栅栏过期在线成员',
+                    failure_value=_REDIS_CALL_FAILED,
+                )
+                members = await self._safe_redis_call(
+                    redis.zrangebyscore(self._presence_key(mindmap_id), now, '+inf'),
+                    operation='读取 AI 栅栏在线成员',
+                    failure_value=_REDIS_CALL_FAILED,
+                )
+                if cleanup is _REDIS_CALL_FAILED or members is _REDIS_CALL_FAILED:
+                    raise RuntimeError('presence unavailable')
+                for member in members or ():
+                    metadata = self._deserialize_presence_metadata(member)
+                    if metadata is None:
+                        raise RuntimeError('presence malformed')
+                    # 旧 worker 未携带 canEdit/capabilities 时不能假定为只读：
+                    # 纳入参与者会令它因无法 ACK 而超时失败，符合滚动升级的
+                    # fail-closed 语义。
+                    if metadata.get('canEdit') is False:
+                        continue
+                    participants.add(metadata['connectionId'])
+                async with self._lock:
+                    local_writers = self._local_writer_connection_ids(mindmap_id)
+                if not local_writers.issubset(participants):
+                    raise RuntimeError('local writable presence is unproven')
+                if participants:
+                    added = await self._safe_redis_call(
+                        redis.sadd(
+                            self._mutation_barrier_participants_key(mindmap_id, token),
+                            *sorted(participants),
+                        ),
+                        operation='登记 AI 栅栏参与连接',
+                        failure_value=_REDIS_CALL_FAILED,
+                    )
+                    if added is _REDIS_CALL_FAILED:
+                        raise RuntimeError('participants unavailable')
+                    participants_expired = await self._safe_redis_call(
+                        redis.expire(
+                            self._mutation_barrier_participants_key(mindmap_id, token),
+                            self._mutation_barrier_ttl_seconds,
+                        ),
+                        operation='设置 AI 栅栏参与连接有效期',
+                        failure_value=_REDIS_CALL_FAILED,
+                    )
+                    if (
+                        participants_expired is _REDIS_CALL_FAILED
+                        or participants_expired != 1
+                    ):
+                        raise RuntimeError('participants expiry unavailable')
+            except Exception:
+                provisional = CollaborationMutationBarrier(
+                    mindmap_id=mindmap_id,
+                    token=token,
+                    expected_revision=expected_revision,
+                    expected_room_epoch=expected_room_epoch,
+                    participants=frozenset(),
+                    barrier_raw=barrier_raw,
+                    expected_lineage_raw=expected_lineage_raw,
+                )
+                await self.abort_collaboration_mutation_barrier(provisional)
+                return None
+        else:
+            if AppConfig.app_workers > 1:
+                return None
+            current_lineage = self._content_lineages.get(mindmap_id)
+            current_epoch = self._local_lineage_epochs.get(mindmap_id)
+            active_epoch = (
+                current_epoch
+                if current_lineage is not None
+                and current_lineage[0] == expected_revision
+                else None
+            )
+            if active_epoch != expected_room_epoch:
+                return None
+            async with self._lock:
+                if mindmap_id in self._collaboration_mutation_barriers:
+                    return None
+                participants = self._local_writer_connection_ids(mindmap_id)
+
+        barrier = CollaborationMutationBarrier(
+            mindmap_id=mindmap_id,
+            token=token,
+            expected_revision=expected_revision,
+            expected_room_epoch=expected_room_epoch,
+            participants=frozenset(participants),
+            barrier_raw=barrier_raw,
+            expected_lineage_raw=expected_lineage_raw,
+        )
+        async with self._lock:
+            self._collaboration_mutation_barriers[mindmap_id] = barrier
+            self._local_collaboration_barrier_acks[mindmap_id] = set()
+            self._local_collaboration_barrier_failures[mindmap_id] = set()
+            self._local_collaboration_barrier_checkpoints[mindmap_id] = set()
+
+        message = {
+            'type': 'collaboration_barrier_prepare',
+            'token': token,
+            'operation': operation,
+            'contentRevision': expected_revision,
+            'roomEpoch': expected_room_epoch,
+            'participants': sorted(participants),
+        }
+        locally_verified = await self._activate_local_collaboration_barrier(
+            mindmap_id,
+            message,
+        )
+        if not locally_verified:
+            await self.abort_collaboration_mutation_barrier(barrier)
+            return None
+        if redis:
+            subscriber_count = await self._publish_redis_event_with_count(
+                mindmap_id,
+                message,
+            )
+            # 当前 worker 自己也运行一个订阅者。0 或不可证明的返回值表示
+            # prepare 没有可靠地覆盖当前 worker 集合，不能继续提交整图 reset。
+            if subscriber_count is None or subscriber_count < 1:
+                await self.abort_collaboration_mutation_barrier(barrier)
+                return None
+            barrier = replace(
+                barrier,
+                expected_worker_witnesses=subscriber_count,
+            )
+            self._collaboration_mutation_barriers[mindmap_id] = barrier
+        return barrier
+
+    async def _activate_local_collaboration_barrier(
+        self,
+        mindmap_id: int,
+        message: dict,
+    ) -> bool:
+        token = message.get('token')
+        participants = frozenset(message.get('participants') or ())
+        if (
+            not isinstance(token, str)
+            or len(token) != COLLABORATION_MUTATION_BARRIER_TOKEN_HEX_LENGTH
+        ):
+            return False
+        barrier_raw = self._encode_collaboration_mutation_barrier(
+            token=token,
+            expected_revision=message.get('contentRevision'),
+            expected_room_epoch=message.get('roomEpoch'),
+            operation=message.get('operation'),
+            stage='draining',
+        )
+        current = self._collaboration_mutation_barriers.get(mindmap_id)
+        if current is None or current.token != token:
+            self._collaboration_mutation_barriers[mindmap_id] = (
+                CollaborationMutationBarrier(
+                    mindmap_id=mindmap_id,
+                    token=token,
+                    expected_revision=message.get('contentRevision'),
+                    expected_room_epoch=message.get('roomEpoch'),
+                    participants=participants,
+                    barrier_raw=barrier_raw,
+                    expected_lineage_raw=None,
+                )
+            )
+        targets = []
+        unproven_local_writers: set[str] = set()
+        async with self._lock:
+            for websocket_id, presence in self._connection_presence.items():
+                if presence[0] != mindmap_id:
+                    continue
+                is_writer = self._connection_can_edit.get(websocket_id, False)
+                if is_writer and presence[1] not in participants:
+                    unproven_local_writers.add(presence[1])
+                if not is_writer or presence[1] not in participants:
+                    continue
+                websocket = next(
+                    (
+                        candidate
+                        for candidate in self._rooms.get(mindmap_id, ())
+                        if id(candidate) == websocket_id
+                    ),
+                    None,
+                )
+                if websocket is not None:
+                    targets.append(websocket)
+        if unproven_local_writers:
+            await asyncio.gather(*(
+                self._report_barrier_member(
+                    mindmap_id,
+                    barrier_raw,
+                    token,
+                    connection_id,
+                    kind='failure',
+                )
+                for connection_id in unproven_local_writers
+            ))
+            # 即使 failure 写入暂时失败，也绝不能用一个成功 witness 掩盖
+            # 本 worker 的未知状态；协调端会因 witness 缺失而超时中止。
+            return False
+        witnessed = await self._report_barrier_member(
+            mindmap_id,
+            barrier_raw,
+            token,
+            f'worker:{self._instance_id}',
+            kind='ack',
+        )
+        if not witnessed:
+            return False
+        await asyncio.gather(*(self.send_to(websocket, message) for websocket in targets))
+        return True
+
+    def _discard_local_barrier_state(self, mindmap_id: int) -> None:
+        """丢弃栅栏在各本地状态表中的残留，供 abort/complete/跨实例释放复用。"""
+        self._collaboration_mutation_barriers.pop(mindmap_id, None)
+        self._local_collaboration_barrier_acks.pop(mindmap_id, None)
+        self._local_collaboration_barrier_failures.pop(mindmap_id, None)
+        self._local_collaboration_barrier_checkpoints.pop(mindmap_id, None)
+
+    def _local_writer_connection_ids(self, mindmap_id: int) -> set[str]:
+        """当前 worker 上仍持有写权限的脑图连接 ID 集合（调用方需持锁）。"""
+        return {
+            presence[1]
+            for websocket_id, presence in self._connection_presence.items()
+            if presence[0] == mindmap_id
+            and self._connection_can_edit.get(websocket_id, False)
+        }
+
+    async def _report_barrier_member(
+        self,
+        mindmap_id: int,
+        barrier_raw: str,
+        token: str,
+        member: str,
+        *,
+        kind: Literal['failure', 'ack'],
+    ) -> bool:
+        """把 failure/ack 成员原子登记到 Redis 栅栏集合；无 Redis 时本地降级。"""
+        if kind == 'failure':
+            target_key = self._mutation_barrier_failures_key(mindmap_id, token)
+            local_table = self._local_collaboration_barrier_failures
+            operation = '报告未证明的 AI 栅栏写连接'
+        else:
+            target_key = self._mutation_barrier_acks_key(mindmap_id, token)
+            local_table = self._local_collaboration_barrier_acks
+            operation = '确认 AI 栅栏 worker participant 快照'
+        redis = self._redis
+        if not redis:
+            local_table.setdefault(mindmap_id, set()).add(member)
+            return True
+        result = await self._safe_redis_call(
+            redis.eval(
+                _REPORT_UNPROVEN_COLLABORATION_PARTICIPANT_SCRIPT,
+                2,
+                self._mutation_barrier_key(mindmap_id),
+                target_key,
+                barrier_raw,
+                member,
+                self._mutation_barrier_ttl_seconds,
+            ),
+            operation=operation,
+            failure_value=_REDIS_CALL_FAILED,
+        )
+        return result == 1
+
+    async def is_collaboration_mutation_allowed(
+        self,
+        mindmap_id: int,
+        websocket: WebSocket,
+        *,
+        barrier_token: str | None = None,
+    ) -> bool:
+        """普通写仅在无栅栏时通过；drain checkpoint 需匹配连接和 token。"""
+        connection_id = self._connection_id(websocket)
+        if connection_id is None:
+            return False
+        redis = self._redis
+        if redis:
+            raw = await self._safe_redis_call(
+                redis.get(self._mutation_barrier_key(mindmap_id)),
+                operation='校验 AI 协作写栅栏',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            if raw is _REDIS_CALL_FAILED:
+                return False
+            if raw is None:
+                return barrier_token is None
+            payload = self._decode_collaboration_mutation_barrier(raw)
+            if payload is None:
+                return False
+            if barrier_token is None:
+                return False
+            if payload['stage'] != 'draining' or payload['token'] != barrier_token:
+                return False
+            participant = await self._safe_redis_call(
+                redis.sismember(
+                    self._mutation_barrier_participants_key(mindmap_id, barrier_token),
+                    connection_id,
+                ),
+                operation='校验 AI 栅栏参与连接',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            return participant == 1 or participant is True
+        barrier = self._collaboration_mutation_barriers.get(mindmap_id)
+        if barrier is None:
+            return barrier_token is None
+        return bool(
+            barrier_token == barrier.token
+            and barrier.stage == 'draining'
+            and connection_id in barrier.participants
+        )
+
+    async def acknowledge_collaboration_mutation_barrier(
+        self,
+        mindmap_id: int,
+        websocket: WebSocket,
+        token: str,
+        *,
+        ready: bool,
+    ) -> bool:
+        connection_id = self._connection_id(websocket)
+        if connection_id is None or not isinstance(token, str):
+            return False
+        checkpoint_recorded = (
+            token,
+            connection_id,
+        ) in self._local_collaboration_barrier_checkpoints.get(mindmap_id, set())
+        # ready ACK 本身不能证明排空完成。只有同一 worker 已在该连接上成功
+        # 持久化带 token 的最终 checkpoint 后才能确认；进程重启、连接迁移
+        # 或伪造 ACK 都会安全地记为失败。
+        effective_ready = ready and checkpoint_recorded
+        redis = self._redis
+        if redis:
+            raw = await self._safe_redis_call(
+                redis.get(self._mutation_barrier_key(mindmap_id)),
+                operation='读取 AI 栅栏 ACK 状态',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            if raw is _REDIS_CALL_FAILED:
+                return False
+            payload = self._decode_collaboration_mutation_barrier(raw)
+            if payload is None or payload['token'] != token or payload['stage'] != 'draining':
+                return False
+            normalized_raw = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+            result = await self._safe_redis_call(
+                redis.eval(
+                    _ACK_COLLABORATION_BARRIER_SCRIPT,
+                    4,
+                    self._mutation_barrier_key(mindmap_id),
+                    self._mutation_barrier_participants_key(mindmap_id, token),
+                    self._mutation_barrier_acks_key(mindmap_id, token),
+                    self._mutation_barrier_failures_key(mindmap_id, token),
+                    normalized_raw,
+                    connection_id,
+                    '1' if effective_ready else '0',
+                    self._mutation_barrier_ttl_seconds,
+                ),
+                operation='确认 AI 协作排空',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            return result == 1 and (not ready or checkpoint_recorded)
+        barrier = self._collaboration_mutation_barriers.get(mindmap_id)
+        if (
+            barrier is None
+            or barrier.token != token
+            or barrier.stage != 'draining'
+            or connection_id not in barrier.participants
+        ):
+            return False
+        target = (
+            self._local_collaboration_barrier_acks
+            if effective_ready
+            else self._local_collaboration_barrier_failures
+        )
+        target.setdefault(mindmap_id, set()).add(connection_id)
+        return not ready or checkpoint_recorded
+
+    async def record_collaboration_mutation_checkpoint(
+        self,
+        mindmap_id: int,
+        websocket: WebSocket,
+        token: str,
+    ) -> bool:
+        """登记该连接已按栅栏 token 成功持久化最终 checkpoint。"""
+        connection_id = self._connection_id(websocket)
+        if connection_id is None or not await self.is_collaboration_mutation_allowed(
+            mindmap_id,
+            websocket,
+            barrier_token=token,
+        ):
+            return False
+        self._local_collaboration_barrier_checkpoints.setdefault(
+            mindmap_id,
+            set(),
+        ).add((token, connection_id))
+        return True
+
+    async def wait_for_collaboration_mutation_barrier(
+        self,
+        barrier: CollaborationMutationBarrier,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        """等待获取栅栏时的所有写连接依次完成 checkpoint 与 ACK。"""
+        timeout = (
+            self._mutation_barrier_drain_timeout_seconds
+            if timeout_seconds is None
+            else max(0.05, float(timeout_seconds))
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._redis:
+                renewed = await self._safe_redis_call(
+                    self._redis.eval(
+                        _RENEW_COLLABORATION_BARRIER_SCRIPT,
+                        4,
+                        self._mutation_barrier_key(barrier.mindmap_id),
+                        self._mutation_barrier_participants_key(
+                            barrier.mindmap_id, barrier.token,
+                        ),
+                        self._mutation_barrier_acks_key(
+                            barrier.mindmap_id, barrier.token,
+                        ),
+                        self._mutation_barrier_failures_key(
+                            barrier.mindmap_id, barrier.token,
+                        ),
+                        barrier.barrier_raw,
+                        self._mutation_barrier_ttl_seconds,
+                    ),
+                    operation='续期 AI 协作写栅栏',
+                    failure_value=_REDIS_CALL_FAILED,
+                )
+                if renewed != 1:
+                    return False
+                ack_values, failure_values = await asyncio.gather(
+                    self._safe_redis_call(
+                        self._redis.smembers(self._mutation_barrier_acks_key(
+                            barrier.mindmap_id, barrier.token,
+                        )),
+                        operation='读取 AI 协作排空确认',
+                        failure_value=_REDIS_CALL_FAILED,
+                    ),
+                    self._safe_redis_call(
+                        self._redis.smembers(self._mutation_barrier_failures_key(
+                            barrier.mindmap_id, barrier.token,
+                        )),
+                        operation='读取 AI 协作排空失败',
+                        failure_value=_REDIS_CALL_FAILED,
+                    ),
+                )
+                if (
+                    ack_values is _REDIS_CALL_FAILED
+                    or failure_values is _REDIS_CALL_FAILED
+                ):
+                    return False
+                failures = {
+                    value.decode('utf-8') if isinstance(value, bytes) else value
+                    for value in failure_values or ()
+                }
+                acks = {
+                    value.decode('utf-8') if isinstance(value, bytes) else value
+                    for value in ack_values or ()
+                }
+            else:
+                current = self._collaboration_mutation_barriers.get(barrier.mindmap_id)
+                if current is None or current.token != barrier.token:
+                    return False
+                failures = self._local_collaboration_barrier_failures.get(
+                    barrier.mindmap_id, set(),
+                )
+                acks = self._local_collaboration_barrier_acks.get(
+                    barrier.mindmap_id, set(),
+                )
+            if failures:
+                return False
+            worker_witness_count = sum(
+                isinstance(value, str) and value.startswith('worker:')
+                for value in acks
+            )
+            if (
+                barrier.participants.issubset(acks)
+                and worker_witness_count >= barrier.expected_worker_witnesses
+            ):
+                return True
+            await asyncio.sleep(self._mutation_barrier_poll_seconds)
+        return False
+
+    async def verify_collaboration_mutation_barrier(
+        self,
+        barrier: CollaborationMutationBarrier,
+    ) -> bool:
+        redis = self._redis
+        if redis:
+            raw = await self._safe_redis_call(
+                redis.get(self._mutation_barrier_key(barrier.mindmap_id)),
+                operation='复核 AI 协作写栅栏',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            if raw is _REDIS_CALL_FAILED:
+                return False
+            normalized = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+            return normalized == barrier.barrier_raw
+        current = self._collaboration_mutation_barriers.get(barrier.mindmap_id)
+        return current is not None and current.token == barrier.token and current.stage == barrier.stage
+
+    async def get_collaboration_mutation_barrier_status(
+        self,
+        mindmap_id: int,
+        token: str,
+        expected_revision: int,
+        persisted_revision: int,
+    ) -> str:
+        """在 DB 行锁复核之后判定丢失 release 的客户端该如何收敛。"""
+        if persisted_revision > expected_revision:
+            return 'committed'
+        if persisted_revision != expected_revision:
+            return 'unknown'
+        redis = self._redis
+        if redis:
+            raw = await self._safe_redis_call(
+                redis.get(self._mutation_barrier_key(mindmap_id)),
+                operation='查询 AI 协作栅栏恢复状态',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            if raw is _REDIS_CALL_FAILED:
+                return 'unknown'
+            if raw is None:
+                # 调用方的 SELECT FOR UPDATE 已等待任何在途 DB commit/rollback。
+                # 同 revision 且 Redis barrier 已不存在，原操作不可能再提交。
+                return 'aborted'
+            payload = self._decode_collaboration_mutation_barrier(raw)
+            if payload is None:
+                return 'unknown'
+            return 'active' if payload['token'] == token else 'unknown'
+        current = self._collaboration_mutation_barriers.get(mindmap_id)
+        if current is None:
+            return 'aborted'
+        return 'active' if current.token == token else 'unknown'
+
+    async def prepare_collaboration_mutation_barrier_commit(
+        self,
+        barrier: CollaborationMutationBarrier,
+        new_revision: int,
+    ) -> CollaborationMutationBarrier | None:
+        """在 DB 行锁仍持有时先封死旧 lineage，栅栏保持关闭。"""
+        if barrier.stage != 'draining' or new_revision <= barrier.expected_revision:
+            return None
+        operation = self._decode_collaboration_mutation_barrier(
+            barrier.barrier_raw,
+        )
+        if operation is None:
+            return None
+        prepared_lineage_raw = self._encode_lineage_fence(new_revision, None)
+        prepared_barrier_raw = self._encode_collaboration_mutation_barrier(
+            token=barrier.token,
+            expected_revision=barrier.expected_revision,
+            expected_room_epoch=barrier.expected_room_epoch,
+            operation=operation['operation'],
+            stage='committing',
+            new_revision=new_revision,
+        )
+        if self._redis:
+            result = await self._safe_redis_call(
+                self._redis.eval(
+                    _PREPARE_COLLABORATION_BARRIER_COMMIT_SCRIPT,
+                    2,
+                    self._mutation_barrier_key(barrier.mindmap_id),
+                    self._lineage_fence_key(barrier.mindmap_id),
+                    barrier.barrier_raw,
+                    barrier.expected_lineage_raw or '',
+                    '1' if barrier.expected_lineage_raw is None else '0',
+                    prepared_lineage_raw,
+                    prepared_barrier_raw,
+                    self._mutation_barrier_ttl_seconds,
+                ),
+                operation='预提交 AI 协作 lineage 栅栏',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            if result != 1:
+                return None
+        else:
+            current = self._collaboration_mutation_barriers.get(barrier.mindmap_id)
+            if current is None or current.token != barrier.token:
+                return None
+        prepared = replace(
+            barrier,
+            barrier_raw=prepared_barrier_raw,
+            stage='committing',
+            prepared_lineage_raw=prepared_lineage_raw,
+        )
+        self._collaboration_mutation_barriers[barrier.mindmap_id] = prepared
+        return prepared
+
+    async def abort_collaboration_mutation_barrier(
+        self,
+        barrier: CollaborationMutationBarrier,
+    ) -> bool:
+        """释放未提交栅栏；若已预推进 lineage，则在冻结窗口内原样回滚。"""
+        released = True
+        if self._redis:
+            result = await self._safe_redis_call(
+                self._redis.eval(
+                    _ABORT_COLLABORATION_BARRIER_SCRIPT,
+                    5,
+                    self._mutation_barrier_key(barrier.mindmap_id),
+                    self._lineage_fence_key(barrier.mindmap_id),
+                    self._mutation_barrier_participants_key(
+                        barrier.mindmap_id, barrier.token,
+                    ),
+                    self._mutation_barrier_acks_key(
+                        barrier.mindmap_id, barrier.token,
+                    ),
+                    self._mutation_barrier_failures_key(
+                        barrier.mindmap_id, barrier.token,
+                    ),
+                    barrier.barrier_raw,
+                    barrier.prepared_lineage_raw or '',
+                    barrier.expected_lineage_raw or '',
+                    '1' if barrier.expected_lineage_raw is None else '0',
+                ),
+                operation='释放 AI 协作写栅栏',
+                failure_value=_REDIS_CALL_FAILED,
+            )
+            released = result in {0, 1}
+        current = self._collaboration_mutation_barriers.get(barrier.mindmap_id)
+        if current is not None and current.token == barrier.token:
+            self._discard_local_barrier_state(barrier.mindmap_id)
+            message = {
+                'type': 'collaboration_barrier_released',
+                'token': barrier.token,
+                'status': 'aborted',
+                'contentRevision': barrier.expected_revision,
+            }
+            await self._broadcast_local(barrier.mindmap_id, message)
+            if self._redis and released:
+                await self._publish_redis_event(barrier.mindmap_id, message)
+        return released
+
+    async def complete_collaboration_mutation_barrier(
+        self,
+        barrier: CollaborationMutationBarrier,
+        *,
+        new_revision: int,
+        client_mutation_id: str,
+    ) -> bool:
+        """DB commit 后释放栅栏；lineage tombstone 必须仍与预提交完全一致。"""
+        if barrier.stage != 'committing' or barrier.prepared_lineage_raw is None:
+            return False
+        message = {
+            'type': 'collaboration_barrier_released',
+            'token': barrier.token,
+            'status': 'committed',
+            'contentRevision': new_revision,
+            'clientMutationId': client_mutation_id,
+            'reason': 'authoritative_cloud_reset',
+        }
+        redis_event: tuple[str, bytes] | None = None
+        redis_completed = not self._redis
+        if self._redis:
+            redis_event = self._prepare_redis_event(barrier.mindmap_id, message)
+            if redis_event is not None:
+                event_id, event_payload = redis_event
+                result = await self._safe_redis_call(
+                    self._redis.eval(
+                    _COMPLETE_COLLABORATION_BARRIER_SCRIPT,
+                    5,
+                    self._mutation_barrier_key(barrier.mindmap_id),
+                    self._lineage_fence_key(barrier.mindmap_id),
+                    self._mutation_barrier_participants_key(
+                        barrier.mindmap_id, barrier.token,
+                    ),
+                    self._mutation_barrier_acks_key(
+                        barrier.mindmap_id, barrier.token,
+                    ),
+                    self._mutation_barrier_failures_key(
+                        barrier.mindmap_id, barrier.token,
+                    ),
+                    barrier.barrier_raw,
+                    barrier.prepared_lineage_raw,
+                    self._channel,
+                    event_payload,
+                    ),
+                    operation='提交 AI 协作写栅栏',
+                    failure_value=_REDIS_CALL_FAILED,
+                )
+                # PUBLISH 返回 0 只表示此刻没有订阅者，原子提交本身仍成功；负值
+                # 是 compare 失败，transport failure 则结果未知，两者交给 DB
+                # 权威回源收敛，不能把已经 commit 的正文误称为未提交。
+                redis_completed = (
+                    result is not _REDIS_CALL_FAILED
+                    and type(result) is int
+                    and result >= 0
+                )
+                if redis_completed:
+                    self._remember_event(event_id)
+        self.set_content_revision(
+            barrier.mindmap_id,
+            new_revision,
+            transition_type='document_reset',
+        )
+        self.clear_content_lineage(barrier.mindmap_id, new_revision)
+        current = self._collaboration_mutation_barriers.get(barrier.mindmap_id)
+        owns_local_barrier = current is not None and current.token == barrier.token
+        if owns_local_barrier:
+            self._discard_local_barrier_state(barrier.mindmap_id)
+            await self._broadcast_local(barrier.mindmap_id, message)
+        return redis_completed
+
     @staticmethod
     def _lineage_digest(lineage_id: object) -> str | None:
         if not isinstance(lineage_id, str):
@@ -737,9 +1765,7 @@ class RoomManager:
         """从同 revision 的持久化快照恢复房间 lineage 栅栏。"""
         if (
             type(revision) is not int
-            or not isinstance(lineage_digest, str)
-            or len(lineage_digest) != LINEAGE_DIGEST_HEX_LENGTH
-            or any(character not in '0123456789abcdef' for character in lineage_digest)
+            or not is_lower_hex(lineage_digest, LINEAGE_DIGEST_HEX_LENGTH)
             or not self.is_current_revision(mindmap_id, revision)
         ):
             return False
@@ -770,9 +1796,7 @@ class RoomManager:
         if (
             type(expected_generation) is not int
             or type(revision) is not int
-            or not isinstance(lineage_digest, str)
-            or len(lineage_digest) != LINEAGE_DIGEST_HEX_LENGTH
-            or any(character not in '0123456789abcdef' for character in lineage_digest)
+            or not is_lower_hex(lineage_digest, LINEAGE_DIGEST_HEX_LENGTH)
             or not self.is_current_revision(mindmap_id, revision)
         ):
             return False, False
@@ -801,10 +1825,7 @@ class RoomManager:
     ) -> str:
         if epoch is None:
             epoch = uuid.uuid4().hex
-        elif (
-            len(epoch) != LINEAGE_FENCE_EPOCH_HEX_LENGTH
-            or any(character not in '0123456789abcdef' for character in epoch)
-        ):
+        elif not is_lower_hex(epoch, LINEAGE_FENCE_EPOCH_HEX_LENGTH):
             raise ValueError('lineage fence epoch 格式无效')
         return json.dumps(
             {
@@ -841,18 +1862,12 @@ class RoomManager:
                 or payload.get('version') != LINEAGE_FENCE_SCHEMA_VERSION
                 or type(revision) is not int
                 or revision <= 0
-                or not isinstance(epoch, str)
-                or len(epoch) != LINEAGE_FENCE_EPOCH_HEX_LENGTH
-                or any(character not in '0123456789abcdef' for character in epoch)
+                or not is_lower_hex(epoch, LINEAGE_FENCE_EPOCH_HEX_LENGTH)
                 or status not in {LINEAGE_FENCE_ACTIVE, LINEAGE_FENCE_TOMBSTONE}
             ):
                 return None
             if status == LINEAGE_FENCE_ACTIVE:
-                if (
-                    not isinstance(digest, str)
-                    or len(digest) != LINEAGE_DIGEST_HEX_LENGTH
-                    or any(character not in '0123456789abcdef' for character in digest)
-                ):
+                if not is_lower_hex(digest, LINEAGE_DIGEST_HEX_LENGTH):
                     return None
             elif digest is not None:
                 return None
@@ -1083,6 +2098,8 @@ class RoomManager:
         redis = self._redis
         if not redis:
             if AppConfig.app_workers > 1:
+                return None
+            if mindmap_id in self._collaboration_mutation_barriers:
                 return None
             return 'local' if self._content_lineages.get(mindmap_id) == (
                 revision,
@@ -1640,7 +2657,7 @@ class RoomManager:
             operation='按 owner 和 lineage 续期节点编辑租约',
             failure_value=_REDIS_CALL_FAILED,
         )
-        if result is _REDIS_CALL_FAILED or result == -1:
+        if result is _REDIS_CALL_FAILED or result in {-1, -2}:
             record_mindmap_event('node_edit_lease_unavailable')
             return None
         if result != 1:
@@ -2140,27 +3157,10 @@ class RoomManager:
             return expected_lineage_fence is None
         if not self._running:
             return False
-        message = self._normalize_cross_instance_message(mindmap_id, message)
-        if message is None:
-            logger.warning('脑图协作事件不符合跨实例协议，已仅在本实例广播')
+        prepared = self._prepare_redis_event(mindmap_id, message)
+        if prepared is None:
             return False
-        event_id = uuid.uuid4().hex
-        envelope = {
-            'schemaVersion': REDIS_EVENT_SCHEMA_VERSION,
-            'eventId': event_id,
-            'sourceInstanceId': self._instance_id,
-            'issuedAtMs': self._utc_now_ms(),
-            'mindmapId': mindmap_id,
-            'message': message,
-        }
-        try:
-            payload = self._encode_redis_envelope(envelope)
-        except (TypeError, ValueError, RecursionError):
-            logger.warning('脑图协作事件无法序列化，已仅在本实例广播')
-            return False
-        if len(payload) > self._max_redis_event_bytes:
-            logger.warning('脑图协作事件超过跨实例体积上限，已仅在本实例广播')
-            return False
+        event_id, payload = prepared
         if expected_lineage_fence is None:
             result = await self._safe_redis_call(
                 redis.publish(self._channel, payload),
@@ -2171,8 +3171,9 @@ class RoomManager:
             result = await self._safe_redis_call(
                 redis.eval(
                     _VERIFY_LINEAGE_FENCE_AND_PUBLISH_SCRIPT,
-                    1,
+                    2,
                     self._lineage_fence_key(mindmap_id),
+                    self._mutation_barrier_key(mindmap_id),
                     expected_lineage_fence,
                     self._channel,
                     payload,
@@ -2180,10 +3181,67 @@ class RoomManager:
                 operation='校验 lineage 并发布协作事件',
                 failure_value=_REDIS_CALL_FAILED,
             )
-        if result is _REDIS_CALL_FAILED or result == -1:
+        if result is _REDIS_CALL_FAILED or result in {-1, -2}:
             return False
         self._remember_event(event_id)
         return True
+
+    async def _publish_redis_event_with_count(
+        self,
+        mindmap_id: int,
+        message: Any,
+    ) -> int | None:
+        """发布 barrier prepare，并保留 Redis 返回的订阅 worker 数。"""
+        redis = self._redis
+        if not redis or not self._running or not self._listener_ready.is_set():
+            return None
+        prepared = self._prepare_redis_event(mindmap_id, message)
+        if prepared is None:
+            return None
+        event_id, payload = prepared
+        result = await self._safe_redis_call(
+            redis.publish(self._channel, payload),
+            operation='发布 AI 协作栅栏并统计 worker',
+            failure_value=_REDIS_CALL_FAILED,
+        )
+        if (
+            result is _REDIS_CALL_FAILED
+            or type(result) is not int
+            or result < 0
+            or not self._listener_ready.is_set()
+        ):
+            return None
+        self._remember_event(event_id)
+        return result
+
+    def _prepare_redis_event(
+        self,
+        mindmap_id: int,
+        message: Any,
+    ) -> tuple[str, bytes] | None:
+        """规范化并签名一条事件，供普通或 Lua 原子发布路径共用。"""
+        normalized = self._normalize_cross_instance_message(mindmap_id, message)
+        if normalized is None:
+            logger.warning('脑图协作事件不符合跨实例协议，已仅在本实例广播')
+            return None
+        event_id = uuid.uuid4().hex
+        envelope = {
+            'schemaVersion': REDIS_EVENT_SCHEMA_VERSION,
+            'eventId': event_id,
+            'sourceInstanceId': self._instance_id,
+            'issuedAtMs': self._utc_now_ms(),
+            'mindmapId': mindmap_id,
+            'message': normalized,
+        }
+        try:
+            payload = self._encode_redis_envelope(envelope)
+        except (TypeError, ValueError, RecursionError):
+            logger.warning('脑图协作事件无法序列化，已仅在本实例广播')
+            return None
+        if len(payload) > self._max_redis_event_bytes:
+            logger.warning('脑图协作事件超过跨实例体积上限，已仅在本实例广播')
+            return None
+        return event_id, payload
 
     async def _listen_redis_events(self) -> None:
         retry_delay = 1
@@ -2250,6 +3308,24 @@ class RoomManager:
                 mindmap_id,
                 message['capability'],
             )
+            return
+        if message_type == 'collaboration_barrier_prepare':
+            await self._activate_local_collaboration_barrier(mindmap_id, message)
+            return
+        if message_type == 'collaboration_barrier_released':
+            current = self._collaboration_mutation_barriers.get(mindmap_id)
+            if current is None or current.token != message.get('token'):
+                return
+            if message.get('status') == 'committed':
+                revision = message.get('contentRevision')
+                self.set_content_revision(
+                    mindmap_id,
+                    revision,
+                    transition_type='document_reset',
+                )
+                self.clear_content_lineage(mindmap_id, revision)
+            self._discard_local_barrier_state(mindmap_id)
+            await self._broadcast_local(mindmap_id, message)
             return
         if message_type in {
             'access_revoked',
@@ -2471,7 +3547,7 @@ class RoomManager:
         return hmac.compare_digest(signer.hexdigest().encode('ascii'), signature)
 
     @staticmethod
-    def _normalize_cross_instance_message(
+    def _normalize_cross_instance_message(  # noqa: PLR0911, PLR0912
         mindmap_id: int,
         message: Any,
     ) -> dict | None:
@@ -2490,6 +3566,74 @@ class RoomManager:
             if capability not in ROOM_WRITE_CAPABILITIES:
                 return None
             return {'type': msg_type, 'capability': capability}
+        if msg_type == 'collaboration_barrier_prepare':
+            token = message.get('token')
+            operation = message.get('operation')
+            revision = message.get('contentRevision')
+            room_epoch = message.get('roomEpoch')
+            participants = message.get('participants')
+            if (
+                not is_lower_hex(token, COLLABORATION_MUTATION_BARRIER_TOKEN_HEX_LENGTH)
+                or operation not in {'apply', 'undo'}
+                or type(revision) is not int
+                or revision <= 0
+                or (
+                    room_epoch is not None
+                    and not is_lower_hex(room_epoch, LINEAGE_FENCE_EPOCH_HEX_LENGTH)
+                )
+                or not isinstance(participants, list)
+                or len(participants) > MAX_COLLABORATION_MUTATION_BARRIER_PARTICIPANTS
+                or any(
+                    not isinstance(connection_id, str)
+                    or not connection_id
+                    or len(connection_id) > MAX_REDIS_EVENT_IDENTITY_LENGTH
+                    for connection_id in participants
+                )
+                or len(set(participants)) != len(participants)
+            ):
+                return None
+            return {
+                'type': msg_type,
+                'token': token,
+                'operation': operation,
+                'contentRevision': revision,
+                'roomEpoch': room_epoch,
+                'participants': participants,
+            }
+        if msg_type == 'collaboration_barrier_released':
+            token = message.get('token')
+            status = message.get('status')
+            revision = message.get('contentRevision')
+            client_mutation_id = message.get('clientMutationId')
+            if (
+                not is_lower_hex(token, COLLABORATION_MUTATION_BARRIER_TOKEN_HEX_LENGTH)
+                or status not in {'aborted', 'committed'}
+                or type(revision) is not int
+                or revision <= 0
+                or (
+                    status == 'committed'
+                    and (
+                        not isinstance(client_mutation_id, str)
+                        or not client_mutation_id
+                        or len(client_mutation_id) > MAX_REDIS_EVENT_IDENTITY_LENGTH
+                    )
+                )
+            ):
+                return None
+            return {
+                'type': msg_type,
+                'token': token,
+                'status': status,
+                'contentRevision': revision,
+                **(
+                    {
+                        'clientMutationId': client_mutation_id,
+                        'reason': 'authoritative_cloud_reset',
+                    }
+                    if status == 'committed'
+                    else {}
+                ),
+            }
         if (
             msg_type in {'document_deleted', 'document_archived', 'access_revoked'}
             and message.get('mindmapId') != mindmap_id
@@ -2505,35 +3649,6 @@ class RoomManager:
             # 缺少范围的旧 worker 事件沿用历史的“完全撤销访问”语义。
             return {**message, 'revocationScope': revocation_scope}
         return message
-
-    async def _close_local_room(self, mindmap_id: int, close_code: int) -> None:
-        """清除本地房间、在线状态并尽力关闭连接。"""
-        websockets, presence_records = await self._take_local_connections(mindmap_id)
-        await self._close_connections(
-            mindmap_id, websockets, presence_records, close_code=close_code,
-        )
-
-    async def _disconnect_local_user(
-        self,
-        mindmap_id: int,
-        user_id: int,
-        message: dict,
-        close_code: int,
-        *,
-        editable_only: bool = False,
-    ) -> None:
-        websockets, presence_records = await self._take_local_connections(
-            mindmap_id,
-            user_id=user_id,
-            editable_only=editable_only,
-        )
-        await self._close_connections(
-            mindmap_id,
-            websockets,
-            presence_records,
-            close_code=close_code,
-            message=message,
-        )
 
     async def _take_local_connections(
         self,
@@ -2652,21 +3767,37 @@ class RoomManager:
         except Exception:
             return
 
-    async def _write_presence(self, mindmap_id: int, member: str) -> None:
+    async def _write_presence(self, mindmap_id: int, member: str) -> bool:
         redis = self._redis
         if not redis:
-            return
+            return AppConfig.app_workers <= 1
         key = self._presence_key(mindmap_id)
         expires_at = time.time() + self._presence_ttl_seconds
         result = await self._safe_redis_call(
             redis.zadd(key, {member: expires_at}),
             operation='刷新在线成员',
+            failure_value=_REDIS_CALL_FAILED,
         )
-        if result is not None:
+        if result is _REDIS_CALL_FAILED:
             await self._safe_redis_call(
-                redis.expire(key, self._presence_ttl_seconds * 2),
-                operation='设置在线成员过期时间',
+                redis.zrem(key, member),
+                operation='移除失去续期证明的在线成员',
             )
+            return False
+        expiry = await self._safe_redis_call(
+            redis.expire(key, self._presence_ttl_seconds * 2),
+            operation='设置在线成员过期时间',
+            failure_value=_REDIS_CALL_FAILED,
+        )
+        if expiry is _REDIS_CALL_FAILED or expiry != 1:
+            # zadd 成功但键级 TTL 未建立时也不授予可写 admission。尽力移除
+            # 临时成员，避免它作为幽灵 participant 阻塞后续栅栏。
+            await self._safe_redis_call(
+                redis.zrem(key, member),
+                operation='回滚未完整登记的在线成员',
+            )
+            return False
+        return True
 
     async def _safe_redis_call(
         self,
@@ -2687,9 +3818,18 @@ class RoomManager:
             logger.warning(f'脑图协作 Redis {operation}失败，已启用该操作的安全降级策略: {error}')
             return failure_value
 
-    def _serialize_presence(self, connection_id: str, user_info: dict) -> str:
+    def _serialize_presence(
+        self,
+        connection_id: str,
+        user_info: dict,
+        *,
+        can_edit: bool = True,
+        capabilities: set[str] | None = None,
+    ) -> str:
         return json.dumps(
             {
+                'canEdit': can_edit is True,
+                'capabilities': sorted(capabilities or ()),
                 'connectionId': connection_id,
                 'instanceId': self._instance_id,
                 'user': user_info,
@@ -2705,6 +3845,23 @@ class RoomManager:
             payload = json.loads(member.decode() if isinstance(member, bytes) else member)
             user = payload.get('user')
             return user if isinstance(user, dict) else None
+        except (TypeError, ValueError, AttributeError, UnicodeDecodeError):
+            return None
+
+    @staticmethod
+    def _deserialize_presence_metadata(member: Any) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(member.decode() if isinstance(member, bytes) else member)
+            if not isinstance(payload, dict):
+                return None
+            connection_id = payload.get('connectionId')
+            if (
+                not isinstance(connection_id, str)
+                or not connection_id
+                or len(connection_id) > MAX_REDIS_EVENT_IDENTITY_LENGTH
+            ):
+                return None
+            return payload
         except (TypeError, ValueError, AttributeError, UnicodeDecodeError):
             return None
 
@@ -2731,6 +3888,18 @@ class RoomManager:
 
     def _lineage_gap_key(self, mindmap_id: int, revision: int) -> str:
         return f'{self._lineage_gap_key_prefix}{mindmap_id}:{revision}'
+
+    def _mutation_barrier_key(self, mindmap_id: int) -> str:
+        return f'{self._mutation_barrier_key_prefix}{mindmap_id}'
+
+    def _mutation_barrier_participants_key(self, mindmap_id: int, token: str) -> str:
+        return f'{self._mutation_barrier_key_prefix}{mindmap_id}:{token}:participants'
+
+    def _mutation_barrier_acks_key(self, mindmap_id: int, token: str) -> str:
+        return f'{self._mutation_barrier_key_prefix}{mindmap_id}:{token}:acks'
+
+    def _mutation_barrier_failures_key(self, mindmap_id: int, token: str) -> str:
+        return f'{self._mutation_barrier_key_prefix}{mindmap_id}:{token}:failures'
 
     def _message_for_connection(self, websocket: WebSocket, message: Any) -> Any | None:
         """新客户端收紧凑补丁；旧客户端在滚动升级期间继续收到完整状态。"""

@@ -1,5 +1,7 @@
 from importlib import import_module
+from ipaddress import ip_address
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from config.database import async_engine
 from config.env import DataBaseConfig
@@ -58,6 +60,21 @@ _STORAGE_ENGINE_REGISTRY: dict[str, tuple[str, str]] = {
 # 已加载的提供商类缓存，避免重复import_module
 _provider_class_cache: dict[str, 'type[Model]'] = {}
 _storage_class_cache: dict[str, 'type[AsyncBaseDb]'] = {}
+
+
+def _is_loopback_url(value: str | None) -> bool:
+    """判断显式配置的 HTTP endpoint 是否指向本机回环地址。"""
+    if not value:
+        return False
+    try:
+        hostname = urlparse(value if '://' in value else f'http://{value}').hostname
+        if hostname is None:
+            return False
+        if hostname.casefold() == 'localhost':
+            return True
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 class AiUtil:
@@ -161,7 +178,28 @@ class AiUtil:
         }
         params = {k: v for k, v in params.items() if v is not None}
         if provider == 'Ollama':
-            params['host'] = base_url
+            # Agno 的 Ollama 适配器使用 host，而不是 OpenAI 风格的
+            # base_url；采样参数也必须放入 options。直接透传这些通用
+            # 参数会在创建模型时触发 unexpected keyword argument。
+            params.pop('base_url', None)
+            temperature_value = params.pop('temperature', None)
+            max_tokens_value = params.pop('max_tokens', None)
+            if base_url:
+                params['host'] = base_url
+                # httpx 默认读取 HTTP(S)_PROXY；当 NO_PROXY 未覆盖本机时，
+                # Ollama 请求会绕到代理并表现为无正文的 502。只对显式
+                # 回环 endpoint 禁用环境代理，远程 Ollama 仍保留部署者配置。
+                if _is_loopback_url(base_url):
+                    client_params = dict(params.get('client_params') or {})
+                    client_params['trust_env'] = False
+                    params['client_params'] = client_params
+            ollama_options = {}
+            if temperature_value is not None:
+                ollama_options['temperature'] = temperature_value
+            if max_tokens_value is not None:
+                ollama_options['num_predict'] = max_tokens_value
+            if ollama_options:
+                params['options'] = ollama_options
         if provider == 'DashScope' and not base_url:
             params['base_url'] = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
         model_class = cls._resolve_provider_class(provider)

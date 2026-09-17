@@ -22,6 +22,9 @@ services:
       dockerfile: Dockerfile.pg
     image: ruoyi-backend-pg:latest
     container_name: ruoyi-backend-pg
+    environment:
+      MINDMAP_AI_CHECKPOINT_KEY: "${MINDMAP_AI_CHECKPOINT_KEY:?MINDMAP_AI_CHECKPOINT_KEY must be set to an independent secret of at least 32 bytes}"
+      MINDMAP_AI_CHECKPOINT_KEY_ID: "${MINDMAP_AI_CHECKPOINT_KEY_ID:-checkpoint-v1}"
     ports:
       - "19099:9099"
     depends_on:
@@ -49,6 +52,7 @@ services:
       - ./ruoyi-fastapi-backend/migrations/20260825_mindmap_markers_to_tags_postgresql.sql:/docker-entrypoint-initdb.d/zzzz-mindmap-markers-to-tags-postgresql.sql
       - ./ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_home_postgresql.sql:/docker-entrypoint-initdb.d/zzzzz-mindmap-tag-category-home-postgresql.sql
       - ./ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_selection_mode_postgresql.sql:/docker-entrypoint-initdb.d/zzzzzz-mindmap-tag-category-selection-mode-postgresql.sql
+      - ./ruoyi-fastapi-backend/migrations/20260910_mindmap_ai_agent_postgresql.sql:/docker-entrypoint-initdb.d/zzzzzzz-mindmap-ai-agent-postgresql.sql
     networks:
       - ruoyi-network
     healthcheck:

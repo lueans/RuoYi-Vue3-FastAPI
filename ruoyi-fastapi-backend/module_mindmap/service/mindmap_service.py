@@ -118,6 +118,11 @@ MINDMAP_CREATION_AUDIT_FIELDS = frozenset({
 })
 
 
+def _default_mindmap_theme() -> dict[str, Any]:
+    """Return a fresh default theme for legacy reads and blank creations."""
+    return {'template': 'default', 'config': {}}
+
+
 def _detail_metric_outcome(result: MindmapModel) -> str:
     return 'success' if result.content_state == 'ready' else 'degraded'
 
@@ -561,7 +566,7 @@ def _node_data_changed_fields(payload: dict[str, Any]) -> set[str] | None:
     previous = payload.get('previousData', payload.get('previous_data'))
     if not isinstance(current, dict) or not isinstance(previous, dict):
         return None
-    return {
+    changed_fields = {
         str(key)
         for key in current.keys() | previous.keys()
         if (key in current) != (key in previous)
@@ -570,6 +575,18 @@ def _node_data_changed_fields(payload: dict[str, Any]) -> set[str] | None:
             and not _json_values_equal(current[key], previous[key])
         )
     }
+    # text 的字节表示必须与 richText 格式标记作为一个原子冲突域。
+    # 富文本插件可能在建立命令历史基线前已把 plain 运行态转为
+    # rich，使新旧快照里 richText 都是 true；若只按表面差异写 text，
+    # 服务端会把 HTML 字节保存成 plain，下次打开再次转义并形成自激循环。
+    if 'text' in changed_fields:
+        changed_fields.add('richText')
+    if (
+        'richText' in changed_fields
+        and ('text' in current or 'text' in previous)
+    ):
+        changed_fields.add('text')
+    return changed_fields
 
 
 def _node_delete_conflict_keys(
@@ -2510,6 +2527,11 @@ class MindmapService:
         )
 
         result_dict = CamelCaseUtil.transform_result(mindmap)
+        # Existing rows created before the canonical default may contain NULL.
+        # Cosmetic metadata must not prevent an otherwise valid document from
+        # opening, so legacy absence has the same meaning as the default theme.
+        if not isinstance(result_dict.get('theme'), dict):
+            result_dict['theme'] = _default_mindmap_theme()
         migration_failed = await MindmapDao.get_migration_status(query_db, mindmap_id) == 'failed'
         result_dict.update({
             'accessType': 'owned' if is_owner else 'shared',
@@ -2792,6 +2814,9 @@ class MindmapService:
             if key in MINDMAP_CREATION_ALLOWED_FIELDS
         }
         insert_data['status'] = 0
+        # The database historically allowed NULL themes, while the editor
+        # requires a complete theme envelope. Canonicalize blank creations.
+        insert_data.setdefault('theme', _default_mindmap_theme())
         if isinstance(insert_data.get('node_tree'), dict):
             insert_data['node_tree'] = json.dumps(insert_data['node_tree'], ensure_ascii=False)
         insert_data.pop('id', None)
@@ -3173,6 +3198,9 @@ class MindmapService:
         page_object: MindmapContentBatchModel,
         user_id: int,
         user_name: str | None = None,
+        *,
+        commit: bool = True,
+        broadcast: bool = True,
     ) -> dict[str, Any]:
         """幂等、带乐观锁的结构化内容增量保存。"""
         await cls.check_mindmap_access(query_db, mindmap_id, user_id, require_edit=True)
@@ -3181,6 +3209,7 @@ class MindmapService:
             mindmap = await MindmapDao.get_mindmap_for_update(query_db, mindmap_id)
             if not mindmap:
                 raise ServiceException(message='思维导图不存在')
+            current_document_data = getattr(mindmap, 'document_data', None)
 
             request_fingerprint = _content_batch_request_fingerprint(page_object)
             previous = await MindmapContentDao.get_change_by_mutation(
@@ -3236,6 +3265,10 @@ class MindmapService:
             )
             document_snapshot_update = legacy_document_update or content_snapshot_update
             should_persist_tree = bool(tree_operations or document_snapshot_update)
+            should_update_document_data = (
+                'document_data' in file_fields
+                or (document_snapshot_update and page_object.document_data is not None)
+            )
             materialized_tree = page_object.node_tree
             concurrent_merge = False
             authoritative_reload_required = page_object.yjs_delivery_mode == 'reload'
@@ -3251,8 +3284,8 @@ class MindmapService:
                         required=True,
                         for_update=True,
                     )
-                elif tree_operations:
-                    server_tree = mindmap.node_tree
+                elif should_persist_tree:
+                    server_tree = getattr(mindmap, 'node_tree', None)
                     if isinstance(server_tree, str):
                         server_tree = json.loads(server_tree)
             if sync_confirmation:
@@ -3432,10 +3465,6 @@ class MindmapService:
                 update_data['layout'] = page_object.layout
             if ('theme' in file_fields or document_snapshot_update) and page_object.theme is not None:
                 update_data['theme'] = page_object.theme
-            should_update_document_data = (
-                'document_data' in file_fields
-                or (document_snapshot_update and page_object.document_data is not None)
-            )
             if should_update_document_data:
                 update_data['document_data'] = page_object.document_data
             await MindmapDao.update_content_dao(query_db, mindmap_id, update_data)
@@ -3458,7 +3487,7 @@ class MindmapService:
             effective_document_data = (
                 page_object.document_data
                 if should_update_document_data
-                else mindmap.document_data
+                else current_document_data
             )
 
             result = {
@@ -3507,39 +3536,41 @@ class MindmapService:
                     theme=effective_theme,
                     created_by=operator,
                 )
-            await query_db.commit()
-            try:
-                from module_mindmap.websocket.room_manager import room_manager  # noqa: PLC0415
+            if commit:
+                await query_db.commit()
+            if broadcast:
+                try:
+                    from module_mindmap.websocket.room_manager import room_manager  # noqa: PLC0415
 
-                # 客户端产生的 Yjs 帧无法由 Python 服务端解码并与已落库的
-                # canonical tree 做内容绑定。它们只承担低延迟预览；远端在
-                # HTTP 提交确认后必须读取权威正文，才能防止“序号完整但载荷
-                # 与请求快照不一致”的错误状态进入同 revision 检查点。发起端
-                # 则由 HTTP 响应确认自己提交的文档，无需在正常路径重复回源。
-                remote_authoritative_reload_required = (
-                    authoritative_reload_required
-                    or any(
-                        operation.get('type') != 'file.view.update'
-                        for operation in request_operations
+                    # 客户端产生的 Yjs 帧无法由 Python 服务端解码并与已落库的
+                    # canonical tree 做内容绑定。它们只承担低延迟预览；远端在
+                    # HTTP 提交确认后必须读取权威正文，才能防止“序号完整但载荷
+                    # 与请求快照不一致”的错误状态进入同 revision 检查点。发起端
+                    # 则由 HTTP 响应确认自己提交的文档，无需在正常路径重复回源。
+                    remote_authoritative_reload_required = (
+                        authoritative_reload_required
+                        or any(
+                            operation.get('type') != 'file.view.update'
+                            for operation in request_operations
+                        )
                     )
-                )
-                await room_manager.broadcast(mindmap_id, {
-                    'type': 'content_revision_changed',
-                    'contentRevision': new_revision,
-                    'clientMutationId': page_object.client_mutation_id,
-                    'concurrentMerge': concurrent_merge,
-                    'authoritativeReloadRequired': remote_authoritative_reload_required,
-                    'yjsUpdateCount': page_object.yjs_update_count,
-                    'yjsDeliveryMode': page_object.yjs_delivery_mode,
-                    # 与同一 mutation 的 Yjs 增量一起到达客户端后，原子更新
-                    # 节点 revision 栅栏，避免已显示远端内容却继续携带旧
-                    # targetRevision 产生假冲突。
-                    'changedNodes': changed_nodes,
-                })
-            except Exception as exc:
-                # HTTP 保存已提交，实时通知失败不能反向回滚主数据。
-                record_mindmap_event('broadcast_failure')
-                logger.warning(f'广播脑图 revision 变更失败: {exc}')
+                    await room_manager.broadcast(mindmap_id, {
+                        'type': 'content_revision_changed',
+                        'contentRevision': new_revision,
+                        'clientMutationId': page_object.client_mutation_id,
+                        'concurrentMerge': concurrent_merge,
+                        'authoritativeReloadRequired': remote_authoritative_reload_required,
+                        'yjsUpdateCount': page_object.yjs_update_count,
+                        'yjsDeliveryMode': page_object.yjs_delivery_mode,
+                        # 与同一 mutation 的 Yjs 增量一起到达客户端后，原子更新
+                        # 节点 revision 栅栏，避免已显示远端内容却继续携带旧
+                        # targetRevision 产生假冲突。
+                        'changedNodes': changed_nodes,
+                    })
+                except Exception as exc:
+                    # HTTP 保存已提交，实时通知失败不能反向回滚主数据。
+                    record_mindmap_event('broadcast_failure')
+                    logger.warning(f'广播脑图 revision 变更失败: {exc}')
             return result
         except (ServiceException, ServiceWarning):
             await query_db.rollback()

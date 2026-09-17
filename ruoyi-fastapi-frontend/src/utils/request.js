@@ -20,10 +20,42 @@ import {
   isRepeatSubmitMethod
 } from '@/utils/requestDedupe'
 import { getCurrentLoginReturnPath } from '@/utils/login-redirect'
+import {
+  claimReloginPrompt,
+  createAuthExpiredError,
+  releaseReloginPrompt
+} from '@/utils/auth-expiry'
 
 let downloadLoadingInstance;
 // 是否显示重新登录
 export let isRelogin = { show: false };
+
+function shouldHandleAuthExpired(config) {
+  return config?.skipAuthExpiredHandler !== true
+}
+
+function handleAuthExpired() {
+  if (!claimReloginPrompt(isRelogin)) return
+
+  const returnPath = getCurrentLoginReturnPath(location)
+  ElMessageBox.confirm(
+    '登录状态已过期，您可以继续留在该页面，或者重新登录',
+    '系统提示',
+    { confirmButtonText: '重新登录', cancelButtonText: '取消', type: 'warning' },
+  ).then(() => {
+    const userStore = useUserStore()
+    const expiredToken = userStore.token
+    userStore.resetToken()
+    releaseReloginPrompt(isRelogin)
+    // 本地退出和页面跳转是权威动作，不能等待远端 logout 成功。
+    location.href = returnPath
+    Promise.resolve()
+      .then(() => userStore.logOutRemote(expiredToken))
+      .catch(() => undefined)
+  }).catch(() => {
+    releaseReloginPrompt(isRelogin)
+  })
+}
 
 axios.defaults.headers['Content-Type'] = 'application/json;charset=utf-8'
 // 创建axios实例
@@ -94,7 +126,7 @@ service.interceptors.response.use(async res => {
     // 响应若命中了传输层加密，这里先还原为原始业务 JSON。
     res = await decryptTransportResponse(res)
     // 未设置状态码则默认成功状态
-    const code = res.data.code || 200;
+    const code = Number(res.data.code ?? 200);
     const silentError = res.config?.silentError === true
     // 获取错误信息
     const msg = errorCode[code] || res.data.msg || errorCode['default']
@@ -103,21 +135,11 @@ service.interceptors.response.use(async res => {
       return res.data
     }
     if (code === 401) {
-      if (!isRelogin.show) {
-        isRelogin.show = true;
-        ElMessageBox.confirm('登录状态已过期，您可以继续留在该页面，或者重新登录', '系统提示', { confirmButtonText: '重新登录', cancelButtonText: '取消', type: 'warning' }).then(() => {
-          isRelogin.show = false;
-          const returnPath = getCurrentLoginReturnPath(location)
-          useUserStore().logOut().then(() => {
-            // 退出后重新访问原站内地址，由路由守卫安全生成登录 redirect。
-            // 不能固定跳转 /index，否则协作会话、脑图 ID 和节点定位都会丢失。
-            location.href = returnPath;
-          })
-      }).catch(() => {
-        isRelogin.show = false;
-      });
-    }
-      return Promise.reject('无效的会话，或者会话已过期，请重新登录。')
+      if (shouldHandleAuthExpired(res.config)) handleAuthExpired()
+      return Promise.reject(createAuthExpiredError(
+        res.data.msg || msg,
+        { data: res.data.data, response: res },
+      ))
     } else if (code === 500) {
       if (!silentError) ElMessage({ message: msg, type: 'error' })
       const businessError = new Error(msg)
@@ -159,6 +181,18 @@ service.interceptors.response.use(async res => {
     const responseStatus = response?.status
     const responseCode = response?.data?.code
     const responseMsg = response?.data?.msg
+    const authExpired = Number(responseStatus) === 401 || Number(responseCode) === 401
+    if (authExpired) {
+      const skipAuthExpiredHandler = (
+        !shouldHandleAuthExpired(error.config)
+        || !shouldHandleAuthExpired(response?.config)
+      )
+      if (!skipAuthExpiredHandler) handleAuthExpired()
+      return Promise.reject(createAuthExpiredError(
+        responseMsg || errorCode[401],
+        { data: response?.data?.data, response },
+      ))
+    }
     // 后台轮询可自行聚合普通错误，但认证失效必须继续进入全局可见处理，
     // 不能因为调用方要求静默而让用户停留在已经失效的会话中。
     const silentError = (
@@ -168,7 +202,13 @@ service.interceptors.response.use(async res => {
     if (responseMsg) {
       const messageType = responseStatus === 429 || responseCode === 429 ? 'warning' : 'error'
       if (!silentError) ElMessage({ message: responseMsg, type: messageType, duration: 5 * 1000 })
-      return Promise.reject(new Error(responseMsg))
+      // 保留 HTTP 响应元数据，供静默恢复流程区分“资源确实不存在”和
+      // 临时网络/服务故障；只抛裸 Error 会让调用方无法安全决定是否重试。
+      const responseError = new Error(responseMsg)
+      responseError.response = response
+      responseError.status = responseStatus
+      responseError.code = responseCode ?? responseStatus
+      return Promise.reject(responseError)
     }
     let { message } = error;
     if (message == "Network Error") {

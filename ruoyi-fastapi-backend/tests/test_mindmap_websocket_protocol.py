@@ -45,6 +45,7 @@ from module_mindmap.websocket.mindmap_ws import (
     persist_authorized_yjs_state,
 )
 from module_mindmap.websocket.room_manager import (
+    COLLABORATION_MUTATION_BARRIER_CAPABILITY,
     CONDITIONAL_NODE_PATCH_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
     NODE_EDIT_LEASE_CAPABILITY,
@@ -225,6 +226,9 @@ def _create_endpoint_room_manager(
         release_node_edit_lease=AsyncMock(return_value=True),
         release_connection_node_edit_leases=AsyncMock(),
         owns_node_edit_lease=AsyncMock(return_value=True),
+        is_collaboration_mutation_allowed=AsyncMock(return_value=True),
+        record_collaboration_mutation_checkpoint=AsyncMock(return_value=True),
+        acknowledge_collaboration_mutation_barrier=AsyncMock(return_value=True),
         require_write_capability=AsyncMock(side_effect=require_write_capability),
         get_required_write_capabilities=AsyncMock(
             side_effect=get_required_write_capabilities,
@@ -2320,6 +2324,82 @@ class MindmapWebsocketAuthenticationBoundaryTest(unittest.IsolatedAsyncioTestCas
         ))
         manager.reconcile_persisted_content_lineage_digest.assert_not_called()
         manager.leave.assert_awaited_once_with(7, websocket)
+
+    async def test_barrier_ready_ack_is_processed_after_forced_checkpoint_persistence(
+        self,
+    ) -> None:
+        token = '0123456789abcdef0123456789abcdef'
+        websocket = _ScriptedWebSocket([
+            {
+                'type': 'auth',
+                'token': 'opaque-token',
+                'capabilities': [
+                    COLLABORATION_MUTATION_BARRIER_CAPABILITY,
+                    YJS_CHECKPOINT_CAPABILITY,
+                    YJS_LINEAGE_CAPABILITY,
+                ],
+            },
+            {
+                'type': 'checkpoint',
+                'state': base64.b64encode(b'drained-yjs-state').decode(),
+                'contentRevision': 4,
+                'lineageId': 'committed-lineage',
+                'barrierToken': token,
+            },
+            {
+                'type': 'collaboration_barrier_ack',
+                'token': token,
+                'ready': True,
+                'contentRevision': 4,
+            },
+        ])
+        manager = _create_endpoint_room_manager(websocket)
+        manager.consume_disconnect_persistence_permission.side_effect = None
+        manager.consume_disconnect_persistence_permission.return_value = False
+        save_state = AsyncMock(return_value=True)
+        timeline = Mock()
+        timeline.attach_mock(save_state, 'persist')
+        timeline.attach_mock(
+            manager.record_collaboration_mutation_checkpoint,
+            'checkpoint_recorded',
+        )
+        timeline.attach_mock(
+            manager.acknowledge_collaboration_mutation_barrier,
+            'acknowledged',
+        )
+
+        with patch(
+            'module_mindmap.websocket.mindmap_ws.time.monotonic',
+            return_value=1.0,
+        ):
+            await _run_scripted_endpoint(
+                websocket,
+                manager,
+                load_snapshot=(
+                    4,
+                    {'db-source': b'database-state'},
+                    {'db-source': 'a' * 64},
+                ),
+                save_state=save_state,
+            )
+
+        save_state.assert_awaited_once()
+        manager.record_collaboration_mutation_checkpoint.assert_awaited_once_with(
+            7,
+            websocket,
+            token,
+        )
+        manager.acknowledge_collaboration_mutation_barrier.assert_awaited_once_with(
+            7,
+            websocket,
+            token,
+            ready=True,
+        )
+        self.assertEqual(
+            [call[0] for call in timeline.method_calls],
+            ['persist', 'checkpoint_recorded', 'acknowledged'],
+        )
+        manager.broadcast_checkpoint.assert_not_awaited()
 
     async def test_unexpected_auth_failure_is_generic_and_retryable(self) -> None:
         websocket = _AuthFailureWebSocket()

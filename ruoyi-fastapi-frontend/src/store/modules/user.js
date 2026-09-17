@@ -71,14 +71,23 @@ const useUserStore = defineStore(
           })
         })
       },
+      // 仅清理本地认证状态。会话已经失效时不能等待远端 logout，
+      // 否则网络失败会让路由守卫永久停在当前导航。
+      resetToken() {
+        this.token = ''
+        this.roles = []
+        this.permissions = []
+        removeToken()
+      },
+      // 仅请求服务端注销，不在迟到响应中修改当前本地会话。
+      logOutRemote(token = this.token) {
+        return logout(token)
+      },
       // 退出系统
       logOut() {
         return new Promise((resolve, reject) => {
-          logout(this.token).then(() => {
-            this.token = ''
-            this.roles = []
-            this.permissions = []
-            removeToken()
+          this.logOutRemote(this.token).then(() => {
+            this.resetToken()
             resolve()
           }).catch(error => {
             reject(error)

@@ -89,6 +89,11 @@ MINDMAP_SCHEMA_MIGRATIONS = (
         '20260828_mindmap_tag_category_selection_mode.sql',
         '为标签分组增加单选/多选规则，并把现有系统标记分组迁移为单选',
     ),
+    MindmapMigrationDefinition(
+        '20260910_mindmap_ai_agent.sql',
+        '建立 AI 脑图 Connector、任务、会话、不可变 Artifact、Proposal、事件和撤销记录，'
+        '并附加 Agent 治理策略、到期清理索引、讨论模式文字结果与实时草稿加密检查点',
+    ),
 )
 
 POSTGRESQL_MIGRATION_OVERRIDES = {
@@ -106,6 +111,7 @@ POSTGRESQL_MIGRATION_OVERRIDES = {
     '20260828_mindmap_tag_category_selection_mode.sql': (
         '20260828_mindmap_tag_category_selection_mode_postgresql.sql'
     ),
+    '20260910_mindmap_ai_agent.sql': '20260910_mindmap_ai_agent_postgresql.sql',
 }
 
 

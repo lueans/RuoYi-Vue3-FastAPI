@@ -1,3 +1,4 @@
+from importlib import import_module
 from typing import Any
 
 from cli.exit_codes import DATABASE_ERROR
@@ -64,6 +65,100 @@ class DatabaseRuntimeService:
             return {'ok': False, 'message': '数据库连接失败', 'error': str(exc), 'exit_code': DATABASE_ERROR}
         finally:
             await engine.dispose()
+
+    async def check_mindmap_readiness(self, env: str) -> dict[str, dict[str, Any]]:
+        """只读检查脑图结构与 AI Agent 关键初始化数据。"""
+        config_module = import_module('config.env')
+        release_module = import_module('module_mindmap.service.mindmap_schema_release')
+        verifier_module = import_module('module_mindmap.service.mindmap_schema_verifier')
+
+        create_async_db_engine = self.infrastructure_gateway.get_async_db_engine_factory()
+        engine = create_async_db_engine(echo=False)
+        try:
+            async with engine.connect() as connection:
+                snapshot = await connection.run_sync(verifier_module.inspect_mindmap_schema)
+        except Exception as exc:
+            error_type = type(exc).__name__
+            action = (
+                '先修复数据库连接或只读元数据权限，再运行 '
+                f'python -m scripts.verify_mindmap_schema --env={env}'
+            )
+            failure = {
+                'ok': False,
+                'message': '无法完成脑图发布就绪检查',
+                'error': error_type,
+                'action': action,
+            }
+            return {'schema': dict(failure), 'aiBootstrap': dict(failure)}
+        finally:
+            await engine.dispose()
+
+        issues = verifier_module.find_mindmap_schema_issues(snapshot)
+        schema_issues = [
+            item for item in issues
+            if item.kind not in verifier_module.AI_BOOTSTRAP_ISSUE_KINDS
+        ]
+        bootstrap_issues = [
+            item for item in issues
+            if item.kind in verifier_module.AI_BOOTSTRAP_ISSUE_KINDS
+        ]
+        migration_order = [
+            item.filename for item in release_module.MINDMAP_SCHEMA_MIGRATIONS
+        ]
+
+        def _build_status(
+            scoped_issues: list[Any],
+            *,
+            ready_message: str,
+            failure_message: str,
+        ) -> dict[str, Any]:
+            if not scoped_issues:
+                return {'ok': True, 'message': ready_message, 'missingCount': 0}
+            referenced = {item.migration for item in scoped_issues}
+            database_type = config_module.DataBaseConfig.db_type
+            migrations = [
+                release_module.resolve_migration_filename(
+                    filename,
+                    database_type,
+                )
+                for filename in migration_order
+                if filename in referenced
+            ]
+            serialized_issues = []
+            for item in scoped_issues:
+                issue_payload = item.to_dict()
+                issue_payload['migration'] = release_module.resolve_migration_filename(
+                    item.migration,
+                    database_type,
+                )
+                serialized_issues.append(issue_payload)
+            return {
+                'ok': False,
+                'message': f'{failure_message}：{len(scoped_issues)} 项阻塞',
+                'error': 'mindmap_release_not_ready',
+                'missingCount': len(scoped_issues),
+                'issues': serialized_issues,
+                'migrations': migrations,
+                'action': (
+                    '先运行 '
+                    f'python -m scripts.plan_mindmap_schema_migrations --env={env}，'
+                    '人工审核并执行输出的迁移，再运行 '
+                    f'python -m scripts.verify_mindmap_schema --env={env}'
+                ),
+            }
+
+        return {
+            'schema': _build_status(
+                schema_issues,
+                ready_message='脑图 Schema 已就绪',
+                failure_message='脑图 Schema 未就绪',
+            ),
+            'aiBootstrap': _build_status(
+                bootstrap_issues,
+                ready_message='AI Agent Connector、菜单与角色授权已就绪',
+                failure_message='AI Agent 初始化数据未就绪',
+            ),
+        }
 
     def get_current_revision(self) -> dict[str, Any]:
         """

@@ -68,6 +68,8 @@ def test_app_doctor_text_output_has_stable_check_structure(
     assert 'env: dev\n' in completed.stdout
     assert 'checks:\n' in completed.stdout
     assert 'database:' in completed.stdout
+    assert 'mindmap_schema:' in completed.stdout
+    assert 'mindmap_ai_bootstrap:' in completed.stdout
     assert 'redis:' in completed.stdout
     assert 'crypto:' in completed.stdout
 
@@ -84,10 +86,26 @@ def test_app_doctor_json_output_has_stable_contract(
     assert completed.stderr == ''
     assert payload['env'] == 'dev'
     assert isinstance(payload['ok'], bool)
-    assert set(payload) == {'env', 'database', 'redis', 'crypto', 'ok'}
+    assert set(payload) == {
+        'env',
+        'database',
+        'mindmapSchema',
+        'mindmapAiBootstrap',
+        'redis',
+        'crypto',
+        'ok',
+    }
     assert_check_payload_contract(payload['database'], True)
     assert_check_payload_contract(payload['redis'], True)
     assert_check_payload_contract(payload['crypto'], False)
+    for check_name in ('mindmapSchema', 'mindmapAiBootstrap'):
+        check = payload[check_name]
+        assert isinstance(check.get('ok'), bool)
+        assert isinstance(check.get('message'), str)
+        if not check['ok']:
+            assert isinstance(check.get('error'), str)
+            assert isinstance(check.get('action'), str)
+            assert any(command in check['action'] for command in ('scripts.', 'ruoyi app doctor'))
 
 
 def test_app_env_json_output_has_stable_contract(

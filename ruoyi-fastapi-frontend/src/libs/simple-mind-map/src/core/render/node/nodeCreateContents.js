@@ -369,8 +369,9 @@ function createHyperlinkNode() {
 
 //  创建标签节点
 function createTagNode() {
-  const tagData = this.getData('tag')
-  if (!tagData || tagData.length <= 0) {
+  const persistedTagData = this.getData('tag')
+  const tagData = Array.isArray(persistedTagData) ? persistedTagData : []
+  if (tagData.length <= 0) {
     return []
   }
   let { maxTag, tagsColorMap } = this.mindMap.opt

@@ -1,0 +1,21 @@
+{
+  "format": "ruoyi-mindmap",
+  "formatSchemaVersion": 2,
+  "manifest": {
+    "artifactId": "fixture-invalid-hash",
+    "title": "篡改样例",
+    "sourceType": "external_agent",
+    "createdAt": "2026-09-10T00:00:00Z",
+    "generator": { "agentKey": "fixture_agent", "adapterVersion": "1.0.0", "promptVersion": "fixture-1" },
+    "validation": { "status": "passed", "validatorVersion": "mindmap-agent-kit-1" },
+    "provenance": "external_unverified",
+    "documentHash": "mmf2:sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "document": {
+    "root": { "data": { "uid": "root-1", "text": "已被篡改" }, "children": [] },
+    "layout": "logicalStructure",
+    "theme": { "template": "default", "config": {} },
+    "view": null,
+    "documentData": {}
+  }
+}

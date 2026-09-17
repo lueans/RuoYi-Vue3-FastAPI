@@ -64,6 +64,11 @@ def test_collect_app_page_snapshot_builds_env_config_and_route_sections(
                     'ok': True,
                     'env': 'dev',
                     'database': {'ok': True, 'message': '数据库连接成功'},
+                    'mindmapSchema': {'ok': True, 'message': '脑图 Schema 已就绪'},
+                    'mindmapAiBootstrap': {
+                        'ok': True,
+                        'message': 'AI Agent 初始化数据已就绪',
+                    },
                     'redis': {'ok': True, 'message': 'Redis连接成功'},
                     'crypto': {'ok': True, 'message': '传输加密配置有效'},
                 }
@@ -154,6 +159,8 @@ def test_collect_app_page_snapshot_builds_env_config_and_route_sections(
     assert any('监听地址: 127.0.0.1:8000' in line for line in snapshot.sections[2].lines)
     assert any('传输加密: 开启' in line for line in snapshot.sections[3].lines)
     assert any('数据库: 正常' in line for line in snapshot.sections[4].lines)
+    assert any('脑图 Schema: 正常' in line for line in snapshot.sections[4].lines)
+    assert any('AI 初始化: 正常' in line for line in snapshot.sections[4].lines)
     assert any('活动 Shell: bash' in line for line in snapshot.sections[5].lines)
     assert any('source /tmp/ruoyi.bash' in line for line in snapshot.sections[5].lines)
     assert any('Shell: bash' in line for line in snapshot.sections[6].lines)

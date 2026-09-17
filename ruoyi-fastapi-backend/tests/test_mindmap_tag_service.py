@@ -72,7 +72,7 @@ class MindmapTagServiceTest(unittest.IsolatedAsyncioTestCase):
             expired = False
             id = 8
             owner_id = 0
-            tag_key = 'testcase_priority_p0'
+            tag_key = 'priority_p0'
             uuid = 'tag-uuid'
             name = 'P0'
             style = {'fill': '#fa0000'}
@@ -101,7 +101,7 @@ class MindmapTagServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         model = MindmapTagModel(
             id=8,
-            tagKey='testcase_priority_p0',
+            tagKey='priority_p0',
             name='P0',
             categoryId=2,
             ownerId=0,

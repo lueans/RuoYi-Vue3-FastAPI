@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruoyi:mindmap-agent-quality-dataset:v1",
+  "title": "RuoYi mind-map agent quality evaluation dataset v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "datasetVersion", "cases"],
+  "properties": {
+    "schema": {"const": "ruoyi-mindmap-agent-quality-dataset/v1"},
+    "datasetVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "cases": {
+      "type": "array",
+      "minItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "caseId",
+          "category",
+          "language",
+          "intent",
+          "prompt",
+          "sourceType",
+          "parameters",
+          "expected"
+        ],
+        "properties": {
+          "caseId": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{2,63}$"},
+          "category": {
+            "enum": [
+              "knowledge_graph",
+              "project_plan",
+              "requirements_breakdown",
+              "long_text_zh",
+              "long_text_en",
+              "branch_rewrite",
+              "structure_condense",
+              "prompt_injection",
+              "ambiguous_input"
+            ]
+          },
+          "language": {"type": "string", "minLength": 1, "maxLength": 16},
+          "intent": {
+            "enum": [
+              "create",
+              "expand",
+              "rewrite_branch",
+              "condense_branch",
+              "reorganize"
+            ]
+          },
+          "prompt": {"type": "string", "minLength": 1, "maxLength": 20000},
+          "sourceType": {"enum": ["none", "local_snapshot"]},
+          "sourceDocument": {"type": "object"},
+          "scope": {"type": "object"},
+          "parameters": {"type": "object"},
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "expectedOutcome",
+              "minNodes",
+              "maxNodes",
+              "minDepth",
+              "maxDepth",
+              "requiredTerms",
+              "forbiddenTerms",
+              "maxDuplicateRatio"
+            ],
+            "properties": {
+              "expectedOutcome": {"enum": ["artifact", "needs_input"]},
+              "minNodes": {"type": "integer", "minimum": 1, "maximum": 2000},
+              "maxNodes": {"type": "integer", "minimum": 1, "maximum": 2000},
+              "minDepth": {"type": "integer", "minimum": 1, "maximum": 32},
+              "maxDepth": {"type": "integer", "minimum": 1, "maximum": 32},
+              "requiredTerms": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                "uniqueItems": true
+              },
+              "forbiddenTerms": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                "uniqueItems": true
+              },
+              "maxDuplicateRatio": {"type": "number", "minimum": 0, "maximum": 1},
+              "allowedTools": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

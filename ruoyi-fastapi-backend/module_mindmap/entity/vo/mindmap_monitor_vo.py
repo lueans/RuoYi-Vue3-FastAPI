@@ -1,7 +1,7 @@
 """脑图监控响应模型。"""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -76,3 +76,7 @@ class MindmapMetricsSnapshotModel(BaseModel):
     collaboration: MindmapCollaborationRuntimeModel = Field(description='当前进程协作运行态')
     series: list[MindmapMetricSeriesModel] = Field(description='操作指标序列')
     events: list[MindmapMetricEventModel] = Field(description='固定事件计数')
+    ai: dict[str, Any] = Field(
+        default_factory=lambda: {'runs': [], 'events': []},
+        description='按 Agent 与固定结果聚合的 AI 脑图指标',
+    )

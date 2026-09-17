@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { waitForMindmapInitialRender } from '../mindmap-initial-render.js'
+import {
+  establishMindmapInitialHistoryBaseline,
+  waitForMindmapInitialRender,
+} from '../mindmap-initial-render.js'
 
 class FakeEventTarget {
   constructor(visibilityState = 'visible') {
@@ -52,6 +55,23 @@ class FakeMindMap {
 }
 
 const wait = delay => new Promise(resolve => setTimeout(resolve, delay))
+
+test('首帧插件归一化被收口为静默历史基线', () => {
+  const calls = []
+  const mindMap = {
+    command: {
+      addHistory: { cancel: () => calls.push('cancel') },
+      resetHistoryBaseline: () => {
+        calls.push('baseline')
+        return true
+      },
+    },
+  }
+
+  assert.equal(establishMindmapInitialHistoryBaseline(mindMap), true)
+  assert.deepEqual(calls, ['cancel', 'baseline'])
+  assert.equal(establishMindmapInitialHistoryBaseline(null), false)
+})
 
 test('后台标签页暂停首次渲染超时并在回到前台后等待真实完成事件', async () => {
   const documentRef = new FakeEventTarget('hidden')

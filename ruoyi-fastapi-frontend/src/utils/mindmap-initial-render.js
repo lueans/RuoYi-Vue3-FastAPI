@@ -8,6 +8,24 @@ function isMindmapInitialRenderComplete(instance) {
     && !renderer.renderTimer
   )
 }
+
+/**
+ * 将插件首帧为渲染而做的数据归一化收口为静默历史基线。
+ *
+ * RichText 等插件会消费 resetRichText、补齐富文本 DOM 结构；这些都不是
+ * 用户操作，不得在延迟的 Command.addHistory 回调中反向变成一批云端修改。
+ */
+export function establishMindmapInitialHistoryBaseline(instance) {
+  const command = instance?.command
+  if (!command) return false
+  command.addHistory?.cancel?.()
+  if (typeof command.resetHistoryBaseline === 'function') {
+    return command.resetHistoryBaseline() === true
+  }
+  command.clearHistory?.()
+  return false
+}
+
 /**
  * 等待 simple-mind-map 首次画布渲染完成。
  *

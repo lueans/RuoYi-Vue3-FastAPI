@@ -77,7 +77,7 @@ test('布局和主题元数据由编辑器按文件类型统一持久化', async
   assert.match(inspector, /function handleDocumentMetaChange\(scope, payload\)[\s\S]*emit\('document-meta-change', payload\)/)
   assert.match(editor, /function onDocumentMetaChange\(patch\)/)
   assert.match(editor, /normalizedPatch = normalizeMindmapDocumentMetaPatch\(patch\)/)
-  assert.match(editor, /if \(!props\.mindmapId\) \{\s*persistLocalWorkspace\(normalizedPatch\)\s*return/)
+  assert.match(editor, /if \(!props\.mindmapId\) \{\s*const stored = persistLocalWorkspace\(normalizedPatch\)[\s\S]*return stored/)
   assert.match(editor, /recordDocumentOperations\(current, Object\.keys\(normalizedPatch\)\)/)
   assert.match(editor, /scheduleYjsMetaSync\(normalizedPatch\)/)
   assert.match(editor, /scheduleLocalDraftPersist\(\)/)

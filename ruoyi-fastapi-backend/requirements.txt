@@ -2,6 +2,7 @@ agno==2.4.8
 aiofiles==25.1.0
 alembic==1.18.3
 anthropic==0.78.0
+claude-agent-sdk==0.2.152
 APScheduler==3.11.2
 async-lru==2.1.0
 asyncmy==0.2.11
@@ -17,6 +18,8 @@ loguru==0.7.3
 mistralai==1.12.0
 ollama==0.6.1
 openai==2.17.0
+openai-codex==0.147.0
+openai-codex-cli-bin==0.147.0
 openpyxl==3.1.5
 pandas==2.3.3
 Pillow==12.1.1
@@ -28,8 +31,10 @@ PyJWT[crypto]==2.11.0
 PyMySQL==1.1.2
 redis==7.1.0
 requests
+rfc8785==0.1.4
 ruff==0.15.0
 SQLAlchemy[asyncio]==2.0.46
 sqlglot[rs]==28.10.0
 textual==8.2.5
 user-agents==2.2.0
+.

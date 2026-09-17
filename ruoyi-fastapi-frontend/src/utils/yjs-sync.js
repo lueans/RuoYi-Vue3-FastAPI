@@ -80,8 +80,11 @@ const YJS_LINEAGE_CAPABILITY = 'yjs-lineage-v1'
 const YJS_SOURCE_CAS_CAPABILITY = 'yjs-source-cas-v1'
 const NODE_EDIT_LEASE_CAPABILITY = 'node-edit-lease-v1'
 const NODE_EDIT_LEASE_RENEWAL_CAPABILITY = 'node-edit-lease-renewal-v1'
+const COLLABORATION_MUTATION_BARRIER_CAPABILITY = 'collaboration-mutation-barrier-v1'
 const NODE_EDIT_LEASE_REQUEST_TIMEOUT_MS = 5000
 const NODE_EDIT_LEASE_REFRESH_INTERVAL_MS = 10 * 1000
+const COLLABORATION_BARRIER_CLIENT_TIMEOUT_MS = 45 * 1000
+const COLLABORATION_BARRIER_STATUS_RETRY_MS = 3 * 1000
 const NODE_EDIT_LEASE_FAILURE_REASONS = new Set([
   'occupied',
   'connecting',
@@ -698,6 +701,11 @@ export class YjsMindmapSync {
     this._nodeEditLeaseRefreshTimer = null
     this._nodeEditLeaseFailureReason = ''
     this._lastStructureWriteBlocked = false
+    this._collaborationBarrierToken = ''
+    this._collaborationBarrierRevision = null
+    this._collaborationBarrierAcked = false
+    this._collaborationBarrierStatusUnknown = false
+    this._collaborationBarrierTimer = null
     this.sessionId = null
     this.contentRevision = contentRevision
     this.confirmedMutationDeliveryTimeoutMs = (
@@ -824,6 +832,15 @@ export class YjsMindmapSync {
       room_users: (data) => this._handleRoomUsers(data),
       awareness: (data) => this._handleAwareness(data),
       node_edit_lease_result: (data) => this._handleNodeEditLeaseResult(data),
+      collaboration_barrier_prepare: (data) => {
+        void this._handleCollaborationBarrierPrepare(data)
+      },
+      collaboration_barrier_released: (data) => {
+        this._handleCollaborationBarrierReleased(data)
+      },
+      collaboration_barrier_status: (data) => {
+        this._handleCollaborationBarrierStatus(data)
+      },
       protocol_error: (data) => {
         this.syncError.value = data.message || '协作消息格式错误'
         // protocol_error 没有可靠携带所拒绝帧的 mutationId。只要本地仍有
@@ -851,6 +868,7 @@ export class YjsMindmapSync {
         && origin !== 'remote'
         && origin !== 'authoritative-baseline'
         && !this._paused
+        && !this._collaborationBarrierToken
         && this._authoritativeRevisionPending === null
       ) {
         const supportsConditionalPatch = this._supportsConditionalNodePatchProtocol()
@@ -1087,6 +1105,12 @@ export class YjsMindmapSync {
     this.releaseNodeEditLease()
     this._clearPendingNodeEditLeaseRequests()
     this._pendingNodeEditLeaseAcquireCount = 0
+    this._collaborationBarrierToken = ''
+    this._collaborationBarrierRevision = null
+    this._collaborationBarrierAcked = false
+    this._collaborationBarrierStatusUnknown = false
+    clearTimeout(this._collaborationBarrierTimer)
+    this._collaborationBarrierTimer = null
     this._preparingRemote = false
     this._applyingRemote = false
     this._settleNodeEditLeaseRemoteIdleWaiters({ cancel: true })
@@ -1683,6 +1707,7 @@ export class YjsMindmapSync {
       this._destroyed
       || this.readonly
       || this._receivedServerState
+      || this._collaborationBarrierToken
     ) return
     this.wsClient.send({
       type: 'request_seed',
@@ -1797,6 +1822,7 @@ export class YjsMindmapSync {
   _sendFullState({ authoritativeSeed = false } = {}) {
     if (
       this._destroyed
+      || this._collaborationBarrierToken
       || this._authoritativeRevisionPending !== null
       || this.readonly
       // 无 mutationId 的完整状态无法证明其中的删除/移动已经由 HTTP
@@ -1949,6 +1975,7 @@ export class YjsMindmapSync {
       this._pendingNodeEditLeaseAcquireCount > 0
       || this._preparingRemote
       || this._applyingRemote
+      || Boolean(this._collaborationBarrierToken)
     )
   }
 
@@ -1983,6 +2010,7 @@ export class YjsMindmapSync {
       generation === this._nodeEditLeaseAcquireGeneration
       && !this._destroyed
       && !this._paused
+      && !this._collaborationBarrierToken
       && !this.readonly
       && this.isSynced.value === true
       && this._authoritativeRevisionPending === null
@@ -1998,6 +2026,7 @@ export class YjsMindmapSync {
         || waiter.generation !== this._nodeEditLeaseAcquireGeneration
         || this._destroyed
         || this._paused
+        || this._collaborationBarrierToken
         || this.readonly
         || this.isSynced.value !== true
         || this._authoritativeRevisionPending !== null
@@ -2015,6 +2044,7 @@ export class YjsMindmapSync {
         generation !== this._nodeEditLeaseAcquireGeneration
         || this._destroyed
         || this._paused
+        || this._collaborationBarrierToken
         || this.readonly
         || this.isSynced.value !== true
         || this._authoritativeRevisionPending !== null
@@ -2055,7 +2085,9 @@ export class YjsMindmapSync {
 
   _getNodeEditLeaseAvailabilityFailureReason({ renewal = false } = {}) {
     if (this.readonly) return 'readonly'
-    if (this._destroyed || this._paused) return 'unavailable'
+    if (this._destroyed || this._paused || this._collaborationBarrierToken) {
+      return 'unavailable'
+    }
     if (!this.wsClient?.isAuthenticated) {
       return [
         'idle',
@@ -2087,6 +2119,7 @@ export class YjsMindmapSync {
       !this.readonly
       && !this._destroyed
       && !this._paused
+      && !this._collaborationBarrierToken
       && this.wsClient?.isAuthenticated
       && this.isSynced.value === true
       && this._supportsNodeEditLeaseProtocol()
@@ -2105,6 +2138,7 @@ export class YjsMindmapSync {
       && this._supportsNodeEditLeaseProtocol()
       && !this._destroyed
       && !this._paused
+      && !this._collaborationBarrierToken
       && !this.readonly
       && this.isSynced.value === true
     )
@@ -2145,6 +2179,7 @@ export class YjsMindmapSync {
         generation !== this._nodeEditLeaseAcquireGeneration
         || this._destroyed
         || this._paused
+        || this._collaborationBarrierToken
         || this.readonly
       ) {
         this._setNodeEditLeaseFailureReason(
@@ -2347,6 +2382,7 @@ export class YjsMindmapSync {
     const stale = (
       this._destroyed
       || this._paused
+      || this._collaborationBarrierToken
       || this.readonly
       || this.isSynced.value !== true
       || this._authoritativeRevisionPending !== null
@@ -2470,6 +2506,7 @@ export class YjsMindmapSync {
     if (
       this._destroyed
       || this._paused
+      || this._collaborationBarrierToken
       || !this._supportsCheckpointProtocol()
     ) return
     this._checkpointDirty = true
@@ -2481,7 +2518,7 @@ export class YjsMindmapSync {
     }, CHECKPOINT_INTERVAL_MS)
   }
 
-  _flushCheckpoint({ reschedule = true } = {}) {
+  _flushCheckpoint({ reschedule = true, barrierToken = '' } = {}) {
     clearTimeout(this._checkpointTimer)
     this._checkpointTimer = null
     if (
@@ -2489,6 +2526,10 @@ export class YjsMindmapSync {
       || this.readonly
       || this._destroyed
       || this._paused
+      || (
+        this._collaborationBarrierToken
+        && barrierToken !== this._collaborationBarrierToken
+      )
       || this.requiresAuthoritativeReconciliation()
       || !this.hasData()
       || !this._supportsCheckpointProtocol()
@@ -2499,6 +2540,7 @@ export class YjsMindmapSync {
       state: this._encodeUpdate(Y.encodeStateAsUpdate(this.doc)),
       contentRevision: this.contentRevision,
       ...(lineageId ? { lineageId } : {}),
+      ...(barrierToken ? { barrierToken } : {}),
     })
     if (sent) {
       this._checkpointDirty = false
@@ -2974,7 +3016,12 @@ export class YjsMindmapSync {
   }
 
   syncDocumentMeta(document = {}, clientMutationId = null) {
-    if (this.readonly || this._paused || this._destroyed) return
+    if (
+      this.readonly
+      || this._paused
+      || this._collaborationBarrierToken
+      || this._destroyed
+    ) return
     if (!this.hasData() && !this.isSynced.value) {
       this._pendingPreSyncChanges.push({
         kind: 'meta',
@@ -2999,7 +3046,12 @@ export class YjsMindmapSync {
 
   /** 将当前完整脑图写入 Yjs（初始化或文档重置时调用）。 */
   initFromMindmap(document, clientMutationId = null) {
-    if (this.readonly || this._paused || this._destroyed) return
+    if (
+      this.readonly
+      || this._paused
+      || this._collaborationBarrierToken
+      || this._destroyed
+    ) return
     const fullDocument = document?.root ? document : { root: document }
     const flat = flattenMindmapTree(fullDocument.root)
     const definitions = this._captureTagDefinitions(fullDocument)
@@ -3046,7 +3098,12 @@ export class YjsMindmapSync {
   /** 监听 simple-mind-map 的 data_change_detail 事件，翻译为 Yjs 操作 */
   onDataChangeDetail(detailList, clientMutationId = null) {
     if (!detailList || !detailList.length) return
-    if (this.readonly || this._paused || this._destroyed) return
+    if (
+      this.readonly
+      || this._paused
+      || this._collaborationBarrierToken
+      || this._destroyed
+    ) return
     // 唯一协作基线尚未确定时不能在空 Y.Doc 中物化局部节点。尤其是 create
     // 会让 hasData() 提前变真，从而跳过种子租约并把残缺树广播给整个房间。
     // 先保留操作顺序；收到持久化/在线种子后再重放，若当前连接获得种子
@@ -4461,6 +4518,216 @@ export class YjsMindmapSync {
     this.connectionState.value = 'syncing'
     this.syncError.value = data?.message || '协作基线已重置，正在加载最新内容'
     this.options.onDocumentReset?.(data)
+  }
+
+  async _handleCollaborationBarrierPrepare(data) {
+    const token = typeof data?.token === 'string' ? data.token : ''
+    const revision = Number(data?.contentRevision)
+    if (
+      this._destroyed
+      || !this.serverCapabilities.has(COLLABORATION_MUTATION_BARRIER_CAPABILITY)
+      || !/^[0-9a-f]{32}$/.test(token)
+      || !Number.isInteger(revision)
+      || revision <= 0
+    ) return
+    if (this._collaborationBarrierToken === token) {
+      if (this._collaborationBarrierAcked) {
+        this.wsClient.send({
+          type: 'collaboration_barrier_ack',
+          token,
+          ready: true,
+          contentRevision: this.contentRevision,
+        })
+      }
+      return
+    }
+    if (this._collaborationBarrierToken) {
+      this.wsClient.send({
+        type: 'collaboration_barrier_ack',
+        token,
+        ready: false,
+        contentRevision: this.contentRevision,
+      })
+      return
+    }
+
+    // 在第一个 await 前关闭所有正文/Yjs 写入口；之后才允许上层提交活动
+    // 编辑器并排空 HTTP 保存。即使用户在另一个标签页触发 AI apply，当前
+    // 标签也不会在 drain 请求到达后再产生第三份状态。
+    this._collaborationBarrierToken = token
+    this._collaborationBarrierRevision = revision
+    this._collaborationBarrierAcked = false
+    this._collaborationBarrierStatusUnknown = false
+    clearTimeout(this._collaborationBarrierTimer)
+    this._collaborationBarrierTimer = setTimeout(() => {
+      if (this._destroyed || this._collaborationBarrierToken !== token) return
+      this._handleCollaborationBarrierTimeout(token, revision)
+    }, COLLABORATION_BARRIER_CLIENT_TIMEOUT_MS)
+    this._collaborationBarrierTimer?.unref?.()
+    this._notifyStructureWriteBlockedChange()
+    this.releaseNodeEditLease()
+    this._sendAwareness([], true, '')
+    clearTimeout(this._checkpointTimer)
+    this._checkpointTimer = null
+    this.connectionState.value = 'syncing'
+    this.syncError.value = '正在排空本地修改，准备安全应用云端 AI 结果'
+
+    let ready = false
+    try {
+      const drain = this.options.onCollaborationBarrierPrepare
+      if (typeof drain !== 'function') throw new Error('missing barrier drain handler')
+      const result = await drain(data)
+      const drainedRevision = Number(result?.contentRevision)
+      ready = (
+        (result === true || result?.ready === true)
+        && this.contentRevision === revision
+        && (
+          result === true
+          || (Number.isInteger(drainedRevision) && drainedRevision === revision)
+        )
+      )
+      if (ready) {
+        // 每一个 ready ACK 前都必须发送一次带 token 的强制检查点。服务端
+        // 只有在该检查点真正持久化后才接受随后按 WS 顺序到达的 ACK。
+        this._checkpointDirty = true
+        if (!this._flushCheckpoint({
+          reschedule: false,
+          barrierToken: token,
+        })) ready = false
+      }
+    } catch (error) {
+      this.options.onCollaborationBarrierError?.(error, data)
+      ready = false
+    }
+    if (this._destroyed || this._collaborationBarrierToken !== token) return
+    const sent = this.wsClient.send({
+      type: 'collaboration_barrier_ack',
+      token,
+      ready,
+      contentRevision: this.contentRevision,
+      ...(this._getYjsLineageId()
+        ? { lineageId: this._getYjsLineageId() }
+        : {}),
+    })
+    this._collaborationBarrierAcked = sent && ready
+    if (!ready) {
+      this.syncError.value = '本地修改未能安全排空，AI 云端操作已取消'
+    }
+  }
+
+  _handleCollaborationBarrierTimeout(token, revision) {
+    if (
+      this._destroyed
+      || this._collaborationBarrierToken !== token
+      || this._collaborationBarrierRevision !== revision
+    ) return
+    this._collaborationBarrierTimer = null
+    this.connectionState.value = 'syncing'
+    this.syncError.value = 'AI 云端操作状态待确认，正在保护本地内容并复核权威版本'
+    if (!this._collaborationBarrierStatusUnknown) {
+      this._collaborationBarrierStatusUnknown = true
+      try {
+        this.options.onCollaborationBarrierUnknown?.({
+          type: 'collaboration_barrier_unknown',
+          token,
+          contentRevision: revision,
+        })
+      } catch {
+        // Yjs 门闩仍保持关闭；上层备份提示失败不能恢复旧画布写入。
+      }
+    }
+    this._requestCollaborationBarrierStatus(token, revision)
+  }
+
+  _requestCollaborationBarrierStatus(token, revision) {
+    if (
+      this._destroyed
+      || this._collaborationBarrierToken !== token
+      || this._collaborationBarrierRevision !== revision
+    ) return false
+    const sent = this.wsClient.send({
+      type: 'collaboration_barrier_status_request',
+      token,
+      contentRevision: revision,
+    })
+    clearTimeout(this._collaborationBarrierTimer)
+    this._collaborationBarrierTimer = setTimeout(() => {
+      this._handleCollaborationBarrierTimeout(token, revision)
+    }, COLLABORATION_BARRIER_STATUS_RETRY_MS)
+    this._collaborationBarrierTimer?.unref?.()
+    return sent
+  }
+
+  _handleCollaborationBarrierStatus(data) {
+    const token = typeof data?.token === 'string' ? data.token : ''
+    const revision = Number(data?.contentRevision)
+    const expectedRevision = this._collaborationBarrierRevision
+    if (
+      this._destroyed
+      || token !== this._collaborationBarrierToken
+      || !Number.isInteger(revision)
+      || !Number.isInteger(expectedRevision)
+    ) return
+    if (data?.status === 'committed' && revision > expectedRevision) {
+      this._handleCollaborationBarrierReleased({
+        type: 'collaboration_barrier_released',
+        token,
+        status: 'committed',
+        contentRevision: revision,
+        reason: 'barrier_status_confirmed',
+      })
+      return
+    }
+    if (data?.status === 'aborted' && revision === expectedRevision) {
+      this._handleCollaborationBarrierReleased({
+        type: 'collaboration_barrier_released',
+        token,
+        status: 'aborted',
+        contentRevision: revision,
+        reason: 'barrier_status_confirmed',
+      })
+      return
+    }
+    this._requestCollaborationBarrierStatus(token, expectedRevision)
+  }
+
+  _handleCollaborationBarrierReleased(data) {
+    const token = typeof data?.token === 'string' ? data.token : ''
+    const committed = data?.status === 'committed'
+    const ownsBarrier = Boolean(
+      token && token === this._collaborationBarrierToken
+    )
+    if (ownsBarrier) {
+      clearTimeout(this._collaborationBarrierTimer)
+      this._collaborationBarrierTimer = null
+      this._collaborationBarrierToken = ''
+      this._collaborationBarrierRevision = null
+      this._collaborationBarrierAcked = false
+      this._collaborationBarrierStatusUnknown = false
+      this._notifyStructureWriteBlockedChange()
+    }
+    try {
+      this.options.onCollaborationBarrierReleased?.(data)
+    } catch {
+      // 栅栏已经由服务端释放；UI 通知异常不能反向恢复旧写资格。
+    }
+    if (committed) {
+      this._clearCheckpoint()
+      this._handleDocumentReset({
+        ...data,
+        type: 'document_reset',
+        reason: 'authoritative_cloud_reset',
+        message: 'AI 已更新云端脑图，正在加载权威版本',
+      })
+      return
+    }
+    if (!ownsBarrier) return
+    if (this._checkpointDirty) this._scheduleCheckpoint()
+    this._sendAwareness(this._localActiveNodeUids)
+    if (!this._paused) {
+      this.connectionState.value = this.isSynced.value ? 'connected' : 'syncing'
+      this.syncError.value = ''
+    }
   }
 
   _handleRevisionHeartbeat(data) {

@@ -9,6 +9,7 @@ import useUserStore from '@/store/modules/user'
 import useSettingsStore from '@/store/modules/settings'
 import usePermissionStore from '@/store/modules/permission'
 import { createLoginRedirectLocation } from '@/utils/login-redirect'
+import { isAuthExpiredError, recoverExpiredBootstrap } from '@/utils/auth-expiry'
 
 NProgress.configure({ showSpinner: false })
 
@@ -29,10 +30,11 @@ router.beforeEach((to, from, next) => {
     } else if (isWhiteList(to.path)) {
       next()
     } else {
-      if (useUserStore().roles.length === 0) {
+      const userStore = useUserStore()
+      if (userStore.roles.length === 0) {
         isRelogin.show = true
         // 判断当前用户是否已拉取完user_info信息
-        useUserStore().getInfo().then(() => {
+        userStore.getInfo().then(() => {
           isRelogin.show = false
           usePermissionStore().generateRoutes().then(accessRoutes => {
             // 根据roles权限生成可访问的路由表
@@ -44,8 +46,25 @@ router.beforeEach((to, from, next) => {
             next({ ...to, replace: true }) // hack方法 确保addRoutes已完成
           })
         }).catch(err => {
-          useUserStore().logOut().then(() => {
-            ElMessage.error(err)
+          if (isAuthExpiredError(err)) {
+            const expiredToken = userStore.token
+            recoverExpiredBootstrap({
+              fullPath: to.fullPath,
+              clearLocalAuth: () => userStore.resetToken(),
+              bestEffortLogout: () => userStore.logOutRemote(expiredToken),
+              setReloginVisible: show => { isRelogin.show = show },
+              navigate: loginLocation => next(loginLocation),
+              notify: () => ElMessage.error(err.message),
+            })
+            return
+          }
+
+          isRelogin.show = false
+          userStore.logOut().then(() => {
+            ElMessage.error(err?.message || String(err))
+            next({ path: '/' })
+          }).catch(() => {
+            ElMessage.error(err?.message || String(err))
             next({ path: '/' })
           })
         })

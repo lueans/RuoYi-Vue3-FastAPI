@@ -51,6 +51,7 @@
 import bus from './useEventBus'
 import { actions, store } from './useStore'
 import { assertMindmapImportDocument } from '@/utils/mindmap-import-validation'
+import { assertMindmapAiArtifact, MINDMAP_AI_FORMAT } from '@/utils/mindmap-ai-artifact'
 
 const props = defineProps({
   readonly: { type: Boolean, default: false },
@@ -69,8 +70,9 @@ let selectPromiseReject = null
 let fileFetchController = null
 let importRequestId = 0
 let componentAlive = true
+let parsingForAi = false
 
-const supportFileStr = '.xmind,.smm,.json,.md'
+const supportFileStr = '.xmind,.smm,.json,.md,.txt'
 const MAX_IMPORT_FILE_SIZE = 20 * 1024 * 1024
 
 function handleShowImport() {
@@ -104,7 +106,7 @@ function invalidateImportSession(message = '导入会话已经失效') {
 }
 
 function getRegexp() {
-  return /\.(smm|json|xmind|md)$/i
+  return /\.(smm|json|xmind|md|txt)$/i
 }
 
 function resolveImportType(name = '') {
@@ -154,7 +156,11 @@ async function handleFileURL() {
 }
 
 async function handleSmm(file) {
-  return JSON.parse(await file.raw.text())
+  const parsed = JSON.parse(await file.raw.text())
+  if (parsed?.format === MINDMAP_AI_FORMAT) {
+    return (await assertMindmapAiArtifact(parsed)).document
+  }
+  return parsed
 }
 
 async function handleXmind(file) {
@@ -163,7 +169,7 @@ async function handleXmind(file) {
 }
 
 function requestXmindCanvasSelection(content) {
-  if (props.readonly || !componentAlive || !isImporting.value) {
+  if ((props.readonly && !parsingForAi) || !componentAlive || !isImporting.value) {
     const error = new Error('导入会话已经失效')
     error.code = 'IMPORT_SESSION_EXPIRED'
     return Promise.reject(error)
@@ -179,7 +185,7 @@ function requestXmindCanvasSelection(content) {
 }
 
 function confirmSelect() {
-  if (props.readonly) return
+  if (props.readonly && !parsingForAi) return
   const selected = canvasList.value[selectCanvas.value]
   if (!selected || !selectPromiseResolve) return
   const resolve = selectPromiseResolve
@@ -214,6 +220,36 @@ async function handleMd(file) {
   return markdownModule.default.transformMarkdownTo(await file.raw.text())
 }
 
+async function handleTxt(file) {
+  const text = (await file.raw.text()).replace(/\r\n?/g, '\n').trim()
+  if (!text) throw new Error('TXT 文件内容为空')
+  const lines = text.split('\n').map(item => item.trim()).filter(Boolean)
+  const fallbackTitle = String(file.name || '文本脑图').replace(/\.txt$/i, '') || '文本脑图'
+  const rootText = lines.length > 1 ? fallbackTitle : lines[0]
+  const childLines = lines.length > 1 ? lines : []
+  return {
+    root: {
+      data: { text: rootText },
+      children: childLines.map(line => ({ data: { text: line }, children: [] })),
+    },
+    layout: 'logicalStructure',
+    theme: { template: 'default', config: {} },
+    view: null,
+    documentData: {},
+  }
+}
+
+async function parseImportFile(file, type) {
+  let data
+  if (type === 'smm' || type === 'json') data = await handleSmm(file)
+  else if (type === 'xmind') data = await handleXmind(file)
+  else if (type === 'md') data = await handleMd(file)
+  else if (type === 'txt') data = await handleTxt(file)
+  if (!data) throw new Error('不支持的脑图文件类型')
+  assertMindmapImportDocument(data)
+  return data
+}
+
 async function executeImport(file, type) {
   if (props.readonly || !componentAlive) return false
   if (isImporting.value) {
@@ -228,12 +264,8 @@ async function executeImport(file, type) {
     duration: 0,
   })
   try {
-    let data
-    if (type === 'smm' || type === 'json') data = await handleSmm(file)
-    else if (type === 'xmind') data = await handleXmind(file)
-    else if (type === 'md') data = await handleMd(file)
+    const data = await parseImportFile(file, type)
     if (!isImportRequestCurrent(requestId)) return false
-    assertMindmapImportDocument(data)
     await new Promise((resolve, reject) => {
       const handled = bus.emit('setData', data, { resolve, reject })
       if (!handled) reject(new Error('脑图编辑器尚未就绪'))
@@ -269,21 +301,47 @@ async function handleImportFile(file) {
   if (props.readonly) return
   const name = file?.name || ''
   const type = resolveImportType(name)
-  if (!type) return ElMessage.error('请选择 XMind、SMM、JSON 或 Markdown 文件')
+  if (!type) return ElMessage.error('请选择 XMind、SMM、JSON、Markdown 或 TXT 文件')
   if (!validateFileSize(file)) return false
   const imported = await executeImport({ raw: file, name }, type)
   if (imported) actions.setActiveSidebar(null)
   return imported
 }
 
+async function handleParseMindmapFile(file, request = {}) {
+  const name = file?.name || ''
+  const type = resolveImportType(name)
+  if (!type) return request.reject?.(new Error('请选择 XMind、SMM、JSON、Markdown 或 TXT 文件'))
+  if (!validateFileSize(file)) return request.reject?.(new Error('导入文件不能超过 20MB'))
+  if (isImporting.value) return request.reject?.(new Error('已有文件正在解析，请稍候'))
+  const requestId = ++importRequestId
+  isImporting.value = true
+  parsingForAi = true
+  importStatusText.value = '正在解析 AI 输入文件…'
+  try {
+    const document = await parseImportFile({ raw: file, name }, type)
+    if (!componentAlive || requestId !== importRequestId) throw new Error('文件解析会话已经变化')
+    request.resolve?.({ document, name, type })
+  } catch (error) {
+    request.reject?.(error)
+  } finally {
+    if (requestId === importRequestId) {
+      isImporting.value = false
+      importStatusText.value = ''
+    }
+    parsingForAi = false
+  }
+}
+
 watch(() => props.readonly, (readonly) => {
-  if (readonly) invalidateImportSession('脑图已切换为只读，导入已取消')
+  if (readonly && !parsingForAi) invalidateImportSession('脑图已切换为只读，导入已取消')
 })
 
 onMounted(() => {
   bus.on('showImport', handleShowImport)
   bus.on('handle_file_url', handleFileURL)
   bus.on('importFile', handleImportFile)
+  bus.on('parseMindmapFile', handleParseMindmapFile)
 })
 
 onBeforeUnmount(() => {
@@ -292,6 +350,7 @@ onBeforeUnmount(() => {
   bus.off('showImport', handleShowImport)
   bus.off('handle_file_url', handleFileURL)
   bus.off('importFile', handleImportFile)
+  bus.off('parseMindmapFile', handleParseMindmapFile)
 })
 </script>
 

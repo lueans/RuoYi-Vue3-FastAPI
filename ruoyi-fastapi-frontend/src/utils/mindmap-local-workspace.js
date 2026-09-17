@@ -6,13 +6,24 @@ import { normalizeViewTransformData } from '../libs/simple-mind-map/src/utils/vi
 import { normalizeMindmapDocumentData } from './mindmap-document-config.js'
 import { assertMindmapImportDocument } from './mindmap-import-validation.js'
 
-export const MINDMAP_LOCAL_WORKSPACE_SCHEMA_VERSION = 1
+export const MINDMAP_LOCAL_WORKSPACE_SCHEMA_VERSION = 2
+export const MINDMAP_LOCAL_WORKSPACE_LEGACY_SCHEMA_VERSION = 1
 export const MINDMAP_LOCAL_WORKSPACE_MAX_BYTES = 2 * 1024 * 1024
 
 const DEFAULT_LAYOUT = 'logicalStructure'
 const DEFAULT_THEME_TEMPLATE = 'default'
 const ALLOWED_LAYOUTS = new Set(layoutValueList)
-const WORKSPACE_FIELDS = ['root', 'layout', 'theme', 'view', 'documentData']
+const WORKSPACE_FIELDS = [
+  'root',
+  'layout',
+  'theme',
+  'view',
+  'documentData',
+  'documentId',
+  'revision',
+  'documentHash',
+  'lastAppliedProposal',
+]
 const DOCUMENT_META_FIELDS = ['layout', 'theme', 'view', 'documentData']
 
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
@@ -85,6 +96,34 @@ function normalizeFields(source, { strictPatch = false } = {}) {
     output.documentData = normalizeMindmapDocumentData(source.documentData)
   }
 
+  if (hasOwn(source, 'documentId')) {
+    if (typeof source.documentId === 'string' && /^local:[A-Za-z0-9._:-]{8,120}$/.test(source.documentId)) {
+      output.documentId = source.documentId
+    } else if (strictPatch) throw new TypeError('本地脑图文档 ID 无效')
+  }
+
+  if (hasOwn(source, 'revision')) {
+    if (Number.isSafeInteger(source.revision) && source.revision >= 1) {
+      output.revision = source.revision
+    } else if (strictPatch) throw new TypeError('本地脑图版本号无效')
+  }
+
+  if (hasOwn(source, 'documentHash')) {
+    if (
+      source.documentHash === null
+      || (typeof source.documentHash === 'string' && /^mmf2:sha256:[a-f0-9]{64}$/.test(source.documentHash))
+    ) output.documentHash = source.documentHash
+    else if (strictPatch) throw new TypeError('本地脑图内容哈希无效')
+  }
+
+  if (hasOwn(source, 'lastAppliedProposal')) {
+    if (
+      source.lastAppliedProposal === null
+      || (typeof source.lastAppliedProposal === 'string' && source.lastAppliedProposal.length <= 64)
+    ) output.lastAppliedProposal = source.lastAppliedProposal
+    else if (strictPatch) throw new TypeError('本地脑图 AI 提案标识无效')
+  }
+
   return output
 }
 
@@ -92,7 +131,10 @@ function getRecordValues(value) {
   if (!isRecord(value)) return null
   if (!hasOwn(value, 'schemaVersion')) return value
   if (
-    value.schemaVersion !== MINDMAP_LOCAL_WORKSPACE_SCHEMA_VERSION
+    ![
+      MINDMAP_LOCAL_WORKSPACE_LEGACY_SCHEMA_VERSION,
+      MINDMAP_LOCAL_WORKSPACE_SCHEMA_VERSION,
+    ].includes(value.schemaVersion)
     || !isRecord(value.values)
   ) return null
   return value.values
@@ -101,7 +143,10 @@ function getRecordValues(value) {
 export function isUnsupportedMindmapLocalWorkspaceRecord(value) {
   return isRecord(value)
     && hasOwn(value, 'schemaVersion')
-    && value.schemaVersion !== MINDMAP_LOCAL_WORKSPACE_SCHEMA_VERSION
+    && ![
+      MINDMAP_LOCAL_WORKSPACE_LEGACY_SCHEMA_VERSION,
+      MINDMAP_LOCAL_WORKSPACE_SCHEMA_VERSION,
+    ].includes(value.schemaVersion)
 }
 
 export function normalizeMindmapLocalWorkspaceRecord(value) {

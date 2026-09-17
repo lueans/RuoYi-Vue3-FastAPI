@@ -5,8 +5,10 @@ from pathlib import Path
 
 from module_mindmap.service.mindmap_marker_tags import MINDMAP_MARKER_GROUP_COUNTS
 
-
 SQL_DIR = Path(__file__).resolve().parents[2] / 'sql'
+
+# 系统标签种子目录的总数量契约：四个分组数量之和。
+EXPECTED_TOTAL_MARKER_COUNT = 61
 
 
 def _expected_group_catalog() -> dict[str, tuple[str, int]]:
@@ -19,7 +21,7 @@ def _expected_group_catalog() -> dict[str, tuple[str, int]]:
 
 
 def _assert_pure_seed_script(sql: str) -> None:
-    assert sum(MINDMAP_MARKER_GROUP_COUNTS.values()) == 61
+    assert sum(MINDMAP_MARKER_GROUP_COUNTS.values()) == EXPECTED_TOTAL_MARKER_COUNT
     assert 'builtin_marker_' in sql
     assert 'mindmap-marker-' in sql
     assert 'mindmap_node_tag' not in sql

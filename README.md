@@ -245,12 +245,21 @@ pnpm dev:mp-weixin
 # 进入后端目录
 cd ruoyi-fastapi-backend
 
-# 如果使用的是MySQL数据库，请执行以下命令安装项目依赖环境
-pip3 install -r requirements.txt
-# 如果使用的是PostgreSQL数据库，请执行以下命令安装项目依赖环境
-pip3 install -r requirements-pg.txt
+# 建议使用全新的虚拟环境；requirements 会同时安装当前项目并生成 ruoyi 命令
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+
+# MySQL（二选一）
+python -m pip install -r requirements.txt
+# PostgreSQL（二选一）
+python -m pip install -r requirements-pg.txt
+
+# 安装后必须能找到项目 CLI
+ruoyi --help
+
 # 如需运行后端测试，请安装测试运行器与异步插件
-pip3 install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt
 
 # 配置环境
 在.env.dev文件中配置开发环境的数据库和redis
@@ -259,12 +268,33 @@ pip3 install -r requirements-dev.txt
 1.新建数据库ruoyi-fastapi(默认，可修改)
 2.如果使用的是MySQL数据库，使用命令或数据库连接工具运行sql文件夹下的ruoyi-fastapi.sql；如果使用的是PostgreSQL数据库，使用命令或数据库连接工具运行sql文件夹下的ruoyi-fastapi-pg.sql
 
+# 全新 MySQL 库还必须写入 AI Agent 合并迁移（表、三种 Connector、菜单和权限种子、治理策略、到期索引、讨论模式与草稿检查点）
+mysql -u root -p ruoyi-fastapi < migrations/20260910_mindmap_ai_agent.sql
+
+# 全新 PostgreSQL 库使用对应脚本
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi -f migrations/20260910_mindmap_ai_agent_postgresql.sql
+
 # 运行后端
 ruoyi app run --env=dev
+
+# 在另一个终端执行只读发布门禁；两条命令都必须返回 READY/退出码 0
+python -m scripts.plan_mindmap_schema_migrations --env=dev
+python -m scripts.verify_mindmap_schema --env=dev
+
+# app doctor 还会独立校验脑图 Schema 与 AI Connector/菜单/角色授权种子
+ruoyi app doctor --env=dev --output=json
 
 # 运行后端测试
 pytest -q
 ```
+
+`DB_AUTO_CREATE_TABLES=true` 只适用于全新开发库首次启动。生产环境必须保持 `false`，先评审并受控执行计划中的全部迁移；`app doctor` 任一项失败都不得视为可发布。AI 验收前还需完成以下检查：
+
+1. 使用管理员账号打开“AI Agent 管理”，确认 `native_mindmap`、`codex`、`claude` 三条 Connector 均存在，并分别执行一致性检查和健康检查。
+2. Native Agent 至少配置一个已启用模型；Codex 完成本机登录或配置凭据引用；Claude 完成本机登录、凭据引用或 Bedrock 配置。不得把 API Key 写入数据库或日志。
+3. 分别使用 Native、Codex 和 Claude 创建任务，确认左侧 Agent 交互记录持续追加、脑图草稿实时变化，任务完成后可以应用 Proposal 并撤销。
+
+Connector 配置、认证方式与故障排查详见：[AI 脑图 Agent 适配说明](./ruoyi-fastapi-backend/docs/mindmap-ai-agent-adapter.md)。
 
 后端 CLI 使用说明请参考：[ruoyi-fastapi-backend/docs/cli_usage.md](./ruoyi-fastapi-backend/docs/cli_usage.md)
 
@@ -301,9 +331,20 @@ npm run build:prod 或 yarn build:prod
 ruoyi app run --env=prod
 ```
 
+生产环境必须显式配置 `MINDMAP_AI_CHECKPOINT_KEY`：使用独立生成、至少 32 字节的随机密钥，且不得复用 `JWT_SECRET_KEY`；配置缺失、长度不足或与 JWT 密钥相同时，服务会拒绝启动。
+
 ### Docker Compose部署方式
 
 > ⚠️ **警告：** 默认未做数据持久化配置，请注意数据备份或自行配置持久化
+
+Compose 会从当前终端强制读取 `MINDMAP_AI_CHECKPOINT_KEY`。首次部署可使用 `openssl rand -hex 32` 生成密钥，但必须保存到密钥管理系统；后续重启、升级和滚动发布必须复用同一密钥，否则已加密的 AI 草稿检查点将无法恢复。
+
+```bash
+# 示例：从密钥管理系统取值后注入当前终端
+export MINDMAP_AI_CHECKPOINT_KEY='<至少32字节的独立随机密钥>'
+# 可选；密钥轮换时应使用新的唯一 key ID
+export MINDMAP_AI_CHECKPOINT_KEY_ID='checkpoint-v1'
+```
 
 #### MySQL版本
 
@@ -362,6 +403,8 @@ psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
   -f ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_home_postgresql.sql
 psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
   -f ruoyi-fastapi-backend/migrations/20260828_mindmap_tag_category_selection_mode_postgresql.sql
+psql -v ON_ERROR_STOP=1 -U postgres -d ruoyi-fastapi \
+  -f ruoyi-fastapi-backend/migrations/20260910_mindmap_ai_agent_postgresql.sql
 ```
 
 迁移成功后继续保持 `DB_AUTO_CREATE_TABLES=false`，再启动服务：

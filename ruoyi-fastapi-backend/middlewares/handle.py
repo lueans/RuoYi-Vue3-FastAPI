@@ -6,6 +6,7 @@ from middlewares.context_middleware import add_context_cleanup_middleware
 from middlewares.cors_middleware import add_cors_middleware
 from middlewares.demo_mode_middleware import add_demo_mode_middleware
 from middlewares.gzip_middleware import add_gzip_middleware
+from middlewares.mindmap_ai_request_size_middleware import add_mindmap_ai_request_size_middleware
 from middlewares.trace_middleware import add_trace_middleware
 from middlewares.transport_crypto_middleware import add_transport_crypto_middleware
 
@@ -29,3 +30,5 @@ def handle_middleware(app: FastAPI) -> None:
         add_demo_mode_middleware(app)
     # 加载传输层请求解密/响应加密中间件
     add_transport_crypto_middleware(app)
+    # 最后注册以保证它位于加密中间件外层，在解密或 JSON 解析前限制请求体
+    add_mindmap_ai_request_size_middleware(app)

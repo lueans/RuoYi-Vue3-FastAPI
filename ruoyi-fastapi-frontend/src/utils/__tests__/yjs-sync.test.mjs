@@ -6294,3 +6294,250 @@ test('长期会话的暂时认证故障保留 Yjs 文档等待自动重连', () 
 
   sync.destroy({ flushCheckpoint: false })
 })
+
+test('AI 协作栅栏冻结写入并仅在强制检查点之后发送 ready ACK', async () => {
+  const token = '0123456789abcdef0123456789abcdef'
+  const released = []
+  const resets = []
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 4, {
+    onCollaborationBarrierPrepare: async () => ({
+      ready: true,
+      contentRevision: 4,
+    }),
+    onCollaborationBarrierReleased: data => released.push(data),
+    onDocumentReset: data => resets.push(data),
+  })
+  sync.initFromMindmap(createDocument())
+  sync.serverCapabilities = new Set([
+    'collaboration-mutation-barrier-v1',
+    'yjs-checkpoint-v1',
+  ])
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+
+  await sync._handleCollaborationBarrierPrepare({
+    type: 'collaboration_barrier_prepare',
+    token,
+    operation: 'apply',
+    contentRevision: 4,
+  })
+
+  assert.equal(sync.isStructureWriteBlocked(), true)
+  assert.equal(sync.canAcquireNodeEditLease(), false)
+  const protocolMessages = sent.filter(message => message.type !== 'awareness')
+  assert.deepEqual(protocolMessages.map(message => message.type), [
+    'checkpoint',
+    'collaboration_barrier_ack',
+  ])
+  assert.equal(protocolMessages[0].barrierToken, token)
+  assert.equal(protocolMessages[0].contentRevision, 4)
+  assert.equal(protocolMessages[1].ready, true)
+  assert.equal(protocolMessages[1].token, token)
+
+  sync._handleCollaborationBarrierReleased({
+    type: 'collaboration_barrier_released',
+    token,
+    status: 'committed',
+    contentRevision: 5,
+  })
+  assert.equal(sync.isStructureWriteBlocked(), false)
+  assert.equal(released.length, 1)
+  assert.equal(resets.length, 1)
+  assert.equal(sync._authoritativeRevisionPending, 5)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('AI 协作栅栏在排空后版本变化或检查点发送失败时拒绝 ready ACK', async () => {
+  const token = 'fedcba9876543210fedcba9876543210'
+  const revisionChanged = new YjsMindmapSync(
+    1,
+    createMindmap(createDocument()),
+    7,
+    {
+      onCollaborationBarrierPrepare: async () => ({
+        ready: true,
+        contentRevision: 8,
+      }),
+    },
+  )
+  revisionChanged.initFromMindmap(createDocument())
+  revisionChanged.serverCapabilities = new Set([
+    'collaboration-mutation-barrier-v1',
+    'yjs-checkpoint-v1',
+  ])
+  const changedMessages = []
+  revisionChanged.wsClient.send = message => {
+    changedMessages.push(message)
+    return true
+  }
+  await revisionChanged._handleCollaborationBarrierPrepare({
+    token,
+    operation: 'undo',
+    contentRevision: 7,
+  })
+  const changedProtocolMessages = changedMessages.filter(
+    message => message.type !== 'awareness',
+  )
+  assert.deepEqual(changedProtocolMessages.map(message => message.type), [
+    'collaboration_barrier_ack',
+  ])
+  assert.equal(changedProtocolMessages[0].ready, false)
+  revisionChanged._handleCollaborationBarrierReleased({
+    token,
+    status: 'aborted',
+    contentRevision: 7,
+  })
+  revisionChanged.destroy({ flushCheckpoint: false })
+
+  const checkpointFailed = new YjsMindmapSync(
+    2,
+    createMindmap(createDocument()),
+    7,
+    {
+      onCollaborationBarrierPrepare: async () => ({
+        ready: true,
+        contentRevision: 7,
+      }),
+    },
+  )
+  checkpointFailed.initFromMindmap(createDocument())
+  checkpointFailed.serverCapabilities = new Set([
+    'collaboration-mutation-barrier-v1',
+    'yjs-checkpoint-v1',
+  ])
+  const failedMessages = []
+  checkpointFailed.wsClient.send = message => {
+    failedMessages.push(message)
+    return message.type !== 'checkpoint'
+  }
+  await checkpointFailed._handleCollaborationBarrierPrepare({
+    token,
+    operation: 'apply',
+    contentRevision: 7,
+  })
+  const failedProtocolMessages = failedMessages.filter(
+    message => message.type !== 'awareness',
+  )
+  assert.deepEqual(failedProtocolMessages.map(message => message.type), [
+    'checkpoint',
+    'collaboration_barrier_ack',
+  ])
+  assert.equal(failedProtocolMessages[1].ready, false)
+  checkpointFailed._handleCollaborationBarrierReleased({
+    token,
+    status: 'aborted',
+    contentRevision: 7,
+  })
+  checkpointFailed.destroy({ flushCheckpoint: false })
+})
+
+test('AI 栅栏超时进入权威未知态且慢提交期间绝不伪装 aborted 解锁', async () => {
+  const token = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const unknownEvents = []
+  const released = []
+  const sync = new YjsMindmapSync(3, createMindmap(createDocument()), 11, {
+    onCollaborationBarrierPrepare: async () => ({
+      ready: true,
+      contentRevision: 11,
+    }),
+    onCollaborationBarrierUnknown: data => unknownEvents.push(data),
+    onCollaborationBarrierReleased: data => released.push(data),
+  })
+  sync.initFromMindmap(createDocument())
+  sync.serverCapabilities = new Set([
+    'collaboration-mutation-barrier-v1',
+    'yjs-checkpoint-v1',
+  ])
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+  await sync._handleCollaborationBarrierPrepare({
+    token,
+    operation: 'apply',
+    contentRevision: 11,
+  })
+
+  clearTimeout(sync._collaborationBarrierTimer)
+  sync._handleCollaborationBarrierTimeout(token, 11)
+  assert.equal(sync.isStructureWriteBlocked(), true)
+  assert.equal(sync._collaborationBarrierToken, token)
+  assert.equal(sync.connectionState.value, 'syncing')
+  assert.equal(unknownEvents.length, 1)
+  assert.equal(
+    sent.some(message => (
+      message.type === 'collaboration_barrier_status_request'
+      && message.token === token
+      && message.contentRevision === 11
+    )),
+    true,
+  )
+
+  // 服务端持有 DB 行锁或仍在 committing 时只能返回 active/unknown。
+  // 任意等待时长都不得合成 aborted 并恢复旧画布写入。
+  sync._handleCollaborationBarrierStatus({
+    token,
+    status: 'active',
+    contentRevision: 11,
+  })
+  sync._handleCollaborationBarrierStatus({
+    token,
+    status: 'aborted',
+    contentRevision: 12,
+  })
+  assert.equal(sync.isStructureWriteBlocked(), true)
+  assert.equal(sync._collaborationBarrierToken, token)
+  assert.equal(released.length, 0)
+
+  sync._handleCollaborationBarrierStatus({
+    token,
+    status: 'aborted',
+    contentRevision: 11,
+  })
+  assert.equal(sync.isStructureWriteBlocked(), false)
+  assert.equal(released.length, 1)
+  assert.equal(released[0].reason, 'barrier_status_confirmed')
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('丢失 committed release 后仅凭更高权威 revision 收敛并触发重载', async () => {
+  const token = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  const resets = []
+  const sync = new YjsMindmapSync(4, createMindmap(createDocument()), 15, {
+    onCollaborationBarrierPrepare: async () => ({
+      ready: true,
+      contentRevision: 15,
+    }),
+    onDocumentReset: data => resets.push(data),
+  })
+  sync.initFromMindmap(createDocument())
+  sync.serverCapabilities = new Set([
+    'collaboration-mutation-barrier-v1',
+    'yjs-checkpoint-v1',
+  ])
+  sync.wsClient.send = () => true
+  await sync._handleCollaborationBarrierPrepare({
+    token,
+    operation: 'undo',
+    contentRevision: 15,
+  })
+
+  clearTimeout(sync._collaborationBarrierTimer)
+  sync._handleCollaborationBarrierTimeout(token, 15)
+  sync._handleCollaborationBarrierStatus({
+    token,
+    status: 'committed',
+    contentRevision: 16,
+  })
+
+  assert.equal(sync._collaborationBarrierToken, '')
+  assert.equal(sync.isStructureWriteBlocked(), false)
+  assert.equal(sync._authoritativeRevisionPending, 16)
+  assert.equal(resets.length, 1)
+  assert.equal(resets[0].contentRevision, 16)
+  sync.destroy({ flushCheckpoint: false })
+})

@@ -1,0 +1,4 @@
+[
+  { "file": "valid-create.smm.json", "valid": true },
+  { "file": "invalid-hash.smm.json", "valid": false, "errorContains": "documentHash" }
+]

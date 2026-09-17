@@ -13,6 +13,11 @@ from config.get_scheduler import SchedulerUtil
 from exceptions.handle import handle_exception
 from middlewares.handle import handle_middleware
 from module_admin.service.log_service import LogAggregatorService
+from module_mindmap.ai.checkpoint_crypto import MindmapAiCheckpointCrypto
+from module_mindmap.service.mindmap_ai_service import (
+    MindmapAiRetentionManager,
+    MindmapAiTaskManager,
+)
 from module_mindmap.websocket.room_manager import room_manager
 from sub_applications.handle import handle_sub_applications
 from utils.common_util import worship
@@ -29,6 +34,8 @@ async def _start_background_tasks(app: FastAPI) -> None:
     :return: None
     """
     await room_manager.start(app.state.redis)
+    MindmapAiTaskManager.configure_redis(app.state.redis)
+    MindmapAiTaskManager.start()
     await SchedulerUtil.init_system_scheduler(app.state.redis)
     app.state.log_aggregator_task = asyncio.create_task(LogAggregatorService.consume_stream(app.state.redis))
 
@@ -40,6 +47,8 @@ async def _stop_background_tasks(app: FastAPI) -> None:
     :param app: FastAPI对象
     :return: None
     """
+    await MindmapAiRetentionManager.stop()
+    await MindmapAiTaskManager.shutdown()
     await room_manager.stop()
     log_task = getattr(app.state, 'log_aggregator_task', None)
     if log_task:
@@ -94,11 +103,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if startup_log_enabled:
             worship()
         TransportKeyProvider.validate_runtime_configuration()
+        MindmapAiCheckpointCrypto.validate_runtime_configuration()
         await init_create_table()
         await RedisUtil.check_redis_connection(app.state.redis, log_enabled=startup_log_enabled)
         await RedisUtil.init_sys_dict(app.state.redis)
         await RedisUtil.init_sys_config(app.state.redis)
         await _start_background_tasks(app)
+        if startup_log_enabled:
+            await MindmapAiTaskManager.recover_pending()
+            MindmapAiRetentionManager.start()
 
     if startup_log_enabled:
         # 短暂等待确保下面的启动日志在最后打印

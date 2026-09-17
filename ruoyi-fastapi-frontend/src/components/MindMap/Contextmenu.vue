@@ -26,8 +26,7 @@
             aria-haspopup="menu"
             :data-menu-key="item.key"
             :aria-expanded="expandedSubmenu === item.key"
-            @click="toggleSubmenu(item.key)"
-            @focus="expandedSubmenu = item.key"
+            @click="openSubmenu(item.key)"
           >
             <span class="name">{{ item.label }}</span>
             <span aria-hidden="true">›</span>
@@ -45,6 +44,7 @@
               :key="child.key"
               type="button"
               role="menuitem"
+              :disabled="isMenuItemDisabled(child)"
               @click="runMenuItem(child)"
             >
               <span class="name">{{ child.label }}</span>
@@ -71,10 +71,13 @@
 </template>
 
 <script setup>
+import { ElMessage } from 'element-plus'
 import bus from './useEventBus'
 import { isCurrentMindmapEventSource } from '@/utils/mindmap-event'
 import { store, actions } from './useStore'
 import { copyMindmapPngBlob, copyMindmapText } from '@/utils/mindmap-clipboard'
+import { hasAnyPermission } from '@/utils/mindmap-permission'
+import useUserStore from '@/store/modules/user'
 import { stringifyJsonValueIterative } from '@mind-map/src/utils/jsonClone'
 
 const props = defineProps({
@@ -83,6 +86,7 @@ const props = defineProps({
     default: null
   }
 })
+const userStore = useUserStore()
 
 const isShow = ref(false)
 const left = ref(-9999)
@@ -102,6 +106,7 @@ const enableCopyToClipboardApi = !!navigator.clipboard
 const isDark = computed(() => store.localConfig.isDark)
 const isZenMode = computed(() => store.localConfig.isZenMode)
 const isReadonly = computed(() => store.isReadonly)
+const canUseAi = computed(() => hasAnyPermission(userStore.permissions, ['mindmap:ai:use']))
 
 const insertNodeBtnDisabled = computed(() => {
   return !node.value || node.value.isRoot || node.value.isGeneralization
@@ -137,6 +142,18 @@ const nodeMenuGroups = computed(() => [
     { key: 'insert-child', label: '插入子级节点', shortcut: 'Tab', command: 'INSERT_CHILD_NODE', write: true, disabled: () => isGeneralization.value },
     { key: 'insert-parent', label: '插入父节点', shortcut: 'Shift + Tab', command: 'INSERT_PARENT_NODE', write: true, disabled: () => insertNodeBtnDisabled.value },
     { key: 'insert-summary', label: '插入概要', shortcut: 'Ctrl + G', command: 'ADD_GENERALIZATION', write: true, disabled: () => insertNodeBtnDisabled.value },
+  ],
+  [
+    {
+      key: 'ai-actions',
+      label: 'AI 智能助手',
+      visible: () => canUseAi.value && !isGeneralization.value,
+      children: [
+        { key: 'ai-expand', label: 'AI 扩展当前主题', action: 'node-ai', value: 'expand', write: true },
+        { key: 'ai-explain', label: 'AI 解释当前主题', action: 'node-ai', value: 'explain' },
+        { key: 'ai-reorganize', label: 'AI 重新组织此分支', action: 'node-ai', value: 'reorganize', write: true },
+      ],
+    },
   ],
   [
     { key: 'move-up', label: '上移节点', shortcut: 'Ctrl + ↑', command: 'UP_NODE', write: true, disabled: () => upNodeBtnDisabled.value },
@@ -204,9 +221,16 @@ const canvasMenuGroups = computed(() => {
 const activeMenuGroups = computed(() => {
   const groups = type.value === 'node' ? nodeMenuGroups.value : canvasMenuGroups.value
   return groups
-    .map(group => group.filter(isMenuItemVisible))
+    .map(group => group.map(normalizeVisibleMenuItem).filter(Boolean))
     .filter(group => group.length > 0)
 })
+
+function normalizeVisibleMenuItem(item) {
+  if (!isMenuItemVisible(item)) return null
+  if (!item.children) return item
+  const children = item.children.filter(isMenuItemVisible)
+  return children.length > 0 ? { ...item, children } : null
+}
 
 function isMenuItemVisible(item) {
   if (isReadonly.value && item.write) return false
@@ -219,6 +243,10 @@ function isMenuItemDisabled(item) {
 
 function runMenuItem(item) {
   if (isMenuItemDisabled(item)) return
+  if (item.action === 'node-ai') {
+    openNodeAi(item.value)
+    return
+  }
   if (item.action === 'copy') {
     copyToClipboard(item.value)
     return
@@ -226,8 +254,66 @@ function runMenuItem(item) {
   exec(item.command, false, ...(item.args || []))
 }
 
-function toggleSubmenu(key) {
-  expandedSubmenu.value = expandedSubmenu.value === key ? '' : key
+const NODE_AI_PRESETS = Object.freeze({
+  expand: Object.freeze({
+    intent: 'expand',
+    sourceMode: 'current',
+    scopeType: 'branch',
+    interactionMode: 'edit',
+    prompt: '围绕当前选中主题补充 4–6 个互不重复、具体且有启发性的子主题，保留现有内容与结构。',
+  }),
+  explain: Object.freeze({
+    intent: 'create',
+    sourceMode: 'current',
+    scopeType: 'branch',
+    interactionMode: 'discussion',
+    prompt: '解释当前选中主题：说明核心含义、关键概念、典型示例与常见误区，不修改当前脑图。',
+  }),
+  reorganize: Object.freeze({
+    intent: 'reorganize',
+    sourceMode: 'current',
+    scopeType: 'branch',
+    interactionMode: 'edit',
+    prompt: '重新组织当前选中主题的整个分支：消除重复、优化层级与命名，保留重要信息。',
+  }),
+})
+
+function nodeIdentity(target) {
+  return String(target?.uid || target?.getData?.('uid') || '').trim()
+}
+
+function isSameMindmapNode(leftNode, rightNode) {
+  if (leftNode === rightNode) return true
+  const leftUid = nodeIdentity(leftNode)
+  return Boolean(leftUid && leftUid === nodeIdentity(rightNode))
+}
+
+function ensureContextNodeActive(target) {
+  const renderer = props.mindMap?.renderer
+  if (!target || !renderer || isReadonly.value) return false
+  const activeNodes = renderer.activeNodeList || []
+  if (activeNodes.length === 1 && isSameMindmapNode(activeNodes[0], target)) return true
+  renderer.clearActiveNodeList?.()
+  target.active?.()
+  return renderer.activeNodeList?.length === 1
+    && isSameMindmapNode(renderer.activeNodeList[0], target)
+}
+
+function openNodeAi(action) {
+  const preset = NODE_AI_PRESETS[action]
+  const target = node.value
+  if (!preset || !target || target.isGeneralization) return
+  if (!ensureContextNodeActive(target)) {
+    ElMessage.warning('当前主题无法选中，可能正被协作者占用')
+    hide()
+    return
+  }
+  hide()
+  bus.emit('showAiMindmap', { ...preset })
+}
+
+function openSubmenu(key) {
+  expandedSubmenu.value = key
 }
 
 // Calculate context menu position to stay within viewport
@@ -237,7 +323,7 @@ function getShowPosition(x, y) {
   if (x + rect.width > window.innerWidth) {
     x = x - rect.width - 20
   }
-  subItemsShowLeft.value = x + rect.width + 150 > window.innerWidth
+  subItemsShowLeft.value = x + rect.width + 184 > window.innerWidth
   if (y + rect.height > window.innerHeight) {
     y = window.innerHeight - rect.height - 10
   }
@@ -643,12 +729,12 @@ watch(() => props.mindMap, (mindMap, oldMindMap) => {
     .subItems {
       position: absolute;
       left: 100%;
-      width: 150px;
+      width: 184px;
       cursor: auto;
       top: -6px;
 
       &.showLeft {
-        left: -150px;
+        left: -184px;
       }
 
       .item {

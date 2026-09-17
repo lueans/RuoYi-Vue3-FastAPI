@@ -55,7 +55,7 @@ async def get_ai_model_list(
     '/all',
     summary='获取AI模型不分页列表接口',
     description='用于获取AI模型不分页列表',
-    response_model=DataResponseModel[AiModelModel],
+    response_model=DataResponseModel[list[AiModelModel]],
 )
 @ApiCache(namespace=ApiNamespace.AI_MODEL_ALL)
 async def get_ai_model_all(

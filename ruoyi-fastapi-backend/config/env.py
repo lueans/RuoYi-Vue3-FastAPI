@@ -5,7 +5,7 @@ import sys
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import computed_field
+from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings
 
 
@@ -154,6 +154,43 @@ class TransportCryptoSettings(BaseSettings):
     )
 
 
+class MindmapAiSettings(BaseSettings):
+    """AI 脑图 Agent 运行配置。"""
+
+    mindmap_ai_native_enabled: bool = True
+    mindmap_ai_codex_enabled: bool = True
+    mindmap_ai_codex_model: str = 'gpt-5.6-terra'
+    mindmap_ai_claude_enabled: bool = True
+    mindmap_ai_claude_model: str = 'sonnet'
+    mindmap_ai_job_timeout_seconds: int = Field(default=900, ge=30, le=900)
+    mindmap_ai_artifact_retention_days: int = Field(default=30, ge=1, le=365)
+    mindmap_ai_applied_retention_days: int = Field(default=90, ge=1, le=365)
+    mindmap_ai_audit_retention_days: int = Field(default=365, ge=1, le=3_650)
+    mindmap_ai_cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86_400)
+    mindmap_ai_cleanup_batch_size: int = Field(default=200, ge=1, le=2_000)
+    mindmap_ai_recovery_interval_seconds: int = Field(default=15, ge=5, le=300)
+    mindmap_ai_recovery_batch_size: int = Field(default=200, ge=1, le=2_000)
+    mindmap_ai_job_lease_ttl_seconds: int = Field(default=60, ge=15, le=300)
+    mindmap_ai_connector_health_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    mindmap_ai_adapter_cancel_grace_seconds: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=30.0,
+        allow_inf_nan=False,
+    )
+    mindmap_ai_max_budget_usd: float = Field(
+        default=5.0,
+        gt=0,
+        le=1_000,
+        allow_inf_nan=False,
+    )
+    mindmap_ai_max_concurrent_jobs_per_agent: int = Field(default=4, ge=1, le=100)
+    mindmap_ai_checkpoint_key_id: str = 'checkpoint-v1'
+    mindmap_ai_checkpoint_key: str = ''
+    mindmap_ai_checkpoint_legacy_keys_json: str = '{}'
+    mindmap_ai_checkpoint_allow_legacy_jwt_read: bool = False
+
+
 class GenSettings:
     """
     代码生成配置
@@ -281,6 +318,10 @@ class GetConfig:
         """
         return TransportCryptoSettings()
 
+    def get_mindmap_ai_config(self) -> MindmapAiSettings:
+        """获取 AI 脑图 Agent 配置。"""
+        return MindmapAiSettings()
+
     def get_gen_config(self) -> GenSettings:
         """
         获取代码生成配置
@@ -346,6 +387,8 @@ FeishuConfig = get_config.get_feishu_config()
 LogConfig = get_config.get_log_config()
 # 传输层加解密配置
 TransportCryptoConfig = get_config.get_transport_crypto_config()
+# AI 脑图 Agent 配置
+MindmapAiConfig = get_config.get_mindmap_ai_config()
 # 代码生成配置
 GenConfig = get_config.get_gen_config()
 # 上传配置

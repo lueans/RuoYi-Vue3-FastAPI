@@ -438,21 +438,38 @@ class AppSectionBuilder:
             )
 
         database = payload.get('database') if isinstance(payload.get('database'), dict) else {}
+        mindmap_schema = (
+            payload.get('mindmapSchema')
+            if isinstance(payload.get('mindmapSchema'), dict)
+            else {}
+        )
+        mindmap_ai_bootstrap = (
+            payload.get('mindmapAiBootstrap')
+            if isinstance(payload.get('mindmapAiBootstrap'), dict)
+            else {}
+        )
         redis = payload.get('redis') if isinstance(payload.get('redis'), dict) else {}
         crypto = payload.get('crypto') if isinstance(payload.get('crypto'), dict) else {}
+        lines = ['## 检查结果', f'环境: {payload.get("env", "-")}']
+        for label, check in (
+            ('数据库', database),
+            ('脑图 Schema', mindmap_schema),
+            ('AI 初始化', mindmap_ai_bootstrap),
+            ('Redis', redis),
+            ('加密组件', crypto),
+        ):
+            lines.append(f'{label}: {"正常" if check.get("ok", False) else "异常"}')
+            lines.append(
+                f'> {SHELL_TEXT_FORMATTER.truncate_text(check.get("message", "-"), 64)}'
+            )
+            if check.get('action'):
+                lines.append(
+                    f'> 处理: {SHELL_TEXT_FORMATTER.truncate_text(check["action"], 120)}'
+                )
         return DetailSectionSnapshot(
             title='启动前检查',
             status='ok' if payload.get('ok', False) else 'fail',
-            lines=[
-                '## 检查结果',
-                f'环境: {payload.get("env", "-")}',
-                f'数据库: {"正常" if database.get("ok", False) else "异常"}',
-                f'> {SHELL_TEXT_FORMATTER.truncate_text(database.get("message", "-"), 64)}',
-                f'Redis: {"正常" if redis.get("ok", False) else "异常"}',
-                f'> {SHELL_TEXT_FORMATTER.truncate_text(redis.get("message", "-"), 64)}',
-                f'加密组件: {"正常" if crypto.get("ok", False) else "异常"}',
-                f'> {SHELL_TEXT_FORMATTER.truncate_text(crypto.get("message", "-"), 64)}',
-            ],
+            lines=lines,
         )
 
     @staticmethod

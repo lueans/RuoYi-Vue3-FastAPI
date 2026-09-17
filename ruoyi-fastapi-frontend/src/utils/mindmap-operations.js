@@ -10,6 +10,7 @@ import {
 import {
   transformTreeDataToObject,
 } from '../libs/simple-mind-map/src/utils/treeData.js'
+import { normalizePersistedNodeData } from '../libs/simple-mind-map/src/utils/nodeData.js'
 
 export const MAX_MINDMAP_CONTENT_OPERATIONS = 2000
 
@@ -843,8 +844,12 @@ export function buildMindmapContentOperations(detailList, nodeRevisions = new Ma
     // Command 会为子树内每个消失节点各发一条 delete 明细。祖先操作已经
     // 原子覆盖整个子树，省略后代重复删除可避免大分支产生平方级请求载荷。
     if (action === 'delete' && deletedDescendantUids.has(String(nodeUid))) continue
-    const rawCurrentData = stripCrossNodeData(detail.data?.data || {})
-    const rawPreviousData = stripCrossNodeData(detail.oldData?.data || {})
+    const rawCurrentData = stripCrossNodeData(
+      normalizePersistedNodeData(detail.data?.data || {}),
+    )
+    const rawPreviousData = stripCrossNodeData(
+      normalizePersistedNodeData(detail.oldData?.data || {}),
+    )
     const canSeparateTags = managedTagBindings(rawCurrentData) !== null
       && managedTagBindings(action === 'create' ? {} : rawPreviousData) !== null
     const currentData = stripSeparatedTagBindings(rawCurrentData, canSeparateTags)

@@ -1,0 +1,36 @@
+{
+  "format": "ruoyi-mindmap",
+  "formatSchemaVersion": 2,
+  "manifest": {
+    "artifactId": "fixture-valid-create",
+    "title": "支付测试",
+    "sourceType": "external_agent",
+    "createdAt": "2026-09-10T00:00:00Z",
+    "generator": {
+      "agentKey": "fixture_agent",
+      "adapterVersion": "1.0.0",
+      "promptVersion": "fixture-1"
+    },
+    "validation": {
+      "status": "passed",
+      "validatorVersion": "mindmap-agent-kit-1"
+    },
+    "provenance": "external_unverified",
+    "documentHash": "mmf2:sha256:16ea648feb53af63db07b5d62b2bbf3c879c7441e2bf3c5274f70c37219bb566"
+  },
+  "document": {
+    "root": {
+      "data": { "uid": "root-1", "text": "支付测试", "expand": true },
+      "children": [
+        {
+          "data": { "uid": "case-1", "text": "支付成功", "expand": true },
+          "children": []
+        }
+      ]
+    },
+    "layout": "logicalStructure",
+    "theme": { "template": "default", "config": {} },
+    "view": null,
+    "documentData": {}
+  }
+}

@@ -22,6 +22,9 @@ services:
       dockerfile: Dockerfile.my
     image: ruoyi-backend-my:latest
     container_name: ruoyi-backend-my
+    environment:
+      MINDMAP_AI_CHECKPOINT_KEY: "${MINDMAP_AI_CHECKPOINT_KEY:?MINDMAP_AI_CHECKPOINT_KEY must be set to an independent secret of at least 32 bytes}"
+      MINDMAP_AI_CHECKPOINT_KEY_ID: "${MINDMAP_AI_CHECKPOINT_KEY_ID:-checkpoint-v1}"
     ports:
       - "19099:9099"
     depends_on:
@@ -58,6 +61,7 @@ services:
       - "13306:3306"
     volumes:
       - ./ruoyi-fastapi-backend/sql/ruoyi-fastapi.sql:/docker-entrypoint-initdb.d/ruoyi-fastapi.sql
+      - ./ruoyi-fastapi-backend/migrations/20260910_mindmap_ai_agent.sql:/docker-entrypoint-initdb.d/zzzzzzz-mindmap-ai-agent.sql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_general_ci --skip-character-set-client-handshake=1
     networks:
       - ruoyi-network

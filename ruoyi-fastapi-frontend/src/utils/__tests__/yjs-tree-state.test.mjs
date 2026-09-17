@@ -40,9 +40,17 @@ test('托管标签只保留身份和局部布局', () => {
   assert.deepEqual(result.tag, [{ tagId: 7, categoryId: 3, placement: 'right' }])
 })
 
-test('Yjs 节点数据排除本地选中状态', () => {
+test('Yjs 节点数据排除本地选中与渲染命令状态', () => {
   assert.deepEqual(
-    normalizeNodeDataForYjs({ uid: 'node-1', text: '节点', isActive: true }),
+    normalizeNodeDataForYjs({
+      uid: 'node-1',
+      text: '节点',
+      isActive: true,
+      inserting: true,
+      needUpdate: true,
+      resetRichText: true,
+      activeStyle: { color: 'red' },
+    }),
     { uid: 'node-1', text: '节点' },
   )
 })

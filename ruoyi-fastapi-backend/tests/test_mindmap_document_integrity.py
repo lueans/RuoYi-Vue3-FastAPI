@@ -18,6 +18,29 @@ from module_mindmap.service.simple_mind_document_codec import EncodedDocument
 
 
 class MindmapDocumentIntegrityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_detail_normalizes_legacy_null_theme_to_default(self) -> None:
+        mindmap = Mindmap(
+            id=42,
+            name='旧版空主题脑图',
+            owner_id=7,
+            status=0,
+            schema_version=1,
+            node_tree={'data': {'uid': 'root', 'text': '根节点'}, 'children': []},
+            theme=None,
+        )
+        with (
+            patch.object(
+                MindmapService,
+                'resolve_mindmap_access',
+                new=AsyncMock(return_value=(mindmap, 1, True)),
+            ),
+            patch.object(MindmapDao, 'get_migration_status', new=AsyncMock(return_value='done')),
+        ):
+            result = await MindmapService.get_mindmap_detail_services(AsyncMock(), 42, 7)
+
+        self.assertEqual(result.theme, {'template': 'default', 'config': {}})
+        self.assertEqual(result.content_state, 'ready')
+
     async def test_locking_load_uses_current_read_and_refreshes_identity_map(self) -> None:
         result = MagicMock()
         result.scalars.return_value = []

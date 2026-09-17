@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ruoyi-mindmap-agent-kit"
+version = "1.1.0"
+description = "Standalone SMM v2 and Agent interoperability contracts for mind-map agents"
+requires-python = ">=3.10"
+dependencies = ["rfc8785>=0.1.2,<0.2"]
+
+[project.scripts]
+mindmap-agent = "mindmap_agent_kit.cli:main"
+mindmap-agent-mcp = "mindmap_agent_kit.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mindmap_agent_kit*"]
+
+[tool.setuptools.package-data]
+mindmap_agent_kit = ["schema/*.json"]

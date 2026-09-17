@@ -130,6 +130,10 @@ class AppCommandPresenter:
                 f'env: {payload.get("env", "")}',
                 'checks:',
                 self._build_check_status_line('database', payload.get('database')),
+                self._build_check_status_line('mindmap_schema', payload.get('mindmapSchema')),
+                self._build_check_status_line(
+                    'mindmap_ai_bootstrap', payload.get('mindmapAiBootstrap')
+                ),
                 self._build_check_status_line('redis', payload.get('redis')),
                 self._build_check_status_line('crypto', payload.get('crypto')),
             ]
@@ -205,6 +209,10 @@ class AppCommandPresenter:
         ok = str(status_payload.get('ok', False)).lower()
         message = status_payload.get('message', '-') or '-'
         error = status_payload.get('error')
+        action = status_payload.get('action')
+        suffix = ''
         if error:
-            return f'  {name}: {ok} | {message} | error: {SHELL_TEXT_FORMATTER.truncate_text(error, 120)}'
-        return f'  {name}: {ok} | {message}'
+            suffix += f' | error: {SHELL_TEXT_FORMATTER.truncate_text(error, 120)}'
+        if action:
+            suffix += f' | action: {SHELL_TEXT_FORMATTER.truncate_text(action, 240)}'
+        return f'  {name}: {ok} | {message}{suffix}'

@@ -181,6 +181,7 @@ test('只读协作连接在认证消息中声明观察模式', () => {
     'cross-node-crdt-v2',
     'node-edit-lease-v1',
     'node-edit-lease-renewal-v1',
+    'collaboration-mutation-barrier-v1',
   ])
   client.disconnect()
 })

@@ -24,15 +24,14 @@
         <span class="iconfont iconfuhao-dagangshu" aria-hidden="true" />
       </button>
       <button
-        class="activityButton"
-        :class="{ active: activeSidebar === 'versionHistory' }"
+        v-hasPermi="['mindmap:ai:use']"
+        class="activityButton aiActivityButton"
         type="button"
-        aria-label="版本历史"
-        :aria-pressed="activeSidebar === 'versionHistory'"
-        title="版本历史"
-        @click="toggleSidebar('versionHistory')"
+        aria-label="打开 AI 脑图面板"
+        title="AI 脑图"
+        @click="bus.emit('showAiMindmap')"
       >
-        <span class="iconfont iconlishijilu" aria-hidden="true" />
+        <el-icon aria-hidden="true"><MagicStick /></el-icon>
       </button>
       <button
         v-if="canManageCollaborators && !isReadonly"
@@ -65,6 +64,7 @@
 </template>
 
 <script setup>
+import { MagicStick } from '@element-plus/icons-vue'
 import bus from './useEventBus'
 import { actions, store, isMindmapSidebarReadonlySafe } from './useStore'
 
@@ -151,7 +151,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: color 0.15s ease, background 0.15s ease;
 
-  .iconfont {
+  .iconfont,
+  .el-icon {
     font-size: 17px;
   }
 

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from module_mindmap.service.mindmap_metrics import mindmap_metrics
 from module_mindmap.websocket.room_manager import (
+    COLLABORATION_MUTATION_BARRIER_CAPABILITY,
     CONDITIONAL_NODE_PATCH_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
     NODE_EDIT_LEASE_CAPABILITY,
@@ -23,10 +24,12 @@ from module_mindmap.websocket.room_manager import (
 )
 
 OFFICIAL_WRITE_CAPABILITIES = {
+    COLLABORATION_MUTATION_BARRIER_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
     NODE_EDIT_LEASE_CAPABILITY,
     YJS_LINEAGE_CAPABILITY,
 }
+BARRIER_RENEW_KEY_COUNT = 4
 
 
 class _FakeWebSocket:
@@ -95,6 +98,7 @@ class _FakeRedisBroker:
         self.subscribers: set[_FakePubSub] = set()
         self.sorted_sets: dict[str, dict[str, float]] = {}
         self.strings: dict[str, str] = {}
+        self.sets: dict[str, set[str]] = {}
         self.seed_lease_renewals: list[tuple[str, str, int]] = []
         self.lineage_gap_clock_ms = 0
         self.lineage_gap_observations: dict[str, tuple[str, int]] = {}
@@ -161,7 +165,7 @@ class _FakeRedis:
     async def get(self, key: str) -> str | None:
         return self.broker.strings.get(key)
 
-    async def eval(  # noqa: PLR0911, PLR0912
+    async def eval(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         script: str,
         numkeys: int,
@@ -170,6 +174,76 @@ class _FakeRedis:
         keys = keys_and_args[:numkeys]
         args = keys_and_args[numkeys:]
         key = keys[0]
+        if "redis.call('sismember', KEYS[2]" in script:
+            expected, connection_id, ready, _ttl_seconds = args
+            if self.broker.strings.get(key) != expected:
+                return -1
+            if connection_id not in self.broker.sets.get(keys[1], set()):
+                return -2
+            target_key = keys[2] if ready == '1' else keys[3]
+            self.broker.sets.setdefault(target_key, set()).add(connection_id)
+            return 1
+        if "redis.call('sadd', KEYS[2], ARGV[2])" in script:
+            expected_barrier, connection_id, _ttl_seconds = args
+            if self.broker.strings.get(key) != expected_barrier:
+                return 0
+            self.broker.sets.setdefault(keys[1], set()).add(connection_id)
+            return 1
+        if "redis.call('set', KEYS[1], ARGV[5], 'EX'" in script:
+            (
+                expected_barrier,
+                expected_lineage,
+                expect_missing,
+                prepared_lineage,
+                prepared_barrier,
+                _ttl_seconds,
+            ) = args
+            if self.broker.strings.get(key) != expected_barrier:
+                return -1
+            current_lineage = self.broker.strings.get(keys[1])
+            if (
+                (expect_missing == '1' and current_lineage is not None)
+                or (expect_missing != '1' and current_lineage != expected_lineage)
+            ):
+                return -2
+            self.broker.strings[keys[1]] = prepared_lineage
+            self.broker.strings[key] = prepared_barrier
+            return 1
+        if (
+            "redis.call('del', KEYS[1], KEYS[3], KEYS[4], KEYS[5])" in script
+            and "ARGV[2] ~= ''" in script
+        ):
+            expected_barrier, prepared_lineage, expected_lineage, expected_missing = args
+            if self.broker.strings.get(key) != expected_barrier:
+                return 0
+            if prepared_lineage:
+                if self.broker.strings.get(keys[1]) != prepared_lineage:
+                    return -1
+                if expected_missing == '1':
+                    self.broker.strings.pop(keys[1], None)
+                else:
+                    self.broker.strings[keys[1]] = expected_lineage
+            self.broker.strings.pop(key, None)
+            for cleanup_key in keys[2:]:
+                self.broker.sets.pop(cleanup_key, None)
+            return 1
+        if "local subscribers = redis.call('publish', ARGV[3], ARGV[4])" in script:
+            expected_barrier, prepared_lineage, channel, payload = args
+            if self.broker.strings.get(key) != expected_barrier:
+                return -1
+            if self.broker.strings.get(keys[1]) != prepared_lineage:
+                return -2
+            subscribers = await self.publish(channel, payload)
+            self.broker.strings.pop(key, None)
+            for cleanup_key in keys[2:]:
+                self.broker.sets.pop(cleanup_key, None)
+            return subscribers
+        if (
+            numkeys == BARRIER_RENEW_KEY_COUNT
+            and "redis.call('expire', KEYS[1], ARGV[2])" in script
+        ):
+            expected_barrier, _ttl_seconds = args
+            return int(self.broker.strings.get(key) == expected_barrier)
         if "redis.call('set', KEYS[2]" in script:
             expected_epoch, owner, ttl_seconds = args
             raw_fence = self.broker.strings.get(key)
@@ -215,6 +289,8 @@ class _FakeRedis:
             expected, channel, payload = args
             if self.broker.strings.get(key) != expected:
                 return -1
+            if len(keys) > 1 and keys[1] in self.broker.strings:
+                return -2
             return await self.publish(channel, payload)
         if "redis.call('pttl'" in script:
             expected_epoch, grace_ms, _marker_ttl_ms = args
@@ -257,6 +333,18 @@ class _FakeRedis:
     async def expire(self, _key: str, _seconds: int) -> bool:
         return True
 
+    async def sadd(self, key: str, *members: str) -> int:
+        bucket = self.broker.sets.setdefault(key, set())
+        created = sum(member not in bucket for member in members)
+        bucket.update(members)
+        return created
+
+    async def smembers(self, key: str) -> Any:
+        return set(self.broker.sets.get(key, set()))
+
+    async def sismember(self, key: str, member: str) -> int:
+        return int(member in self.broker.sets.get(key, set()))
+
     async def zrem(self, key: str, *members: str) -> int:
         bucket = self.broker.sorted_sets.setdefault(key, {})
         return sum(bucket.pop(member, None) is not None for member in members)
@@ -272,6 +360,25 @@ class _FakeRedis:
         upper = float('inf') if maximum == '+inf' else float(maximum)
         bucket = self.broker.sorted_sets.setdefault(key, {})
         return [member for member, score in bucket.items() if minimum <= score <= upper]
+
+
+class _TogglePresenceRedis(_FakeRedis):
+    """可精确模拟 admission/heartbeat presence 的短暂 Redis 故障。"""
+
+    def __init__(self, broker: _FakeRedisBroker) -> None:
+        super().__init__(broker)
+        self.fail_zadd = False
+        self.fail_expire = False
+
+    async def zadd(self, key: str, mapping: dict[str, float]) -> int:
+        if self.fail_zadd:
+            raise ConnectionError('presence zadd unavailable')
+        return await super().zadd(key, mapping)
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        if self.fail_expire:
+            raise ConnectionError('presence expiry unavailable')
+        return await super().expire(key, seconds)
 
 
 class _FenceRaceRedis(_FakeRedis):
@@ -2989,6 +3096,453 @@ class MindmapRoomManagerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(peer.messages, [{'type': 'awareness'}])
         finally:
             await manager.stop()
+
+    async def test_writable_admission_requires_proven_presence_and_recovers_without_overwrite(
+        self,
+    ) -> None:
+        broker = _FakeRedisBroker()
+        redis = _TogglePresenceRedis(broker)
+        manager = RoomManager(instance_id='presence-admission-gate')
+        await manager.start(redis)
+        untracked_writer = _FakeWebSocket()
+        redis.fail_zadd = True
+        try:
+            with self.assertRaisesRegex(RuntimeError, '在线状态登记失败'):
+                await manager.join(
+                    70,
+                    untracked_writer,
+                    {'id': 6},
+                    capabilities=OFFICIAL_WRITE_CAPABILITIES,
+                )
+            self.assertFalse(manager.is_connection_active(untracked_writer))
+            self.assertFalse(
+                manager.is_connection_write_enabled(70, untracked_writer),
+            )
+            self.assertEqual(
+                broker.sorted_sets.get(manager._presence_key(70), {}),
+                {},
+            )
+
+            # Redis 恢复后 AI 可以获取一个空 participant 栅栏；之前未获准
+            # 的连接既不会收到 prepare，也不能被后续整图 reset 覆盖。
+            redis.fail_zadd = False
+            raw_fence = manager._encode_lineage_fence(
+                3,
+                manager._lineage_digest('presence-recovery-lineage'),
+            )
+            broker.strings[manager._lineage_fence_key(70)] = raw_fence
+            epoch = manager._decode_lineage_fence_record(raw_fence)[3]
+            barrier = await manager.acquire_collaboration_mutation_barrier(
+                70,
+                3,
+                epoch,
+                operation='apply',
+            )
+            self.assertIsNotNone(barrier)
+            assert barrier is not None
+            self.assertEqual(barrier.participants, frozenset())
+            self.assertTrue(await manager.wait_for_collaboration_mutation_barrier(
+                barrier,
+                timeout_seconds=0.5,
+            ))
+            self.assertTrue(await manager.abort_collaboration_mutation_barrier(barrier))
+            self.assertEqual(untracked_writer.messages, [])
+        finally:
+            await manager.stop()
+
+    async def test_presence_heartbeat_failure_revokes_local_write_immediately(
+        self,
+    ) -> None:
+        broker = _FakeRedisBroker()
+        redis = _TogglePresenceRedis(broker)
+        manager = RoomManager(instance_id='presence-heartbeat-gate')
+        await manager.start(redis)
+        websocket = _FakeWebSocket()
+        try:
+            self.assertTrue(await manager.join(
+                69,
+                websocket,
+                {'id': 5},
+                capabilities=OFFICIAL_WRITE_CAPABILITIES,
+            ))
+            redis.fail_expire = True
+            self.assertFalse(await manager.touch_presence(69, websocket))
+            self.assertFalse(manager.is_connection_write_enabled(69, websocket))
+            self.assertFalse(
+                manager.consume_disconnect_persistence_permission(websocket),
+            )
+            self.assertEqual(
+                broker.sorted_sets.get(manager._presence_key(69), {}),
+                {},
+            )
+        finally:
+            redis.fail_expire = False
+            await manager.stop()
+
+    async def test_cross_worker_barrier_requires_every_worker_presence_witness(
+        self,
+    ) -> None:
+        broker = _FakeRedisBroker()
+        coordinator = RoomManager(instance_id='presence-witness-coordinator')
+        participant = RoomManager(instance_id='presence-witness-participant')
+        await coordinator.start(_FakeRedis(broker))
+        await participant.start(_FakeRedis(broker))
+        websocket = _FakeWebSocket()
+        raw_fence = coordinator._encode_lineage_fence(
+            4,
+            coordinator._lineage_digest('presence-witness-lineage'),
+        )
+        broker.strings[coordinator._lineage_fence_key(68)] = raw_fence
+        epoch = coordinator._decode_lineage_fence_record(raw_fence)[3]
+        await participant.join(
+            68,
+            websocket,
+            {'id': 4},
+            capabilities=OFFICIAL_WRITE_CAPABILITIES,
+        )
+        # 模拟远端 worker 的 connection presence 被 Redis 异常移除、但下一次
+        # heartbeat 尚未来得及撤销本地写资格。prepare 必须等该 worker 自证。
+        broker.sorted_sets[coordinator._presence_key(68)].clear()
+        try:
+            barrier = await coordinator.acquire_collaboration_mutation_barrier(
+                68,
+                4,
+                epoch,
+                operation='apply',
+            )
+            self.assertIsNotNone(barrier)
+            assert barrier is not None
+            self.assertEqual(barrier.participants, frozenset())
+            self.assertEqual(barrier.expected_worker_witnesses, 2)
+            self.assertFalse(await coordinator.wait_for_collaboration_mutation_barrier(
+                barrier,
+                timeout_seconds=0.5,
+            ))
+            self.assertFalse(any(
+                message.get('type') == 'collaboration_barrier_prepare'
+                for message in websocket.messages
+            ))
+            self.assertTrue(await coordinator.abort_collaboration_mutation_barrier(barrier))
+        finally:
+            await coordinator.stop()
+            await participant.stop()
+
+    async def test_local_ai_barrier_requires_persisted_checkpoint_before_ready_ack(
+        self,
+    ) -> None:
+        manager = RoomManager(instance_id='local-ai-barrier-proof')
+        websocket = _FakeWebSocket()
+        await manager.join(
+            71,
+            websocket,
+            {'id': 7},
+            capabilities=OFFICIAL_WRITE_CAPABILITIES,
+        )
+        manager.set_content_revision(71, 4)
+        epoch = _establish_lineage(manager, 71, 4, 'lineage-local-ai')
+
+        barrier = await manager.acquire_collaboration_mutation_barrier(
+            71,
+            4,
+            epoch,
+            operation='apply',
+        )
+        self.assertIsNotNone(barrier)
+        assert barrier is not None
+        self.assertFalse(await manager.is_collaboration_mutation_allowed(71, websocket))
+        self.assertFalse(await manager.acknowledge_collaboration_mutation_barrier(
+            71,
+            websocket,
+            barrier.token,
+            ready=True,
+        ))
+        self.assertFalse(await manager.wait_for_collaboration_mutation_barrier(
+            barrier,
+            timeout_seconds=0.05,
+        ))
+        self.assertTrue(await manager.abort_collaboration_mutation_barrier(barrier))
+        self.assertEqual(
+            [message['type'] for message in websocket.messages],
+            ['collaboration_barrier_prepare', 'collaboration_barrier_released'],
+        )
+
+    async def test_ai_barrier_drains_cross_worker_and_fences_old_lineage(self) -> None:
+        broker = _FakeRedisBroker()
+        coordinator = RoomManager(instance_id='ai-barrier-coordinator')
+        participant = RoomManager(instance_id='ai-barrier-participant')
+        await coordinator.start(_FakeRedis(broker))
+        await participant.start(_FakeRedis(broker))
+        websocket = _FakeWebSocket()
+        raw_fence = coordinator._encode_lineage_fence(
+            5,
+            coordinator._lineage_digest('lineage-cross-worker'),
+        )
+        broker.strings[coordinator._lineage_fence_key(72)] = raw_fence
+        epoch = coordinator._decode_lineage_fence_record(raw_fence)[3]
+        coordinator.set_content_revision(72, 5)
+        participant.set_content_revision(72, 5)
+        coordinator.set_content_lineage(72, 5, 'lineage-cross-worker')
+        participant.set_content_lineage(72, 5, 'lineage-cross-worker')
+        await participant.join(
+            72,
+            websocket,
+            {'id': 8},
+            capabilities=OFFICIAL_WRITE_CAPABILITIES,
+        )
+        try:
+            barrier = await coordinator.acquire_collaboration_mutation_barrier(
+                72,
+                5,
+                epoch,
+                operation='undo',
+            )
+            self.assertIsNotNone(barrier)
+            assert barrier is not None
+            await self._wait_until(lambda: any(
+                message.get('type') == 'collaboration_barrier_prepare'
+                for message in websocket.messages
+            ))
+            self.assertFalse(await participant.broadcast_with_lineage_fence(
+                72,
+                {
+                    'type': 'update',
+                    'update': 'stale-update',
+                    'contentRevision': 5,
+                },
+                content_revision=5,
+                lineage_id='lineage-cross-worker',
+            ))
+            self.assertTrue(await participant.record_collaboration_mutation_checkpoint(
+                72,
+                websocket,
+                barrier.token,
+            ))
+            self.assertTrue(await participant.acknowledge_collaboration_mutation_barrier(
+                72,
+                websocket,
+                barrier.token,
+                ready=True,
+            ))
+            self.assertTrue(await coordinator.wait_for_collaboration_mutation_barrier(
+                barrier,
+                timeout_seconds=0.5,
+            ))
+            prepared = await coordinator.prepare_collaboration_mutation_barrier_commit(
+                barrier,
+                6,
+            )
+            self.assertIsNotNone(prepared)
+            assert prepared is not None
+            self.assertTrue(await coordinator.complete_collaboration_mutation_barrier(
+                prepared,
+                new_revision=6,
+                client_mutation_id='ai-undo:test',
+            ))
+            await self._wait_until(lambda: any(
+                message.get('type') == 'collaboration_barrier_released'
+                and message.get('status') == 'committed'
+                for message in websocket.messages
+            ))
+            self.assertFalse(await participant.broadcast_with_lineage_fence(
+                72,
+                {
+                    'type': 'update',
+                    'update': 'old-epoch-update',
+                    'contentRevision': 5,
+                },
+                content_revision=5,
+                lineage_id='lineage-cross-worker',
+            ))
+        finally:
+            await coordinator.stop()
+            await participant.stop()
+
+    async def test_atomic_barrier_complete_accepts_zero_release_subscribers(self) -> None:
+        broker = _FakeRedisBroker()
+        redis = _FakeRedis(broker)
+        manager = RoomManager(instance_id='ai-complete-no-subscribers')
+        await manager.start(redis)
+        raw_fence = manager._encode_lineage_fence(
+            7,
+            manager._lineage_digest('complete-zero-lineage'),
+        )
+        broker.strings[manager._lineage_fence_key(74)] = raw_fence
+        epoch = manager._decode_lineage_fence_record(raw_fence)[3]
+        try:
+            barrier = await manager.acquire_collaboration_mutation_barrier(
+                74,
+                7,
+                epoch,
+                operation='apply',
+            )
+            assert barrier is not None
+            self.assertTrue(await manager.wait_for_collaboration_mutation_barrier(
+                barrier,
+                timeout_seconds=0.5,
+            ))
+            prepared = await manager.prepare_collaboration_mutation_barrier_commit(
+                barrier,
+                8,
+            )
+            assert prepared is not None
+
+            # 模拟 prepare 后所有订阅者同时断开。Lua 的 PUBLISH=0 仍表示
+            # compare + publish + delete 已完整执行，不能误报为未提交。
+            broker.subscribers.clear()
+            self.assertTrue(await manager.complete_collaboration_mutation_barrier(
+                prepared,
+                new_revision=8,
+                client_mutation_id='ai-apply:zero-subscriber',
+            ))
+            self.assertNotIn(manager._mutation_barrier_key(74), broker.strings)
+        finally:
+            await manager.stop()
+
+    async def test_atomic_barrier_complete_publish_failure_keeps_redis_barrier_recoverable(
+        self,
+    ) -> None:
+        broker = _FakeRedisBroker()
+        redis = _FakeRedis(broker)
+        manager = RoomManager(instance_id='ai-complete-publish-failure')
+        await manager.start(redis)
+        readonly_peer = _FakeWebSocket()
+        await manager.join(75, readonly_peer, {'id': 10}, can_edit=False)
+        raw_fence = manager._encode_lineage_fence(
+            9,
+            manager._lineage_digest('complete-failure-lineage'),
+        )
+        broker.strings[manager._lineage_fence_key(75)] = raw_fence
+        epoch = manager._decode_lineage_fence_record(raw_fence)[3]
+        try:
+            barrier = await manager.acquire_collaboration_mutation_barrier(
+                75,
+                9,
+                epoch,
+                operation='undo',
+            )
+            assert barrier is not None
+            self.assertTrue(await manager.wait_for_collaboration_mutation_barrier(
+                barrier,
+                timeout_seconds=0.5,
+            ))
+            prepared = await manager.prepare_collaboration_mutation_barrier_commit(
+                barrier,
+                10,
+            )
+            assert prepared is not None
+            redis.fail_publish = True
+
+            self.assertFalse(await manager.complete_collaboration_mutation_barrier(
+                prepared,
+                new_revision=10,
+                client_mutation_id='ai-undo:publish-failure',
+            ))
+            # Lua 在 PUBLISH 抛错时不会执行 DEL；跨 worker 可以在 Redis
+            # 恢复后重试，客户端也能用已提交的 DB revision 判定 committed。
+            self.assertEqual(
+                broker.strings[manager._mutation_barrier_key(75)],
+                prepared.barrier_raw,
+            )
+            self.assertEqual(
+                await manager.get_collaboration_mutation_barrier_status(
+                    75,
+                    prepared.token,
+                    9,
+                    10,
+                ),
+                'committed',
+            )
+            self.assertTrue(any(
+                message.get('type') == 'collaboration_barrier_released'
+                and message.get('status') == 'committed'
+                for message in readonly_peer.messages
+            ))
+
+            redis.fail_publish = False
+            self.assertTrue(await manager.complete_collaboration_mutation_barrier(
+                prepared,
+                new_revision=10,
+                client_mutation_id='ai-undo:publish-failure',
+            ))
+            self.assertNotIn(manager._mutation_barrier_key(75), broker.strings)
+        finally:
+            redis.fail_publish = False
+            await manager.stop()
+
+    async def test_committing_barrier_crash_windows_repair_from_database(self) -> None:
+        broker = _FakeRedisBroker()
+        before_commit = RoomManager(instance_id='ai-crash-before-commit')
+        await before_commit.start(_FakeRedis(broker))
+        old_digest = before_commit._lineage_digest('lineage-before-crash')
+        old_fence = before_commit._encode_lineage_fence(9, old_digest)
+        broker.strings[before_commit._lineage_fence_key(73)] = old_fence
+        epoch = before_commit._decode_lineage_fence_record(old_fence)[3]
+        barrier = await before_commit.acquire_collaboration_mutation_barrier(
+            73,
+            9,
+            epoch,
+            operation='apply',
+        )
+        assert barrier is not None
+        prepared = await before_commit.prepare_collaboration_mutation_barrier_commit(
+            barrier,
+            10,
+        )
+        assert prepared is not None
+        # 模拟进程在 DB commit 前崩溃，Redis barrier TTL 到期；DB 仍是 r9。
+        broker.strings.pop(before_commit._mutation_barrier_key(73), None)
+        recovered_old, recovered_digest = (
+            await before_commit.repair_content_lineage_fence_from_persisted(
+                73,
+                9,
+                old_digest,
+            )
+        )
+        self.assertTrue(recovered_old)
+        self.assertEqual(recovered_digest, old_digest)
+        self.assertEqual(
+            before_commit._decode_lineage_fence_record(
+                broker.strings[before_commit._lineage_fence_key(73)],
+            )[:3],
+            (9, old_digest, 'active'),
+        )
+        await before_commit.stop()
+
+        after_commit = RoomManager(instance_id='ai-crash-after-commit')
+        await after_commit.start(_FakeRedis(broker))
+        current_fence = broker.strings[after_commit._lineage_fence_key(73)]
+        current_epoch = after_commit._decode_lineage_fence_record(current_fence)[3]
+        barrier = await after_commit.acquire_collaboration_mutation_barrier(
+            73,
+            9,
+            current_epoch,
+            operation='apply',
+        )
+        assert barrier is not None
+        prepared = await after_commit.prepare_collaboration_mutation_barrier_commit(
+            barrier,
+            10,
+        )
+        assert prepared is not None
+        # 模拟 DB 已提交 r10、release 前崩溃。握手应保留 r10 tombstone，
+        # 绝不能恢复 r9 epoch 或永久依赖已经过期的 barrier。
+        broker.strings.pop(after_commit._mutation_barrier_key(73), None)
+        recovered_new, recovered_digest = (
+            await after_commit.repair_content_lineage_fence_from_persisted(
+                73,
+                10,
+                None,
+            )
+        )
+        self.assertTrue(recovered_new)
+        self.assertIsNone(recovered_digest)
+        self.assertEqual(
+            after_commit._decode_lineage_fence_record(
+                broker.strings[after_commit._lineage_fence_key(73)],
+            )[:3],
+            (10, None, 'tombstone'),
+        )
+        await after_commit.stop()
 
     async def _wait_until(self, predicate: Callable[[], bool], timeout: float = 1) -> None:
         deadline = asyncio.get_running_loop().time() + timeout

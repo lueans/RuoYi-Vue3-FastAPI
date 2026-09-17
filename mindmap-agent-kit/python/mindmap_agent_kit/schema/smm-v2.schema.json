@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ruoyi.example/schemas/smm-v2.schema.json",
+  "title": "RuoYi Simple Mind Map v2 Artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "formatSchemaVersion", "manifest", "document"],
+  "properties": {
+    "format": { "const": "ruoyi-mindmap" },
+    "formatSchemaVersion": { "const": 2 },
+    "manifest": { "$ref": "#/$defs/manifest" },
+    "document": { "$ref": "#/$defs/document" }
+  },
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "required": ["artifactId", "title", "sourceType", "createdAt", "generator", "validation", "documentHash"],
+      "properties": {
+        "artifactId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "sourceType": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "generator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agentKey", "adapterVersion", "promptVersion"],
+          "properties": {
+            "agentKey": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$" },
+            "adapterVersion": { "type": "string", "minLength": 1 },
+            "promptVersion": { "type": "string", "minLength": 1 }
+          }
+        },
+        "validation": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["status", "validatorVersion"],
+          "properties": {
+            "status": { "enum": ["passed", "draft"] },
+            "validatorVersion": { "type": "string", "minLength": 1 }
+          }
+        },
+        "documentHash": { "type": "string", "pattern": "^mmf2:sha256:[a-f0-9]{64}$" },
+        "provenance": { "enum": ["external_unverified", "platform_verified"] }
+      },
+      "additionalProperties": true
+    },
+    "document": {
+      "type": "object",
+      "required": ["root", "layout", "theme", "view", "documentData"],
+      "properties": {
+        "root": { "$ref": "#/$defs/node" },
+        "layout": {
+          "enum": ["mindMap", "logicalStructure", "organizationStructure", "catalogOrganization", "timeline", "timeline2", "verticalTimeline", "verticalTimeline2", "verticalTimeline3", "fishbone", "fishbone2", "rightFishbone", "rightFishbone2", "logicalStructureLeft"]
+        },
+        "theme": { "type": "object" },
+        "view": { "type": ["object", "null"] },
+        "documentData": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "node": {
+      "type": "object",
+      "required": ["data", "children"],
+      "properties": {
+        "data": {
+          "type": "object",
+          "required": ["uid", "text"],
+          "properties": {
+            "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "text": { "type": "string", "minLength": 1, "maxLength": 10000 },
+            "note": { "type": "string", "maxLength": 20000 },
+            "hyperlink": { "type": "string" },
+            "tag": { "type": "array" }
+          },
+          "additionalProperties": true
+        },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

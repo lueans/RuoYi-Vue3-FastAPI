@@ -19,6 +19,7 @@ import {
 const STORAGE_KEY_DATA = 'MIND_MAP_DATA'
 const STORAGE_KEY_CONFIG = 'MIND_MAP_CONFIG'
 const STORAGE_KEY_LOCAL_CONFIG = 'MIND_MAP_LOCAL_CONFIG'
+const STORAGE_KEY_AI_RECOVERY = 'MIND_MAP_AI_RECOVERY_V1'
 
 const READONLY_SAFE_SIDEBARS = new Set([
   'outline',
@@ -105,7 +106,13 @@ function initLocalConfig() {
   }
 }
 
-function storeData(data) {
+function createLocalDocumentId() {
+  const value = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  return `local:${value}`
+}
+
+function storeData(data, options = {}) {
   let patch
   try {
     patch = normalizeMindmapLocalWorkspacePatch(data)
@@ -133,12 +140,96 @@ function storeData(data) {
       existing = {}
     }
   }
+  const next = { ...existing, ...patch }
+  const hasContentPatch = ['root', 'layout', 'theme', 'documentData']
+    .some(field => Object.prototype.hasOwnProperty.call(patch, field))
+  if (next.root) {
+    next.documentId = existing.documentId || createLocalDocumentId()
+    if (hasContentPatch) {
+      next.revision = Number.isSafeInteger(options.revision)
+        ? options.revision
+        : Math.max(Number(existing.revision) || 0, 0) + 1
+      next.documentHash = options.documentHash || null
+      // 任意后续正文编辑都会使“直接撤销 AI 应用”的条件失效。
+      next.lastAppliedProposal = options.lastAppliedProposal || null
+    } else {
+      next.revision = Number(existing.revision) || 1
+    }
+  }
   try {
+    const serialized = serializeMindmapLocalWorkspaceRecord(next)
     localStorage.setItem(
       STORAGE_KEY_DATA,
-      serializeMindmapLocalWorkspaceRecord({ ...existing, ...patch }),
+      serialized,
     )
+    if (localStorage.getItem(STORAGE_KEY_DATA) !== serialized) return false
     return true
+  } catch {
+    return false
+  }
+}
+
+function replaceData(data, options = {}) {
+  let normalized
+  try {
+    normalized = normalizeMindmapLocalWorkspacePatch(data)
+  } catch {
+    return false
+  }
+  if (!normalized?.root) return false
+  const next = {
+    ...normalized,
+    documentId: createLocalDocumentId(),
+    revision: 1,
+    documentHash: options.documentHash || null,
+    lastAppliedProposal: options.lastAppliedProposal || null,
+  }
+  let serialized
+  let previousRaw = null
+  let previousRecoveryRaw = null
+  try {
+    serialized = serializeMindmapLocalWorkspaceRecord(next)
+    previousRaw = localStorage.getItem(STORAGE_KEY_DATA)
+    previousRecoveryRaw = localStorage.getItem(STORAGE_KEY_AI_RECOVERY)
+    if (previousRaw) {
+      localStorage.setItem(STORAGE_KEY_AI_RECOVERY, JSON.stringify({
+        schemaVersion: 1,
+        reason: options.reason || 'ai-open-local',
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        workspace: previousRaw,
+      }))
+    }
+    localStorage.setItem(STORAGE_KEY_DATA, serialized)
+    if (localStorage.getItem(STORAGE_KEY_DATA) !== serialized) {
+      throw new Error('本地工作区写入后校验失败')
+    }
+    return next
+  } catch {
+    try {
+      if (previousRaw === null) localStorage.removeItem(STORAGE_KEY_DATA)
+      else localStorage.setItem(STORAGE_KEY_DATA, previousRaw)
+      if (previousRecoveryRaw === null) localStorage.removeItem(STORAGE_KEY_AI_RECOVERY)
+      else localStorage.setItem(STORAGE_KEY_AI_RECOVERY, previousRecoveryRaw)
+    } catch {}
+    return false
+  }
+}
+
+// Restore the exact durable local-workspace identity after a transactional AI
+// apply fails. Unlike storeData/replaceData this must not advance the revision,
+// create a new documentId, or alter lastAppliedProposal.
+function restoreData(data) {
+  try {
+    if (data == null) {
+      localStorage.removeItem(STORAGE_KEY_DATA)
+      return true
+    }
+    const normalized = normalizeMindmapLocalWorkspaceRecord(data)
+    if (!normalized?.root) return false
+    const serialized = serializeMindmapLocalWorkspaceRecord(normalized)
+    localStorage.setItem(STORAGE_KEY_DATA, serialized)
+    return localStorage.getItem(STORAGE_KEY_DATA) === serialized
   } catch {
     return false
   }
@@ -168,6 +259,13 @@ function getData() {
     hasMindmapLocalWorkspaceRoot(parsed)
     && !Object.prototype.hasOwnProperty.call(normalized, 'root')
   ) return null
+  if (normalized.root) {
+    normalized.documentId ||= createLocalDocumentId()
+    normalized.revision = Number(normalized.revision) || 1
+    if (!Object.prototype.hasOwnProperty.call(normalized, 'documentHash')) {
+      normalized.documentHash = null
+    }
+  }
   try {
     localStorage.setItem(
       STORAGE_KEY_DATA,
@@ -238,6 +336,8 @@ export const actions = {
   setLocalConfig,
   initLocalConfig,
   storeData,
+  replaceData,
+  restoreData,
   getData,
   storeConfig,
   getConfig,

@@ -43,6 +43,7 @@ import { CONSTANTS, ERROR_TYPES } from '../../constants/constant'
 import { Polygon } from '@svgdotjs/svg.js'
 import { createAsyncRenderSession } from '../../utils/asyncRenderSession'
 import { rebindRuntimeNodesToRenderTree } from '../../utils/nodeData'
+import { applyNodeDataBatch } from '../../utils/nodeDataBatch'
 
 // 布局列表
 const layouts = {
@@ -470,6 +471,9 @@ class Render {
     // 设置节点数据
     this.setNodeData = this.setNodeData.bind(this)
     this.mindMap.command.add('SET_NODE_DATA', this.setNodeData)
+    // 稀疏节点补丁在同一命令中预校验并原子应用，形成一个撤销单元。
+    this.setNodeDataBatch = this.setNodeDataBatch.bind(this)
+    this.mindMap.command.add('SET_NODE_DATA_BATCH', this.setNodeDataBatch)
     // 设置节点文本
     this.setNodeText = this.setNodeText.bind(this)
     this.mindMap.command.add('SET_NODE_TEXT', this.setNodeText)
@@ -1708,7 +1712,7 @@ class Render {
     let nodeList = getTopAncestorsFomNodeList(this.activeNodeList)
     nodeList = sortNodeList(nodeList)
     return nodeList.map(node => {
-      return copyNodeTree({}, node, true)
+      return copyNodeTree({}, node, true, true)
     })
   }
 
@@ -1812,7 +1816,6 @@ class Render {
   //  展开所有
   expandAllNode(uid = '') {
     if (!this.renderTree) return
-
     const _walk = (node, enableExpand) => {
       // 如果该节点为目标节点，那么修改允许展开的标志
       if (!enableExpand && node.data.uid === uid) {
@@ -1835,7 +1838,6 @@ class Render {
   //  收起所有
   unexpandAllNode(isSetRootNodeCenter = true, uid = '') {
     if (!this.renderTree) return
-
     const _walk = (node, isRoot, enableUnExpand) => {
       // 如果该节点为目标节点，那么修改允许展开的标志
       if (!enableUnExpand && node.data.uid === uid) {
@@ -2134,6 +2136,14 @@ class Render {
     Object.keys(data).forEach(key => {
       node.nodeData.data[key] = data[key]
     })
+  }
+
+  // 批量更新节点数据。applyNodeDataBatch 会在写入前验证全部目标，且把
+  // undefined 解释为删除字段，避免产生无法通过持久化校验的空键。
+  setNodeDataBatch(updates) {
+    const updatedCount = applyNodeDataBatch(updates)
+    if (updatedCount > 0) this.mindMap.render()
+    return updatedCount
   }
 
   //  设置节点数据，并判断是否渲染

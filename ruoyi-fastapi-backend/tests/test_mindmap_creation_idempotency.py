@@ -15,6 +15,13 @@ from module_mindmap.service.mindmap_service import MindmapService
 
 
 class MindmapCreationRuleTest(unittest.TestCase):
+    def test_blank_creation_persists_a_canonical_default_theme(self) -> None:
+        prepared = MindmapService._prepare_mindmap_insert_data(
+            MindmapModel(name='购物车测试用例', ownerId=7),
+        )
+
+        self.assertEqual(prepared['theme'], {'template': 'default', 'config': {}})
+
     def test_fingerprint_is_canonical_and_operation_sensitive(self) -> None:
         first = MindmapCreationService.build_context(
             'request-key-1234567890',

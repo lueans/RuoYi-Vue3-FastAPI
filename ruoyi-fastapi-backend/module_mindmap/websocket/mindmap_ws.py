@@ -23,6 +23,8 @@ from module_mindmap.service.mindmap_metrics import record_mindmap_event
 from module_mindmap.service.mindmap_service import MindmapService
 from module_mindmap.service.simple_mind_document_codec import SCHEMA_VERSION
 from module_mindmap.websocket.room_manager import (
+    COLLABORATION_MUTATION_BARRIER_CAPABILITY,
+    COLLABORATION_MUTATION_BARRIER_TOKEN_HEX_LENGTH,
     CONDITIONAL_NODE_PATCH_CAPABILITY,
     CROSS_NODE_CRDT_V2_CAPABILITY,
     NODE_EDIT_LEASE_CAPABILITY,
@@ -32,6 +34,7 @@ from module_mindmap.websocket.room_manager import (
     YJS_LINEAGE_CAPABILITY,
     YJS_MUTATION_SEQUENCE_CAPABILITY,
     YJS_SOURCE_CAS_CAPABILITY,
+    is_lower_hex,
     room_manager,
 )
 from module_mindmap.websocket.ws_auth import WsAuthenticationError, validate_ws_token
@@ -83,6 +86,8 @@ SUPPORTED_WS_CLIENT_MESSAGE_TYPES = frozenset({
     'awareness',
     'node_edit_lease_acquire',
     'node_edit_lease_release',
+    'collaboration_barrier_ack',
+    'collaboration_barrier_status_request',
 })
 
 
@@ -213,6 +218,12 @@ def normalize_yjs_lineage_id(value: object) -> str | None:
     return normalized
 
 
+def normalize_collaboration_barrier_token(value: object) -> str | None:
+    if not is_lower_hex(value, COLLABORATION_MUTATION_BARRIER_TOKEN_HEX_LENGTH):
+        return None
+    return value
+
+
 def are_yjs_state_replacements_authorized(
     replaceable_source_digests: dict[str, str],
     replacement_ids: list[str],
@@ -337,6 +348,7 @@ def normalize_ws_capabilities(payload: object) -> set[str]:
             CROSS_NODE_CRDT_V2_CAPABILITY,
             NODE_EDIT_LEASE_CAPABILITY,
             NODE_EDIT_LEASE_RENEWAL_CAPABILITY,
+            COLLABORATION_MUTATION_BARRIER_CAPABILITY,
         }
     }
 
@@ -411,6 +423,8 @@ async def persist_authorized_yjs_state(  # noqa: PLR0913
     lineage_id: str | None = None,
     manager: Any | None = None,
     enforce_lineage_fence: bool = False,
+    websocket: WebSocket | None = None,
+    barrier_token: str | None = None,
 ) -> bool:
     """在与正文保存相同的脑图行锁内复核编辑权限并保存检查点。"""
     # 协作者降权/移除、归档以及正文保存都先锁 Mindmap。这里沿用同一
@@ -421,6 +435,15 @@ async def persist_authorized_yjs_state(  # noqa: PLR0913
         user_id,
         require_edit=True,
     )
+    if manager is not None and websocket is not None and (
+        not await manager.is_collaboration_mutation_allowed(
+            mindmap_id,
+            websocket,
+            barrier_token=barrier_token,
+        )
+    ):
+        record_mindmap_event('collaboration_barrier_write_rejected')
+        return False
     if enforce_lineage_fence and (
         manager is None
         or lineage_id is None
@@ -1147,7 +1170,7 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
     auth_recheck_failures = 0
     access_recheck_failures = 0
 
-    async def heartbeat() -> None:
+    async def heartbeat() -> None:  # noqa: PLR0912
         """定期复核登录会话、编辑权限并检测死亡连接。"""
         nonlocal access_recheck_failures, auth_recheck_failures, missed_pongs
         try:
@@ -1226,7 +1249,18 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                     )
                     await close_websocket_with_error(websocket, payload, close_code)
                     return
-                await room_manager.touch_presence(mindmap_id, websocket)
+                presence_refreshed = await room_manager.touch_presence(
+                    mindmap_id,
+                    websocket,
+                )
+                if can_edit_session and not presence_refreshed:
+                    await close_websocket_with_error(websocket, {
+                        'type': 'auth_error',
+                        'code': 'collaboration_presence_unavailable',
+                        'message': '协作在线状态暂时不可用，已暂停写入并准备重连',
+                        'retryable': True,
+                    }, WS_RETRY_LATER_CLOSE_CODE)
+                    return
                 if missed_pongs >= HEARTBEAT_MISS_LIMIT:
                     logger.warning(f'心跳超时: 用户 {user_info["id"]} 连续 {missed_pongs} 次未响应 pong，关闭连接')
                     try:
@@ -1257,10 +1291,29 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
     latest_replace_source_digests: dict[str, str] = {}
     traffic_budget = WebSocketTrafficBudget()
 
+    async def reject_if_collaboration_barrier_active(
+        barrier_token_for_check: str | None,
+    ) -> bool:
+        """栅栏生效时发送 protocol_error 并返回 True；否则返回 False。"""
+        if await room_manager.is_collaboration_mutation_allowed(
+            mindmap_id,
+            websocket,
+            barrier_token=barrier_token_for_check,
+        ):
+            return False
+        await room_manager.send_to(websocket, {
+            'type': 'protocol_error',
+            'code': 'collaboration_barrier_active',
+            'message': '云端权威操作正在排空协作修改，请等待同步完成',
+            'retryable': True,
+        })
+        return True
+
     async def authorize_shared_document_mutation(
         client_revision: object,
         *,
         require_current_revision: bool = True,
+        barrier_token: str | None = None,
     ) -> tuple[bool, bool]:
         """返回 (允许继续, 需要终止当前消息循环)。"""
         nonlocal missing_write_capabilities
@@ -1280,6 +1333,8 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                 WS_RETRY_LATER_CLOSE_CODE,
             )
             return False, True
+        if await reject_if_collaboration_barrier_active(barrier_token):
+            return False, False
         try:
             async with AsyncSessionLocal() as db:
                 revision_error = await get_authorized_ws_revision_fence_payload(
@@ -1328,6 +1383,10 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
         if revision_error:
             await room_manager.send_to(websocket, revision_error)
             return False, False
+        # 数据库行锁等待期间可能刚好由另一个请求建立栅栏；在任何实际
+        # 持久化或广播前再次检查，不能把锁等待前的判断当作通行证。
+        if await reject_if_collaboration_barrier_active(barrier_token):
+            return False, False
         return True, False
 
     async def reconcile_message_lineage(
@@ -1374,6 +1433,7 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
         force: bool = False,
         context: str = '',
         establish_lineage: bool = False,
+        barrier_token: str | None = None,
     ) -> str:
         """按连接来源保存最近完整状态，区分节流与真实失败。"""
         nonlocal last_persist_time, latest_replace_source_ids
@@ -1397,6 +1457,8 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                     lineage_id=latest_state_lineage_id,
                     manager=room_manager,
                     enforce_lineage_fence=not establish_lineage,
+                    websocket=websocket,
+                    barrier_token=barrier_token,
                 )
             if saved:
                 if (
@@ -1738,8 +1800,22 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                     })
                     continue
                 client_revision = data.get('contentRevision')
+                raw_barrier_token = data.get('barrierToken')
+                barrier_token = normalize_collaboration_barrier_token(
+                    raw_barrier_token,
+                )
+                if raw_barrier_token is not None and barrier_token is None:
+                    await room_manager.send_to(websocket, {
+                        'type': 'protocol_error',
+                        'code': 'invalid_collaboration_barrier',
+                        'message': '协作排空栅栏标识无效',
+                    })
+                    continue
                 mutation_allowed, terminate_loop = (
-                    await authorize_shared_document_mutation(client_revision)
+                    await authorize_shared_document_mutation(
+                        client_revision,
+                        barrier_token=barrier_token,
+                    )
                 )
                 if not mutation_allowed:
                     if terminate_loop:
@@ -1837,11 +1913,18 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                     )
                 )
                 persist_result = await persist_latest_state(
-                    force=bool(replacement_ids) or must_establish_lineage,
+                    # barrier checkpoint 是客户端 ready ACK 的服务端证明，
+                    # 不能被普通检查点节流伪装成已排空。
+                    force=(
+                        barrier_token is not None
+                        or bool(replacement_ids)
+                        or must_establish_lineage
+                    ),
                     context='状态修复' if invalid_source_ids else (
                         '状态压缩' if replace_source_ids else '检查点'
                     ),
                     establish_lineage=must_establish_lineage,
+                    barrier_token=barrier_token,
                 )
                 if persist_result == YJS_PERSIST_FAILED:
                     # DB 拒绝与纯节流必须区分。真实失败可能是
@@ -1857,16 +1940,39 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                 if persist_result == YJS_PERSIST_SAVED:
                     for source_id in replacement_ids:
                         replaceable_state_source_digests.pop(source_id, None)
+                if (
+                    barrier_token is not None
+                    and (
+                        persist_result != YJS_PERSIST_SAVED
+                        or not await room_manager.record_collaboration_mutation_checkpoint(
+                            mindmap_id,
+                            websocket,
+                            barrier_token,
+                        )
+                    )
+                ):
+                    room_manager.block_disconnect_persistence(websocket)
+                    await close_websocket_with_error(websocket, {
+                        'type': 'protocol_error',
+                        'code': 'collaboration_barrier_checkpoint_failed',
+                        'message': '协作排空检查点未能确认，正在重新连接',
+                    }, WS_RETRY_LATER_CLOSE_CODE)
+                    break
 
                 if not connection_write_remains_enabled():
                     break
-                checkpoint_broadcasted = await room_manager.broadcast_checkpoint(
-                    mindmap_id,
-                    state_b64,
-                    str(user_info['id']),
-                    client_revision,
-                    exclude=websocket,
-                    lineage_id=checkpoint_lineage_id,
+                # drain checkpoint 只负责把发送者已接受的最终状态落库。其他
+                # 参与者也在同一栅栏内独立排空；再次广播会被写栅栏正确拒绝，
+                # 且没有必要把完整状态混入冻结窗口。
+                checkpoint_broadcasted = barrier_token is not None or (
+                    await room_manager.broadcast_checkpoint(
+                        mindmap_id,
+                        state_b64,
+                        str(user_info['id']),
+                        client_revision,
+                        exclude=websocket,
+                        lineage_id=checkpoint_lineage_id,
+                    )
                 )
                 if not checkpoint_broadcasted:
                     room_manager.block_disconnect_persistence(websocket)
@@ -1995,6 +2101,84 @@ async def mindmap_websocket_endpoint(  # noqa: PLR0911, PLR0912, PLR0915
                         node_uid,
                         websocket,
                     )
+
+            elif msg_type == 'collaboration_barrier_ack':
+                barrier_token = normalize_collaboration_barrier_token(
+                    data.get('token'),
+                )
+                ready = data.get('ready')
+                if barrier_token is None or type(ready) is not bool:
+                    await room_manager.send_to(
+                        websocket,
+                        get_ws_invalid_message_payload(),
+                    )
+                    continue
+                acknowledged = (
+                    await room_manager.acknowledge_collaboration_mutation_barrier(
+                        mindmap_id,
+                        websocket,
+                        barrier_token,
+                        ready=ready,
+                    )
+                )
+                if not acknowledged:
+                    await room_manager.send_to(websocket, {
+                        'type': 'protocol_error',
+                        'code': 'collaboration_barrier_stale',
+                        'message': '协作排空栅栏已经失效，请重新同步',
+                    })
+
+            elif msg_type == 'collaboration_barrier_status_request':
+                barrier_token = normalize_collaboration_barrier_token(
+                    data.get('token'),
+                )
+                expected_revision = data.get('contentRevision')
+                if (
+                    not can_edit_session
+                    or COLLABORATION_MUTATION_BARRIER_CAPABILITY not in capabilities
+                    or barrier_token is None
+                    or type(expected_revision) is not int
+                    or expected_revision <= 0
+                ):
+                    await room_manager.send_to(
+                        websocket,
+                        get_ws_invalid_message_payload(),
+                    )
+                    continue
+                try:
+                    # 行锁会等待仍处在 commit/rollback 窗口的 AI 事务。锁释放后
+                    # 再看 Redis barrier，才能把“DB 仍是旧 revision”确认为
+                    # aborted，而不是把尚未提交误判成中止。
+                    async with AsyncSessionLocal() as status_db:
+                        await MindmapService.check_mindmap_access(
+                            status_db,
+                            mindmap_id,
+                            user_info['id'],
+                            require_edit=True,
+                        )
+                        status_mindmap = await MindmapDao.get_mindmap_for_update(
+                            status_db,
+                            mindmap_id,
+                        )
+                        persisted_revision = int(status_mindmap.content_revision)
+                        await status_db.rollback()
+                    barrier_status = (
+                        await room_manager.get_collaboration_mutation_barrier_status(
+                            mindmap_id,
+                            barrier_token,
+                            expected_revision,
+                            persisted_revision,
+                        )
+                    )
+                except Exception:
+                    barrier_status = 'unknown'
+                    persisted_revision = expected_revision
+                await room_manager.send_to(websocket, {
+                    'type': 'collaboration_barrier_status',
+                    'token': barrier_token,
+                    'status': barrier_status,
+                    'contentRevision': persisted_revision,
+                })
 
             elif msg_type == 'pong':
                 # 心跳响应，重置未响应计数

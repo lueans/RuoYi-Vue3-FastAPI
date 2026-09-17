@@ -67,7 +67,10 @@ const emit = defineEmits([
 
 const containerRef = ref(null)
 const mindMapInstance = shallowRef(null)
-let dataVersion = 0
+let applyingExternalModelValue = false
+let lastEmittedModelValue = null
+let containerResizeObserver = null
+let resizeAnimationFrame = null
 
 const wrapperStyle = computed(() => ({
   width: props.width,
@@ -75,6 +78,21 @@ const wrapperStyle = computed(() => ({
 }))
 
 registerPlugins(props.preset, props.extraPlugins)
+
+function scheduleCanvasResize() {
+  if (resizeAnimationFrame !== null) return
+  resizeAnimationFrame = window.requestAnimationFrame(() => {
+    resizeAnimationFrame = null
+    const instance = mindMapInstance.value
+    const container = containerRef.value
+    if (!instance || !container) return
+    const { width, height } = container.getBoundingClientRect()
+    // The renderer rejects a zero-sized canvas. This can occur while a dialog is
+    // entering/leaving or a responsive column is temporarily hidden.
+    if (width <= 0 || height <= 0) return
+    instance.resize()
+  })
+}
 
 onMounted(() => {
   if (!containerRef.value) return
@@ -92,7 +110,12 @@ onMounted(() => {
   mindMapInstance.value = instance
 
   instance.on('data_change', (data) => {
-    dataVersion++
+    // MindMap#setData initializes a fresh history baseline and emits data_change
+    // before replacing the render tree. That event is an implementation detail of
+    // applying a prop, not a user edit, so it must not be echoed to the parent or
+    // used to suppress the next authoritative realtime frame.
+    if (applyingExternalModelValue) return
+    lastEmittedModelValue = data
     emit('update:modelValue', data)
     emit('data-change', data)
   })
@@ -118,23 +141,49 @@ onMounted(() => {
   })
 
   emit('ready', instance)
+
+  if (typeof ResizeObserver === 'function') {
+    containerResizeObserver = new ResizeObserver(scheduleCanvasResize)
+    containerResizeObserver.observe(containerRef.value)
+  } else {
+    window.addEventListener('resize', scheduleCanvasResize)
+  }
 })
 
 onBeforeUnmount(() => {
+  containerResizeObserver?.disconnect()
+  containerResizeObserver = null
+  window.removeEventListener('resize', scheduleCanvasResize)
+  if (resizeAnimationFrame !== null) {
+    window.cancelAnimationFrame(resizeAnimationFrame)
+    resizeAnimationFrame = null
+  }
   if (mindMapInstance.value) {
     mindMapInstance.value.destroy()
     mindMapInstance.value = null
   }
 })
 
-let lastAppliedVersion = 0
 watch(() => props.modelValue, (val) => {
-  if (dataVersion !== lastAppliedVersion) {
-    lastAppliedVersion = dataVersion
+  // A v-model parent normally sends the exact emitted object back on the next
+  // tick. Ignore only that echo; every other object is an external authoritative
+  // update and must reach the canvas (notably every AI draft version).
+  if (val === lastEmittedModelValue || toRaw(val) === lastEmittedModelValue) {
+    lastEmittedModelValue = null
     return
   }
   if (val && mindMapInstance.value) {
-    mindMapInstance.value.setData(val)
+    lastEmittedModelValue = null
+    applyingExternalModelValue = true
+    try {
+      mindMapInstance.value.setData(val)
+      // setData schedules its history initialization through a 100 ms throttle.
+      // Flush it while the external-update guard is active so that its delayed
+      // data_change cannot be mistaken for a user edit after this watcher exits.
+      mindMapInstance.value.command?.flushPendingHistory?.()
+    } finally {
+      applyingExternalModelValue = false
+    }
   }
 })
 

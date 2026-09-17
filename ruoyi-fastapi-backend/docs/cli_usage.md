@@ -201,6 +201,8 @@ ruoyi app doctor --env=dev
 ruoyi app run --env=dev
 ```
 
+`app doctor` 同时检查数据库、Redis、传输加密、脑图 Schema，以及三种 AI Connector、AI 菜单和关键角色授权。脑图门禁失败时会返回待处理对象、迁移文件与只读计划/复验命令；不得在失败状态下继续发布。
+
 ### 4.2 发布前检查
 
 ```bash
@@ -763,6 +765,8 @@ FAIL FAILED
 env: dev
 checks:
   database: false | 数据库连接失败 | error: <database error message>
+  mindmap_schema: false | 数据库不可用，无法执行脑图发布就绪检查 | error: database_unavailable | action: 先修复数据库连接，再重新运行 ruoyi app doctor --env=dev
+  mindmap_ai_bootstrap: false | 数据库不可用，无法执行脑图发布就绪检查 | error: database_unavailable | action: 先修复数据库连接，再重新运行 ruoyi app doctor --env=dev
   redis: false | Redis连接失败 | error: <redis error message>
   crypto: true | 传输加密配置校验通过
 ```
@@ -826,6 +830,7 @@ ruoyi ops health --env=dev --output=json
 - 当前网络、容器或主机是否允许连接目标服务
 - `app doctor` 与 `ops health` 在依赖异常时返回退出码 `10`
 - 单项依赖失败会在 JSON 中带出原始 `error` 和对应依赖退出码
+- 脑图 Schema 或 AI 初始化失败会在 `mindmapSchema` / `mindmapAiBootstrap` 中返回不含凭据的错误码、阻塞项、迁移文件和 `action`
 
 ### 8.3 文本输出太花或不适合脚本处理
 

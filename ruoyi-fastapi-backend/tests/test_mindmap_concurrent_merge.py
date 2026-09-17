@@ -2186,6 +2186,47 @@ class MindmapConcurrentMergeTest(unittest.TestCase):
         self.assertEqual(node_a['data']['text'], 'client-a')
         self.assertEqual([child['data']['uid'] for child in node_a['children']], ['remote'])
 
+    def test_text_update_atomically_persists_runtime_rich_text_format(self) -> None:
+        server = _node('root', '原始纯文本')
+        client = _node('root', '<p><span>原始纯文本</span></p>')
+        client['data']['richText'] = True
+        operation = _verified_update(
+            'root',
+            previous_data={
+                'uid': 'root',
+                'text': '<p>原始纯文本</p>',
+                'richText': True,
+            },
+            data=client['data'],
+        )
+
+        merged = merge_node_operations(server, client, [operation])
+
+        self.assertEqual(
+            merged['data']['text'],
+            '<p><span>原始纯文本</span></p>',
+        )
+        self.assertIs(merged['data']['richText'], True)
+        self.assertEqual(
+            get_operation_conflict_keys(operation),
+            {'node:root:data:text', 'node:root:data:richText'},
+        )
+
+    def test_plain_text_update_atomically_removes_stale_rich_text_format(self) -> None:
+        server = _node('root', '<p>旧富文本</p>')
+        server['data']['richText'] = True
+        client = _node('root', '新纯文本')
+        operation = _verified_update(
+            'root',
+            previous_data={'uid': 'root', 'text': '旧纯文本'},
+            data=client['data'],
+        )
+
+        merged = merge_node_operations(server, client, [operation])
+
+        self.assertEqual(merged['data']['text'], '新纯文本')
+        self.assertNotIn('richText', merged['data'])
+
     def test_change_history_must_be_contiguous(self) -> None:
         self.assertTrue(is_change_history_complete(
             [SimpleNamespace(revision=4), SimpleNamespace(revision=5)],

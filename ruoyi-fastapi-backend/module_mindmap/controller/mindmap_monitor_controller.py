@@ -7,6 +7,7 @@ from common.aspect.pre_auth import PreAuthDependency
 from common.router import APIRouterPro
 from common.vo import DataResponseModel
 from module_mindmap.entity.vo.mindmap_monitor_vo import MindmapMetricsSnapshotModel
+from module_mindmap.service.mindmap_ai_metrics import mindmap_ai_metrics
 from module_mindmap.service.mindmap_metrics import mindmap_metrics
 from module_mindmap.websocket.room_manager import room_manager
 from utils.response_util import ResponseUtil
@@ -28,4 +29,7 @@ mindmap_monitor_controller = APIRouterPro(
 )
 async def get_mindmap_metrics(request: Request) -> Response:
     collaboration = await room_manager.get_runtime_snapshot()
-    return ResponseUtil.success(data=mindmap_metrics.snapshot(collaboration))
+    return ResponseUtil.success(data={
+        **mindmap_metrics.snapshot(collaboration),
+        'ai': mindmap_ai_metrics.snapshot(),
+    })

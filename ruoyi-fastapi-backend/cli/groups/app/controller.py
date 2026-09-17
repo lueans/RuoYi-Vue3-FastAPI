@@ -79,15 +79,40 @@ class AppCommandController:
         """
         ctx = self.context_factory.build_readonly(env, output)
         db_status = self.execution_service.run_async(self.database_runtime.ping_database())
+        if db_status.get('ok', False):
+            mindmap_readiness = self.execution_service.run_async(
+                self.database_runtime.check_mindmap_readiness(ctx.env)
+            )
+        else:
+            unavailable = {
+                'ok': False,
+                'message': '数据库不可用，无法执行脑图发布就绪检查',
+                'error': 'database_unavailable',
+                'action': f'先修复数据库连接，再重新运行 ruoyi app doctor --env={ctx.env}',
+            }
+            mindmap_readiness = {
+                'schema': dict(unavailable),
+                'aiBootstrap': dict(unavailable),
+            }
+        mindmap_schema_status = mindmap_readiness['schema']
+        mindmap_ai_bootstrap_status = mindmap_readiness['aiBootstrap']
         redis_status = self.execution_service.run_async(self.operations_runtime.ping_redis())
         crypto_status = self.crypto_runtime.validate_crypto_config()
         payload = {
             'env': ctx.env,
             'database': db_status,
+            'mindmapSchema': mindmap_schema_status,
+            'mindmapAiBootstrap': mindmap_ai_bootstrap_status,
             'redis': redis_status,
             'crypto': crypto_status,
         }
-        payload['ok'] = all(item.get('ok', False) for item in (db_status, redis_status, crypto_status))
+        payload['ok'] = all(item.get('ok', False) for item in (
+            db_status,
+            mindmap_schema_status,
+            mindmap_ai_bootstrap_status,
+            redis_status,
+            crypto_status,
+        ))
         exit_code = SUCCESS if payload['ok'] else DEPENDENCY_ERROR
         self.execution_service.complete_payload_with_text(
             ctx,

@@ -7,15 +7,7 @@ import {
   extractCreatedMindmapId,
   resolveCreatedMindmapNavigation,
 } from '../mindmap-creation.js'
-
-function memoryStorage() {
-  const values = new Map()
-  return {
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, value),
-    removeItem: key => values.delete(key),
-  }
-}
+import { memoryStorage } from './helpers/memory-storage.mjs'
 
 test('不确定失败和同标签页刷新会复用同一个创建幂等键', () => {
   const storage = memoryStorage()

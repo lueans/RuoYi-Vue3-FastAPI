@@ -18,6 +18,7 @@
       @transitionend="onMindMapContainerTransitionEnd"
     ></div>
     <WorkspaceActivityBar v-if="!isZenMode" />
+    <MindmapAiDialog :readonly="isReadonly" />
     <Navigator v-if="mindMap" :mindMap="mindMap" />
     <OutlineSidebar v-if="mindMap && activeSidebar === 'outline'" :mindMap="mindMap" />
     <AssociativeLineStyle v-if="mindMap" :mindMap="mindMap" />
@@ -105,8 +106,11 @@ import {
 } from './useStore'
 import { defaultData } from './config'
 import {
+  ackMindmapAiLocalApply,
+  ackMindmapAiLocalUndo,
   batchUpdateMindmapContent,
   getMindmap,
+  getMindmapAiProposal,
   resetMindmapCollaboration,
   updateMindmapView,
 } from '@/api/mindmap/mindmap'
@@ -115,7 +119,10 @@ import {
   countMindmapNodes,
   resolveMindmapPerformanceOptions,
 } from '@/utils/mindmap-performance'
-import { waitForMindmapInitialRender } from '@/utils/mindmap-initial-render'
+import {
+  establishMindmapInitialHistoryBaseline,
+  waitForMindmapInitialRender,
+} from '@/utils/mindmap-initial-render'
 import {
   getMindmapResumeRecoveryReason,
   mindmapCommandStartsNodeTextEdit,
@@ -125,7 +132,6 @@ import { ensureMindmapDocumentPlugins } from '@/utils/mindmap-plugin-loader'
 import { getNodeEditLeaseBlockedMessage } from '@/utils/mindmap-node-edit-lease'
 import {
   calculateMindmapWheelScale,
-  clampMindmapScale,
   shouldZoomMindmapWheel
 } from '@/utils/mindmap-zoom'
 import {
@@ -194,7 +200,23 @@ import {
   mindmapTreeNodesHaveSameEditableData,
   mindmapTreesHaveSameCrossNodeState,
 } from '@/utils/mindmap-document-apply'
-import { normalizeMindmapDocumentMetaPatch } from '@/utils/mindmap-local-workspace'
+import {
+  normalizeMindmapDocumentMetaPatch,
+  normalizeMindmapLocalWorkspaceRecord,
+} from '@/utils/mindmap-local-workspace'
+import {
+  assertMindmapAiLocalUndoBaseline,
+  cloneMindmapBranchWithFreshUids,
+  computeMindmapSnapshotFingerprint,
+} from '@/utils/mindmap-ai-artifact'
+import {
+  getMindmapAiLocalJournal,
+  inspectMindmapAiLocalRecovery,
+  listMindmapAiLocalJournals,
+  prepareMindmapAiLocalJournal,
+  removeMindmapAiLocalJournal,
+  transitionMindmapAiLocalJournal,
+} from '@/utils/mindmap-ai-local-journal'
 import { createMindmapDraftProtectionTracker } from '@/utils/mindmap-draft-protection'
 import './assets/icon-font/iconfont.css'
 import './styles/markdown.scss'
@@ -203,6 +225,7 @@ import Contextmenu from './Contextmenu.vue'
 import Navigator from './Navigator.vue'
 import Search from './Search.vue'
 import WorkspaceActivityBar from './WorkspaceActivityBar.vue'
+import MindmapAiDialog from './MindmapAiDialog.vue'
 import SidebarTrigger from './SidebarTrigger.vue'
 import PropertyInspector from './PropertyInspector.vue'
 import ShortcutKey from './ShortcutKey.vue'
@@ -249,6 +272,11 @@ const serverCanEdit = ref(props.mindmapId ? null : true)
 // 仍属于旧 revision。临时只读门闩阻止它产生新的保存意图；进入门闩前
 // 会先提交并持久化所有活动输入，成功应用权威正文后才解除。
 const authoritativeRecoveryEditingBlocked = ref(false)
+// 云端 AI apply/undo 在服务端建立全局写栅栏后要求每个在线编辑器先排空。
+// 该门闩只冻结新交互，既有保存仍可继续，以免 ACK 等待与 HTTP 保存死锁。
+const collaborationBarrierEditingBlocked = ref(false)
+let collaborationBarrierToken = ''
+let collaborationBarrierRevision = 0
 // 历史预览和整图导入都包含不可避免的网络/插件等待窗口。它们只冻结用户
 // 交互，不撤销当前会话的写权限；已经登记的修改仍须能够在门闩内 flush。
 const versionTransitionEditingBlocked = ref(false)
@@ -256,6 +284,7 @@ const importTransitionEditingBlocked = ref(false)
 const isReadonly = computed(() => (
   props.readonly
   || authoritativeRecoveryEditingBlocked.value
+  || collaborationBarrierEditingBlocked.value
   || versionTransitionEditingBlocked.value
   || importTransitionEditingBlocked.value
   || (Boolean(props.mindmapId) && serverCanEdit.value !== true)
@@ -300,6 +329,7 @@ const DOCUMENT_META_FIELDS_BY_OPERATION = Object.freeze(Object.fromEntries(
 ))
 let dataChangeDetailHandler = null
 let contentRevision = 1
+
 let pendingContentOperations = []
 let activeSaveMutation = null
 let pendingFileMetaIntents = {}
@@ -363,6 +393,14 @@ let protectingActiveEditorFromRemoteDelete = false
 let collaborationRestartDeferredUntilSave = false
 let remoteDocumentApplyRecoveryPromise = null
 let editingTransitionGeneration = 0
+// The renderer command history only stores the node tree. Keep the complete
+// pre-apply document beside that single history entry so an AI undo can also
+// restore layout, theme, view and documentData atomically. This is deliberately
+// in-memory: after a reload the command history is gone, so the UI must no
+// longer advertise an undo it cannot safely complete.
+let localAiUndoSnapshot = null
+let localAiUndoInProgress = false
+let localAiJournalRecoveryPromise = null
 
 const documentMetaBuffer = createMindmapDocumentMetaBuffer((meta) => {
   yjsSync?.syncDocumentMeta(meta, pendingClientMutationId)
@@ -472,6 +510,10 @@ function markDocumentMetaSaved(document) {
 }
 
 function normalizeServerTheme(theme) {
+  // 历史文件和未显式选择主题的新建文件允许数据库 theme 为 null。
+  // null 表示“使用默认主题”，不是损坏的文档元数据；用户主动提交的
+  // 非空非法主题仍由 normalizeMindmapDocumentMetaPatch 严格拒绝。
+  if (theme == null) return { template: 'default', config: {} }
   const normalized = normalizeMindmapDocumentMetaPatch({ theme })
   return normalized.theme || { template: 'default', config: {} }
 }
@@ -565,8 +607,336 @@ function getCurrentDocument() {
   )
 }
 
-function persistLocalWorkspace(data) {
-  const saved = actions.storeData(data)
+function applyLocalAiCompleteDocument(activeMindMap, document) {
+  if (!activeMindMap || !document?.root) throw new Error('本地 AI 撤销基线不完整')
+  activeMindMap.setFullData(cloneRequestPayload(document))
+  if (!document.view) activeMindMap.view?.reset?.()
+  documentData.value = normalizeMindmapDocumentData(document.documentData)
+  documentDataGeneration += 1
+  applyMindmapDocumentConfig(activeMindMap, documentData.value)
+  crossNodeOperationSnapshot = extractCrossNodeState(document.root)
+}
+
+/**
+ * AI 本地操作失败后的基线回滚：依次恢复画布文档、撤销历史链与本地持久化
+ * 记录。historyState 缺失时跳过历史链恢复；localRecord 缺失时跳过持久化
+ * 恢复（restoreData 对空记录本身就视为成功）。返回是否完整恢复，任一层
+ * 失败都意味着画布或本地数据可能不一致，调用方必须提示用户刷新页面。
+ */
+function restoreLocalAiBaseline({
+  activeMindMap,
+  document,
+  historyState,
+  localRecord,
+  logLabel,
+}) {
+  let runtimeRestored = false
+  try {
+    applyLocalAiCompleteDocument(activeMindMap, document)
+    activeMindMap.command?.flushPendingHistory?.()
+    if (historyState) {
+      const restored = activeMindMap.command?.appendCurrentToHistoryState?.(historyState)
+      if (restored !== true) throw new Error('AI 操作前的历史链恢复失败')
+    }
+    runtimeRestored = true
+  } catch (rollbackError) {
+    console.error(`${logLabel}:`, rollbackError)
+  }
+  const durableRestored = localRecord
+    ? actions.restoreData(localRecord)
+    : true
+  return runtimeRestored && durableRestored
+}
+
+/**
+ * 校验本地工作区仍停留在 AI 提案生成时的基线（文档、revision 与双重哈希），
+ * 任何漂移都拒绝应用，要求基于最新内容重新生成。
+ */
+function assertLocalAiApplyBaseline(localRecord, aiLocalApply, fingerprint) {
+  if (
+    !localRecord?.documentId
+    || localRecord.documentId !== aiLocalApply.documentId
+    || Number(localRecord.revision) !== Number(aiLocalApply.revision)
+    || fingerprint !== aiLocalApply.snapshotFingerprint
+    || fingerprint !== aiLocalApply.baseHash
+  ) {
+    throw new Error('当前本地脑图已发生变化，请基于最新内容重新生成')
+  }
+}
+
+/**
+ * 将本地 AI 日志沿 prepared → applied_ack_pending → applied_ack_confirmed
+ * 推进；serverConfirmed 为 false 时保持原条目，不做任何写入。
+ */
+function advanceLocalAiJournalToAppliedConfirmed(identity, entry, serverConfirmed = true) {
+  if (!entry || !serverConfirmed) return entry
+  if (entry.phase === 'prepared') {
+    entry = transitionMindmapAiLocalJournal(identity, 'applied_ack_pending')
+  }
+  if (entry?.phase === 'applied_ack_pending') {
+    entry = transitionMindmapAiLocalJournal(identity, 'applied_ack_confirmed')
+  }
+  return entry
+}
+
+function currentLocalAiOwnerUserId() {
+  const ownerUserId = String(userStore.id ?? '').trim()
+  return /^[1-9]\d{0,63}$/.test(ownerUserId) ? ownerUserId : ''
+}
+
+function localAiJournalIdentity(proposalId, documentId) {
+  const ownerUserId = currentLocalAiOwnerUserId()
+  if (!ownerUserId || !proposalId || !documentId) return null
+  return { ownerUserId, proposalId, documentId }
+}
+
+function finishLocalAiJournal(identity) {
+  if (!identity) return false
+  try {
+    const entry = transitionMindmapAiLocalJournal(identity, 'done')
+    if (!entry) return false
+    removeMindmapAiLocalJournal(identity)
+    return true
+  } catch (error) {
+    console.warn('AI 本地事务日志暂未能完成清理:', error)
+    return false
+  }
+}
+
+function retirePriorLocalAiJournals(documentId, exceptProposalId = '', { blockPending = false } = {}) {
+  const ownerUserId = currentLocalAiOwnerUserId()
+  if (!ownerUserId || !documentId) return true
+  let entries
+  try {
+    entries = listMindmapAiLocalJournals(ownerUserId)
+      .filter(entry => (
+        entry.documentId === documentId
+        && entry.proposalId !== exceptProposalId
+      ))
+  } catch (error) {
+    if (blockPending) throw error
+    console.warn('读取旧 AI 本地事务日志失败:', error)
+    return false
+  }
+  for (const entry of entries) {
+    const identity = localAiJournalIdentity(entry.proposalId, entry.documentId)
+    if (!identity) continue
+    if (entry.phase === 'done') {
+      try { removeMindmapAiLocalJournal(identity) } catch {}
+      continue
+    }
+    if (entry.phase === 'applied_ack_confirmed') {
+      finishLocalAiJournal(identity)
+      continue
+    }
+    if (entry.phase === 'prepared') {
+      const state = inspectMindmapAiLocalRecovery(identity, actions.getData())
+      if (state.classification === 'not_applied') {
+        finishLocalAiJournal(identity)
+        continue
+      }
+    }
+    if (blockPending) {
+      throw new Error('当前本地脑图仍有上一条 AI 应用回执待确认，请联网同步后重试')
+    }
+  }
+  return true
+}
+
+function localAiJournalDocument(entry) {
+  const workspace = normalizeMindmapLocalWorkspaceRecord(entry?.beforeWorkspace)
+  if (!workspace?.root) return null
+  return {
+    root: workspace.root,
+    layout: workspace.layout || 'logicalStructure',
+    theme: workspace.theme || { template: 'default', config: {} },
+    view: workspace.view ?? null,
+    documentData: workspace.documentData || {},
+  }
+}
+
+async function confirmRecoveredLocalAiAck(plan) {
+  const identity = localAiJournalIdentity(plan?.proposalId, plan?.documentId)
+  if (!identity || identity.ownerUserId !== plan.ownerUserId) {
+    throw new Error('AI 本地事务恢复身份不一致')
+  }
+  let serverStatus = ''
+  try {
+    if (plan.action === 'undo') {
+      await ackMindmapAiLocalUndo(plan.proposalId, {
+        documentId: plan.documentId,
+        revision: plan.revision,
+        resultHash: plan.resultHash,
+        revertedHash: plan.revertedHash,
+      })
+      serverStatus = 'undone'
+    } else {
+      await ackMindmapAiLocalApply(plan.proposalId, {
+        documentId: plan.documentId,
+        revision: plan.revision,
+        resultHash: plan.resultHash,
+      })
+      serverStatus = 'applied'
+    }
+  } catch (error) {
+    // 请求可能在服务端提交后断线。只接受同一用户可读取的提案权威终态，
+    // 绝不因为模糊网络错误自行推进日志。
+    try {
+      serverStatus = String((await getMindmapAiProposal(plan.proposalId)).data?.status || '')
+    } catch {
+      throw error
+    }
+    const reconciled = plan.action === 'undo'
+      ? serverStatus === 'undone'
+      : ['applied', 'undone'].includes(serverStatus)
+    if (!reconciled) throw error
+  }
+
+  let entry = getMindmapAiLocalJournal(identity)
+  if (!entry) return serverStatus
+  if (plan.action === 'apply') {
+    entry = advanceLocalAiJournalToAppliedConfirmed(identity, entry)
+    if (serverStatus === 'undone' && entry?.phase === 'applied_ack_confirmed') {
+      entry = transitionMindmapAiLocalJournal(identity, 'undone_ack_pending')
+      transitionMindmapAiLocalJournal(identity, 'done')
+      removeMindmapAiLocalJournal(identity)
+    }
+  } else {
+    if (entry.phase === 'applied_ack_confirmed') {
+      entry = transitionMindmapAiLocalJournal(identity, 'undone_ack_pending')
+    }
+    if (entry?.phase === 'undone_ack_pending') {
+      transitionMindmapAiLocalJournal(identity, 'done')
+      removeMindmapAiLocalJournal(identity)
+    }
+  }
+  return serverStatus
+}
+
+async function recoverLocalAiJournal() {
+  if (props.mindmapId || !mindMap.value) return false
+  if (localAiJournalRecoveryPromise) return localAiJournalRecoveryPromise
+  const recovery = (async () => {
+    const ownerUserId = currentLocalAiOwnerUserId()
+    const workspace = actions.getData()
+    if (!ownerUserId || !workspace?.documentId || !workspace?.root) return false
+    let journals
+    try {
+      journals = listMindmapAiLocalJournals(ownerUserId)
+        .filter(entry => entry.documentId === workspace.documentId)
+        .sort((left, right) => right.updatedAt - left.updatedAt)
+    } catch (error) {
+      console.warn('AI 本地事务日志损坏，已停止自动恢复:', error)
+      return false
+    }
+    if (!journals.length) return false
+
+    const actualHash = await computeMindmapSnapshotFingerprint(getCurrentDocument())
+    if (actualHash !== workspace.documentHash) {
+      console.warn('本地工作区哈希与实际画布不一致，已停止 AI 自动恢复')
+      return false
+    }
+
+    let recovered = false
+    for (const entry of journals) {
+      const identity = localAiJournalIdentity(entry.proposalId, entry.documentId)
+      if (!identity) continue
+      const result = inspectMindmapAiLocalRecovery(identity, workspace)
+      if (result.classification === 'not_applied') {
+        finishLocalAiJournal(identity)
+        continue
+      }
+      if (result.classification === 'superseded') {
+        // 已经持久化到 pending 的阶段证明对应本地提交曾经成功；即使用户
+        // 后来继续编辑，也只补幂等回执，不应用或撤销任何脑图数据。
+        let fallbackPlan = []
+        if (entry.phase === 'applied_ack_pending') {
+          fallbackPlan = [{
+            ownerUserId,
+            action: 'apply',
+            proposalId: entry.proposalId,
+            documentId: entry.documentId,
+            revision: entry.appliedRevision,
+            resultHash: entry.resultHash,
+          }]
+        } else if (entry.phase === 'undone_ack_pending') {
+          fallbackPlan = [{
+            ownerUserId,
+            action: 'undo',
+            proposalId: entry.proposalId,
+            documentId: entry.documentId,
+            revision: entry.appliedRevision + 1,
+            resultHash: entry.resultHash,
+            revertedHash: entry.baseHash,
+          }]
+        }
+        for (const plan of fallbackPlan) await confirmRecoveredLocalAiAck(plan)
+        finishLocalAiJournal(identity)
+        continue
+      }
+      if (result.classification === 'applied') {
+        const beforeDocument = localAiJournalDocument(result.entry)
+        const historyState = mindMap.value.command?.captureHistoryState?.() || null
+        if (!beforeDocument?.root || !historyState) {
+          console.warn('AI 本地撤销快照无法从事务日志恢复')
+          continue
+        }
+        localAiUndoSnapshot = {
+          proposalId: entry.proposalId,
+          documentId: entry.documentId,
+          appliedRevision: entry.appliedRevision,
+          resultHash: entry.resultHash,
+          baseHash: entry.baseHash,
+          document: beforeDocument,
+          historyState: cloneRequestPayload(historyState),
+          journalIdentity: cloneRequestPayload(identity),
+          recoveredAfterReload: true,
+        }
+      }
+      for (const plan of result.ackPlan) await confirmRecoveredLocalAiAck(plan)
+      recovered = true
+      bus.emit('aiLocalJournalRecovered', {
+        proposalId: entry.proposalId,
+        classification: result.classification,
+      })
+    }
+    return recovered
+  })().catch((error) => {
+    console.warn('AI 本地事务回执暂未恢复，将在联网后重试:', error)
+    return false
+  }).finally(() => {
+    if (localAiJournalRecoveryPromise === recovery) {
+      localAiJournalRecoveryPromise = null
+    }
+  })
+  localAiJournalRecoveryPromise = recovery
+  return recovery
+}
+
+function guardLocalAiHistoryBack(commandName, sourceMindMap) {
+  if (
+    commandName !== 'BACK'
+    || !localAiUndoSnapshot
+    || localAiUndoInProgress
+    || sourceMindMap !== mindMap.value
+  ) return true
+  // Commit a normal edit that is still inside Command's throttle window. Its
+  // data_change handler invalidates the direct AI undo snapshot, after which
+  // BACK may safely undo that ordinary edit.
+  sourceMindMap.command?.flushPendingHistory?.()
+  if (!localAiUndoSnapshot) return true
+  // Renderer history contains only the root tree. Crossing the AI marker here
+  // would persist an impossible hybrid (old root plus new layout/theme/view or
+  // documentData), so keep the marker untouched and use the atomic AI undo.
+  ElMessage.warning({
+    message: '本次 AI 整图变更包含文档设置，请在 AI 面板点击“撤销本次 AI 应用”以安全恢复。',
+    grouping: true,
+  })
+  return false
+}
+
+function persistLocalWorkspace(data, options = {}) {
+  const saved = actions.storeData(data, options)
   if (saved) {
     localWorkspaceSaveFailureNotified = false
     return true
@@ -585,21 +955,24 @@ function onDocumentMetaChange(patch) {
     || !patch
     || typeof patch !== 'object'
     || Array.isArray(patch)
-  ) return
+  ) return false
   let normalizedPatch
   try {
     normalizedPatch = normalizeMindmapDocumentMetaPatch(patch)
   } catch (error) {
     console.warn('忽略无效的脑图文档元数据:', error)
-    return
+    return false
   }
-  if (Object.keys(normalizedPatch).length === 0) return
+  if (Object.keys(normalizedPatch).length === 0) return true
   if (Object.prototype.hasOwnProperty.call(normalizedPatch, 'documentData')) {
     documentDataGeneration += 1
   }
+  if (!props.mindmapId && localAiUndoInProgress) return true
+  if (!props.mindmapId) localAiUndoSnapshot = null
   if (!props.mindmapId) {
-    persistLocalWorkspace(normalizedPatch)
-    return
+    const stored = persistLocalWorkspace(normalizedPatch)
+    if (stored) retirePriorLocalAiJournals(actions.getData()?.documentId)
+    return stored
   }
   const current = {
     ...getRuntimeDocument(),
@@ -612,6 +985,7 @@ function onDocumentMetaChange(patch) {
   resetSaveRetryForNewChange()
   clearTimeout(autoSaveTimer)
   autoSaveTimer = setTimeout(() => saveToBackend(), AUTO_SAVE_DELAY)
+  return true
 }
 
 function onDocumentConfigChange(patch) {
@@ -1285,6 +1659,7 @@ function recordContentOperations(detailList) {
 }
 
 function onMindmapDataChangeDetail(detailList) {
+  if (!initialRenderReady) return
   if (isContentDetailTrackingSuspended()) return
   const operationRecorded = recordContentOperations(detailList)
   if (!operationRecorded) return
@@ -1684,6 +2059,7 @@ function isRecoveryStructureWriteBlocked() {
     || authoritativeReloadRequired
     || pendingAutomaticConflictRecovery
     || pendingRemoteDocumentReset
+    || collaborationBarrierEditingBlocked.value
   )
 }
 
@@ -1775,6 +2151,134 @@ function resumePendingSaveAfterNodeEditLeaseSettles() {
   autoSaveTimer = setTimeout(() => { void saveToBackend() }, 0)
 }
 
+async function drainForCollaborationMutationBarrier(data = {}) {
+  const token = typeof data?.token === 'string' ? data.token : ''
+  const barrierRevision = Number(data?.contentRevision)
+  if (
+    !/^[0-9a-f]{32}$/.test(token)
+    || !Number.isInteger(barrierRevision)
+    || barrierRevision <= 0
+    || terminalState
+    || !componentMounted
+    || !mindMap.value
+    || !hasRealWritePermission()
+  ) return { ready: false }
+
+  // Yjs 已在调用此回调前同步封住传输；这里在第一个 await 前提交所有
+  // DOM-only 文本并切换只读，使最后一次输入只能进入即将排空的 HTTP 批次。
+  commitActiveEditorsBeforeTermination()
+  setCollaborationBarrierEditingBlocked(true, token, barrierRevision)
+  clearTimeout(autoSaveTimer)
+  clearTimeout(saveRetryTimer)
+  saveRetryTimer = null
+  await nextTick()
+  if (
+    terminalState
+    || !componentMounted
+    || !mindMap.value
+    || collaborationBarrierToken !== token
+    || versionChangeTrackingPaused
+    || hasActiveEditingTransition()
+    || authoritativeRecoveryEditingBlocked.value
+    || resolvingStaleState
+    || authoritativeReloadInProgress
+  ) return { ready: false }
+
+  const drained = await flushBeforeLeave()
+  if (
+    drained !== true
+    || collaborationBarrierToken !== token
+    || contentRevision !== barrierRevision
+    || hasUnsavedChanges()
+    || viewSaveRequested
+    || viewSaveInProgress
+    || conflictBlocked
+    || pendingAutomaticConflictRecovery
+    || pendingRemoteDocumentReset
+    || authoritativeReloadRequired
+  ) return { ready: false }
+  return {
+    ready: true,
+    contentRevision,
+  }
+}
+
+function releaseCollaborationMutationBarrier(data = {}) {
+  const token = typeof data?.token === 'string' ? data.token : ''
+  if (collaborationBarrierToken && token !== collaborationBarrierToken) return
+  if (
+    data?.status === 'aborted'
+    && data?.reason === 'barrier_status_confirmed'
+  ) {
+    void reconcileConfirmedAbortedCollaborationBarrier(data)
+    return
+  }
+  if (data?.status === 'committed') {
+    // 将临时 drain 门闩无缝移交给权威回源门闩，避免两次状态切换之间
+    // 短暂恢复编辑旧 revision。随后 document_reset 回调执行真正重载。
+    raiseAuthoritativeReloadMinimumRevision(data)
+    markAuthoritativeReloadRequired()
+    setAuthoritativeRecoveryEditingBlocked(true)
+  }
+  setCollaborationBarrierEditingBlocked(false)
+  if (data?.status !== 'committed') {
+    resumePendingSaveAfterNodeEditLeaseSettles()
+  }
+}
+
+function protectUnknownCollaborationBarrierState(data = {}) {
+  const token = typeof data?.token === 'string' ? data.token : ''
+  if (!token || collaborationBarrierToken !== token || terminalState) return
+  commitActiveEditorsBeforeTermination()
+  // 不等待异步备份才继续状态查询，但始终保持 collaboration 门闩关闭。
+  // 即使 IndexedDB 不可用，后续也只能在权威复核后进入恢复流程。
+  void persistLocalDraft({ notifyFailure: true })
+  ElNotification.warning({
+    title: 'AI 云端操作状态待确认',
+    message: '当前画布已保持只读并保护本地草稿，正在复核服务器最终版本',
+  })
+}
+
+async function reconcileConfirmedAbortedCollaborationBarrier(data = {}) {
+  const token = typeof data?.token === 'string' ? data.token : ''
+  const revision = Number(data?.contentRevision)
+  if (
+    !token
+    || collaborationBarrierToken !== token
+    || !Number.isInteger(revision)
+    || revision !== contentRevision
+    || terminalState
+  ) return false
+
+  // status 响应已在服务端通过 Mindmap 行锁确认：在途 AI 事务已经 commit
+  // 或 rollback。用恢复门闩接棒后才解除 collaboration 门闩，避免旧画布
+  // 出现一帧可编辑窗口；成功重载同 revision 权威正文后方可恢复输入。
+  setAuthoritativeRecoveryEditingBlocked(true)
+  markAuthoritativeReloadRequired()
+  setCollaborationBarrierEditingBlocked(false)
+  const protectedDraftVersion = draftProtection.getChangeVersion()
+  const protectedViewVersion = viewChangeVersion
+  try {
+    const reloaded = await reloadLatestServerDocument({
+      preserveLocalDraft: true,
+      requireClean: false,
+      expectedDraftChangeVersion: protectedDraftVersion,
+      expectedViewChangeVersion: protectedViewVersion,
+      minimumContentRevision: revision,
+    })
+    if (!reloaded) {
+      scheduleAuthoritativeReload()
+      return false
+    }
+    ElMessage.info('已确认 AI 云端操作未提交，画布已按服务器版本恢复')
+    return true
+  } catch (error) {
+    console.warn('复核已中止的 AI 云端操作失败:', error)
+    scheduleAuthoritativeReload()
+    return false
+  }
+}
+
 function createYjsSyncInstance() {
   let documentPrepareFailureNotified = false
   return new YjsMindmapSync(props.mindmapId, mindMap.value, contentRevision, {
@@ -1814,6 +2318,12 @@ function createYjsSyncInstance() {
       if (wasBlocked && !isBlocked) {
         resumePendingSaveAfterNodeEditLeaseSettles()
       }
+    },
+    onCollaborationBarrierPrepare: drainForCollaborationMutationBarrier,
+    onCollaborationBarrierReleased: releaseCollaborationMutationBarrier,
+    onCollaborationBarrierUnknown: protectUnknownCollaborationBarrierState,
+    onCollaborationBarrierError: (error) => {
+      console.warn('排空 AI 云端操作前的本地修改失败:', error)
     },
     // 当前保存请求提交后会推进全房间 revision。它在途期间新建的下一批
     // Yjs 帧无法保证全部落在同一 revision，先仅保留本地并由紧随其后的
@@ -1861,7 +2371,9 @@ function createYjsSyncInstance() {
     },
     onContentRevision: (revision, data) => {
       const revisionAdvanced = revision > contentRevision
-      if (revisionAdvanced) contentRevision = revision
+      if (revisionAdvanced) {
+        contentRevision = revision
+      }
       applyMindmapNodeRevisionChanges(nodeRevisionMap, data?.changedNodes)
       // 远端 revision 推进不能改写已经冻结在待保存操作里的 targetRevision。
       // 若双方修改同一节点，旧 fence 必须保留给服务端识别冲突；只有本地
@@ -2074,6 +2586,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  localAiUndoSnapshot = null
+  localAiUndoInProgress = false
   commitActiveEditorsBeforeTermination()
   persistLocalDraftBeforeUnload()
   clearTimeout(viewSaveTimer)
@@ -2420,6 +2934,7 @@ async function initMindMap(signal) {
   mindMap.value = mm
   actions.setMindMap(mm)
   actions.setIsReadonly(isReadonly.value)
+  mm.command?.addExecutionGuard?.((name) => guardLocalAiHistoryBack(name, mm))
   applyMindmapDocumentConfig(mm, documentData.value)
   crossNodeOperationSnapshot = extractCrossNodeState(root)
 
@@ -2475,7 +2990,11 @@ async function initMindMap(signal) {
 
   await waitForMindmapInitialRender(mm)
   if (sessionCancelled(signal) || mindMap.value !== mm) return
+  // 插件初始化可能会消费 resetRichText 并补齐富文本标签。在对外宣布
+  // ready 前取消其延迟历史任务，否则无操作打开文档也会触发自动保存。
+  establishMindmapInitialHistoryBaseline(mm)
   initialRenderReady = true
+  if (!props.mindmapId) void recoverLocalAiJournal()
   if (restoredLocalDraft) void saveToBackend()
   // 首帧之前不接入 Yjs，杜绝初始化渲染与远端状态同时替换节点树。
   startYjsSyncIfReady()
@@ -2506,6 +3025,11 @@ function setSaveStatus(status) {
 
 function onBusDataChange(data, sourceMindMap = null) {
   if (!isCurrentMindmapEventSource(sourceMindMap, mindMap.value)) return
+  if (!initialRenderReady) return
+  // Full-document import/AI apply owns one explicit durable commit below.
+  // Ignore intermediate setFullData/history events so a partial root snapshot
+  // cannot advance local identity before that commit succeeds.
+  if (importTransitionEditingBlocked.value) return
   if (props.mindmapId) {
     // 跳过远程变更或暂停状态（版本预览）引发的本地 data_change
     if (isChangeTrackingSuspended()) return
@@ -2526,7 +3050,10 @@ function onBusDataChange(data, sourceMindMap = null) {
       saveToBackend()
     }, AUTO_SAVE_DELAY)
   } else {
-    persistLocalWorkspace({ root: data })
+    if (localAiUndoInProgress) return
+    localAiUndoSnapshot = null
+    const stored = persistLocalWorkspace({ root: data })
+    if (stored) retirePriorLocalAiJournals(actions.getData()?.documentId)
   }
 }
 
@@ -2677,6 +3204,7 @@ async function settlePendingViewSave(maxPasses = CLOUD_EXIT_MAX_PASSES) {
 
 function onBusViewDataChange(data, sourceMindMap = null) {
   if (!isCurrentMindmapEventSource(sourceMindMap, mindMap.value)) return
+  if (localAiUndoInProgress) return
   if (isReadonly.value) return
   if (props.mindmapId) {
     // 跳过远程变更或暂停状态引发的本地视图变更
@@ -2779,6 +3307,7 @@ function handleNetworkOffline() {
 }
 
 function handleNetworkOnline() {
+  if (!props.mindmapId) void recoverLocalAiJournal()
   if (viewSaveRequested && !viewSaveInProgress) void flushPendingViewSave()
   if (authoritativeReloadRequired && !hasUnsavedChanges()) {
     scheduleAuthoritativeReload()
@@ -2823,6 +3352,27 @@ function setAuthoritativeRecoveryEditingBlocked(blocked) {
   actions.setIsReadonly(isReadonly.value)
   mindMap.value?.setMode?.(isReadonly.value ? 'readonly' : 'edit')
   return true
+}
+
+function setCollaborationBarrierEditingBlocked(blocked, token = '', revision = 0) {
+  const nextBlocked = blocked === true
+  collaborationBarrierToken = nextBlocked ? token : ''
+  collaborationBarrierRevision = nextBlocked && Number.isInteger(Number(revision))
+    ? Number(revision)
+    : 0
+  if (collaborationBarrierEditingBlocked.value === nextBlocked) return false
+  collaborationBarrierEditingBlocked.value = nextBlocked
+  syncEditingBlockedMode()
+  refreshStructureWriteBlockedState()
+  return true
+}
+
+function hasSupersededCollaborationBarrier(confirmedRevision) {
+  const revision = Number(confirmedRevision)
+  return collaborationBarrierEditingBlocked.value
+    && Boolean(collaborationBarrierToken)
+    && Number.isInteger(revision)
+    && revision > collaborationBarrierRevision
 }
 
 function syncEditingBlockedMode() {
@@ -3033,6 +3583,7 @@ function resolveAuthoritativeReload() {
   setAuthoritativeReloadRequiredState(false)
   authoritativeReloadMinimumRevision = 0
   if (saveRecoveryKind.value === 'sync') saveRecoveryKind.value = ''
+  bus.emit('aiCloudMutationRecoveryReady')
   return true
 }
 
@@ -4555,15 +5106,31 @@ async function onExportRequest(request = {}) {
 
 async function onSetData(data, request = {}) {
   const activeMindMap = mindMap.value
+  const aiLocalApply = request.aiLocalApply
+  const aiArtifactApply = request.aiArtifactApply
   let importCollaborationStopped = false
   let importEditingBlocked = false
   let importBoundaryChangeVersion = null
   let protectedDocumentBeforeImportApply = null
   let importApplyFailureHandled = false
+  let aiHistoryState = null
+  let protectedLocalRecordBeforeAiApply = null
+  let verifiedLocalResultHash = null
+  let localWorkspaceMutationStarted = false
+  let preparedLocalAiJournalIdentity = null
+  const shouldRollbackLocalWorkspace = (
+    !props.mindmapId && Boolean(aiLocalApply || aiArtifactApply)
+  )
   try {
     if (!activeMindMap) throw new Error('脑图实例尚未就绪')
     if (isReadonly.value) throw new Error('只读脑图不能导入内容')
     assertMindmapImportDocument(data)
+    if (aiLocalApply) {
+      if (props.mindmapId) throw new Error('本地 AI 提案不能应用到云端脑图')
+      const localRecord = actions.getData()
+      const currentFingerprint = await computeMindmapSnapshotFingerprint(getCurrentDocument())
+      assertLocalAiApplyBaseline(localRecord, aiLocalApply, currentFingerprint)
+    }
     const document = data.root
       ? data
       : { root: data, layout: activeMindMap.getLayout?.() }
@@ -4658,8 +5225,58 @@ async function onSetData(data, request = {}) {
       if (activeMindMap !== mindMap.value || isReadonly.value) {
         throw new Error('脑图会话已经变化，请重新导入')
       }
+      if (aiLocalApply || aiArtifactApply) {
+        protectedDocumentBeforeImportApply = cloneRequestPayload(getCurrentDocument())
+        protectedLocalRecordBeforeAiApply = cloneRequestPayload(actions.getData())
+        aiHistoryState = activeMindMap.command?.captureHistoryState?.() || null
+        if (!aiHistoryState) throw new Error('AI 脑图应用前的撤销基线不可用')
+      }
       setImportTransitionEditingBlocked(true)
       importEditingBlocked = true
+      if (aiLocalApply) {
+        let localRecord = actions.getData()
+        const currentFingerprint = await computeMindmapSnapshotFingerprint(getCurrentDocument())
+        if (
+          activeMindMap !== mindMap.value
+          || sessionCancelled(sessionController?.signal)
+        ) {
+          throw new Error('当前本地脑图已发生变化，请基于最新内容重新生成')
+        }
+        assertLocalAiApplyBaseline(localRecord, aiLocalApply, currentFingerprint)
+        // 历史本地工作区可能还没有 documentHash。应用前先在同一 revision
+        // 补齐已经重新计算并验证过的基线哈希，随后事务日志才能保存“完全
+        // 精确”的应用前记录，而不是另造一个只用于恢复的伪快照。
+        if (localRecord.documentHash !== aiLocalApply.baseHash) {
+          const baselineSaved = actions.storeData(getCurrentDocument(), {
+            revision: Number(localRecord.revision),
+            documentHash: aiLocalApply.baseHash,
+            lastAppliedProposal: localRecord.lastAppliedProposal ?? null,
+          })
+          localRecord = actions.getData()
+          if (
+            !baselineSaved
+            || localRecord?.documentId !== aiLocalApply.documentId
+            || Number(localRecord?.revision) !== Number(aiLocalApply.revision)
+            || localRecord?.documentHash !== aiLocalApply.baseHash
+          ) throw new Error('AI 应用前基线未能可靠写入本地，已阻止修改画布')
+        }
+        protectedLocalRecordBeforeAiApply = cloneRequestPayload(localRecord)
+        preparedLocalAiJournalIdentity = localAiJournalIdentity(
+          aiLocalApply.proposalId,
+          localRecord.documentId,
+        )
+        if (!preparedLocalAiJournalIdentity) {
+          throw new Error('当前账号身份无效，不能建立 AI 本地事务日志')
+        }
+        prepareMindmapAiLocalJournal({
+          ...preparedLocalAiJournalIdentity,
+          beforeWorkspace: localRecord,
+          baseRevision: Number(localRecord.revision),
+          appliedRevision: Number(localRecord.revision) + 1,
+          baseHash: aiLocalApply.baseHash,
+          resultHash: aiLocalApply.resultHash,
+        })
+      }
     }
 
     let rootNodeData = null
@@ -4678,11 +5295,18 @@ async function onSetData(data, request = {}) {
         activeMindMap.setData(data)
         rootNodeData = data
       }
-      activeMindMap.view.reset()
+      if (!data.root || !data.view) activeMindMap.view.reset()
       // setData 会清空历史并安排首个节流基线，它不会产生
       // data_change_detail。先同步消费该任务，再显式登记受 revision 保护的
       // 整图快照；否则导入可能只改变当前画布，刷新后仍回到旧云端正文。
       activeMindMap.command?.flushPendingHistory?.()
+      if (aiHistoryState) {
+        const attached = activeMindMap.command?.appendCurrentToHistoryState?.(
+          aiHistoryState,
+          { force: Boolean(aiLocalApply || aiArtifactApply) },
+        )
+        if (attached !== true) throw new Error('AI 脑图应用结果未能建立安全撤销点')
+      }
     } catch (applyError) {
       if (props.mindmapId && protectedDocumentBeforeImportApply) {
         importApplyFailureHandled = true
@@ -4700,6 +5324,24 @@ async function onSetData(data, request = {}) {
       throw applyError
     }
     crossNodeOperationSnapshot = extractCrossNodeState(rootNodeData)
+    if (!props.mindmapId && (aiLocalApply || aiArtifactApply)) {
+      const actualResultFingerprint = await computeMindmapSnapshotFingerprint(getCurrentDocument())
+      const expectedResultFingerprint = await computeMindmapSnapshotFingerprint(document)
+      if (
+        activeMindMap !== mindMap.value
+        || sessionCancelled(sessionController?.signal)
+        || actualResultFingerprint !== expectedResultFingerprint
+        || (aiLocalApply && actualResultFingerprint !== aiLocalApply.resultHash)
+      ) {
+        throw new Error('AI 脑图应用后的完整文档与已校验结果不一致')
+      }
+      // Local proposals ACK the browser-recomputed canonical result. Standalone
+      // artifacts retain their signed manifest hash; their semantic roundtrip
+      // was checked above after excluding renderer-managed smmVersion/view.
+      verifiedLocalResultHash = aiLocalApply
+        ? actualResultFingerprint
+        : aiArtifactApply.resultHash
+    }
     if (props.mindmapId) {
       pendingContentOperations = [{ type: CONTENT_SNAPSHOT_OPERATION }]
       ensurePendingClientMutationId()
@@ -4719,8 +5361,57 @@ async function onSetData(data, request = {}) {
       if (saved !== true) {
         throw new Error('导入内容已保留在本地草稿，但尚未保存到云端')
       }
-    } else if (!persistLocalWorkspace(getCurrentDocument())) {
-      throw new Error('导入内容未能保存到本地')
+    } else {
+      localWorkspaceMutationStarted = true
+      let localWorkspaceOptions
+      if (aiLocalApply) {
+        localWorkspaceOptions = {
+          revision: Number(aiLocalApply.revision) + 1,
+          documentHash: verifiedLocalResultHash,
+          lastAppliedProposal: aiLocalApply.proposalId,
+        }
+      } else if (aiArtifactApply) {
+        localWorkspaceOptions = { documentHash: verifiedLocalResultHash }
+      } else {
+        localWorkspaceOptions = {}
+      }
+      const localSaved = aiArtifactApply?.mode === 'new'
+        ? actions.replaceData(getCurrentDocument(), {
+            documentHash: verifiedLocalResultHash,
+            reason: 'ai-open-local',
+          })
+        : persistLocalWorkspace(getCurrentDocument(), localWorkspaceOptions)
+      if (!localSaved) throw new Error('导入内容未能保存到本地')
+      const localRecord = actions.getData()
+      if (aiLocalApply) {
+        if (
+          !localRecord?.documentId
+          || localRecord.documentId !== aiLocalApply.documentId
+          || Number(localRecord.revision) !== Number(aiLocalApply.revision) + 1
+          || localRecord.documentHash !== verifiedLocalResultHash
+          || localRecord.lastAppliedProposal !== aiLocalApply.proposalId
+        ) throw new Error('本地 AI 应用结果的持久化身份校验失败')
+        transitionMindmapAiLocalJournal(
+          preparedLocalAiJournalIdentity,
+          'applied_ack_pending',
+        )
+        retirePriorLocalAiJournals(
+          localRecord.documentId,
+          aiLocalApply.proposalId,
+        )
+        localAiUndoSnapshot = {
+          proposalId: aiLocalApply.proposalId,
+          documentId: localRecord.documentId,
+          appliedRevision: Number(localRecord.revision),
+          resultHash: verifiedLocalResultHash,
+          baseHash: aiLocalApply.baseHash,
+          document: cloneRequestPayload(protectedDocumentBeforeImportApply),
+          historyState: cloneRequestPayload(aiHistoryState),
+          journalIdentity: cloneRequestPayload(preparedLocalAiJournalIdentity),
+        }
+      } else {
+        localAiUndoSnapshot = null
+      }
     }
     // If imported content is rich text, auto-enable rich text mode
     if (rootNodeData?.data?.richText && !openNodeRichText.value) {
@@ -4730,8 +5421,42 @@ async function onSetData(data, request = {}) {
         message: '检测到导入了富文本内容，已自动开启富文本模式'
       })
     }
-    request.resolve?.(true)
+    if (aiLocalApply || aiArtifactApply) {
+      const localRecord = actions.getData()
+      request.resolve?.({
+        documentId: localRecord?.documentId,
+        revision: localRecord?.revision,
+        resultHash: localRecord?.documentHash,
+      })
+    } else {
+      request.resolve?.(true)
+    }
   } catch (error) {
+    let rejectionError = error
+    let baselineRestored = true
+    if (
+      (aiLocalApply || aiArtifactApply)
+      && protectedDocumentBeforeImportApply
+      && activeMindMap === mindMap.value
+    ) {
+      baselineRestored = restoreLocalAiBaseline({
+        activeMindMap,
+        document: protectedDocumentBeforeImportApply,
+        historyState: aiHistoryState,
+        localRecord: shouldRollbackLocalWorkspace && localWorkspaceMutationStarted
+          ? protectedLocalRecordBeforeAiApply
+          : null,
+        logLabel: '恢复 AI 应用前本地画布失败',
+      })
+    }
+    if (!baselineRestored) {
+      rejectionError = new Error(
+        `${error?.message || 'AI 脑图应用失败'}；应用前基线未能完整恢复，请勿继续编辑并立即刷新`,
+        { cause: error },
+      )
+    } else if (preparedLocalAiJournalIdentity) {
+      finishLocalAiJournal(preparedLocalAiJournalIdentity)
+    }
     if (
       !importApplyFailureHandled
       && importCollaborationStopped
@@ -4744,13 +5469,262 @@ async function onSetData(data, request = {}) {
       markAuthoritativeReloadRequired()
       scheduleAuthoritativeReload()
     }
-    request.reject?.(error)
+    request.reject?.(rejectionError)
     if (!request.reject) {
-      console.error('应用导入的脑图数据失败:', error)
-      ElMessage.error(error?.message || '导入内容应用失败')
+      console.error('应用导入的脑图数据失败:', rejectionError)
+      ElMessage.error(rejectionError?.message || '导入内容应用失败')
     }
   } finally {
     if (importEditingBlocked) {
+      setImportTransitionEditingBlocked(false)
+      resumeAfterEditingTransition()
+    }
+  }
+}
+
+async function onOpenAiArtifactAsLocal(payload = {}, request = {}) {
+  try {
+    assertMindmapImportDocument(payload.document)
+    if (props.mindmapId) {
+      const stored = actions.replaceData(payload.document, {
+        documentHash: payload.documentHash,
+        reason: 'ai-open-local',
+      })
+      if (!stored) throw new Error('AI 脑图未能写入本地工作区')
+      request.resolve?.(stored)
+      return
+    }
+    await onSetData(payload.document, {
+      aiArtifactApply: { mode: 'new', resultHash: payload.documentHash },
+      resolve: request.resolve,
+      reject: request.reject,
+    })
+  } catch (error) {
+    request.reject?.(error)
+  }
+}
+
+async function onReplaceLocalWithAiArtifact(payload = {}, request = {}) {
+  if (props.mindmapId) return request.reject?.(new Error('云端脑图不能使用本地替换'))
+  await onSetData(payload.document, {
+    aiArtifactApply: { mode: 'replace', resultHash: payload.documentHash },
+    resolve: request.resolve,
+    reject: request.reject,
+  })
+}
+
+async function onInsertAiArtifactBranch(payload = {}, request = {}) {
+  let insertionEditingBlocked = false
+  let mutationStarted = false
+  let beforeDocument = null
+  let beforeHistoryState = null
+  let beforeLocalRecord = null
+  try {
+    const activeMindMap = mindMap.value
+    if (!activeMindMap || props.mindmapId) throw new Error('只能插入到本地脑图')
+    if (isReadonly.value) throw new Error('只读脑图不能插入分支')
+    assertMindmapImportDocument(payload.document)
+    commitActiveEditorsBeforeTermination()
+    await nextTick()
+    if (activeMindMap !== mindMap.value || isReadonly.value) {
+      throw new Error('脑图会话已经变化，请重新插入')
+    }
+    const activeNodes = activeMindMap.renderer?.activeNodeList || []
+    if (activeNodes.length !== 1) throw new Error('请在本地脑图中选择一个父节点')
+    const targetNode = activeNodes[0]
+    const branch = cloneMindmapBranchWithFreshUids(payload.document.root)
+    beforeDocument = cloneRequestPayload(getCurrentDocument())
+    beforeLocalRecord = cloneRequestPayload(actions.getData())
+    beforeHistoryState = activeMindMap.command?.captureHistoryState?.() || null
+    if (!beforeHistoryState) throw new Error('插入前的撤销基线不可用')
+    await ensureMindmapDocumentPlugins(payload.document, activeMindMap)
+    if (activeMindMap !== mindMap.value || isReadonly.value) {
+      throw new Error('脑图会话已经变化，请重新插入')
+    }
+    setImportTransitionEditingBlocked(true)
+    insertionEditingBlocked = true
+    mutationStarted = true
+    activeMindMap.execCommand('INSERT_MULTI_CHILD_NODE', [targetNode], [branch])
+    activeMindMap.command?.flushPendingHistory?.()
+    const insertedDocument = getCurrentDocument()
+    const insertedHash = await computeMindmapSnapshotFingerprint(insertedDocument)
+    const nextRevision = Math.max(Number(beforeLocalRecord?.revision) || 0, 0) + 1
+    const stored = persistLocalWorkspace(insertedDocument, {
+      revision: nextRevision,
+      documentHash: insertedHash,
+      lastAppliedProposal: null,
+    })
+    if (!stored) throw new Error('插入结果未能保存到本地')
+    const storedRecord = actions.getData()
+    if (
+      !storedRecord?.documentId
+      || (
+        beforeLocalRecord?.documentId
+        && storedRecord.documentId !== beforeLocalRecord.documentId
+      )
+      || Number(storedRecord?.revision) !== nextRevision
+      || storedRecord?.documentHash !== insertedHash
+      || storedRecord?.lastAppliedProposal
+    ) throw new Error('插入结果的持久化身份校验失败')
+    localAiUndoSnapshot = null
+    request.resolve?.(true)
+  } catch (error) {
+    let rejectionError = error
+    if (mutationStarted && mindMap.value && beforeDocument?.root) {
+      const baselineRestored = restoreLocalAiBaseline({
+        activeMindMap: mindMap.value,
+        document: beforeDocument,
+        historyState: beforeHistoryState,
+        localRecord: beforeLocalRecord,
+        logLabel: '恢复 AI 分支插入前画布失败',
+      })
+      if (!baselineRestored) {
+        rejectionError = new Error(
+          `${error?.message || 'AI 分支插入失败'}；插入前基线未能完整恢复，请勿继续编辑并立即刷新`,
+          { cause: error },
+        )
+      }
+    }
+    request.reject?.(rejectionError)
+  } finally {
+    if (insertionEditingBlocked) {
+      setImportTransitionEditingBlocked(false)
+      resumeAfterEditingTransition()
+    }
+  }
+}
+
+async function onUndoLocalAiProposal(payload = {}, request = {}) {
+  const activeMindMap = mindMap.value
+  let undoEditingBlocked = false
+  let undoMutationStarted = false
+  let appliedDocument = null
+  let appliedHistoryState = null
+  let appliedLocalRecord = null
+  try {
+    if (props.mindmapId || isReadonly.value) throw new Error('只能撤销可编辑的本地 AI 提案')
+    if (!activeMindMap) throw new Error('脑图编辑器尚未就绪')
+    commitActiveEditorsBeforeTermination()
+    await nextTick()
+    if (activeMindMap !== mindMap.value || isReadonly.value) {
+      throw new Error('脑图会话已经变化，请重新打开 AI 面板')
+    }
+    appliedHistoryState = activeMindMap.command?.captureHistoryState?.() || null
+    const localRecord = actions.getData()
+    const undoSnapshot = localAiUndoSnapshot
+    if (
+      !payload.proposalId
+      || !undoSnapshot?.document?.root
+      || !undoSnapshot?.historyState
+      || undoSnapshot.proposalId !== payload.proposalId
+      || undoSnapshot.documentId !== localRecord?.documentId
+      || Number(undoSnapshot.appliedRevision) !== Number(localRecord?.revision)
+      || undoSnapshot.resultHash !== payload.resultHash
+      || undoSnapshot.baseHash !== payload.revertedHash
+      || localRecord?.lastAppliedProposal !== payload.proposalId
+      || !payload.resultHash
+      || localRecord?.documentHash !== payload.resultHash
+      || !payload.revertedHash
+    ) {
+      throw new Error('当前脑图已不是该 AI 提案的直接结果，不能自动撤销')
+    }
+    if (!appliedHistoryState) throw new Error('AI 提案撤销历史已经不可用')
+    appliedDocument = cloneRequestPayload(getCurrentDocument())
+    appliedLocalRecord = cloneRequestPayload(localRecord)
+
+    localAiUndoInProgress = true
+    clearTimeout(storeConfigTimer)
+    setImportTransitionEditingBlocked(true)
+    undoEditingBlocked = true
+
+    const currentHash = await computeMindmapSnapshotFingerprint(getCurrentDocument())
+    if (
+      activeMindMap !== mindMap.value
+      || sessionCancelled(sessionController?.signal)
+      || currentHash !== payload.resultHash
+      || currentHash !== undoSnapshot.resultHash
+    ) {
+      throw new Error('当前画布内容已经变化，不能撤销该 AI 提案')
+    }
+
+    undoMutationStarted = true
+    applyLocalAiCompleteDocument(activeMindMap, undoSnapshot.document)
+    activeMindMap.command?.flushPendingHistory?.()
+    const restoredDocument = getCurrentDocument()
+    const actualRevertedHash = await assertMindmapAiLocalUndoBaseline(
+      restoredDocument,
+      undoSnapshot.baseHash,
+    )
+    if (
+      activeMindMap !== mindMap.value
+      || sessionCancelled(sessionController?.signal)
+      || actualRevertedHash !== payload.revertedHash
+    ) throw new Error('撤销后的脑图基线校验失败，已恢复 AI 应用结果')
+
+    const nextRevision = Number(localRecord.revision) + 1
+    const stored = actions.storeData(restoredDocument, {
+      revision: nextRevision,
+      documentHash: actualRevertedHash,
+      lastAppliedProposal: null,
+    })
+    if (!stored) throw new Error('撤销结果未能保存到本地，已恢复 AI 应用结果')
+    const revertedRecord = actions.getData()
+    if (
+      revertedRecord?.documentId !== localRecord.documentId
+      || Number(revertedRecord?.revision) !== nextRevision
+      || revertedRecord?.documentHash !== actualRevertedHash
+      || revertedRecord?.lastAppliedProposal
+    ) throw new Error('撤销结果的持久化身份校验失败')
+    const historyRestored = undoSnapshot.recoveredAfterReload
+      ? activeMindMap.command?.resetHistoryBaseline?.()
+      : activeMindMap.command?.appendCurrentToHistoryState?.(
+          undoSnapshot.historyState,
+        )
+    if (historyRestored !== true) throw new Error('撤销结果未能恢复原始历史链')
+    const journalIdentity = undoSnapshot.journalIdentity
+      || localAiJournalIdentity(payload.proposalId, localRecord.documentId)
+    if (!journalIdentity) throw new Error('AI 本地撤销事务日志身份无效')
+    const journalEntry = advanceLocalAiJournalToAppliedConfirmed(
+      journalIdentity,
+      getMindmapAiLocalJournal(journalIdentity),
+      payload.serverApplied === true,
+    )
+    if (journalEntry?.phase !== 'applied_ack_confirmed') {
+      throw new Error('AI 本地应用回执尚未确认，暂时不能撤销')
+    }
+    transitionMindmapAiLocalJournal(journalIdentity, 'undone_ack_pending')
+    localAiUndoSnapshot = null
+    request.resolve?.({
+      documentId: revertedRecord?.documentId,
+      revision: revertedRecord?.revision,
+      resultHash: payload.resultHash,
+      revertedHash: actualRevertedHash,
+    })
+  } catch (error) {
+    let rejectionError = error
+    if (
+      undoMutationStarted
+      && activeMindMap === mindMap.value
+      && appliedDocument?.root
+    ) {
+      const baselineRestored = restoreLocalAiBaseline({
+        activeMindMap,
+        document: appliedDocument,
+        historyState: appliedHistoryState,
+        localRecord: appliedLocalRecord,
+        logLabel: '恢复 AI 撤销前画布失败',
+      })
+      if (!baselineRestored) {
+        rejectionError = new Error(
+          `${error?.message || 'AI 提案撤销失败'}；恢复 AI 应用结果失败，请勿继续编辑并立即刷新`,
+          { cause: error },
+        )
+      }
+    }
+    request.reject?.(rejectionError)
+  } finally {
+    localAiUndoInProgress = false
+    if (undoEditingBlocked) {
       setImportTransitionEditingBlocked(false)
       resumeAfterEditingTransition()
     }
@@ -4819,6 +5793,135 @@ function onOpenSidebar(sidebarName) {
   nextTick(() => bus.emit('focusActiveSidebar'))
 }
 
+async function onRequestAiMindmapContext(request = {}) {
+  try {
+    const activeMindMap = mindMap.value
+    if (!activeMindMap) throw new Error('脑图编辑器尚未就绪')
+    if (!props.mindmapId && localAiJournalRecoveryPromise) {
+      await localAiJournalRecoveryPromise
+    }
+    commitActiveEditorsBeforeTermination()
+    await nextTick()
+    if (props.mindmapId && await flushBeforeLeave() !== true) {
+      throw new Error('当前修改尚未保存，暂时不能创建 AI 提案')
+    }
+    if (activeMindMap !== mindMap.value) throw new Error('脑图会话已经变化')
+    const document = getCurrentDocument()
+    let documentId = `cloud:${props.mindmapId}`
+    let revision = contentRevision
+    let documentHash = null
+    let lastAppliedProposal = null
+    let canUndoAiProposal = false
+    let undoableAiProposalId = null
+    if (!props.mindmapId) {
+      let localRecord = actions.getData()
+      if (!localRecord?.documentId) {
+        if (!persistLocalWorkspace(document)) throw new Error('当前本地脑图保存失败')
+        localRecord = actions.getData()
+      }
+      documentId = localRecord?.documentId
+      revision = localRecord?.revision
+      documentHash = localRecord?.documentHash || null
+      lastAppliedProposal = localRecord?.lastAppliedProposal || null
+      const undoSnapshot = localAiUndoSnapshot
+      canUndoAiProposal = Boolean(
+        lastAppliedProposal
+        && undoSnapshot?.proposalId === lastAppliedProposal
+        && undoSnapshot?.documentId === documentId
+        && Number(undoSnapshot?.appliedRevision) === Number(revision)
+        && undoSnapshot?.resultHash === documentHash
+        && undoSnapshot?.document?.root
+        && undoSnapshot?.historyState
+      )
+      undoableAiProposalId = canUndoAiProposal ? lastAppliedProposal : null
+    }
+    const selectedNodeUids = (activeMindMap.renderer?.activeNodeList || [])
+      .map(node => String(node?.getData?.('uid') || node?.nodeData?.data?.uid || node?.getData?.()?.uid || ''))
+      .filter(Boolean)
+    request.resolve?.({
+      document,
+      documentId,
+      revision,
+      mindmapId: props.mindmapId,
+      selectedNodeUids,
+      readonly: isReadonly.value,
+      documentHash,
+      lastAppliedProposal,
+      canUndoAiProposal,
+      undoableAiProposalId,
+    })
+  } catch (error) {
+    request.reject?.(error)
+  }
+}
+
+async function onAiCloudProposalApplied(payload = {}, request = {}) {
+  try {
+    if (!props.mindmapId || Number(payload.mindmapId) !== Number(props.mindmapId)) {
+      throw new Error('AI 提案目标与当前脑图不一致')
+    }
+    const nextRevision = Number(payload.contentRevision)
+    if (!Number.isInteger(nextRevision) || nextRevision < 1) {
+      throw new Error('AI 提案返回的云端版本无效')
+    }
+    const forceOverwrite = payload.forceOverwrite === true
+    const supersededBarrier = hasSupersededCollaborationBarrier(nextRevision)
+    if (collaborationBarrierEditingBlocked.value && !supersededBarrier) {
+      throw new Error('另一项云端写入仍在排空当前协作画布，请稍后重试')
+    }
+    // A durable AI mutation recovery may be retried after the authoritative
+    // document was already loaded. Acknowledge only a renderer that has
+    // actually reached the requested revision; the dialog uses this receipt
+    // as the final condition for deleting its reconciliation intent.
+    if (
+      contentRevision >= nextRevision
+      && !authoritativeReloadRequired
+      && !authoritativeReloadInProgress
+      && !supersededBarrier
+    ) {
+      request.resolve?.({
+        mindmapId: Number(props.mindmapId),
+        contentRevision,
+      })
+      return
+    }
+    raiseAuthoritativeReloadMinimumRevision(nextRevision)
+    markAuthoritativeReloadRequired()
+    setAuthoritativeRecoveryEditingBlocked(true)
+    // The HTTP/proposal receipt is durable proof that this revision committed.
+    // It may arrive before collaboration_barrier_released. Destroying the old
+    // Yjs source while its upper-layer barrier is still latched would discard
+    // that later release frame and leave the editor permanently readonly. Only
+    // release a barrier whose base revision is strictly older than the
+    // confirmed result; a newer concurrent barrier remains fail-closed.
+    if (supersededBarrier) setCollaborationBarrierEditingBlocked(false)
+    stopCurrentCollaborationSource()
+    if (forceOverwrite) {
+      // 用户已经在版本冲突确认框中明确选择“覆盖当前脑图”。服务端回执
+      // 表明完整提案已持久化，此时旧 revision 上尚未发出的正文、元数据和
+      // 视图意图都不得继续阻挡或反向覆盖权威结果。document_reset 可能与
+      // HTTP 回执并发到达并进入通用协作保护流程；解除它的一次性重试阻塞，
+      // 让当前确认请求直接以服务端最新正文收敛。
+      await retirePendingViewSaveForAuthoritativeReload()
+      if (sessionCancelled(sessionController?.signal) || !mindMap.value) {
+        throw new Error('AI 提案已保存，编辑器会话已经结束')
+      }
+      abandonPendingContentForAuthoritativeReload()
+      remoteDocumentResetRetryBlocked = false
+    }
+    const reloaded = await performAuthoritativeReload()
+    if (!reloaded || contentRevision < nextRevision) {
+      throw new Error('AI 提案已保存，正在等待画布同步')
+    }
+    request.resolve?.({
+      mindmapId: Number(props.mindmapId),
+      contentRevision,
+    })
+  } catch (error) {
+    request.reject?.(error)
+  }
+}
+
 function onNodeTagClick(node, _tag, _index, _element, sourceMindMap) {
   const activeMindMap = mindMap.value
   if (
@@ -4843,6 +5946,16 @@ function bindBusEvents() {
   bus.on('node_tag_click', onNodeTagClick)
   bus.on('searchPanelVisibilityChange', onSearchPanelVisibilityChange)
   bus.on('toggleOpenNodeRichText', onToggleOpenNodeRichText)
+  bus.on('requestAiMindmapContext', onRequestAiMindmapContext)
+  bus.on('aiCloudProposalApplied', onAiCloudProposalApplied)
+  bus.on('openAiArtifactAsLocal', onOpenAiArtifactAsLocal)
+  bus.on('replaceLocalWithAiArtifact', onReplaceLocalWithAiArtifact)
+  bus.on('insertAiArtifactBranch', onInsertAiArtifactBranch)
+  bus.on('undoLocalAiProposal', onUndoLocalAiProposal)
+  // Toolbar/Dialog may mount before the editor has completed its first
+  // authoritative load. Announce the recovery endpoint only after all
+  // handlers above are bound so a persisted cloud intent can safely resume.
+  bus.emit('aiCloudMutationRecoveryReady')
 }
 
 function unbindBusEvents() {
@@ -4859,6 +5972,12 @@ function unbindBusEvents() {
   bus.off('data_change', onBusDataChange)
   bus.off('view_data_change', onBusViewDataChange)
   bus.off('toggleOpenNodeRichText', onToggleOpenNodeRichText)
+  bus.off('requestAiMindmapContext', onRequestAiMindmapContext)
+  bus.off('aiCloudProposalApplied', onAiCloudProposalApplied)
+  bus.off('openAiArtifactAsLocal', onOpenAiArtifactAsLocal)
+  bus.off('replaceLocalWithAiArtifact', onReplaceLocalWithAiArtifact)
+  bus.off('insertAiArtifactBranch', onInsertAiArtifactBranch)
+  bus.off('undoLocalAiProposal', onUndoLocalAiProposal)
   bus.off('hide_text_edit', onHideTextEdit)
 }
 
@@ -4897,7 +6016,9 @@ function applyRestoredVersionData(serverData, options = {}) {
 /** 销毁旧的 Yjs 连接，用已经应用到画布的权威数据创建新的同步实例。 */
 function onYjsReinit(_restoredRoot, revision) {
   if (!props.mindmapId) return
-  if (Number.isInteger(revision) && revision > 0) contentRevision = revision
+  if (Number.isInteger(revision) && revision > 0) {
+    contentRevision = revision
+  }
   collaborationRestartDeferredUntilSave = false
   // 这里的调用方已经把画布切换为 HTTP/历史版本返回的权威基线。旧 Y.Doc
   // 可能仍是上一 revision 的残缺或未确认状态，且 contentRevision 已经推进；
@@ -4921,6 +6042,7 @@ function onYjsReinit(_restoredRoot, revision) {
 function isContentDetailTrackingSuspended() {
   return Boolean(terminalState)
     || terminatingSession
+    || importTransitionEditingBlocked.value
     || authoritativeRecoveryEditingBlocked.value
     || protectingActiveEditorFromRemoteDelete
     || applyingServerTree
@@ -4934,6 +6056,7 @@ function isContentDetailTrackingSuspended() {
 function isChangeTrackingSuspended() {
   return Boolean(terminalState)
     || terminatingSession
+    || importTransitionEditingBlocked.value
     || authoritativeRecoveryEditingBlocked.value
     || protectingActiveEditorFromRemoteDelete
     || applyingServerTree

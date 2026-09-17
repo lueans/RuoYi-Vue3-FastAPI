@@ -854,6 +854,47 @@ test('节点属性更新与删除保留节点 revision 保护', () => {
   assert.equal(operations[1].targetRevision, 4)
 })
 
+test('渲染器消费富文本复位标记不产生持久化操作', () => {
+  const previousData = {
+    uid: 'a',
+    text: '<p>节点</p>',
+    richText: true,
+    isActive: false,
+    inserting: true,
+    needUpdate: true,
+    resetRichText: true,
+    activeStyle: { color: 'red' },
+  }
+  const currentData = {
+    uid: 'a',
+    text: '<p>节点</p>',
+    richText: true,
+  }
+
+  assert.deepEqual(buildMindmapContentOperations([{
+    action: 'update',
+    oldData: { data: previousData, children: [] },
+    data: { data: currentData, children: [] },
+  }]), [])
+
+  const operations = buildMindmapContentOperations([{
+    action: 'update',
+    oldData: { data: previousData, children: [] },
+    data: { data: { ...currentData, text: '<p>新节点</p>' }, children: [] },
+  }])
+  assert.equal(operations.length, 1)
+  assert.deepEqual(operations[0].payload.previousData, {
+    uid: 'a',
+    text: '<p>节点</p>',
+    richText: true,
+  })
+  assert.deepEqual(operations[0].payload.data, {
+    uid: 'a',
+    text: '<p>新节点</p>',
+    richText: true,
+  })
+})
+
 test('跨节点实体使用独立操作且不污染节点数据冲突域', () => {
   const oldNode = {
     data: { uid: 'root', text: 'root', associativeLineTargets: [] },

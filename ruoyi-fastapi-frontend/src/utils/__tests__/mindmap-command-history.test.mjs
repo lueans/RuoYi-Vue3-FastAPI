@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { applyNodeDataBatch } from '../../libs/simple-mind-map/src/utils/nodeDataBatch.js'
 
 const commandUrl = new URL(
   '../../libs/simple-mind-map/src/core/command/Command.js',
@@ -175,4 +176,82 @@ test('setData-style history initialization emits no tree detail for an imported 
   assert.equal(emitted.filter(item => item.eventName === 'data_change').length, 1)
   assert.equal(emitted.some(item => item.eventName === 'data_change_detail'), false)
   assert.equal(JSON.parse(command.history[0]).data.uid, 'imported-root')
+})
+
+test('AI 整图替换作为一条历史记录接回原撤销链', async () => {
+  const Command = await loadCommand()
+  const { mindMap } = createMindMap()
+  const command = new Command({ mindMap })
+  command.resetHistoryBaseline()
+  const state = command.captureHistoryState()
+
+  command.clearHistory()
+  mindMap.renderer.renderTree = {
+    data: { uid: 'ai-root', text: 'AI result' },
+    children: [],
+  }
+  command.resetHistoryBaseline()
+  assert.equal(command.appendCurrentToHistoryState(state), true)
+
+  assert.equal(command.history.length, 2)
+  assert.equal(JSON.parse(command.history[0]).data.text, 'before')
+  assert.equal(JSON.parse(command.history[1]).data.text, 'AI result')
+  assert.equal(command.back().data.text, 'before')
+})
+
+test('AI 仅修改布局或文档元数据时仍强制建立唯一撤销单元', async () => {
+  const Command = await loadCommand()
+  const { mindMap } = createMindMap()
+  const command = new Command({ mindMap })
+  command.resetHistoryBaseline()
+  const state = command.captureHistoryState()
+
+  // Renderer tree is intentionally identical: full-document metadata lives
+  // outside Command history, but the editor keeps its complete baseline next
+  // to this forced marker.
+  command.clearHistory()
+  command.resetHistoryBaseline()
+  assert.equal(command.appendCurrentToHistoryState(state, { force: true }), true)
+  assert.equal(command.history.length, 2)
+  assert.equal(command.activeHistoryIndex, 1)
+  assert.equal(command.back().data.text, 'before')
+  assert.equal(command.activeHistoryIndex, 0)
+})
+
+test('command execution guard blocks BACK before renderer history mutates', async () => {
+  const Command = await loadCommand()
+  const { mindMap } = createMindMap()
+  const command = new Command({ mindMap })
+  command.resetHistoryBaseline()
+  mindMap.renderer.renderTree.data.text = 'AI result'
+  command.addHistory()
+  command.flushPendingHistory()
+  const historyIndex = command.activeHistoryIndex
+  let rendererBackCalls = 0
+  command.add('BACK', () => { rendererBackCalls += 1 })
+  assert.equal(command.addExecutionGuard(name => name !== 'BACK'), true)
+
+  assert.equal(command.exec('BACK'), false)
+  assert.equal(rendererBackCalls, 0)
+  assert.equal(command.activeHistoryIndex, historyIndex)
+  assert.equal(JSON.parse(command.history[historyIndex]).data.text, 'AI result')
+})
+
+test('sparse node batch is committed as exactly one undo unit', async () => {
+  const Command = await loadCommand()
+  const { emitted, mindMap } = createMindMap()
+  const command = new Command({ mindMap })
+  command.resetHistoryBaseline()
+  emitted.length = 0
+  const rootNode = { nodeData: { data: mindMap.renderer.renderTree.data } }
+  command.add('SET_NODE_DATA_BATCH', updates => applyNodeDataBatch(updates))
+
+  command.exec('SET_NODE_DATA_BATCH', [{
+    node: rootNode,
+    patch: { customPriority: 'P1' },
+  }])
+  assert.equal(command.flushPendingHistory(), true)
+  assert.equal(command.history.length, 2)
+  assert.equal(emitted.filter(item => item.eventName === 'data_change').length, 1)
+  assert.equal(command.back().data.customPriority, undefined)
 })

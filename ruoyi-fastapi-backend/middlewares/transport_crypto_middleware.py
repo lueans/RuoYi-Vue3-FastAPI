@@ -9,6 +9,15 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from common.constant import HttpStatusConstant
 from config.env import AppConfig, TransportCryptoConfig
+from middlewares.mindmap_ai_request_size_middleware import (
+    MINDMAP_AI_INPUT_TOO_LARGE_ERROR_CODE,
+    MINDMAP_AI_INPUT_TOO_LARGE_MESSAGE,
+    MINDMAP_AI_INPUT_TOO_LARGE_STATUS,
+    MINDMAP_AI_PLAINTEXT_BODY_LIMIT_STATE_KEY,
+    TRANSPORT_ENCRYPT_HEADER_DUPLICATE_MESSAGE,
+    TRANSPORT_ENCRYPT_HEADER_DUPLICATE_RESPONSE_HEADERS,
+    is_ambiguous_transport_encrypt_header,
+)
 from utils.transport_crypto_util import (
     DecryptedTransportEnvelope,
     TransportCryptoMonitorUtil,
@@ -64,7 +73,21 @@ class TransportCryptoMiddleware:
             return
 
         headers = Headers(scope=scope)
-        request_encrypted = headers.get(self._ENCRYPT_REQUEST_HEADER) == '1'
+        encrypt_header_values = self._request_header_values(
+            scope,
+            self._ENCRYPT_REQUEST_HEADER.encode('ascii'),
+        )
+        if is_ambiguous_transport_encrypt_header(encrypt_header_values):
+            await TransportCryptoMonitorUtil.record_plain_response(current_app)
+            await self._send_error_response(
+                scope,
+                receive,
+                send,
+                TRANSPORT_ENCRYPT_HEADER_DUPLICATE_MESSAGE,
+                headers=TRANSPORT_ENCRYPT_HEADER_DUPLICATE_RESPONSE_HEADERS,
+            )
+            return
+        request_encrypted = bool(encrypt_header_values and encrypt_header_values[0] == b'1')
         request_required = TransportCryptoConfig.transport_crypto_mode == 'required' or self._is_required_path(path)
 
         if request_required and not request_encrypted:
@@ -101,8 +124,34 @@ class TransportCryptoMiddleware:
         request = Request(scope, receive=self._build_receive(body))
         try:
             decrypted_scope, decrypted_body, crypto_context = await self._decrypt_request(scope, request, headers, body)
-            await TransportCryptoMonitorUtil.record_encrypted_request(current_app, str(crypto_context['kid']))
-            await TransportCryptoMonitorUtil.record_decrypt_success(current_app, str(crypto_context['kid']))
+            crypto_kid = str(crypto_context['kid'])
+            await TransportCryptoMonitorUtil.record_encrypted_request(current_app, crypto_kid)
+            await TransportCryptoMonitorUtil.record_decrypt_success(current_app, crypto_kid)
+            plaintext_limit = decrypted_scope.get('state', {}).get(
+                MINDMAP_AI_PLAINTEXT_BODY_LIMIT_STATE_KEY,
+            )
+            if isinstance(plaintext_limit, int) and len(decrypted_body) > plaintext_limit:
+                await TransportCryptoMonitorUtil.record_encrypted_response(
+                    current_app,
+                    crypto_kid,
+                    is_error=True,
+                )
+                await self._send_error_response(
+                    decrypted_scope,
+                    self._build_receive(b''),
+                    send,
+                    MINDMAP_AI_INPUT_TOO_LARGE_MESSAGE,
+                    crypto_context,
+                    headers=self._build_monitor_headers(
+                        request_mode='encrypted',
+                        response_mode='encrypted',
+                        crypto_status='payload_too_large',
+                        kid=crypto_kid,
+                    ),
+                    status_code=MINDMAP_AI_INPUT_TOO_LARGE_STATUS,
+                    data={'errorCode': MINDMAP_AI_INPUT_TOO_LARGE_ERROR_CODE},
+                )
+                return
         except Exception as exc:
             error_crypto_context = self._build_error_crypto_context(scope, headers, body)
             error_kid = (
@@ -571,6 +620,16 @@ class TransportCryptoMiddleware:
         ]
 
     @staticmethod
+    def _request_header_values(scope: Scope, key: bytes) -> list[bytes]:
+        """Return normalized raw values without collapsing duplicate headers."""
+        normalized_key = key.lower()
+        return [
+            header_value.strip().lower()
+            for header_key, header_value in scope.get('headers', [])
+            if header_key.lower() == normalized_key
+        ]
+
+    @staticmethod
     def _normalize_path(path: str) -> str:
         """
         标准化请求路径，剥离应用根路径前缀
@@ -639,6 +698,8 @@ class TransportCryptoMiddleware:
         message: str,
         crypto_context: dict[str, str | bytes | bool] | None = None,
         headers: dict[str, str] | None = None,
+        status_code: int = HttpStatusConstant.BAD_REQUEST,
+        data: dict[str, str] | None = None,
     ) -> None:
         """
         发送错误响应，在存在AES会话密钥时优先返回加密错误响应
@@ -649,10 +710,14 @@ class TransportCryptoMiddleware:
         :param message: 错误信息
         :param crypto_context: 可选的请求加密上下文
         :param headers: 需要追加的诊断响应头
+        :param status_code: HTTP 状态码与响应业务码
+        :param data: 可选的稳定错误数据
         :return: None
         """
-        response_content = {'code': HttpStatusConstant.BAD_REQUEST, 'msg': message, 'success': False}
-        response = JSONResponse(status_code=HttpStatusConstant.BAD_REQUEST, content=response_content)
+        response_content = {'code': status_code, 'msg': message, 'success': False}
+        if data is not None:
+            response_content['data'] = data
+        response = JSONResponse(status_code=status_code, content=response_content)
         if crypto_context:
             encrypted_body = TransportCryptoUtil.encrypt_response_body(
                 aes_key=crypto_context['aes_key'],

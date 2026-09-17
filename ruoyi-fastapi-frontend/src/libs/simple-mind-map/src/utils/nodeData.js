@@ -1,6 +1,15 @@
-// 节点选中态与托管标签的展示定义都只属于当前客户端。所有需要比较
-// “持久化节点内容”的路径必须复用同一归一化规则，避免把远端重绘带来的
-// UI 差异误判为正文修改。
+// 节点选中态、渲染器命令标记与托管标签的展示定义都只属于当前
+// 客户端。所有需要比较“持久化节点内容”的路径必须复用同一归一化规则，
+// 避免把远端重绘带来的 UI 差异误判为正文修改。该集合与服务端
+// SimpleMindDocumentCodec.TRANSIENT_KEYS 保持一致。
+const TRANSIENT_NODE_DATA_KEYS = Object.freeze([
+  'isActive',
+  'inserting',
+  'needUpdate',
+  'resetRichText',
+  'activeStyle',
+])
+
 export function stripManagedTagDefinitions(data = {}) {
   const output = { ...data }
   if (Array.isArray(output.tag)) {
@@ -19,7 +28,7 @@ export function stripManagedTagDefinitions(data = {}) {
 
 export function normalizePersistedNodeData(data = {}) {
   const output = stripManagedTagDefinitions(data)
-  delete output.isActive
+  for (const key of TRANSIENT_NODE_DATA_KEYS) delete output[key]
   return output
 }
 

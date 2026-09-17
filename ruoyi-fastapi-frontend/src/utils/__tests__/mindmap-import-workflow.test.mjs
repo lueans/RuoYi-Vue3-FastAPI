@@ -24,8 +24,8 @@ test('import opens the native picker directly and blocks duplicate submissions',
   assert.match(source, /@change="handleFileInputChange"/)
   assert.match(source, /fileInputRef\.value\?\.click\(\)/)
   assert.match(source, /input\.value = ''/)
-  assert.match(source, /const supportFileStr = '\.xmind,\.smm,\.json,\.md'/)
-  assert.match(source, /请选择 XMind、SMM、JSON 或 Markdown 文件/)
+  assert.match(source, /const supportFileStr = '\.xmind,\.smm,\.json,\.md,\.txt'/)
+  assert.match(source, /请选择 XMind、SMM、JSON、Markdown 或 TXT 文件/)
   assert.doesNotMatch(source, /class="nodeImportDialog"/)
   assert.match(source, /const isImporting = ref\(false\)/)
   assert.match(source, /:disabled="isImporting \|\| readonly"/)
@@ -45,6 +45,15 @@ test('all supported formats flow through one validation and canvas update bounda
   assert.match(source, /await new Promise\(\(resolve, reject\) => \{/)
   assert.equal((source.match(/if \(!isImportRequestCurrent\(requestId\)\) return false/g) || []).length >= 3, true)
   assert.match(source, /if \(!handled\) reject\(new Error\('脑图编辑器尚未就绪'\)\)/)
+})
+
+test('只读脑图仍可本地解析 AI 输入文件但不能导入覆盖画布', () => {
+  const parseHandler = source.split('async function handleParseMindmapFile', 2)[1]
+    .split("watch(() => props.readonly", 1)[0]
+  assert.doesNotMatch(parseHandler, /if \(props\.readonly\).*reject/)
+  assert.match(source, /props\.readonly && !parsingForAi/)
+  assert.match(source, /if \(props\.readonly && !parsingForAi\) return/)
+  assert.match(source, /if \(props\.readonly\) return\s+const name = file\?\.name/)
 })
 
 test('failed imports keep the picker reusable while successful imports close the active sidebar', () => {

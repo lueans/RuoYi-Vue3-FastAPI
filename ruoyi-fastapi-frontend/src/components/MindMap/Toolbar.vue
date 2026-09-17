@@ -97,6 +97,19 @@
           </div>
         </el-popover>
       </div>
+      <div
+        v-hasPermi="['mindmap:ai:use']"
+        class="toolbarBlock aiToolbarBlock"
+        role="group"
+        aria-label="AI 脑图"
+      >
+        <el-tooltip content="使用 AI Agent 创建或修改脑图" placement="bottom" :show-after="200">
+          <button type="button" class="toolbarBtn aiToolbarBtn" @click="bus.emit('showAiMindmap')">
+            <span class="icon"><el-icon><MagicStick /></el-icon></span>
+            <span class="text">AI 脑图</span>
+          </button>
+        </el-tooltip>
+      </div>
       <!-- File operations block -->
       <div v-if="!props.embedded" class="toolbarBlock" role="group" aria-label="文件操作">
         <el-tooltip :content="importFormatHint" placement="bottom" :show-after="150">
@@ -129,7 +142,7 @@
 </template>
 
 <script setup>
-import { MoreFilled } from '@element-plus/icons-vue'
+import { MagicStick, MoreFilled } from '@element-plus/icons-vue'
 import bus from './useEventBus'
 import { store } from './useStore'
 import NodeImage from './NodeImage.vue'

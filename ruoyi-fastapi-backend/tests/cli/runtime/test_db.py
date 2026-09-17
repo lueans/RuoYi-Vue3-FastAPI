@@ -1,11 +1,14 @@
 from pathlib import Path
 
 import pytest
+from pytest import MonkeyPatch
 
 from cli.runtime.base import RuntimeEnvironmentService
 from cli.runtime.db import DatabaseRuntimeService
 from cli.runtime.db.gateway import DatabaseInfrastructureGateway
 from cli.runtime.db.support import DatabaseRevisionSupport
+from module_mindmap.service import mindmap_schema_verifier
+from module_mindmap.service.mindmap_schema_verifier import MindmapSchemaIssue
 
 
 class FakeRuntimeEnvironment(RuntimeEnvironmentService):
@@ -142,3 +145,126 @@ async def test_database_runtime_service_ping_database_returns_failure() -> None:
     assert payload['ok'] is False
     assert payload['message'] == '数据库连接失败'
     assert 'db boom' in payload['error']
+
+
+@pytest.mark.asyncio
+async def test_mindmap_readiness_failure_is_actionable_without_leaking_db_error() -> None:
+    """脑图门禁异常应给出恢复命令，但不回显可能包含凭据的底层异常。"""
+
+    class FakeConnection:
+        async def __aenter__(self) -> 'FakeConnection':
+            raise RuntimeError('password=must-not-leak')
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: object,
+        ) -> None:
+            del exc_type, exc, tb
+
+    class FakeEngine:
+        @staticmethod
+        def connect() -> FakeConnection:
+            return FakeConnection()
+
+        @staticmethod
+        async def dispose() -> None:
+            return None
+
+    gateway = DatabaseInfrastructureGateway()
+    service = DatabaseRuntimeService(
+        runtime_environment=FakeRuntimeEnvironment(),
+        infrastructure_gateway=gateway,
+    )
+
+    def _fake_get_async_db_engine_factory() -> object:
+        def _factory(*, echo: bool = False) -> FakeEngine:
+            del echo
+            return FakeEngine()
+
+        return _factory
+
+    object.__setattr__(gateway, 'get_async_db_engine_factory', _fake_get_async_db_engine_factory)
+
+    payload = await service.check_mindmap_readiness('dev')
+
+    for check in payload.values():
+        assert check['ok'] is False
+        assert check['error'] == 'RuntimeError'
+        assert 'scripts.verify_mindmap_schema --env=dev' in check['action']
+        assert 'must-not-leak' not in str(check)
+
+
+@pytest.mark.asyncio
+async def test_mindmap_readiness_separates_schema_and_ai_bootstrap(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Doctor 可分别展示结构迁移与 AI 初始化数据阻塞项。"""
+
+    class FakeConnection:
+        async def __aenter__(self) -> 'FakeConnection':
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: object,
+        ) -> None:
+            del exc_type, exc, tb
+
+        @staticmethod
+        async def run_sync(callback: object) -> dict[str, object]:
+            del callback
+            return {}
+
+    class FakeEngine:
+        @staticmethod
+        def connect() -> FakeConnection:
+            return FakeConnection()
+
+        @staticmethod
+        async def dispose() -> None:
+            return None
+
+    gateway = DatabaseInfrastructureGateway()
+    service = DatabaseRuntimeService(
+        runtime_environment=FakeRuntimeEnvironment(),
+        infrastructure_gateway=gateway,
+    )
+
+    def _fake_get_async_db_engine_factory() -> object:
+        def _factory(*, echo: bool = False) -> FakeEngine:
+            del echo
+            return FakeEngine()
+
+        return _factory
+
+    issues = [
+        MindmapSchemaIssue(
+            'table',
+            'mindmap_ai_job',
+            '20260910_mindmap_ai_agent.sql',
+        ),
+        MindmapSchemaIssue(
+            'seed',
+            'mindmap_ai_connector.codex',
+            '20260910_mindmap_ai_agent.sql',
+        ),
+    ]
+    object.__setattr__(gateway, 'get_async_db_engine_factory', _fake_get_async_db_engine_factory)
+    monkeypatch.setattr(
+        mindmap_schema_verifier,
+        'find_mindmap_schema_issues',
+        lambda snapshot: issues,
+    )
+
+    payload = await service.check_mindmap_readiness('dev')
+
+    assert payload['schema']['missingCount'] == 1
+    assert payload['schema']['migrations'] == ['20260910_mindmap_ai_agent.sql']
+    assert payload['aiBootstrap']['missingCount'] == 1
+    assert payload['aiBootstrap']['migrations'] == [
+        '20260910_mindmap_ai_agent.sql'
+    ]

@@ -31,6 +31,7 @@ class Command {
     this.opt = opt
     this.mindMap = opt.mindMap
     this.commands = {}
+    this.executionGuards = new Set()
     this.history = [] // 字符串形式存储
     this.activeHistoryIndex = 0
     // 注册快捷键
@@ -55,6 +56,19 @@ class Command {
     }
     // 是否暂停收集历史数据
     this.isPause = false
+  }
+
+  // Register a synchronous guard for commands that must be stopped before
+  // their renderer mutation begins. Full-document transactions use this when
+  // their metadata cannot be represented by the renderer-only history stack.
+  addExecutionGuard(guard) {
+    if (typeof guard !== 'function') return false
+    this.executionGuards.add(guard)
+    return true
+  }
+
+  removeExecutionGuard(guard) {
+    return this.executionGuards.delete(guard)
   }
 
   // 暂停收集历史数据
@@ -102,6 +116,37 @@ class Command {
     return true
   }
 
+  // 整图 AI 应用会调用 setData，而 setData 为普通导入清空历史。调用方可在
+  // 应用前捕获历史，并在成功后把结果作为唯一的新条目接回原撤销链。
+  captureHistoryState() {
+    this.flushPendingHistory()
+    return {
+      history: this.history.slice(0, this.activeHistoryIndex + 1),
+      activeHistoryIndex: this.activeHistoryIndex
+    }
+  }
+
+  appendCurrentToHistoryState(state, { force = false } = {}) {
+    this.addHistory.cancel()
+    const currentData = this.getCopyData()
+    if (!currentData || !state || !Array.isArray(state.history)) return false
+    const currentDataStr = stringifyJsonValueIterative(currentData)
+    const previous = state.history.slice(0, Number(state.activeHistoryIndex) + 1)
+    // A full-document operation may only change layout/theme/documentData.
+    // Those fields live outside the renderer tree, so force one history marker
+    // to keep the complete AI apply addressable as exactly one undo unit.
+    if (force || previous.at(-1) !== currentDataStr) previous.push(currentDataStr)
+    trimHistoryEntries(
+      previous,
+      this.mindMap.opt.maxHistoryCount,
+      this.mindMap.opt.maxHistoryMemoryBytes
+    )
+    this.history = previous
+    this.activeHistoryIndex = previous.length - 1
+    this.mindMap.emit('back_forward', this.activeHistoryIndex, this.history.length)
+    return true
+  }
+
   //  注册快捷键
   registerShortcutKeys() {
     this.mindMap.keyCommand.addShortcut('Control+z', () => {
@@ -117,6 +162,12 @@ class Command {
     if (this.mindMap.opt.readonly && !READONLY_COMMANDS.has(name)) {
       this.mindMap.emit('readonly_command_rejected', name)
       return
+    }
+    for (const guard of this.executionGuards) {
+      if (guard(name, ...args) === false) {
+        this.mindMap.emit('command_execution_rejected', name)
+        return false
+      }
     }
     if (this.commands[name]) {
       this.commands[name].forEach(fn => {

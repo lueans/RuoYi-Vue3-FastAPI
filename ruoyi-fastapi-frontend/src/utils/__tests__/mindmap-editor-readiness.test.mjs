@@ -16,9 +16,11 @@ test('页面只在画布、插件和事件生命周期完成后进入就绪态',
 
   assert.ok(mountedBlock.indexOf('bindBusEvents()') < mountedBlock.indexOf("emit('ready')"))
   assert.match(editorSource, /await waitForMindmapInitialRender\(mm\)/)
-  assert.match(editorSource, /await waitForMindmapInitialRender\(mm\)[\s\S]*?initialRenderReady = true[\s\S]*?startYjsSyncIfReady\(\)/)
+  assert.match(editorSource, /await waitForMindmapInitialRender\(mm\)[\s\S]*?establishMindmapInitialHistoryBaseline\(mm\)[\s\S]*?initialRenderReady = true[\s\S]*?startYjsSyncIfReady\(\)/)
   assert.match(editorSource, /function startYjsSyncIfReady[\s\S]*?!initialRenderReady/)
-  assert.match(editorSource, /import \{ waitForMindmapInitialRender \} from '@\/utils\/mindmap-initial-render'/)
+  assert.match(editorSource, /import \{[\s\S]*?establishMindmapInitialHistoryBaseline,[\s\S]*?waitForMindmapInitialRender,[\s\S]*?\} from '@\/utils\/mindmap-initial-render'/)
+  assert.match(editorSource, /function onMindmapDataChangeDetail\(detailList\) \{\s*if \(!initialRenderReady\) return/)
+  assert.match(editorSource, /function onBusDataChange\(data, sourceMindMap = null\) \{[\s\S]*?if \(!initialRenderReady\) return/)
   assert.match(mountedBlock, /catch \(error\) \{[\s\S]*?sessionCancelled\(sessionController\?\.signal\)[\s\S]*?emit\('load-error'/)
   assert.ok(
     mountedBlock.indexOf('sessionCancelled(sessionController?.signal)')
@@ -33,6 +35,19 @@ test('页面只在画布、插件和事件生命周期完成后进入就绪态',
   assert.match(pageSource, /watch\(editorSessionKey, \(\) => \{[\s\S]*?editorReady\.value = false/)
   assert.match(pageSource, /重新加载/)
   assert.match(pageSource, /function retryEditorLoad\(\) \{[\s\S]*?serverCanEdit\.value = null[\s\S]*?loadError\.value = ''[\s\S]*?editorRetryNonce\.value \+= 1/)
+})
+
+test('服务端缺省主题使用默认值而不会让新建脑图加载失败', async () => {
+  const editorSource = await readFile(editorUrl, 'utf8')
+
+  assert.match(
+    editorSource,
+    /function normalizeServerTheme\(theme\) \{[\s\S]*?if \(theme == null\) return \{ template: 'default', config: \{\} \}[\s\S]*?normalizeMindmapDocumentMetaPatch\(\{ theme \}\)/,
+  )
+  assert.match(
+    editorSource,
+    /const normalizedTheme = normalizeServerTheme\(data\.theme\)[\s\S]*?themeTemplate = normalizedTheme\.template/,
+  )
 })
 
 test('快速切换会取消旧详情请求并关闭所属草稿确认', async () => {

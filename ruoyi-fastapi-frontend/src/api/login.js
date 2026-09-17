@@ -41,10 +41,17 @@ export function getInfo() {
 }
 
 // 退出方法
-export function logout() {
+export function logout(token) {
+  const headers = { isToken: false }
+  if (token) headers.Authorization = `Bearer ${token}`
   return request({
     url: '/logout',
-    method: 'post'
+    method: 'post',
+    // 固定使用调用时捕获的旧 token，避免迟到的注销请求误带新会话 token。
+    headers,
+    // logout 本身若返回 401，只向调用方返回结构化错误；不能再次触发
+    // 全局重新登录弹窗，否则会形成 logout -> 401 -> logout 的递归链路。
+    skipAuthExpiredHandler: true
   })
 }
 

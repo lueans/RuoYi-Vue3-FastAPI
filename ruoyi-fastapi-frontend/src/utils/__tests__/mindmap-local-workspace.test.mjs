@@ -29,7 +29,7 @@ test('旧版本地工作区迁移到版本记录并保留 simple-mind 扩展数�
   const normalized = normalizeMindmapLocalWorkspaceRecord(legacy)
   const record = createMindmapLocalWorkspaceRecord(normalized)
 
-  assert.equal(record.schemaVersion, 1)
+  assert.equal(record.schemaVersion, 2)
   assert.equal(record.values.root.children[0].data.text, '子节点')
   assert.equal(record.values.layout, 'mindMap')
   assert.equal(record.values.theme.config.futureThemeField.enabled, true)
@@ -147,7 +147,35 @@ test('状态层从损坏记录恢复、合并部分保存并保留失败前快�
     assert.equal(actions.storeData({ layout: 'mindMap' }), true)
     assert.equal(actions.getData().root.data.text, '根节点')
     assert.equal(actions.getData().layout, 'mindMap')
-    assert.deepEqual(JSON.parse(storage.get('MIND_MAP_DATA')).schemaVersion, 1)
+    assert.deepEqual(JSON.parse(storage.get('MIND_MAP_DATA')).schemaVersion, 2)
+
+    assert.equal(actions.storeData(
+      { root: createRoot('AI 结果') },
+      {
+        documentHash: `mmf2:sha256:${'a'.repeat(64)}`,
+        lastAppliedProposal: 'proposal-1',
+      },
+    ), true)
+    assert.equal(actions.getData().lastAppliedProposal, 'proposal-1')
+    assert.equal(actions.getData().documentHash, `mmf2:sha256:${'a'.repeat(64)}`)
+    const appliedRevision = actions.getData().revision
+    assert.equal(actions.storeData({ view: null }), true)
+    assert.equal(actions.getData().lastAppliedProposal, 'proposal-1')
+    assert.equal(actions.getData().revision, appliedRevision)
+    assert.equal(actions.storeData({ layout: 'timeline' }), true)
+    assert.equal(actions.getData().lastAppliedProposal, null)
+    assert.equal(actions.getData().documentHash, null)
+
+    const exactRollbackRecord = actions.getData()
+    assert.equal(actions.storeData({ root: createRoot('半应用结果') }), true)
+    assert.notEqual(actions.getData().revision, exactRollbackRecord.revision)
+    assert.equal(actions.restoreData(exactRollbackRecord), true)
+    assert.deepEqual(actions.getData(), exactRollbackRecord)
+
+    rejectWrites = true
+    assert.equal(actions.restoreData({ ...exactRollbackRecord, revision: 99 }), false)
+    rejectWrites = false
+    assert.deepEqual(actions.getData(), exactRollbackRecord)
 
     const previous = storage.get('MIND_MAP_DATA')
     assert.equal(actions.storeData({ root: { children: [] } }), false)

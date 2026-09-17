@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruoyi:mindmap-agent-quality-report:v1",
+  "title": "RuoYi mind-map agent quality evaluation report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "assessmentScope",
+    "runnerVersion",
+    "generatedAt",
+    "runConfigurationHash",
+    "datasetVersion",
+    "datasetHash",
+    "agentKey",
+    "modelRef",
+    "adapterVersion",
+    "sdkVersion",
+    "runtimeVersion",
+    "evidenceKind",
+    "providerExecution",
+    "coverageComplete",
+    "qualityThreshold",
+    "overallStatus",
+    "releaseEligible",
+    "summary",
+    "results"
+  ],
+  "properties": {
+    "schema": {"const": "ruoyi-mindmap-agent-quality-report/v1"},
+    "assessmentScope": {"const": "agent_quality_dataset"},
+    "runnerVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "runConfigurationHash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "datasetVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "datasetHash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "agentKey": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"},
+    "modelRef": {"type": ["string", "null"], "maxLength": 128},
+    "adapterVersion": {"type": ["string", "null"], "maxLength": 128},
+    "sdkVersion": {"type": ["string", "null"], "maxLength": 128},
+    "runtimeVersion": {"type": ["string", "null"], "maxLength": 128},
+    "evidenceKind": {"enum": ["not_run", "real_provider", "replay", "synthetic"]},
+    "providerExecution": {"enum": ["not_run", "partial", "completed"]},
+    "coverageComplete": {"type": "boolean"},
+    "qualityThreshold": {"type": "number", "minimum": 0, "maximum": 100},
+    "overallStatus": {"enum": ["passed", "failed", "blocked"]},
+    "releaseEligible": {"type": "boolean"},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected", "passed", "failed", "blocked"],
+      "properties": {
+        "selected": {"type": "integer", "minimum": 1},
+        "passed": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0}
+      }
+    },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "caseId",
+          "category",
+          "status",
+          "score",
+          "hardGateFailures",
+          "qualityFailures",
+          "metrics"
+        ],
+        "properties": {
+          "caseId": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{2,63}$"},
+          "category": {"type": "string", "minLength": 1, "maxLength": 64},
+          "status": {"enum": ["passed", "failed", "blocked"]},
+          "score": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+          "hardGateFailures": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 128},
+            "uniqueItems": true
+          },
+          "qualityFailures": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 128},
+            "uniqueItems": true
+          },
+          "metrics": {
+            "type": "object",
+            "additionalProperties": {"type": ["number", "integer", "boolean"]}
+          }
+        }
+      }
+    }
+  }
+}

@@ -503,6 +503,7 @@ onBeforeUnmount(() => {
     flex-shrink: 0;
     align-items: center;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 10px;
     padding: 0 28px;
     border-top: 1px solid #eceef0;

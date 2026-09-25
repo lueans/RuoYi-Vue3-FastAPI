@@ -118,6 +118,32 @@ test('渲染错误必须拒绝帧，不伪造成功 ACK', async () => {
   } }, document('第').root), /renderer failed/)
 })
 
+for (const phase of ['first-character', 'reveal']) {
+  test(`${phase} 快路径异常后重试必须重建而非确认未挂载的文本`, async () => {
+    const target = '新的完整文字'
+    let rebuilt = 0
+    const runtime = {
+      nodeData: document('旧文字').root,
+      getData() { return this.nodeData.data },
+      reRender() {
+        this._textData = { reveal: { targetText: target, setVisible() { assert.fail('detached reveal reused') } } }
+        throw new Error('layout failed after creating detached text')
+      },
+    }
+    if (phase === 'reveal') runtime._textData = { reveal: { targetText: target, setVisible() { throw new Error('reveal failed') } } }
+    const map = {
+      renderer: { findNodeByUid: () => runtime, setData() { rebuilt++ } },
+      renderAsync(done) { this.renderer.renderRecoveryRequired = false; done() },
+    }
+    const frame = { document: document('新'), typewriterTarget: { uid: 'root', text: target } }
+    await assert.rejects(applyMindmapAiPresentationFrame(map, document('旧文字'), frame), /failed/)
+    assert.equal(map.renderer.renderRecoveryRequired, true)
+    await applyMindmapAiPresentationFrame(map, document('旧文字'), frame)
+    assert.equal(rebuilt, 1)
+    assert.equal(map.renderer.renderRecoveryRequired, false)
+  })
+}
+
 test('渲染器异步错误回执立即拒绝，迟到成功回调不能改为成功', async () => {
   let success
   let fail

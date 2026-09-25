@@ -166,7 +166,7 @@ test('只读来源只能生成独立文件而不会形成可回写 proposal', ()
 
 test('AI 面板由编辑器壳单一挂载且只读工作区保留权限受控入口', () => {
   assert.equal(editor.match(/<MindmapAiDialog\b/g)?.length, 1)
-  assert.match(editor, /<MindmapAiDialog :readonly="aiDialogReadonly" \/>/)
+  assert.match(editor, /<MindmapAiDialog\b[^>]*\s:readonly="aiDialogReadonly"[^>]*\/>/)
   const readonlyState = {
     props: { readonly: false, mindmapId: 1 }, serverCanEdit: ref(true),
     aiEditingBlocked: ref(true), authoritativeRecoveryEditingBlocked: ref(false),

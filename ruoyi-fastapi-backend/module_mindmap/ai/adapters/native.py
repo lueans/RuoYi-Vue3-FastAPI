@@ -10,6 +10,7 @@ from importlib import metadata
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from agno.agent import Agent
+from agno.models.metrics import Metrics
 from agno.run.agent import RunEvent
 from agno.tools.function import Function
 from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError, validate_call
@@ -74,7 +75,7 @@ NATIVE_COMPLETION_RECOVERY_PROMPT = (
     '上一轮已经产生了候选脑图草稿，但没有完成终态调用。现在进入一次受限收尾回合：'
     '禁止调用 start_document、add_nodes、update_nodes、move_nodes、remove_nodes 或 '
     'set_document_meta，也不要输出自然语言；只按顺序调用 validate_draft，然后立即调用 '
-    'complete_artifact。若校验失败，只修复校验明确指出的问题后重新校验并完成。'
+    'complete_artifact。若校验失败则停止收尾，不得修改草稿或宣称任务成功。'
 )
 
 
@@ -639,6 +640,7 @@ class NativeMindmapAdapter(AgentAdapter):
         post_terminal_attempted: str | None = None
         event_delivery_error: AgentEventDeliveryError | None = None
         runtime_error: MindmapArtifactError | None = None
+        recovery_only = False
         tool_lock = asyncio.Lock()
         node_references: dict[str, str] = {}
         tool_failure_total = 0
@@ -734,6 +736,13 @@ class NativeMindmapAdapter(AgentAdapter):
                     raise MindmapArtifactError(
                         'request_clarification 必须是最后一个工具调用',
                     )
+                if recovery_only and (
+                    tool_name not in {'validate_draft', 'complete_artifact'}
+                    or (tool_name == 'complete_artifact' and validated_effect_marker != tools.attempt_effect_marker())
+                ):
+                    error = MindmapArtifactError('自动收尾仅允许依次校验和完成，不能继续修改草稿')
+                    mark_runtime_error(error)
+                    raise error
                 await emit_required(
                     'tool_started', {'toolName': tool_name, 'stage': 'building'},
                 )
@@ -1016,8 +1025,22 @@ class NativeMindmapAdapter(AgentAdapter):
         await emit_required('agent_started', {'agentKey': 'native_mindmap'})
         usage: dict[str, Any] = {}
         terminal_payload: Any = None
+        total_metrics = Metrics()
+
+        def check_run_state() -> None:
+            if event_delivery_error is not None:
+                raise event_delivery_error
+            if runtime_error is not None:
+                raise runtime_error
+            if post_terminal_attempted is not None:
+                context.tool_service = original_tools
+                raise MindmapArtifactError(
+                    f'MindMap Agent 在 {post_terminal_attempted} 后继续调用工具，任务结果无效',
+                )
+
         async def consume_response_stream(response_stream: Any) -> None:
-            nonlocal terminal_payload, usage
+            nonlocal terminal_payload, usage, total_metrics
+            run_metrics = None
             async with aclosing(response_stream) as stream:
                 async for event in stream:
                     if runtime_error is not None:
@@ -1070,9 +1093,15 @@ class NativeMindmapAdapter(AgentAdapter):
                         })
                         raise mapped_error
                     if event.event == RunEvent.run_completed and event.metrics is not None:
-                        usage = event.metrics.to_dict()
+                        # A completion metric is this run's snapshot, not a
+                        # delta. Keep its latest value and add each run once.
+                        run_metrics = event.metrics
                     if event.event == RunEvent.run_completed:
                         terminal_payload = getattr(event, 'content', None)
+            if run_metrics is not None:
+                total_metrics = total_metrics + run_metrics
+                usage = total_metrics.to_dict()
+            check_run_state()
 
         total_timeout = max(1.0, float(context.metadata.get('timeoutSeconds') or 900))
         started_at = asyncio.get_running_loop().time()
@@ -1081,14 +1110,6 @@ class NativeMindmapAdapter(AgentAdapter):
             consume_response_stream(response_stream),
             timeout=total_timeout,
         )
-        if event_delivery_error is not None:
-            raise event_delivery_error
-        if runtime_error is not None:
-            raise runtime_error
-        if post_terminal_attempted is not None:
-            raise MindmapArtifactError(
-                f'MindMap Agent 在 {post_terminal_attempted} 后继续调用工具，任务结果无效'
-            )
         if clarification_payload is not None:
             context.tool_service = original_tools
             return agent_needs_input_result(clarification_payload, usage=usage)
@@ -1190,6 +1211,8 @@ class NativeMindmapAdapter(AgentAdapter):
                 asyncio.get_running_loop().time() - started_at
             )
             if remaining_timeout > 0:
+                recovery_only = True
+                validated_effect_marker = None
                 recovery_stream = agent.arun(
                     NATIVE_COMPLETION_RECOVERY_PROMPT,
                     stream=True,

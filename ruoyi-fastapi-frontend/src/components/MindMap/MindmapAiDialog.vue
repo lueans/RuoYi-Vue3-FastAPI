@@ -8167,7 +8167,9 @@ async function deleteSessionRecord() {
     await deleteMindmapAiSession(sessionId)
     assertActionIdentity(identity)
     recentSessions.value = recentSessions.value.filter(item => item.sessionId !== sessionId)
-    resetNewJob({ clearStoredJob: true, preserveForm: true })
+    // This exact session is durably deleted; no SSE terminal event is required
+    // to detach its local callbacks. Ordinary running-task resets stay blocked.
+    resetNewJob({ clearStoredJob: true, preserveForm: true, detach: true })
     ElMessage.success('AI 会话记录已删除')
   } catch (error) {
     if (error === 'cancel' || error === 'close') return

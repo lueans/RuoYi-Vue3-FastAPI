@@ -66,6 +66,7 @@ from module_mindmap.ai.adapters.native import (
 )
 from module_mindmap.ai.document import MindmapArtifactError
 from module_mindmap.ai.tool_contract import MindmapToolService
+from module_mindmap.service.mindmap_ai_service import MindmapAiTaskManager
 
 EXPECTED_NODE_COUNT = 2
 EXPECTED_CODEX_INPUT_ITEMS = 2
@@ -1499,6 +1500,10 @@ async def test_native_hosted_model_gets_one_terminal_completion_recovery(
     observed: dict[str, Any] = {}
     events: list[tuple[str, dict[str, Any]]] = []
     calls = 0
+    run_metrics = [
+        Metrics(input_tokens=10, output_tokens=20, total_tokens=30, cost=0.75),
+        Metrics(input_tokens=2, output_tokens=5, total_tokens=7, cost=0.5),
+    ]
 
     class FakeAgent:
         def __init__(self, **kwargs: Any) -> None:
@@ -1523,7 +1528,9 @@ async def test_native_hosted_model_gets_one_terminal_completion_recovery(
                     assert prompt == native_adapter_module.NATIVE_COMPLETION_RECOVERY_PROMPT
                     await tools['validate_draft']()
                     await tools['complete_artifact']()
-                yield RunCompletedEvent(metrics=Metrics(total_tokens=8))
+                # Duplicate completion snapshots within a run are not deltas.
+                for _ in range(2):
+                    yield RunCompletedEvent(metrics=run_metrics[calls - 1])
 
             return stream()
 
@@ -1544,6 +1551,75 @@ async def test_native_hosted_model_gets_one_terminal_completion_recovery(
         if event_type == 'tool_completed'
     ] == ['start_document', 'add_nodes', 'validate_draft', 'complete_artifact']
     assert events[-1][0] == 'agent_completed'
+
+    expected_usage = {'input_tokens': 12, 'output_tokens': 25, 'total_tokens': 37, 'cost': 1.25}
+    assert result.usage == expected_usage
+    with pytest.raises(MindmapArtifactError, match='超过任务预算'):
+        MindmapAiTaskManager._enforce_usage_policy(NativeMindmapAdapter().collect_usage(result), max_budget_usd=1.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('violation', ['mutation', 'post_completion', 'unvalidated_completion', 'old_validation'])
+async def test_native_completion_recovery_enforces_the_same_terminal_state(
+    monkeypatch: pytest.MonkeyPatch, violation: str,
+) -> None:
+    events: list[str] = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            self.tools = {tool.__name__: tool for tool in kwargs['tools']}
+            self.calls = 0
+
+        def arun(self, _prompt: str, **_kwargs: Any) -> Any:
+            self.calls += 1
+
+            async def stream() -> Any:
+                if self.calls == 1:
+                    await self.tools['start_document']('基线')
+                    if violation == 'old_validation':
+                        await self.tools['validate_draft']()
+                else:
+                    if violation == 'mutation':
+                        rejected = json.loads(await self.tools['add_nodes']([{'parentUid': '@root', 'text': '不应新增'}]))
+                        assert rejected['ok'] is False
+                    if violation not in {'unvalidated_completion', 'old_validation'}:
+                        await self.tools['validate_draft']()
+                    await self.tools['complete_artifact']()
+                    if violation == 'post_completion':
+                        rejected = json.loads(await self.tools['read_projection']())
+                        assert rejected['ok'] is False
+                yield RunCompletedEvent(metrics=Metrics(total_tokens=8))
+            return stream()
+
+    async def collect(event: str, _payload: dict[str, Any]) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(native_adapter_module, 'Agent', FakeAgent)
+    context = _context()
+    original = context.tool_service
+    context.metadata['model'] = SimpleNamespace(provider='openai')
+    with pytest.raises(MindmapArtifactError):
+        await NativeMindmapAdapter().run(context, collect)
+    assert context.tool_service is original
+    assert original.operation_cursor() == 0
+    assert 'agent_completed' not in events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['preview', 'direct'])
+async def test_codex_comment_capability_matches_its_persistence_mode(mode: str) -> None:
+    context = _context()
+    context.execution_mode = mode
+    allowed = codex_worker.tools_for_execution_mode(mode)
+    assert ('add_comment' in allowed) is (mode == 'direct')
+    assert ('complete_artifact' in allowed) is (mode == 'preview')
+    # Even a stale caller passing the former superset cannot bypass the bridge.
+    executor = _CodexToolExecutionBridge(context, _ignore_event, codex_worker.ALLOWED_TOOL_NAMES)
+    await executor.call('start_document', {'title': '评论目标'})
+    before = executor.operation_cursor
+    result = await executor.call('add_comment', {'nodeUid': '@root', 'content': '请确认'})
+    assert result['ok'] is (mode == 'direct')
+    assert executor.operation_cursor == before + int(mode == 'direct')
 
 
 @pytest.mark.asyncio
@@ -2098,7 +2174,7 @@ async def test_codex_worker_disables_nondomain_tools_and_requires_structured_out
             'maxBudgetUsd': EXPECTED_POLICY_BUDGET,
             'bridgeSocket': bridge_path,
             'bridgeTokenFile': str(tmp_path.joinpath('capability')),
-            'allowedTools': list(codex_worker.ALLOWED_TOOL_NAMES),
+            'allowedTools': list(codex_worker.tools_for_execution_mode('preview')),
         },
         lambda stage, progress, usage: progress_events.append((stage, progress, usage)),
     )
@@ -2140,7 +2216,7 @@ async def test_codex_worker_disables_nondomain_tools_and_requires_structured_out
         value for value in observed['config'].config_overrides
         if value.startswith('mcp_servers.mindmap.enabled_tools=[')
     )
-    assert all(name in enabled_tools for name in codex_worker.ALLOWED_TOOL_NAMES)
+    assert all(name in enabled_tools for name in codex_worker.tools_for_execution_mode('preview'))
     skills_override = next(
         value for value in observed['config'].config_overrides
         if value.startswith('skills.config=[')
@@ -2269,7 +2345,7 @@ async def test_codex_worker_forks_exact_sdk_thread_into_an_independent_branch(
         'maxBudgetUsd': EXPECTED_POLICY_BUDGET,
         'bridgeSocket': bridge_path,
         'bridgeTokenFile': str(tmp_path.joinpath('capability')),
-        'allowedTools': list(codex_worker.ALLOWED_TOOL_NAMES),
+        'allowedTools': list(codex_worker.tools_for_execution_mode('preview')),
     })
     bridge.close()
 
@@ -2315,7 +2391,7 @@ async def test_codex_worker_rejects_a_fork_that_reuses_the_parent_thread_id(
             'maxBudgetUsd': EXPECTED_POLICY_BUDGET,
             'bridgeSocket': bridge_path,
             'bridgeTokenFile': str(tmp_path.joinpath('capability')),
-            'allowedTools': list(codex_worker.ALLOWED_TOOL_NAMES),
+            'allowedTools': list(codex_worker.tools_for_execution_mode('preview')),
         })
     bridge.close()
     assert error.value.code == 'AI_SESSION_UNAVAILABLE'
@@ -2424,6 +2500,7 @@ def test_worker_error_message_keys_in_sync() -> None:
     ({'bridgeSocket': 'relative.sock'}, 'AI_AGENT_UNAVAILABLE'),
     ({'bridgeTokenFile': 'relative-token'}, 'AI_AGENT_UNAVAILABLE'),
     ({'allowedTools': ['read_projection']}, 'AI_CAPABILITY_UNSUPPORTED'),
+    ({'allowedTools': list(codex_worker.ALLOWED_TOOL_NAMES)}, 'AI_CAPABILITY_UNSUPPORTED'),
 ])
 def test_codex_worker_parent_request_failures_are_not_model_output_errors(
     patch: dict[str, Any],
@@ -2439,7 +2516,7 @@ def test_codex_worker_parent_request_failures_are_not_model_output_errors(
         'maxBudgetUsd': EXPECTED_POLICY_BUDGET,
         'bridgeSocket': '/private/tmp/mindmap.sock',
         'bridgeTokenFile': '/private/tmp/mindmap-token',
-        'allowedTools': list(codex_worker.ALLOWED_TOOL_NAMES),
+        'allowedTools': list(codex_worker.tools_for_execution_mode('preview')),
     }
 
     with pytest.raises(codex_worker.WorkerFailure) as error:
@@ -2555,7 +2632,7 @@ async def test_codex_worker_maps_tagged_bridge_runtime_item_to_unavailable(
             'maxBudgetUsd': EXPECTED_POLICY_BUDGET,
             'bridgeSocket': bridge_path,
             'bridgeTokenFile': str(tmp_path.joinpath('capability')),
-            'allowedTools': list(codex_worker.ALLOWED_TOOL_NAMES),
+            'allowedTools': list(codex_worker.tools_for_execution_mode('preview')),
         })
 
     bridge.close()
@@ -2996,7 +3073,7 @@ async def test_codex_worker_rejects_non_json_sdk_result(
             'maxBudgetUsd': EXPECTED_POLICY_BUDGET,
             'bridgeSocket': bridge_path,
             'bridgeTokenFile': str(tmp_path.joinpath('capability')),
-            'allowedTools': list(codex_worker.ALLOWED_TOOL_NAMES),
+            'allowedTools': list(codex_worker.tools_for_execution_mode('preview')),
         })
     bridge.close()
     assert error.value.code == 'AI_OUTPUT_INVALID'

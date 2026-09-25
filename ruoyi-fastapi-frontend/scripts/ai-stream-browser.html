@@ -165,6 +165,32 @@ try {
     return { map, close: () => { map.destroy(); el.remove() } }
   }
   const recoveryChecks = []
+  for (const phase of ['layout', 'update']) {
+    const before = { root: node('text-recovery', '旧节点') }
+    const target = { root: node('text-recovery', '新节点内容更长') }
+    const frame = nextMindmapAiDraftFrame(before, target)
+    const { map, close } = await makeMap(before)
+    const runtime = map.renderer.root
+    const original = runtime[phase]
+    let injected = false
+    runtime[phase] = function (...args) {
+      if (!injected) { injected = true; throw new Error(`first-character-${phase}`) }
+      return original.apply(this, args)
+    }
+    try {
+      await expectRejected(() => applyMindmapAiPresentationFrame(map, before, frame), `first-character-${phase}`)
+      assert(map.renderer.renderRecoveryRequired, 'fast-path failure did not require recovery')
+      await applyMindmapAiPresentationFrame(map, before, frame)
+      const recovered = map.renderer.findNodeByUid('text-recovery')
+      assert(recovered._textData.node.node.isConnected, 'retry acknowledged detached text')
+      assert(visibleText(recovered._textData.node.node) === '新', 'retry did not show the first glyph')
+      assert(!map.renderer.renderRecoveryRequired, 'retry did not finish recovery')
+      const next = nextMindmapAiDraftFrame(frame.document, target)
+      await applyMindmapAiPresentationFrame(map, frame.document, next)
+      assert(visibleText(recovered._textData.node.node) === '新节', 'stream did not resume after recovery')
+      recoveryChecks.push(`first-character-${phase}`)
+    } finally { runtime[phase] = original; close() }
+  }
   // Catch both the first RAF phase and later timer phases; a rejected frame
   // must end its transaction and let the same renderer retry successfully.
   for (const phase of ['layout-entry', 'layout-timer', 'node', 'finalizer']) {

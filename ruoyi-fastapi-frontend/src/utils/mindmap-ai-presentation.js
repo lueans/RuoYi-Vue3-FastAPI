@@ -141,15 +141,22 @@ export async function applyMindmapAiPresentationFrame(mindMap, previousDocument,
   const node = delta && mindMap.renderer.findNodeByUid(delta.uid)
   if (!visibilityChanged && !mindMap.renderer.renderRecoveryRequired
     && node && target && String(target.uid) === delta.uid) {
-    node.nodeData.data.text = delta.text
-    if (node._textData?.reveal?.targetText === target.text) {
-      node._textData.reveal.setVisible(delta.text)
-      node.nodeDataSnapshot = stringifyJsonValueIterative(node.getData())
-      return
+    try {
+      node.nodeData.data.text = delta.text
+      if (node._textData?.reveal?.targetText === target.text) {
+        node._textData.reveal.setVisible(delta.text)
+        node.nodeDataSnapshot = stringifyJsonValueIterative(node.getData())
+        return
+      }
+      // First character of an edit: measure once, mask before layout mounts it.
+      const sizeChanged = node.reRender()
+      if (!sizeChanged) return
+    } catch (error) {
+      // getSize may have replaced _textData before layout/update failed. That
+      // reveal object is not reusable: retry must rebuild through a transaction.
+      mindMap.renderer.renderRecoveryRequired = true
+      throw error
     }
-    // First character of an edit: measure once, mask before layout mounts it.
-    const sizeChanged = node.reRender()
-    if (!sizeChanged) return
   }
   // A structural frame introduces only its selected node and prefix. The
   // renderer's detached measurement hook applies the mask BEFORE insertion.

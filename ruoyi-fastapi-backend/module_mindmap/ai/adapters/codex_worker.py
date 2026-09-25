@@ -74,6 +74,13 @@ ALLOWED_TOOL_NAMES = (
     'complete_artifact',
 )
 
+
+def tools_for_execution_mode(execution_mode: str) -> tuple[str, ...]:
+    """Preview has no comment persistence; direct has no Artifact terminal."""
+    excluded = 'complete_artifact' if execution_mode == 'direct' else 'add_comment'
+    return tuple(name for name in ALLOWED_TOOL_NAMES if name != excluded)
+
+
 DISABLED_CODEX_SKILL_NAMES = (
     'imagegen',
     'openai-docs',
@@ -384,7 +391,7 @@ def _validated_request(request: Any) -> dict[str, Any]:  # noqa: PLR0912
         or not allowed_tools
         or any(not isinstance(name, str) for name in allowed_tools)
         or len(set(allowed_tools)) != len(allowed_tools)
-        or not set(allowed_tools).issubset(ALLOWED_TOOL_NAMES)
+        or not set(allowed_tools).issubset(tools_for_execution_mode(execution_mode))
         or (
             execution_mode != 'direct'
             and allowed_tools[-1] != 'complete_artifact'

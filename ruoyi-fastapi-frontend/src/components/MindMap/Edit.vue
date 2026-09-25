@@ -18,7 +18,7 @@
       @transitionend="onMindMapContainerTransitionEnd"
     ></div>
     <WorkspaceActivityBar v-if="!isZenMode" />
-    <MindmapAiDialog :readonly="aiDialogReadonly" />
+    <MindmapAiDialog ref="mindmapAiDialogRef" :readonly="aiDialogReadonly" />
     <Navigator v-if="mindMap" :mindMap="mindMap" />
     <OutlineSidebar v-if="mindMap && activeSidebar === 'outline'" :mindMap="mindMap" />
     <AssociativeLineStyle v-if="mindMap" :mindMap="mindMap" />
@@ -326,6 +326,7 @@ let terminalState = ''
 const editContainerRef = ref(null)
 const mindMapContainerRef = ref(null)
 const outlineEditRef = ref(null)
+const mindmapAiDialogRef = ref(null)
 const mindMap = shallowRef(null)
 const documentData = ref({})
 const showDragMask = ref(false)
@@ -6679,6 +6680,10 @@ function onVersionChangeTracking(paused, context = {}) {
   }
 }
 
+async function finishCompletedAiGeneration() {
+  return (await mindmapAiDialogRef.value?.finishCompletedAiGeneration?.()) !== false
+}
+
 defineExpose({
   mindMap,
   getMindMap: () => mindMap.value,
@@ -6693,6 +6698,7 @@ defineExpose({
   hasUnsavedChanges,
   flushBeforeLeave,
   prepareForCloudExit,
+  finishCompletedAiGeneration,
   manualSave,
   saveStatus,
   saveRecoveryKind,

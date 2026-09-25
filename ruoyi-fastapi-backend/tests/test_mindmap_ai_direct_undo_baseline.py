@@ -56,6 +56,7 @@ async def _job_with_baseline(state: SimpleNamespace) -> SimpleNamespace:
         id='10000000-0000-4000-8000-000000000001', user_id=7, proposal_id=None, source_type='cloud_document',
         source_mindmap_id=9, base_revision=revision, base_hash=document_hash,
         session_id='session', agent_key='codex', intent='expand', target='file', turn_index=1,
+        status='completed_direct',
         artifact_id=None, base_room_epoch='epoch',
         expires_time=datetime.now() + timedelta(days=1),
         request_json=json.dumps(service._request_with_undo_baseline(payload, baseline)),
@@ -80,9 +81,22 @@ async def test_prepare_receipt_and_actual_undo_write_preserve_original_editor_by
     current, _summary = normalize_ai_editable_source_document(document_from_mindmap_detail(state.detail))
     receipt.applied_revision = 4
     receipt.applied_hash = compute_document_hash(current)
-    monkeypatch.setattr(service.MindmapAiDao, 'get_undo', AsyncMock(return_value=receipt))
+    locks: list[str] = []
+
+    async def read_undo(*_args: Any, for_update: bool = False) -> SimpleNamespace:
+        if for_update:
+            assert locks == ['job'], 'serialize with the AI writer before locking its receipt'
+            locks.append('receipt')
+        return receipt
+
+    async def read_job(*_args: Any, for_update: bool = False) -> SimpleNamespace:
+        if for_update:
+            locks.append('job')
+        return job
+
+    monkeypatch.setattr(service.MindmapAiDao, 'get_undo', read_undo)
     monkeypatch.setattr(service.MindmapAiDao, 'get_proposal', AsyncMock(return_value=None))
-    monkeypatch.setattr(service.MindmapAiDao, 'get_job', AsyncMock(return_value=job))
+    monkeypatch.setattr(service.MindmapAiDao, 'get_job', read_job)
     monkeypatch.setattr(service.MindmapAiDao, 'update_undo', AsyncMock())
     monkeypatch.setattr(service.MindmapAiDao, 'add_event', AsyncMock())
     for method in (
@@ -100,10 +114,51 @@ async def test_prepare_receipt_and_actual_undo_write_preserve_original_editor_by
     result = await service.MindmapAiService.undo_cloud_proposal(state.database, 9, job.id, 7, 'tester', 'key')
 
     assert result['status'] == 'undone'
+    assert locks == ['job', 'receipt']
     batch = saved.await_args.args[2]
     assert {'root': batch.node_tree, 'layout': batch.layout, 'theme': batch.theme,
             'view': batch.view_data, 'documentData': batch.document_data} == original
     wake.assert_awaited_once_with(job.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', [*sorted(service.ACTIVE_JOB_STATUSES), 'waiting_turn', None])
+@pytest.mark.parametrize('phase', ['preflight', 'after_barrier'])
+async def test_direct_undo_rejects_unfinished_jobs_before_any_receipt_lock(
+    monkeypatch: pytest.MonkeyPatch, status: str | None, phase: str,
+) -> None:
+    state = _setup(monkeypatch)
+    job = await _job_with_baseline(state)
+    job.proposal_id = job.id
+    locked_job = SimpleNamespace(**{**vars(job), 'status': status})
+    if phase == 'preflight':
+        job.status = status
+    receipt = SimpleNamespace(mindmap_id=9, status='available', applied_revision=3, expires_time=job.expires_time)
+    reads: list[str] = []
+
+    async def read_job(*_args: Any, for_update: bool = False) -> SimpleNamespace:
+        reads.append('job-lock' if for_update else 'job-read')
+        return locked_job if for_update else job
+
+    async def read_undo(*_args: Any, for_update: bool = False) -> SimpleNamespace:
+        assert not for_update, 'unfinished jobs must be refused before any receipt/file lock'
+        reads.append('receipt-read')
+        return receipt
+
+    monkeypatch.setattr(service.MindmapAiDao, 'get_job', read_job)
+    monkeypatch.setattr(service.MindmapAiDao, 'get_undo', read_undo)
+    monkeypatch.setattr(service.MindmapAiDao, 'get_proposal', AsyncMock(return_value=None))
+    acquire, abort, saved = AsyncMock(return_value=object()), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(room_manager, 'acquire_collaboration_mutation_barrier', acquire)
+    monkeypatch.setattr(room_manager, 'wait_for_collaboration_mutation_barrier', AsyncMock(return_value=True))
+    monkeypatch.setattr(room_manager, 'abort_collaboration_mutation_barrier', abort)
+    monkeypatch.setattr(service.MindmapService, 'update_content_batch_services', saved)
+    with pytest.raises(ServiceException) as error:
+        await service.MindmapAiService.undo_cloud_proposal(state.database, 9, job.id, 7, 'tester', 'key')
+    assert error.value.data == {'errorCode': 'AI_UNDO_STATE_INVALID'}
+    assert reads == ['receipt-read', 'job-read'] + (['job-lock'] if phase == 'after_barrier' else [])
+    assert acquire.await_count == abort.await_count == int(phase == 'after_barrier')
+    saved.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -831,7 +831,9 @@ class _CodexToolExecutionBridge:
     ) -> None:
         self._context = context
         self._emit = emit
-        self._allowed_tools = frozenset(allowed_tools)
+        self._allowed_tools = frozenset(allowed_tools).intersection(
+            _codex_worker.tools_for_execution_mode(context.execution_mode),
+        )
         self.capability_token = capability_token or secrets.token_hex(32)
         if type(max_tool_calls) is not int or max_tool_calls < 1:
             raise ValueError('Codex 工具调用上限无效')
@@ -1661,11 +1663,7 @@ update_nodes 不得使用 nodes 字段；更新内容必须放入 patch。不要
                         await emit('agent_completed', {'hasResponse': True})
                         run_succeeded = True
                         return result
-                    allowed_tools = tuple(
-                        name for name in _codex_worker.ALLOWED_TOOL_NAMES
-                        if context.execution_mode != 'direct'
-                        or name != 'complete_artifact'
-                    )
+                    allowed_tools = _codex_worker.tools_for_execution_mode(context.execution_mode)
                     tool_executor = _CodexToolExecutionBridge(
                         context, emit, allowed_tools,
                     )

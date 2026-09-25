@@ -358,6 +358,14 @@ def _raw_direct_undo_baseline(job: Any) -> dict[str, Any] | None:
     return baseline['document'] if compute_document_hash(normalized) == baseline['documentHash'] else None
 
 
+def _require_finished_direct_undo(job: Any) -> None:
+    if getattr(job, 'status', None) not in TERMINAL_JOB_STATUSES:
+        raise ServiceException(
+            data={'errorCode': 'AI_UNDO_STATE_INVALID'},
+            message='AI 任务尚未结束，请等待完成或取消后再撤销',
+        )
+
+
 def _initial_session_title(prompt: str) -> str:
     """Create a deterministic title before any provider response exists."""
     normalized = ' '.join(_SESSION_TITLE_CONTROL_PATTERN.sub(' ', prompt).split())
@@ -7921,6 +7929,8 @@ class MindmapAiService:
                 data={'errorCode': 'AI_UNDO_NOT_FOUND'},
                 message='AI 脑图撤销记录不存在',
             )
+        if direct_receipt:
+            _require_finished_direct_undo(proposal_job)
         if direct_receipt and undo.status != 'undone' and _raw_direct_undo_baseline(proposal_job) is None:
             raise ServiceException(
                 data={'errorCode': 'AI_UNDO_CONFLICT'},
@@ -7944,6 +7954,7 @@ class MindmapAiService:
                 message='AI 脑图撤销记录已过期或不可用',
             )
         expected_revision = int(undo.applied_revision)
+        direct_job_id = str(proposal_job.id) if direct_receipt else None
         await db.rollback()
 
         from module_mindmap.websocket.room_manager import room_manager  # noqa: PLC0415
@@ -7971,6 +7982,15 @@ class MindmapAiService:
                     data={'errorCode': 'AI_UNDO_CONFLICT'},
                     message='协作修改未能全部排空，已取消撤销以保护当前内容',
                 )
+            # Direct commits lock job -> file -> receipt. Serialize against
+            # that job BEFORE locking its receipt, and recheck after draining.
+            # Client barriers alone do not coordinate server-side AI writes.
+            locked_direct_job = (
+                await MindmapAiDao.get_job(db, direct_job_id, user_id, for_update=True)
+                if direct_job_id is not None else None
+            )
+            if locked_direct_job is not None:
+                _require_finished_direct_undo(locked_direct_job)
             undo = await MindmapAiDao.get_undo(
                 db,
                 proposal_id,
@@ -7984,6 +8004,7 @@ class MindmapAiService:
                 for_update=True,
             )
             proposal_job = (
+                locked_direct_job if direct_job_id is not None else
                 await MindmapAiDao.get_job(db, proposal.job_id, user_id)
                 if proposal is not None
                 else await MindmapAiDao.get_job(db, proposal_id, user_id)

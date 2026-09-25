@@ -29,6 +29,8 @@
         :class="{ active: isTriggerActive(item) }"
         :aria-label="item.name"
         :aria-pressed="isTriggerActive(item)"
+        :disabled="isReadonly && !isMindmapSidebarReadonlySafe(item.value)"
+        :title="isReadonly && !isMindmapSidebarReadonlySafe(item.value) ? 'AI 编辑期间暂不可用' : item.name"
         :ref="el => setTriggerRef(item.value, el)"
         @click="triggerClick(item)"
       >
@@ -48,6 +50,9 @@ import {
 import { sidebarTriggerList } from './config'
 import bus from './useEventBus'
 
+const props = defineProps({
+  readonly: { type: Boolean, default: undefined },
+})
 const show = ref(true)
 const maxHeight = ref(0)
 const isDark = computed(() => store.localConfig.isDark)
@@ -55,6 +60,8 @@ const activeSidebar = computed(() => store.activeSidebar)
 const propertySidebarNames = new Set(['nodeStyle', 'baseStyle', 'structure', 'theme'])
 const isPropertyInspectorActive = computed(() => propertySidebarNames.has(activeSidebar.value))
 const isReadonly = computed(() => store.isReadonly)
+// AI 临时锁定保留工具入口；真实只读文档仍按原有权限隐藏写入工具。
+const hideWriteTools = computed(() => props.readonly ?? isReadonly.value)
 const canManageCollaborators = computed(() => store.canManageCollaborators)
 const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const readonlyHeaderSidebarNames = new Set(['outline', 'versionHistory'])
@@ -65,7 +72,7 @@ const triggerList = computed(() => {
   if (!canManageCollaborators.value) {
     list = list.filter(item => item.value !== 'collaboratorManager')
   }
-  if (isReadonly.value) {
+  if (hideWriteTools.value) {
     list = list.filter(item => isMindmapSidebarReadonlySafe(item.value))
     if (viewportWidth.value > 760) {
       list = list.filter(item => (
@@ -311,6 +318,13 @@ onBeforeUnmount(() => {
           border-radius: 3px 0 0 3px;
           background: #3370ff;
         }
+      }
+
+      &:disabled {
+        color: #a8abb2;
+        cursor: not-allowed;
+        background: transparent;
+        box-shadow: none;
       }
 
       .triggerIcon {

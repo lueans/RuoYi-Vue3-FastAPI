@@ -36,7 +36,7 @@
     />
     <CommentSidebar v-if="mindMap && props.mindmapId" :mindMap="mindMap" :mindmapId="props.mindmapId" />
     <Search v-if="mindMap" :mindMap="mindMap" :mindmapId="props.mindmapId" />
-    <SidebarTrigger v-if="!isZenMode" />
+    <SidebarTrigger v-if="!isZenMode" :readonly="aiDialogReadonly" />
     <Setting
       v-if="mindMap && activeSidebar === 'setting'"
       :mindMap="mindMap"

@@ -129,6 +129,14 @@ test('搜索面板可与右侧栏并存，筛选弹窗仍收起侧栏且退出�
   assert.match(source, /returnTarget\.focus\?\.\(\)/)
 })
 
+test('AI 脑图像搜索面板一样占用左侧工作区而不覆盖画布', async () => {
+  const source = await readFile(editSourceUrl, 'utf8')
+
+  assert.match(source, /'has-ai-panel': aiPanelOpen/)
+  assert.match(source, /bus\.on\('aiPanelVisibilityChange', handleAiPanelVisibilityChange\)/)
+  assert.match(source, /&\.has-ai-panel \{[\s\S]*?--mindmap-workspace-left: calc\(var\(--mindmap-activity-width\) \+ 500px\)/)
+})
+
 test('节点大纲和快捷键停靠左侧并与左侧搜索面板互斥', async () => {
   const [sidebar, outline, shortcut, search, edit] = await Promise.all([
     readFile(sidebarSourceUrl, 'utf8'),

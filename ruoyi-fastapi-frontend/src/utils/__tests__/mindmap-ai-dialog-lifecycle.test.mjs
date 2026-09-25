@@ -55,6 +55,10 @@ function harness() {
     activateQueuedFollowupTurn: async () => false,
     livePreviewOldestPendingAt: null,
     emitAiEditingState: noop,
+    bus: { emit: noop },
+    store: { activeSidebar: null },
+    actions: { setActiveSidebar: noop },
+    window: { innerWidth: 1024 },
   }
   Object.defineProperty(s, 'directCanvasOwned', { get: () => ref(Boolean(s.directCanvasOwnerId.value)) })
   Object.defineProperty(s, 'livePreviewCanvasMutationBlocked', { get: () => ref(s.livePreviewActive.value || s.preparingCanvas.value || Boolean(s.directCanvasOwnerId.value)) })

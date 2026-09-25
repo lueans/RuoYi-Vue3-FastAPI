@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { babelParse, parse } from '@vue/compiler-sfc'
 import { resolveMindmapAiAgentSelection } from '../mindmap-ai-agent-selection.js'
+import { isMindmapSidebarReadonlySafe } from '../../components/MindMap/useStore.js'
 
 const dialog = await readFile(
   new URL('../../components/MindMap/MindmapAiDialog.vue', import.meta.url),
@@ -18,6 +19,10 @@ const toolbar = await readFile(
 )
 const activityBar = await readFile(
   new URL('../../components/MindMap/WorkspaceActivityBar.vue', import.meta.url),
+  'utf8',
+)
+const sidebarTrigger = await readFile(
+  new URL('../../components/MindMap/SidebarTrigger.vue', import.meta.url),
   'utf8',
 )
 const api = await readFile(
@@ -180,13 +185,63 @@ test('AI 面板由编辑器壳单一挂载且只读工作区保留权限受控�
   assert.doesNotMatch(toolbar, /<MindmapAiDialog\b|import MindmapAiDialog/)
   assert.match(toolbar, /v-hasPermi="\['mindmap:ai:use'\]"[\s\S]*bus\.emit\('showAiMindmap'\)/)
   assert.match(activityBar, /v-hasPermi="\['mindmap:ai:use'\]"[\s\S]*class="activityButton aiActivityButton"/)
-  assert.match(activityBar, /@click="bus\.emit\('showAiMindmap'\)"/)
+  assert.match(activityBar, /@click="toggleAiPanel"/)
+  assert.match(activityBar, /bus\.emit\(aiPanelOpen\.value \? 'hideAiMindmap' : 'showAiMindmap'\)/)
   const aiButtonClassOffset = activityBar.indexOf('class="activityButton aiActivityButton"')
   const aiButtonOpenTag = activityBar.slice(
     activityBar.lastIndexOf('<button', aiButtonClassOffset),
     activityBar.indexOf('>', aiButtonClassOffset) + 1,
   )
   assert.doesNotMatch(aiButtonOpenTag, /v-if=.*isReadonly/)
+})
+
+test('AI 准备和生成期间右侧工具保持显示，写入锁解除后恢复可用', () => {
+  const editorState = {
+    props: { readonly: false, mindmapId: 1 }, serverCanEdit: ref(true),
+    aiEditingBlocked: ref(false), aiPreparationEditingBlocked: ref(false),
+    authoritativeRecoveryEditingBlocked: ref(false), collaborationBarrierEditingBlocked: ref(false),
+    versionTransitionEditingBlocked: ref(false), importTransitionEditingBlocked: ref(false),
+  }
+  const tools = ['nodeStyle', 'nodeTagSidebar', 'formulaSidebar', 'setting'].map(value => ({ value }))
+  const opened = []
+  const state = {
+    props: { readonly: false }, isReadonly: ref(false), hideWriteTools: ref(false),
+    sidebarTriggerList: tools, canManageCollaborators: ref(false),
+    viewportWidth: ref(1440), activeSidebar: ref(null),
+    readonlyHeaderSidebarNames: new Set(['outline', 'versionHistory']),
+    isMindmapSidebarReadonlySafe,
+    isTriggerActive: () => false,
+    resolveFormatSidebar: () => 'baseStyle',
+    actions: { setActiveSidebar: name => opened.push(name) },
+    nextTick: callback => callback(), bus: { emit() {} },
+  }
+  const refreshTools = () => {
+    state.props.readonly = computedValue('aiDialogReadonly', editorState, editor)
+    state.isReadonly.value = computedValue('isReadonly', editorState, editor)
+    state.hideWriteTools.value = computedValue('hideWriteTools', state, sidebarTrigger)
+    return computedValue('triggerList', state, sidebarTrigger)
+  }
+  const click = executeFunction('triggerClick', state, sidebarTrigger)
+
+  assert.deepEqual(refreshTools(), tools)
+  for (const flag of ['aiPreparationEditingBlocked', 'aiEditingBlocked']) {
+    editorState[flag].value = true
+    assert.deepEqual(refreshTools(), tools)
+    for (const item of tools) click(item)
+    assert.deepEqual(opened, [], '临时锁定不能通过保留的入口绕过写保护')
+    editorState[flag].value = false
+  }
+  assert.deepEqual(refreshTools(), tools)
+  click(tools[0])
+  assert.deepEqual(opened, ['baseStyle'])
+
+  editorState.serverCanEdit.value = false
+  assert.deepEqual(refreshTools(), [], '真实无写权限仍隐藏编辑工具')
+  editorState.serverCanEdit.value = true
+  editorState.props.readonly = true
+  assert.deepEqual(refreshTools(), [], '只读路由保持原有入口规则')
+  assert.match(editor, /<SidebarTrigger\b[^>]*:readonly="aiDialogReadonly"/)
+  assert.match(sidebarTrigger, /:disabled="isReadonly && !isMindmapSidebarReadonlySafe\(item.value\)"/)
 })
 
 test('AI 抽屉内所有浮层高于抽屉，Agent 与会话选项可见且可点击', () => {
@@ -548,7 +603,10 @@ test('AI 抽屉展示安全会话与连接状态，脑图只在主编辑器流�
   assert.match(dialog, /size="500px"/)
   assert.match(dialog, /:modal="false"/)
   assert.match(dialog, /modal-penetrable/)
-  assert.match(dialog, /:z-index="4000"/)
+  assert.match(dialog, /:z-index="2001"/)
+  assert.match(dialog, /\.mindmapAiDrawerOverlay \{[\s\S]*?top: 52px !important;[\s\S]*?left: 44px !important;[\s\S]*?width: 500px !important;/)
+  assert.match(dialog, /watch\(visible, value => \{[\s\S]*?aiPanelVisibilityChange/)
+  assert.match(dialog, /watch\(\(\) => store\.activeSidebar,[\s\S]*?requestDialogClose\(\)/)
   assert.match(dialog, /class="activitySidebar"/)
   assert.match(dialog, /v-for="turn in conversationTurns"/)
   assert.match(dialog, /connectionStateLabel/)

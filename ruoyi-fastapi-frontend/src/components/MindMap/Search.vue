@@ -880,6 +880,7 @@ function handleSearchInfoChange(data) {
 }
 
 function showSearch() {
+  bus.emit('hideAiMindmap')
   if (!show.value) {
     focusReturnTarget = document.activeElement
   }

@@ -26,10 +26,12 @@
       <button
         v-hasPermi="['mindmap:ai:use']"
         class="activityButton aiActivityButton"
+        :class="{ active: aiPanelOpen }"
         type="button"
-        aria-label="打开 AI 脑图面板"
+        :aria-label="aiPanelOpen ? '关闭 AI 脑图面板' : '打开 AI 脑图面板'"
+        :aria-pressed="aiPanelOpen"
         title="AI 脑图"
-        @click="bus.emit('showAiMindmap')"
+        @click="toggleAiPanel"
       >
         <el-icon aria-hidden="true"><MagicStick /></el-icon>
       </button>
@@ -69,6 +71,7 @@ import bus from './useEventBus'
 import { actions, store, isMindmapSidebarReadonlySafe } from './useStore'
 
 const searchOpen = ref(false)
+const aiPanelOpen = ref(false)
 const activeSidebar = computed(() => store.activeSidebar)
 const isReadonly = computed(() => store.isReadonly)
 const canManageCollaborators = computed(() => store.canManageCollaborators)
@@ -82,6 +85,14 @@ function toggleSearch() {
   bus.emit(searchOpen.value ? 'hide_search' : 'show_search')
 }
 
+function onAiPanelVisibilityChange(visible) {
+  aiPanelOpen.value = visible === true
+}
+
+function toggleAiPanel() {
+  bus.emit(aiPanelOpen.value ? 'hideAiMindmap' : 'showAiMindmap')
+}
+
 function toggleSidebar(sidebarName) {
   if (isReadonly.value && !isMindmapSidebarReadonlySafe(sidebarName)) return
   const nextSidebar = activeSidebar.value === sidebarName ? null : sidebarName
@@ -91,10 +102,12 @@ function toggleSidebar(sidebarName) {
 
 onMounted(() => {
   bus.on('searchPanelVisibilityChange', onSearchVisibilityChange)
+  bus.on('aiPanelVisibilityChange', onAiPanelVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   bus.off('searchPanelVisibilityChange', onSearchVisibilityChange)
+  bus.off('aiPanelVisibilityChange', onAiPanelVisibilityChange)
 })
 </script>
 

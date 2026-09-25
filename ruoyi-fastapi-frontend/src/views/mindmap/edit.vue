@@ -4,6 +4,7 @@
     :class="{
       'has-command-bar': documentLoaded && !isZenMode && !isReadonly,
       'has-search-panel': searchPanelOpen,
+      'has-ai-panel': aiPanelOpen,
       'has-left-panel': isLeftSidebarActive,
       'has-right-panel': Boolean(activeSidebar && !isLeftSidebarActive),
       'is-dark': isDark,
@@ -387,6 +388,7 @@ const mobileCommandTriggerRef = ref(null)
 const mobileCommandCloseRef = ref(null)
 const mobileCommandOpen = ref(false)
 const searchPanelOpen = ref(false)
+const aiPanelOpen = ref(false)
 const mindmapId = computed(() => parseMindmapRouteId(route.query.id))
 const hasValidMindmapId = computed(() => mindmapId.value !== null)
 const requestedReadonly = computed(() => route.query.readonly === '1')
@@ -604,6 +606,10 @@ function openFilter() {
 
 function handleSearchPanelVisibilityChange(visible) {
   searchPanelOpen.value = visible === true
+}
+
+function handleAiPanelVisibilityChange(visible) {
+  aiPanelOpen.value = visible === true
 }
 
 function toggleSidebar(sidebarName) {
@@ -849,6 +855,7 @@ onMounted(() => {
   window.addEventListener('keydown', handleMobileCommandKeydown)
   window.addEventListener('resize', handleMobileCommandResize)
   bus.on('searchPanelVisibilityChange', handleSearchPanelVisibilityChange)
+  bus.on('aiPanelVisibilityChange', handleAiPanelVisibilityChange)
 })
 
 onBeforeUnmount(() => {
@@ -857,6 +864,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleMobileCommandKeydown)
   window.removeEventListener('resize', handleMobileCommandResize)
   bus.off('searchPanelVisibilityChange', handleSearchPanelVisibilityChange)
+  bus.off('aiPanelVisibilityChange', handleAiPanelVisibilityChange)
 })
 </script>
 
@@ -882,6 +890,10 @@ onBeforeUnmount(() => {
 
   &.has-search-panel {
     --mindmap-workspace-left: calc(var(--mindmap-activity-width) + 280px);
+  }
+
+  &.has-ai-panel {
+    --mindmap-workspace-left: calc(var(--mindmap-activity-width) + 500px);
   }
 
   &.has-left-panel {
@@ -1557,6 +1569,7 @@ onBeforeUnmount(() => {
     }
 
     &.has-search-panel,
+    &.has-ai-panel,
     &.has-left-panel,
     &.has-right-panel {
       --mindmap-workspace-left: 0px;

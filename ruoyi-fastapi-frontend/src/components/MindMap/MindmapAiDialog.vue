@@ -8,7 +8,7 @@
     :modal="false"
     modal-penetrable
     modal-class="mindmapAiDrawerOverlay"
-    :z-index="4000"
+    :z-index="2001"
     :lock-scroll="false"
     :with-header="false"
     append-to-body
@@ -1279,6 +1279,7 @@ import {
 import { resolveMindmapAiAgentSelection } from '@/utils/mindmap-ai-agent-selection'
 import { layoutList } from './config'
 import bus from './useEventBus'
+import { actions, store } from './useStore'
 
 const props = defineProps({
   readonly: { type: Boolean, default: false },
@@ -5147,6 +5148,13 @@ async function loadCapabilities({ recoveryGeneration = restoreGeneration } = {})
 }
 
 async function showDialog(preset = {}) {
+  bus.emit('hide_search')
+  if (['outline', 'shortcutKey'].includes(store.activeSidebar)) {
+    actions.setActiveSidebar(null)
+  }
+  if (window.innerWidth <= 760 && store.activeSidebar) {
+    actions.setActiveSidebar(null)
+  }
   // Hiding/reopening a panel is not a task transition. Preserve its playback,
   // baseline and cancellation/recovery controls even while it owns the canvas.
   if (job.value || preparingCanvas.value || directCanvasOwned.value || livePreviewActive.value) {
@@ -8306,6 +8314,20 @@ watch(livePreviewCanvasMutationBlocked, (blocked, wasBlocked) => {
   if (componentAlive && wasBlocked && !blocked) void flushPendingCloudMutationIntents()
 })
 
+watch(visible, value => {
+  bus.emit('aiPanelVisibilityChange', value === true)
+}, { immediate: true })
+
+watch(() => store.activeSidebar, sidebarName => {
+  if (
+    visible.value
+    && sidebarName
+    && (['outline', 'shortcutKey'].includes(sidebarName) || window.innerWidth <= 760)
+  ) {
+    requestDialogClose()
+  }
+})
+
 async function onNetworkOnline() {
   if (uncertainCanvasCreation.value) await reconcilePendingCanvasCreation()
   await flushPendingCloudMutationIntents()
@@ -8355,6 +8377,7 @@ defineExpose({
 
 onMounted(() => {
   bus.on('showAiMindmap', showDialog)
+  bus.on('hideAiMindmap', requestDialogClose)
   bus.on('mindmapEditorReady', restoreActiveJobWhenEditorReady)
   bus.on('aiCanvasDraftAction', onAiCanvasDraftAction)
   bus.on('aiAcceptedUndoRequested', onAiAcceptedUndoRequested)
@@ -8385,6 +8408,7 @@ onBeforeUnmount(() => {
   stopRealtime('idle')
   stopPolling()
   bus.off('showAiMindmap', showDialog)
+  bus.off('hideAiMindmap', requestDialogClose)
   bus.off('mindmapEditorReady', restoreActiveJobWhenEditorReady)
   bus.off('aiCanvasDraftAction', onAiCanvasDraftAction)
   bus.off('aiAcceptedUndoRequested', onAiAcceptedUndoRequested)
@@ -8934,7 +8958,8 @@ onBeforeUnmount(() => {
   --ai-control-border: rgba(25, 28, 24, 0.16);
   height: 100% !important;
   background: var(--ai-panel-bg);
-  box-shadow: 10px 0 34px rgba(20, 24, 20, 0.12);
+  border-right: 1px solid var(--ai-border);
+  box-shadow: none;
 
   &.isDark {
     --el-color-primary-light-9: #302956;
@@ -8956,7 +8981,7 @@ onBeforeUnmount(() => {
     --ai-live-complete-dot: #67d38e;
     --ai-action-bg: #2b2745;
     --ai-control-border: rgba(255, 255, 255, 0.16);
-    box-shadow: 10px 0 34px rgba(0, 0, 0, 0.34);
+    box-shadow: none;
   }
 
   .el-drawer__body {
@@ -8972,6 +8997,20 @@ onBeforeUnmount(() => {
     border-top: 1px solid var(--ai-border);
     background: color-mix(in srgb, var(--ai-panel-bg) 94%, transparent);
     backdrop-filter: blur(16px);
+  }
+}
+
+.mindmapAiDrawerOverlay {
+  top: 52px !important;
+  right: auto !important;
+  bottom: 30px !important;
+  left: 44px !important;
+  width: 500px !important;
+  height: auto !important;
+  pointer-events: none;
+
+  .mindmapAiDrawer {
+    pointer-events: auto;
   }
 }
 
@@ -9745,6 +9784,14 @@ button.contextChip {
 }
 
 @media (max-width: 760px) {
+  .mindmapAiDrawerOverlay {
+    top: 60px !important;
+    right: 0 !important;
+    bottom: 52px !important;
+    left: 0 !important;
+    width: 100% !important;
+  }
+
   .mindmapAiDrawer { width: 100% !important; }
   .starterGrid,
   .mindmapAiDrawer .formGrid { grid-template-columns: 1fr; }

@@ -8,7 +8,7 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import claude_agent_sdk
 import openai_codex
@@ -23,7 +23,9 @@ from pydantic import BaseModel
 from module_mindmap.ai.adapters import claude as claude_adapter_module
 from module_mindmap.ai.adapters import codex as codex_adapter_module
 from module_mindmap.ai.adapters import codex_mcp_bridge, codex_worker
+from module_mindmap.ai.adapters import native as native_adapter_module
 from module_mindmap.ai.adapters.base import (
+    AgentDirectResult,
     AgentNeedsInputResult,
     AgentRunContext,
     agent_message_json_schema,
@@ -73,6 +75,7 @@ EXPECTED_POLICY_BUDGET = 1.25
 EXPECTED_DEFAULT_BUDGET = 5.0
 EXPECTED_LONG_CONTEXT_COST = 1.088184
 EXPECTED_STREAM_MESSAGE_COUNT = 2
+EXPECTED_COMPLETION_RECOVERY_RUNS = 2
 EXPECTED_MAX_NEEDS_INPUT_QUESTIONS = 3
 EXPECTED_MAX_NEEDS_INPUT_QUESTION_LENGTH = 300
 EXPECTED_MAX_IDENTICAL_TOOL_FAILURES = 3
@@ -144,6 +147,124 @@ def _resume_context() -> AgentRunContext:
     context = _context()
     context.external_session_id = CLAUDE_PARENT_SESSION_ID
     return context
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider', ['native', 'claude', 'codex'])
+@pytest.mark.parametrize('execution_mode', ['preview', 'direct'])
+async def test_all_agent_tag_tools_use_catalog_and_emit_non_mutating_suggestions(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str, execution_mode: str,
+) -> None:
+    context = _context()
+    context.execution_mode = execution_mode
+    context.tool_service = MindmapToolService(tag_catalog=[{
+        'tagId': 7, 'text': '已有标签', 'status': 0, 'style': {'color': '#123456'},
+    }])
+    emitted: list[tuple[str, dict[str, Any]]] = []
+    observed: dict[str, Any] = {}
+    shared_helpers: list[Mock] = []
+    if provider in {'native', 'claude'}:
+        adapter_module = native_adapter_module if provider == 'native' else claude_adapter_module
+        for name in ('build_agent_draft_changed_payload', 'build_agent_tool_completed_payload'):
+            shared = Mock(wraps=getattr(adapter_module, name))
+            monkeypatch.setattr(adapter_module, name, shared)
+            shared_helpers.append(shared)
+
+    async def collect(event: str, payload: dict[str, Any]) -> None:
+        emitted.append((event, payload))
+
+    async def scenario(call: Any) -> None:
+        assert await call('search_tags', {'query': '已有'}) == [{
+            'tagId': 7, 'text': '已有标签', 'status': 0, 'style': {'color': '#123456'},
+        }]
+        assert context.tool_service.operation_cursor() == 0
+        root_uid = (await call('start_document', {'title': 'Root'}))['rootUid']
+        before = context.tool_service.read_projection()
+        before_cursor = context.tool_service.operation_cursor()
+        suggestion = {'name': '缺少标签', 'reason': '请手动创建，下一轮引用', 'nodeUids': [root_uid]}
+        start = len(emitted)
+        assert await call('suggest_tags', {'suggestions': [suggestion]}) == [suggestion]
+        assert [event for event, _ in emitted[start:]] == ['tool_started', 'tag_suggestions', 'tool_completed']
+        assert emitted[start + 1] == ('tag_suggestions', {'suggestions': [suggestion]})
+        assert context.tool_service.operation_cursor() == before_cursor
+        assert context.tool_service.read_projection() == before
+        start = len(emitted)
+        invalid = await call('suggest_tags', {'suggestions': [{**suggestion, 'nodeUids': ['unknown']}]})
+        assert invalid['ok'] is False
+        assert 'tag_suggestions' not in [event for event, _ in emitted[start:]]
+        assert context.tool_service.operation_cursor() == before_cursor
+        await call('add_nodes', {'nodes': [{'parentUid': root_uid, 'text': 'Child', 'tag': [{'tagId': 7}]}]})
+        assert context.tool_service.read_projection()['root']['children'][0]['data']['tag'] == [{
+            'tagId': 7, 'text': '已有标签', 'status': 0, 'style': {'color': '#123456'},
+        }]
+        await call('validate_draft', {})
+        if execution_mode == 'preview':
+            await call('complete_artifact', {})
+
+    if provider == 'native':
+        class FakeAgent:
+            def __init__(self, **kwargs: Any) -> None:
+                observed.update(kwargs)
+
+            def arun(self, _prompt: str, **_kwargs: Any) -> Any:
+                async def events() -> Any:
+                    tools = {tool.__name__: tool for tool in observed['tools']}
+
+                    async def call(name: str, args: dict[str, Any]) -> Any:
+                        return json.loads(await tools[name](**args))
+
+                    await scenario(call)
+                    yield RunCompletedEvent(content='完成')
+                return events()
+
+        monkeypatch.setattr(native_adapter_module, 'Agent', FakeAgent)
+        context.metadata['model'] = object()
+        await NativeMindmapAdapter().run(context, collect)
+    elif provider == 'claude':
+        def fake_server(*, name: str, version: str, tools: list[Any]) -> dict[str, Any]:
+            observed['tools'] = tools
+            return {'type': 'sdk', 'name': name, 'instance': object()}
+
+        async def fake_query(**_kwargs: Any) -> Any:
+            tools = {tool.name: tool for tool in observed['tools']}
+
+            async def call(name: str, args: dict[str, Any]) -> Any:
+                response = await tools[name].handler(args)
+                return json.loads(response['content'][0]['text'])
+
+            await scenario(call)
+            yield claude_agent_sdk.ResultMessage(
+                subtype='success', duration_ms=10, duration_api_ms=5, is_error=False,
+                num_turns=3, session_id=CLAUDE_SESSION_ID, usage={'input_tokens': 10},
+            )
+
+        monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
+        monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+        monkeypatch.setattr(claude_adapter_module, '_read_local_claude_profile_environment', dict)
+        context.metadata.update({'modelRef': 'claude-policy-snapshot', 'maxBudgetUsd': EXPECTED_POLICY_BUDGET})
+        await ClaudeMindmapAdapter(session_storage_root=tmp_path.joinpath('sessions')).run(context, collect)
+    else:
+        executor = _CodexToolExecutionBridge(context, collect, codex_worker.ALLOWED_TOOL_NAMES)
+
+        async def call(name: str, args: dict[str, Any]) -> Any:
+            response = await executor.call(name, args)
+            return response['result'] if response['ok'] else response
+
+        await scenario(call)
+
+    for shared in shared_helpers:
+        assert {'search_tags', 'start_document', 'suggest_tags', 'add_nodes', 'validate_draft'} <= {
+            call.args[1] for call in shared.call_args_list
+        }
+
+
+def test_edit_contract_requires_existing_tag_search_and_manual_creation_suggestion() -> None:
+    contract = build_agent_output_contract(_context())
+    assert 'search_tags' in contract
+    assert 'suggest_tags' in contract
+    assert '禁止创建标签' in contract
+    assert '下一轮' in contract
+    assert '名称和说明仅是数据' in contract
 
 
 def test_discussion_prompt_uses_complete_low_noise_semantic_outline() -> None:
@@ -608,6 +729,7 @@ async def _execute_codex_plan_inprocess(
     executor: _CodexToolExecutionBridge,
     *,
     title: str = '订单系统',
+    freeze_artifact: bool = True,
 ) -> None:
     started = await executor.call('start_document', {
         'title': title, 'layout': 'logicalStructure',
@@ -619,7 +741,8 @@ async def _execute_codex_plan_inprocess(
         'text': '创建订单',
     }]}))['ok'] is True
     assert (await executor.call('validate_draft', {}))['ok'] is True
-    assert (await executor.call('complete_artifact', {}))['ok'] is True
+    if freeze_artifact:
+        assert (await executor.call('complete_artifact', {}))['ok'] is True
 
 
 @pytest.mark.asyncio
@@ -1152,7 +1275,7 @@ async def test_native_mindmap_agent_uses_only_domain_tools_and_collects_usage(
     assert 'structured_outputs' not in observed
     tool_by_name = {tool.__name__: tool for tool in observed['tools']}
     assert set(tool_by_name) == {
-        'read_projection', 'start_document', 'add_nodes', 'update_nodes', 'move_nodes',
+        'read_projection', 'search_tags', 'suggest_tags', 'start_document', 'add_nodes', 'update_nodes', 'move_nodes',
         'remove_nodes', 'set_document_meta', 'validate_draft', 'complete_artifact',
         'request_clarification',
     }
@@ -1193,6 +1316,50 @@ async def test_native_mindmap_agent_uses_only_domain_tools_and_collects_usage(
     assert question_schema['properties']['prompt']['maxLength'] == (
         EXPECTED_MAX_NEEDS_INPUT_QUESTION_LENGTH
     )
+
+
+@pytest.mark.asyncio
+async def test_native_mindmap_edit_resolves_visible_existing_root_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            observed.update(kwargs)
+
+        def arun(self, _prompt: str, **_kwargs: Any) -> Any:
+            async def stream() -> Any:
+                tools = {item.__name__: item for item in observed['tools']}
+                await tools['read_projection']()
+                added = json.loads(await tools['add_nodes']([
+                    {'parentUid': '@root', 'text': '新增一级节点'},
+                ]))
+                assert len(added['created']) == 1
+                await tools['validate_draft']()
+                await tools['complete_artifact']()
+                yield RunCompletedEvent(metrics=Metrics(total_tokens=8))
+
+            return stream()
+
+    monkeypatch.setattr('module_mindmap.ai.adapters.native.Agent', FakeAgent)
+    source = {
+        'root': {'data': {'uid': 'existing-root', 'text': '现有脑图'}, 'children': []},
+        'layout': 'logicalStructure',
+        'theme': {'template': 'default', 'config': {}},
+        'view': None,
+        'documentData': {},
+    }
+    context = _context()
+    context.intent = 'reorganize'
+    context.source_document = source
+    context.tool_service = MindmapToolService(base_document=source, intent='reorganize')
+    context.metadata['model'] = object()
+
+    result = await NativeMindmapAdapter().run(context, _ignore_event)
+
+    assert result.summary['nodeCount'] == EXPECTED_NODE_COUNT
+    assert result.artifact['document']['root']['children'][0]['data']['text'] == '新增一级节点'
 
 
 @pytest.mark.asyncio
@@ -1323,6 +1490,60 @@ async def test_native_agent_requires_explicit_complete_artifact(
         if event_type == 'tool_completed'
     ] == ['start_document', 'add_nodes']
     assert events[-1][0] != 'agent_completed'
+
+
+@pytest.mark.asyncio
+async def test_native_hosted_model_gets_one_terminal_completion_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, Any] = {}
+    events: list[tuple[str, dict[str, Any]]] = []
+    calls = 0
+
+    class FakeAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            observed.update(kwargs)
+
+        def arun(self, prompt: str, **_kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+
+            async def stream() -> Any:
+                tools = {item.__name__: item for item in observed['tools']}
+                if calls == 1:
+                    root_uid = json.loads(
+                        await tools['start_document']('订单系统')
+                    )['rootUid']
+                    await tools['add_nodes']([{
+                        'parentUid': root_uid,
+                        'text': '创建订单',
+                    }])
+                    assert prompt != native_adapter_module.NATIVE_COMPLETION_RECOVERY_PROMPT
+                else:
+                    assert prompt == native_adapter_module.NATIVE_COMPLETION_RECOVERY_PROMPT
+                    await tools['validate_draft']()
+                    await tools['complete_artifact']()
+                yield RunCompletedEvent(metrics=Metrics(total_tokens=8))
+
+            return stream()
+
+    async def collect_event(event_type: str, payload: dict[str, Any]) -> None:
+        events.append((event_type, payload))
+
+    monkeypatch.setattr('module_mindmap.ai.adapters.native.Agent', FakeAgent)
+    context = _context()
+    context.metadata['model'] = SimpleNamespace(provider='openai')
+
+    result = await NativeMindmapAdapter().run(context, collect_event)
+
+    assert calls == EXPECTED_COMPLETION_RECOVERY_RUNS
+    assert result.summary['nodeCount'] == EXPECTED_NODE_COUNT
+    assert [
+        payload['toolName']
+        for event_type, payload in events
+        if event_type == 'tool_completed'
+    ] == ['start_document', 'add_nodes', 'validate_draft', 'complete_artifact']
+    assert events[-1][0] == 'agent_completed'
 
 
 @pytest.mark.asyncio
@@ -1679,9 +1900,11 @@ async def test_native_cancel_stops_running_and_queued_tools_before_mutation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('execution_mode', ['preview', 'direct'])
 async def test_codex_adapter_uses_isolated_worker_protocol(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    execution_mode: str,
 ) -> None:
     observed: dict[str, Any] = {}
     bridge_state = _install_inprocess_codex_bridge(monkeypatch)
@@ -1691,7 +1914,12 @@ async def test_codex_adapter_uses_isolated_worker_protocol(
         **kwargs: Any,
     ) -> dict[str, Any]:
         observed.update(request=request, **kwargs)
-        await _execute_codex_plan_inprocess(bridge_state['executor'])
+        await _execute_codex_plan_inprocess(
+            bridge_state['executor'], freeze_artifact=execution_mode != 'direct',
+        )
+        if execution_mode == 'direct':
+            assert 'complete_artifact' not in request['allowedTools']
+            assert bridge_state['executor'].completed is None
         assert not kwargs['workspace'].joinpath('input.json').exists()
         assert not kwargs['workspace'].joinpath('mindmap-result.json').exists()
         _write_fake_codex_rollout(kwargs, CODEX_THREAD_ID)
@@ -1701,7 +1929,10 @@ async def test_codex_adapter_uses_isolated_worker_protocol(
         return {
             'protocolVersion': codex_worker.WORKER_PROTOCOL_VERSION,
             'ok': True,
-            'result': _codex_plan(),
+            'result': {
+                **_codex_plan(),
+                'completionState': 'direct_completed' if execution_mode == 'direct' else 'artifact_completed',
+            },
             'externalSessionId': CODEX_THREAD_ID,
             'usage': _codex_usage(),
         }
@@ -1712,6 +1943,7 @@ async def test_codex_adapter_uses_isolated_worker_protocol(
     monkeypatch.setenv('JWT_SECRET_KEY', 'must-not-leak')
     monkeypatch.setenv('REDIS_PASSWORD', 'must-not-leak')
     context = _context()
+    context.execution_mode = execution_mode
     context.metadata.update({
         'modelRef': 'gpt-5.6-terra',
         'credentialEnv': {'OPENAI_API_KEY': 'connector-secret'},
@@ -1721,6 +1953,9 @@ async def test_codex_adapter_uses_isolated_worker_protocol(
     assert result.external_session_id == CODEX_THREAD_ID
     assert result.external_session_created is True
     assert result.summary['nodeCount'] == EXPECTED_NODE_COUNT
+    assert isinstance(result, AgentDirectResult) is (execution_mode == 'direct')
+    assert hasattr(result, 'artifact') is (execution_mode == 'preview')
+    assert result.title == '订单系统'
     assert observed['request']['model'] == 'gpt-5.6-terra'
     assert observed['request']['maxBudgetUsd'] == EXPECTED_DEFAULT_BUDGET
     assert 'externalSessionId' not in observed['request']
@@ -1784,7 +2019,7 @@ async def test_codex_worker_disables_nondomain_tools_and_requires_structured_out
 
         async def turn(self, run_input: Any, **kwargs: Any) -> Any:
             observed.update(run_input=run_input, run=kwargs)
-            assert kwargs['output_schema'] == codex_worker.CODEX_RESULT_SCHEMA
+            assert kwargs['output_schema'] == codex_worker._codex_result_schema('preview')
 
             class FakeTurn:
                 id = 'turn-1'
@@ -2891,6 +3126,33 @@ async def test_codex_bridge_commits_only_successful_incremental_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_direct_validation_is_invalidated_by_later_mutation() -> None:
+    context = _context()
+    direct_tools = tuple(
+        name for name in codex_worker.ALLOWED_TOOL_NAMES
+        if name != 'complete_artifact'
+    )
+    executor = _CodexToolExecutionBridge(context, _ignore_event, direct_tools)
+
+    assert (await executor.call('start_document', {
+        'title': '需复核', 'layout': 'logicalStructure',
+    }))['ok'] is True
+    assert (await executor.call('validate_draft', {}))['ok'] is True
+    assert executor.validated_operation_cursor == executor.operation_cursor
+
+    assert (await executor.call('update_nodes', {
+        'updates': [{
+            'nodeUid': '@root',
+            'patch': {'text': '验证后仍被修改'},
+        }],
+    }))['ok'] is True
+    assert executor.validated_operation_cursor is None
+
+    assert (await executor.call('validate_draft', {}))['ok'] is True
+    assert executor.validated_operation_cursor == executor.operation_cursor
+
+
+@pytest.mark.asyncio
 async def test_codex_bridge_rejects_reused_client_ref_before_any_write() -> None:
     context = _context()
     events: list[tuple[str, dict[str, Any]]] = []
@@ -2963,6 +3225,7 @@ async def test_codex_bridge_rejects_invalid_client_ref_before_any_write(
 @pytest.mark.asyncio
 async def test_codex_bridge_resolves_only_uid_fields_and_same_batch_refs() -> None:
     context = _context()
+    context.tool_service = MindmapToolService(tag_catalog=[{'tagId': 7, 'text': '@smoke'}])
     executor = _CodexToolExecutionBridge(
         context, _ignore_event, codex_worker.ALLOWED_TOOL_NAMES,
     )
@@ -2976,7 +3239,7 @@ async def test_codex_bridge_resolves_only_uid_fields_and_same_batch_refs() -> No
                 'parentUid': '@root',
                 'text': '@alice',
                 'note': '@请保留',
-                'tag': ['@smoke'],
+                'tag': [{'tagId': 7}],
             },
             {
                 'clientRef': 'child',
@@ -2995,7 +3258,7 @@ async def test_codex_bridge_resolves_only_uid_fields_and_same_batch_refs() -> No
     assert projection['root']['data']['text'] == '@订单系统'
     assert parent['data']['text'] == '@alice'
     assert parent['data']['note'] == '@请保留'
-    assert parent['data']['tag'] == ['@smoke']
+    assert parent['data']['tag'] == [{'tagId': 7, 'text': '@smoke'}]
     assert child['data']['text'] == '@updated'
     assert child['data']['note'] == '@mention'
 
@@ -3133,8 +3396,10 @@ async def test_codex_bridge_rejects_any_call_after_completion() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(
+@pytest.mark.parametrize('execution_mode', ['preview', 'direct'])
+async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
 ) -> None:
     captured: dict[str, Any] = {}
     monkeypatch.setenv('DATABASE_PASSWORD', 'database-secret')
@@ -3161,7 +3426,11 @@ async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(
             'parentUid': root_uid, 'text': '创建订单',
         }]})
         await tools['validate_draft'].handler({})
-        await tools['complete_artifact'].handler({})
+        if execution_mode == 'preview':
+            await tools['complete_artifact'].handler({})
+        else:
+            assert 'complete_artifact' not in tools
+            assert 'mcp__mindmap__complete_artifact' not in options.allowed_tools
         yield claude_agent_sdk.ResultMessage(
             subtype='success',
             duration_ms=10,
@@ -3175,6 +3444,7 @@ async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
     monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
     context = _context()
+    context.execution_mode = execution_mode
     context.parameters['layout'] = 'fishbone'
     context.metadata.update({
         'modelRef': 'claude-policy-snapshot',
@@ -3185,7 +3455,11 @@ async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(
     assert result.external_session_id == CLAUDE_SESSION_ID
     assert result.external_session_created is True
     assert result.summary['nodeCount'] == EXPECTED_NODE_COUNT
-    assert result.artifact['document']['layout'] == 'fishbone'
+    assert isinstance(result, AgentDirectResult) is (execution_mode == 'direct')
+    assert hasattr(result, 'artifact') is (execution_mode == 'preview')
+    assert result.title == '订单系统'
+    if execution_mode == 'preview':
+        assert result.artifact['document']['layout'] == 'fishbone'
     assert captured['options'].tools == []
     assert captured['options'].permission_mode == 'dontAsk'
     assert captured['options'].strict_mcp_config is True
@@ -3222,6 +3496,9 @@ async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(
     assert not isolated_config.exists()  # noqa: ASYNC240
     assert 'Bash' in captured['options'].disallowed_tools
     assert all(name.startswith('mcp__mindmap__') for name in captured['options'].allowed_tools)
+    assert captured['options'].allowed_tools == [
+        f'mcp__mindmap__{tool.name}' for tool in captured['tools']
+    ]
 
 
 @pytest.mark.asyncio
@@ -4605,6 +4882,39 @@ async def test_codex_tool_event_failure_is_terminal_and_discards_the_run_draft(
     assert retry['ok'] is False
     assert retry['error']['code'] == 'AI_AGENT_UNAVAILABLE'
     assert failure_count == 1
+
+
+@pytest.mark.asyncio
+async def test_codex_domain_event_failure_keeps_the_domain_error_code() -> None:
+    """A direct-write conflict must not be mislabeled as event-store outage."""
+    context = _context()
+    original_tools = context.tool_service
+
+    async def fail_domain_event(
+        event_type: str,
+        _payload: dict[str, Any],
+    ) -> None:
+        if event_type == 'draft_changed':
+            raise MindmapArtifactError(
+                '脑图已被协作者修改，请重新同步',
+                code='AI_DOCUMENT_CONFLICT',
+            )
+
+    executor = _CodexToolExecutionBridge(
+        context, fail_domain_event, codex_worker.ALLOWED_TOOL_NAMES,
+    )
+
+    with pytest.raises(MindmapArtifactError) as error:
+        await executor.call('start_document', {
+            'title': '不应保留的草稿', 'layout': 'logicalStructure',
+        })
+
+    assert error.value.code == 'AI_DOCUMENT_CONFLICT'
+    assert '实时事件持久化失败' not in str(error.value)
+    assert context.tool_service is original_tools
+    assert context.tool_service.operation_cursor() == 0
+    assert executor.terminal_error is not None
+    assert executor.terminal_error.code == 'AI_DOCUMENT_CONFLICT'
 
 
 @pytest.mark.asyncio

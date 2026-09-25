@@ -17,6 +17,7 @@ import { getSafeMindMapHyperlink } from '../../../utils/hyperlink'
 import { addSafeSvgTitle } from '../../../utils/svg'
 import { getSafeMindMapAttachmentUrl } from '../../../utils/attachment'
 import { getSafeMindMapImageUrl } from '../../../utils/image'
+import { createTextReveal, textGraphemes } from '../../../utils/textReveal'
 
 // 测量svg文本宽高
 const measureText = (text, style) => {
@@ -241,6 +242,18 @@ function createRichTextNode(specifyText) {
 
 //  创建文本节点
 function createTextNode(specifyText) {
+  const target = typeof specifyText !== 'string'
+    ? this.renderer.textRevealTargets?.get(String(this.uid))
+    : null
+  const textData = createMeasuredTextNode.call(this, target ? target.text : specifyText)
+  if (target) {
+    // Mask while detached, before renderSelf/layout can attach this group.
+    textData.reveal = createTextReveal(textData, target.text, this.getData('text'), this.getData('richText'))
+  }
+  return textData
+}
+
+function createMeasuredTextNode(specifyText) {
   if (this.getData('needUpdate')) {
     delete this.nodeData.data.needUpdate
   }
@@ -265,7 +278,7 @@ function createTextNode(specifyText) {
     this.mindMap.opt
   let isMultiLine = textArr.length > 1
   textArr.forEach((item, index) => {
-    let arr = item.split('')
+    let arr = textGraphemes(item)
     let lines = []
     let line = []
     while (arr.length) {

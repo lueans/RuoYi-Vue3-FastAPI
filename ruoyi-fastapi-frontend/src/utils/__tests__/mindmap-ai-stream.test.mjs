@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  applyMindmapAiDraftDelta,
   buildMindmapAiTimelineEnvelopeKey,
   consumeMindmapAiRealtimeEvents,
   describeMindmapAiAgentProgress,
@@ -174,55 +173,49 @@ test('SSE parser reports malformed JSON once and rejects oversized frames', () =
   )
 })
 
-test('draft delta replays create, update, move, delete and metadata operations', () => {
-  const started = applyMindmapAiDraftDelta(null, {
-    initialState: {
+test('draft tree changes are delivered only from versioned cloud snapshots, never replayed from SSE operations', async () => {
+  const node = (uid, text, children = []) => ({ data: { uid, text }, children })
+  const documents = [
+    {
       root: { data: { uid: 'root', text: '旧标题' }, children: [] },
       layout: 'logicalStructure',
       theme: { template: 'default', config: {} },
       view: null,
       documentData: {},
     },
-    operations: [],
+    { root: node('root', '新标题', [node('a', 'A+', [node('b', 'B')])]), layout: 'mindMap' },
+    { root: node('root', '新标题', [node('a', 'A+')]), layout: 'mindMap' },
+  ]
+  const originalDocuments = structuredClone(documents)
+  const delivered = []
+  const requested = []
+  const cursor = await consumeMindmapAiRealtimeEvents('cloud-only', {
+    streamImpl: async (_jobId, { onEvent }) => {
+      for (let index = 0; index < documents.length; index++) {
+        await onEvent({
+          eventType: index === 0 ? 'draft_initialized' : 'draft_changed',
+          data: { sequence: index + 1, payload: {
+            previewAvailable: true, previewVersion: index + 1,
+            // Old persisted envelopes can still contain operations. They must
+            // not mutate or replace the HTTP checkpoint chosen by its version.
+            initialState: { root: node('wrong', '过时本地树') },
+            operations: [{ type: 'delete_subtree', nodeUid: 'a', payload: null }],
+          } },
+        })
+        await new Promise(resolve => setImmediate(resolve))
+      }
+    },
+    fetchDraft: async (jobId, { version }) => {
+      assert.equal(jobId, 'cloud-only')
+      requested.push(version)
+      return { data: { available: true, operationCursor: version, document: documents[version - 1] } }
+    },
+    onDraft: preview => delivered.push(preview.document),
   })
-  const created = applyMindmapAiDraftDelta(started, {
-    operations: [
-      {
-        type: 'create_node',
-        nodeUid: 'a',
-        payload: { parentUid: 'root', index: 0, data: { uid: 'a', text: 'A' } },
-      },
-      {
-        type: 'create_node',
-        nodeUid: 'b',
-        payload: { parentUid: 'root', index: 1, data: { uid: 'b', text: 'B' } },
-      },
-      {
-        type: 'update_node',
-        nodeUid: 'a',
-        payload: { patch: { text: 'A+' } },
-      },
-      {
-        type: 'move_node',
-        nodeUid: 'b',
-        payload: { parentUid: 'a', index: 0 },
-      },
-      {
-        type: 'set_document_meta',
-        payload: { title: '新标题', layout: 'mindMap' },
-      },
-    ],
-  })
-  assert.equal(created.root.data.text, '新标题')
-  assert.equal(created.layout, 'mindMap')
-  assert.equal(created.root.children[0].data.text, 'A+')
-  assert.equal(created.root.children[0].children[0].data.text, 'B')
-
-  const removed = applyMindmapAiDraftDelta(created, {
-    operations: [{ type: 'delete_subtree', nodeUid: 'b', payload: null }],
-  })
-  assert.equal(removed.root.children[0].children.length, 0)
-  assert.equal(created.root.children[0].children.length, 1, 'replay must not mutate prior snapshots')
+  assert.deepEqual(requested, [1, 2, 3])
+  assert.deepEqual(delivered, originalDocuments)
+  assert.deepEqual(documents, originalDocuments, 'delivery must not mutate prior cloud snapshots')
+  assert.deepEqual(cursor, { afterSequence: 3, previewVersion: 3, previewEpoch: 1 })
 })
 
 test('realtime consumer deduplicates replayed events and fetches authoritative draft snapshots', async () => {
@@ -270,7 +263,7 @@ test('realtime consumer deduplicates replayed events and fetches authoritative d
   assert.deepEqual(observedEvents, [2, 3, 4])
   assert.deepEqual(fetchedVersions, [4, 7])
   assert.deepEqual(observedDrafts, [4, 7])
-  assert.deepEqual(cursor, { afterSequence: 4, previewVersion: 7 })
+  assert.deepEqual(cursor, { afterSequence: 4, previewVersion: 7, previewEpoch: 1 })
 })
 
 test('realtime consumer rejects stale or unavailable draft snapshots', async () => {
@@ -367,7 +360,22 @@ test('draft fetch failure is isolated and a later preview can still be accepted'
   assert.deepEqual(observedEvents, [1, 2])
   assert.deepEqual(draftErrors, [['temporary preview failure', 0]])
   assert.deepEqual(observedDrafts, [2])
-  assert.deepEqual(cursor, { afterSequence: 2, previewVersion: 2 })
+  assert.deepEqual(cursor, { afterSequence: 2, previewVersion: 2, previewEpoch: 1 })
+})
+
+test('draft transport cancellation propagates unchanged and is never downgraded to a recoverable draft failure', async () => {
+  for (const error of [{ name: 'AbortError' }, { name: 'CanceledError' }, { code: 'ERR_CANCELED' }]) {
+    const draftErrors = []
+    await assert.rejects(consumeMindmapAiRealtimeEvents('job-cancel', {
+      streamImpl: async (_jobId, options) => options.onEvent({
+        id: '1', eventType: 'draft_initialized',
+        data: { sequence: 1, payload: { previewAvailable: true, previewVersion: 0 } },
+      }),
+      fetchDraft: async () => { throw error },
+      onDraftError: failure => draftErrors.push(failure),
+    }), failure => failure === error)
+    assert.deepEqual(draftErrors, [])
+  }
 })
 
 test('rapid draft events request their exact versions without jumping to latest', async () => {
@@ -404,6 +412,84 @@ test('rapid draft events request their exact versions without jumping to latest'
 
   assert.deepEqual(requestedVersions, [1, 2])
   assert.deepEqual(observedDrafts, [2])
+})
+
+test('画布在任务仍在运行时接收首帧，后续密集事件只追最新草稿', async () => {
+  let releaseFirstFetch
+  let releaseStream
+  let notifyEventsConsumed
+  const eventsConsumed = new Promise(resolve => { notifyEventsConsumed = resolve })
+  const firstFetch = new Promise(resolve => { releaseFirstFetch = resolve })
+  const observedEvents = []
+  const requestedVersions = []
+  const displayedVersions = []
+  const preview = version => ({ data: {
+    available: true,
+    operationCursor: version,
+    document: { root: { data: { uid: 'root', text: `草稿 ${version}` }, children: [] } },
+  } })
+  const consuming = consumeMindmapAiRealtimeEvents('job-live', {
+    streamImpl: async (_jobId, options) => {
+      for (const version of [1, 2, 3, 4]) {
+        await options.onEvent({
+          id: String(version),
+          eventType: 'draft_changed',
+          data: { sequence: version, payload: { previewAvailable: true, previewVersion: version } },
+        })
+      }
+      await options.onEvent({ id: '5', eventType: 'tool_started', data: { sequence: 5, payload: {} } })
+      notifyEventsConsumed()
+      await new Promise(resolve => { releaseStream = resolve })
+    },
+    fetchDraft: async (_jobId, { version }) => {
+      requestedVersions.push(version)
+      if (version === 1) await firstFetch
+      return preview(version)
+    },
+    onEvent: event => observedEvents.push(event.data.sequence),
+    onDraft: draft => displayedVersions.push(draft.operationCursor),
+  })
+
+  await eventsConsumed
+  assert.deepEqual(observedEvents, [1, 2, 3, 4, 5], '草稿拉取不应堵住模型后续事件')
+  assert.deepEqual(requestedVersions, [1], '同一时间只拉取一个权威草稿')
+  releaseFirstFetch()
+  // The first draft is drawn before the task/stream is allowed to finish.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(displayedVersions, [1, 4])
+  assert.deepEqual(requestedVersions, [1, 4])
+  releaseStream()
+  assert.deepEqual(await consuming, { afterSequence: 5, previewVersion: 4, previewEpoch: 1 })
+})
+
+test('重启世代的小游标可以继续推送，并丢弃在途旧世代快照', async () => {
+  const displayed = []
+  let releaseOld
+  let fetchedOld
+  const oldStarted = new Promise(resolve => { fetchedOld = resolve })
+  const oldSnapshot = new Promise(resolve => { releaseOld = resolve })
+  const snapshot = (epoch, version) => ({ available: true, previewEpoch: epoch, operationCursor: version, document: { root: { data: { uid: 'root', text: `${epoch}:${version}` } } } })
+  const cursor = await consumeMindmapAiRealtimeEvents('restarted', {
+    previewVersion: 19,
+    previewEpoch: 1,
+    streamImpl: async (_id, { onEvent }) => {
+      const event = (sequence, epoch, version) => onEvent({ eventType: 'draft_changed', data: { sequence, payload: { previewAvailable: true, previewEpoch: epoch, previewVersion: version } } })
+      await event(1, 1, 20)
+      await oldStarted
+      await event(2, 2, 1)
+      await event(3, 1, 99)
+      await event(4, 2, 2)
+      releaseOld(snapshot(1, 20))
+    },
+    fetchDraft: async (_id, { version }) => {
+      if (version === 20) { fetchedOld(); return oldSnapshot }
+      assert.equal(version, 2)
+      return snapshot(2, version)
+    },
+    onDraft: preview => displayed.push([preview.previewEpoch, preview.operationCursor]),
+  })
+  assert.deepEqual(displayed, [[2, 2]])
+  assert.deepEqual(cursor, { afterSequence: 4, previewVersion: 2, previewEpoch: 2 })
 })
 
 test('Codex progress payload keeps only approved stage, progress and total tokens', () => {
@@ -523,6 +609,42 @@ test('authoritative snapshots accept coalesced ready or review to undone transit
     )
     assert.equal(merged.status, 'undone')
   }
+})
+
+test('direct-write terminal jobs can converge to undone after compensating undo', () => {
+  for (const status of ['completed_direct', 'failed', 'stale', 'cancelled']) {
+    const merged = mergeMindmapAiJobSnapshot(
+      { id: `job-${status}`, status, progress: 100, proposalId: 'receipt-1' },
+      { id: `job-${status}`, status: 'undone', progress: 100, proposalId: 'receipt-1' },
+    )
+    assert.equal(merged.status, 'undone')
+  }
+})
+
+test('明确拒绝高影响提案后允许 needs_review 收敛为 rejected，旧轮询不能复活任务', () => {
+  const review = {
+    id: 'job-rejected',
+    status: 'needs_review',
+    progress: 100,
+    artifactId: 'artifact-rejected',
+    proposalId: 'proposal-rejected',
+  }
+  const rejected = mergeMindmapAiJobSnapshot(review, {
+    ...review,
+    status: 'rejected',
+    progress: 100,
+  })
+  assert.equal(rejected.status, 'rejected')
+  assert.equal(rejected.artifactId, 'artifact-rejected')
+  assert.equal(rejected.proposalId, 'proposal-rejected')
+
+  assert.deepEqual(mergeMindmapAiJobSnapshot(rejected, {
+    ...review,
+    status: 'running',
+    progress: 60,
+    artifactId: null,
+    proposalId: null,
+  }), rejected)
 })
 
 test('replayed active events cannot rewind status while a newer worker recovery can', () => {

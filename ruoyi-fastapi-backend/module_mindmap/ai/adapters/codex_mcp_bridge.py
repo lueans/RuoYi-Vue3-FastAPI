@@ -30,13 +30,27 @@ class ModelToolProtocolError(ValueError):
 
 
 STRING = {'type': 'string', 'minLength': 1}
+TAG_REFERENCE_SCHEMA = {
+    'type': 'array', 'maxItems': 50,
+    'items': {'type': 'object', 'properties': {'tagId': {'type': 'integer', 'minimum': 1}},
+              'required': ['tagId'], 'additionalProperties': False},
+}
+TAG_SUGGESTIONS_SCHEMA = {
+    'type': 'array', 'minItems': 1, 'maxItems': 10,
+    'items': {'type': 'object', 'properties': {
+        'name': {'type': 'string', 'minLength': 1, 'maxLength': 100},
+        'reason': {'type': 'string', 'minLength': 1, 'maxLength': 500},
+        'nodeUids': {'type': 'array', 'maxItems': 200, 'uniqueItems': True,
+                     'items': {'type': 'string', 'minLength': 1, 'maxLength': 64}},
+    }, 'required': ['name', 'reason', 'nodeUids'], 'additionalProperties': False},
+}
 NODE_FIELDS = {
     'clientRef': {'type': 'string'},
     'parentUid': STRING,
     'text': STRING,
     'note': {'type': 'string'},
     'hyperlink': {'type': 'string'},
-    'tag': {'type': 'array'},
+    'tag': TAG_REFERENCE_SCHEMA,
 }
 PATCH_FIELDS = {
     key: value for key, value in NODE_FIELDS.items()
@@ -57,6 +71,16 @@ TOOL_DESCRIPTORS = {
     'read_projection': {
         'description': 'Read the current authorized mind-map draft projection.',
         'inputSchema': _schema({}, []),
+    },
+    'read_document_detail': {
+        'description': 'Read the authorized mind-map projection and bounded metadata.',
+        'inputSchema': _schema({}, []),
+    },
+    'get_node_tags': {
+        'description': 'Read tags from one authorized node, or all visible nodes.',
+        'inputSchema': _schema({
+            'nodeUid': STRING,
+        }, []),
     },
     'start_document': {
         'description': 'Create the isolated candidate document exactly once.',
@@ -92,6 +116,42 @@ TOOL_DESCRIPTORS = {
                 'maxItems': 200,
             },
         }, ['updates']),
+    },
+    'edit_node_text': {
+        'description': 'Edit the text of one authorized candidate node.',
+        'inputSchema': _schema({
+            'nodeUid': STRING,
+            'text': STRING,
+        }, ['nodeUid', 'text']),
+    },
+    'edit_node_tags': {
+        'description': 'Replace the tags of one authorized candidate node.',
+        'inputSchema': _schema({
+            'nodeUid': STRING,
+            'tags': TAG_REFERENCE_SCHEMA,
+        }, ['nodeUid', 'tags']),
+    },
+    'search_tags': {
+        'description': 'Search authorized existing tags. Never creates a tag.',
+        'inputSchema': _schema({
+            'query': {'type': 'string', 'maxLength': 200},
+            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50},
+        }, []),
+    },
+    'suggest_tags': {
+        'description': 'Suggest missing tags for the user to create manually and reference next turn; does not edit the draft.',
+        'inputSchema': _schema({'suggestions': TAG_SUGGESTIONS_SCHEMA}, ['suggestions']),
+    },
+    'add_comment': {
+        'description': 'Add a comment to one authorized candidate node.',
+        'inputSchema': _schema({
+            'nodeUid': STRING,
+            'content': {
+                'type': 'string',
+                'minLength': 1,
+                'maxLength': 5000,
+            },
+        }, ['nodeUid', 'content']),
     },
     'move_nodes': {
         'description': 'Move one to 200 nodes inside the isolated candidate.',
@@ -204,13 +264,19 @@ class CodexMindmapMcpProxy:
             return None
         if method == 'initialize':
             requested = (request.get('params') or {}).get('protocolVersion')
+            direct_mode = 'complete_artifact' not in self._allowed_tools
             result = {
                 'protocolVersion': requested or PROTOCOL_VERSION,
                 'capabilities': {'tools': {'listChanged': False}},
                 'serverInfo': {'name': 'ruoyi-codex-mindmap-bridge', 'version': '1.0.0'},
                 'instructions': (
                     'Tools operate one isolated server-side draft. '
-                    'Call complete_artifact explicitly and last.'
+                    + (
+                        'Call validate_draft after the final mutation and then return '
+                        'direct_completed; do not call complete_artifact.'
+                        if direct_mode
+                        else 'Call complete_artifact explicitly and last.'
+                    )
                 ),
             }
         elif method == 'ping':

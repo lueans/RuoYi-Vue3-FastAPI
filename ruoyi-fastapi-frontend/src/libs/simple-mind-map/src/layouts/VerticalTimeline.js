@@ -12,7 +12,7 @@ class VerticalTimeline extends Base {
   }
 
   //  布局
-  doLayout(callback) {
+  doLayout(callback, renderSession) {
     let task = [
       () => {
         this.computedBaseValue()
@@ -27,7 +27,7 @@ class VerticalTimeline extends Base {
         callback(this.root)
       }
     ]
-    asyncRun(task)
+    asyncRun(task, () => {}, renderSession)
   }
 
   //  遍历数据创建节点、计算根节点的位置，计算根节点的子节点的top值

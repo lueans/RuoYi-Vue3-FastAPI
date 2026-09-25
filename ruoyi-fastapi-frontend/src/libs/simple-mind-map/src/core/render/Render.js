@@ -90,6 +90,9 @@ class Render {
     this.isRendering = false
     // 是否存在等待渲染
     this.hasWaitRendering = false
+    // 等待中的下一帧沿用最后一次请求的渲染节奏。AI 实时预览使用异步
+    // 节点渲染，普通编辑仍然保持同步渲染。
+    this.hasWaitRenderingAsync = false
     // 用于缓存节点
     this.nodeCache = {}
     this.lastNodeCache = {}
@@ -100,11 +103,16 @@ class Render {
     this.renderSourceList = []
     // 收集render的回调函数
     this.renderCallbackList = []
+    this.renderErrorCallbackList = []
+    this.renderSession = null
+    this.renderRecoveryRequired = false
+    this.renderEventActive = false
     // 当前激活的节点列表
     this.activeNodeList = []
     // 防抖定时器
     this.emitNodeActiveEventTimer = null
     this.renderTimer = null
+    this.renderAsyncMode = false
     // 性能模式每次视图渲染都有独立会话，后续渲染可取消旧任务
     this.performanceRenderSession = null
     this.performanceRenderEventActive = false
@@ -146,6 +154,9 @@ class Render {
 
   // 重新设置思维导图数据
   setData(data) {
+    // Never let a previous layout's delayed tasks write into a replacement
+    // document. Its callers receive a failure, not a successful stale ACK.
+    if (this.renderSession || this.renderTimer) this.abortRender(new Error('脑图渲染已被新文档替代'))
     this.cancelPerformanceRender()
     const runtimeRoots = [
       this.root,
@@ -207,6 +218,7 @@ class Render {
       return false
     }
     if (nodeData?.data?.expand !== false) return true
+    if (this.aiPresentationExpandedNodeUids?.has(String(nodeData?.data?.uid))) return true
     if (this.transientVisibleNodeUids === null) return false
     const children = Array.isArray(nodeData?.children) ? nodeData.children : []
     return children.some(child => (
@@ -272,6 +284,7 @@ class Render {
   destroy() {
     if (this.destroyed) return
     this.destroyed = true
+    this.abortRender(new Error('脑图渲染器已销毁'))
     this.cancelPerformanceRender()
     this.onViewDataChange?.cancel()
     this.onNodeTextEditChange?.cancel()
@@ -283,6 +296,9 @@ class Render {
       cancelAnimationFrame(this.renderTimer)
       this.renderTimer = null
     }
+    this.renderAsyncMode = false
+    this.hasWaitRendering = false
+    this.hasWaitRenderingAsync = false
     clearTimeout(this.emitNodeActiveEventTimer)
     this.emitNodeActiveEventTimer = null
   }
@@ -691,31 +707,98 @@ class Render {
 
   // 渲染完毕的操作
   onRenderEnd() {
-    this.renderCallbackList.forEach(fn => {
-      fn()
-    })
+    const callbacks = this.renderCallbackList
     this.isRendering = false
     this.reRender = false
+    this.renderRecoveryRequired = false
     this.renderCallbackList = []
+    this.renderErrorCallbackList = []
     this.renderSourceList = []
+    this.renderEventActive = false
+    callbacks.forEach(fn => fn())
     this.mindMap.emit('node_tree_render_end')
+  }
+
+  // End a failed/cancelled transaction, including delayed layout AND node
+  // tasks. Keep existing SVG groups and invalidate measurements for the retry.
+  // A session identity prevents a late failure from aborting its successor.
+  abortRender(error, expectedSession = this.renderSession) {
+    if (expectedSession && expectedSession !== this.renderSession) return false
+    const session = this.renderSession
+    session?.cancel()
+    this.renderSession = null
+    if (this.renderTimer) cancelAnimationFrame(this.renderTimer)
+    this.renderTimer = null
+    const hadWork = this.isRendering || this.renderCallbackList.length > 0
+    if (hadWork) {
+      this.nodeCache = { ...this.lastNodeCache, ...this.nodeCache }
+      this.root ||= session?.previousRoot || null
+      this.renderRecoveryRequired = true
+    }
+    this.isRendering = false
+    this.hasWaitRendering = false
+    this.hasWaitRenderingAsync = false
+    this.reRender = false
+    const failures = this.renderErrorCallbackList
+    this.renderCallbackList = []
+    this.renderErrorCallbackList = []
+    this.renderSourceList = []
+    const emitEnd = this.renderEventActive
+    this.renderEventActive = false
+    failures.forEach(fail => fail(error))
+    if (emitEnd) this.mindMap.emit('node_tree_render_end')
+    if (hadWork) this.mindMap.emit('node_tree_render_error', error)
+    return hadWork
   }
 
   // 渲染
   render(callback, source) {
+    this.scheduleRender(callback, source, false)
+  }
+
+  // AI 实时预览可以让出事件循环，避免大脑图在连续帧之间长时间阻塞主线程。
+  // 该入口只改变节点渲染方式，不改变数据、历史和协作语义。
+  renderAsync(callback, source, onError) {
+    let pending = true
+    const fail = error => {
+      if (!pending) return
+      pending = false
+      onError?.(error)
+    }
+    if (this.destroyed) {
+      fail(new Error('脑图渲染器已销毁'))
+      return { cancel() {} }
+    }
+    this.renderErrorCallbackList.push(fail)
+    this.scheduleRender(() => {
+      if (!pending) return
+      pending = false
+      callback?.()
+    }, source, true)
+    return { cancel: error => {
+      if (pending) this.abortRender(error || new Error('脑图渲染已取消'))
+    } }
+  }
+
+  scheduleRender(callback, source, asyncRender) {
     if (this.destroyed) return
     this.addRenderParams(callback, source)
+    this.renderAsyncMode = asyncRender === true
     if (this.renderTimer) {
       cancelAnimationFrame(this.renderTimer)
     }
     this.renderTimer = requestAnimationFrame(() => {
       this.renderTimer = null
-      this._render()
+      try {
+        this._render(this.renderAsyncMode)
+      } catch (error) {
+        this.abortRender(error)
+      }
     })
   }
 
   // 真正的渲染
-  _render() {
+  _render(asyncRender = false) {
     if (this.destroyed) return
     this.cancelPerformanceRender()
     // 切换主题时，被收起的节点需要添加样式复位的标注
@@ -726,49 +809,65 @@ class Render {
     if (this.isRendering) {
       // 等待当前渲染完毕后再进行一次渲染
       this.hasWaitRendering = true
+      this.hasWaitRenderingAsync = asyncRender === true
       return
     }
     this.isRendering = true
-    // 节点缓存
-    this.lastNodeCache = this.nodeCache
-    this.nodeCache = {}
-    // 重新渲染需要清除激活状态
-    if (this.reRender) {
-      this.clearActiveNodeList()
-    }
-    // 如果没有节点数据
-    if (!this.renderTree) {
-      this.onRenderEnd()
-      return
-    }
-    this.mindMap.emit('node_tree_render_start')
-    // 计算布局
-    this.root = null
-    this.layout.doLayout(root => {
-      // 删除本次渲染时不再需要的节点
-      Object.keys(this.lastNodeCache).forEach(uid => {
-        if (!this.nodeCache[uid]) {
-          // 从激活节点列表里删除
-          this.removeNodeFromActiveList(this.lastNodeCache[uid])
-          this.emitNodeActiveEvent()
-          // 调用节点的销毁方法
-          this.lastNodeCache[uid].destroy()
-        }
-      })
-      // 更新根节点
-      this.root = root
-      // 渲染节点
-      this.root.render(() => {
-        this.isRendering = false
-        if (this.hasWaitRendering) {
-          this.hasWaitRendering = false
-          this.render()
-          return
-        }
+    const session = createAsyncRenderSession({ onError: error => this.abortRender(error, session) })
+    session.previousRoot = this.root
+    this.renderSession = session
+    const current = () => this.renderSession === session && session.isActive() && !this.destroyed
+    session.run(() => {
+      // 节点缓存
+      this.lastNodeCache = this.nodeCache
+      this.nodeCache = {}
+      if (this.reRender) this.clearActiveNodeList()
+      if (!this.renderTree) {
+        this.renderSession = null
+        session.cancel()
         this.onRenderEnd()
-      })
+        return
+      }
+      this.renderEventActive = true
+      this.mindMap.emit('node_tree_render_start')
+      if (!current()) return
+      this.root = null
+      this.layout.doLayout(root => {
+        if (!current()) return
+        session.run(() => {
+          // 删除本次渲染时不再需要的节点
+          Object.keys(this.lastNodeCache).forEach(uid => {
+            if (!this.nodeCache[uid]) {
+              this.removeNodeFromActiveList(this.lastNodeCache[uid])
+              this.emitNodeActiveEvent()
+              this.lastNodeCache[uid].destroy()
+            }
+          })
+          this.root = root
+          this.root.render(() => {
+            // MindMapNode finishes the final leaf after calling its completion
+            // callback. Wait for that stack to unwind before success/cancel;
+            // a finalizer error must still fail this transaction, not its heir.
+            Promise.resolve().then(() => session.run(() => {
+              if (!current()) return
+              this.renderSession = null
+              session.cancel()
+              this.isRendering = false
+              if (this.hasWaitRendering) {
+                const renderAsync = this.hasWaitRenderingAsync
+                this.hasWaitRendering = false
+                this.hasWaitRenderingAsync = false
+                if (renderAsync) this.renderAsync()
+                else this.render()
+                return
+              }
+              this.onRenderEnd()
+            }))
+          }, false, asyncRender === true, session)
+        })
+      }, session)
+      this.emitNodeActiveEvent()
     })
-    this.emitNodeActiveEvent()
   }
 
   // 当某个自定义节点内容改变后，可以调用该方法实时更新该节点大小和整体节点的定位
@@ -1799,9 +1898,16 @@ class Render {
 
   //  设置节点是否激活
   setNodeActive(node, active) {
-    this.mindMap.execCommand('SET_NODE_DATA', node, {
-      isActive: active
-    })
+    // Selection is navigation state and remains available in readonly mode.
+    // SET_NODE_DATA is deliberately blocked there, so update only this
+    // transient flag without granting a general data-write capability.
+    if (this.mindMap.opt.readonly) {
+      node.nodeData.data.isActive = active
+    } else {
+      this.mindMap.execCommand('SET_NODE_DATA', node, {
+        isActive: active
+      })
+    }
     node.updateNodeByActive(active)
   }
 

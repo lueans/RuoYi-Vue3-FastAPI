@@ -1,3 +1,7 @@
+from copy import deepcopy
+
+import pytest
+
 from module_mindmap.ai.diff import build_document_diff
 
 DELETED_NODE_COUNT = 2
@@ -47,3 +51,59 @@ def test_diff_marks_large_or_ten_percent_deletion_as_high_impact() -> None:
     assert impact['deletedCount'] == DELETED_NODE_COUNT
     assert impact['highImpact'] is True
     assert '10%' in impact['highImpactReasons'][0]
+
+
+def test_even_one_deletion_in_large_map_requires_destructive_review() -> None:
+    before = _document([_node(f'n{index}', f'N{index}') for index in range(100)])
+    after = deepcopy(before)
+    after['root']['children'].pop()
+    _, impact = build_document_diff(before, after)
+    assert impact['deletedCount'] == 1
+    assert impact['riskLevel'] == 'R3'
+    assert impact['requiresApproval'] is True
+    assert impact['highImpact'] is True
+
+
+@pytest.mark.parametrize('change', ['cross_branch', 'reorder', 'root', 'bulk', 'majority', 'metadata'])
+def test_structural_and_destructive_changes_require_review(change: str) -> None:
+    before = _document([_node(f'n{index}', f'N{index}') for index in range(30)])
+    after = deepcopy(before)
+    children = after['root']['children']
+    expected = 'R2'
+    if change == 'cross_branch':
+        children[0]['children'].append(children.pop())
+    elif change == 'reorder':
+        children.reverse()
+    elif change == 'root':
+        after['root']['data']['text'] = '新主题'
+        expected = 'R3'
+    elif change in {'bulk', 'majority'}:
+        for child in children[:7 if change == 'bulk' else 20]:
+            child['data']['text'] += ' revised'
+        expected = 'R3' if change == 'majority' else 'R2'
+    else:
+        after['layout'] = 'mindMap'
+    _, impact = build_document_diff(before, after)
+    assert impact['riskLevel'] == expected
+    assert impact['requiresApproval'] is True
+    assert impact['highImpactReasons']
+
+
+def test_new_sibling_insertion_is_not_misclassified_as_existing_node_reorder() -> None:
+    before = _document([_node('a', 'A'), _node('b', 'B')])
+    after = deepcopy(before)
+    after['root']['children'].insert(0, _node('new', 'New'))
+    after['root']['children'][1]['data']['text'] = 'A revised'
+    operations, impact = build_document_diff(before, after)
+    assert any(op['type'] == 'move_node' for op in operations)
+    assert impact['movedCount'] == 0
+    assert impact['riskLevel'] == 'R1'
+    assert impact['requiresApproval'] is False
+
+
+def test_unchanged_document_has_read_only_risk() -> None:
+    before = _document([_node('a', 'A')])
+    operations, impact = build_document_diff(before, deepcopy(before))
+    assert operations == []
+    assert impact['riskLevel'] == 'R0'
+    assert impact['requiresApproval'] is False

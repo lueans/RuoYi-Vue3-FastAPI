@@ -3,7 +3,7 @@
 import asyncio
 import json
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -28,6 +28,7 @@ from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
 from module_mindmap.entity.do.mindmap_ai_do import MINDMAP_AI_EVENT_SEQUENCE_MAX
 from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiArtifactValidateModel,
+    MindmapAiCancelModel,
     MindmapAiCloudApplyModel,
     MindmapAiCloudSaveModel,
     MindmapAiConnectorModel,
@@ -53,6 +54,50 @@ from utils.response_util import ResponseUtil
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{8,100}$')
 SSE_EVENT_TYPE_PATTERN = re.compile(r'^[a-z][a-z0-9_]{0,63}$')
+
+
+async def _run_job_creation(
+    db: AsyncSession,
+    user_id: int,
+    idempotency_key: str,
+    create: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Distinguish this request's business rejection from an unknown result.
+
+    The service can raise after committing (for example while scheduling or
+    serializing its response), and key/fingerprint conflicts can refer to an
+    already running job. Roll back unfinished work and check a fresh transaction
+    before adding the opt-in rejection receipt. Failure to verify stays unknown.
+
+    ``creationRejected`` is not a tombstone for this idempotency key: a previous
+    concurrent request may still commit later. Clients may only use it to release
+    a *first*, definitively rejected request, never an uncertain request replay.
+    """
+    try:
+        if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+            raise ServiceException(message='幂等键格式无效')
+        return await create()
+    except ServiceException as error:
+        # Preserve non-object legacy payloads without changing their contract.
+        if error.data is not None and not isinstance(error.data, dict):
+            raise
+        # Only this boundary may certify rejection; do not trust a nested
+        # service's stale or copied response metadata.
+        error_data = dict(error.data or {})
+        error_data.pop('creationRejected', None)
+        error.data = error_data or None
+        try:
+            await db.rollback()
+            existing = await MindmapAiDao.get_job_by_idempotency(
+                db, user_id, idempotency_key,
+            )
+        except Exception:
+            # Neither a rollback failure nor a failed verification read proves
+            # non-creation. Keep the original business error and uncertainty.
+            raise error from None
+        if existing is None:
+            error.data = {**error_data, 'creationRejected': True}
+        raise
 
 
 def _parse_last_event_id(value: str | None) -> int:
@@ -206,9 +251,14 @@ async def create_mindmap_ai_job(
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
     idempotency_key: Annotated[str, Header(alias='Idempotency-Key', min_length=8, max_length=100)],
 ) -> Response:
-    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
-        raise ServiceException(message='幂等键格式无效')
-    result = await MindmapAiService.create_job(query_db, model, current_user.user.user_id, idempotency_key)
+    result = await _run_job_creation(
+        query_db,
+        current_user.user.user_id,
+        idempotency_key,
+        lambda: MindmapAiService.create_job(
+            query_db, model, current_user.user.user_id, idempotency_key,
+        ),
+    )
     return ResponseUtil.success(data=result)
 
 
@@ -391,15 +441,15 @@ async def continue_mindmap_ai_job(
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
     idempotency_key: Annotated[str, Header(alias='Idempotency-Key', min_length=8, max_length=100)],
 ) -> Response:
-    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
-        raise ServiceException(message='幂等键格式无效')
-    return ResponseUtil.success(data=await MindmapAiService.create_followup_job(
+    result = await _run_job_creation(
         query_db,
-        job_id,
-        model,
         current_user.user.user_id,
         idempotency_key,
-    ))
+        lambda: MindmapAiService.create_followup_job(
+            query_db, job_id, model, current_user.user.user_id, idempotency_key,
+        ),
+    )
+    return ResponseUtil.success(data=result)
 
 
 @mindmap_ai_controller.post(
@@ -416,15 +466,15 @@ async def retry_mindmap_ai_job(
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
     idempotency_key: Annotated[str, Header(alias='Idempotency-Key', min_length=8, max_length=100)],
 ) -> Response:
-    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
-        raise ServiceException(message='幂等键格式无效')
-    return ResponseUtil.success(data=await MindmapAiService.retry_job(
+    result = await _run_job_creation(
         query_db,
-        job_id,
-        model,
         current_user.user.user_id,
         idempotency_key,
-    ))
+        lambda: MindmapAiService.retry_job(
+            query_db, job_id, model, current_user.user.user_id, idempotency_key,
+        ),
+    )
+    return ResponseUtil.success(data=result)
 
 
 async def _event_stream(
@@ -524,9 +574,15 @@ async def cancel_mindmap_ai_job(
     job_id: Annotated[str, Path(min_length=36, max_length=36)],
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    model: Annotated[MindmapAiCancelModel, Body()] = MindmapAiCancelModel(),
 ) -> Response:
     return ResponseUtil.success(
-        data=await MindmapAiService.cancel_job(query_db, job_id, current_user.user.user_id),
+        data=await MindmapAiService.cancel_job(
+            query_db,
+            job_id,
+            current_user.user.user_id,
+            preserve_draft=model.preserve_draft,
+        ),
     )
 
 
@@ -598,6 +654,22 @@ async def get_mindmap_ai_proposal(
 ) -> Response:
     return ResponseUtil.success(
         data=await MindmapAiService.get_proposal(query_db, proposal_id, current_user.user.user_id),
+    )
+
+
+@mindmap_ai_controller.post('/proposals/{proposal_id}/reject', summary='拒绝尚未应用的 AI 脑图提案')
+async def reject_mindmap_ai_proposal(
+    request: Request,
+    proposal_id: Annotated[str, Path(min_length=36, max_length=36)],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    return ResponseUtil.success(
+        data=await MindmapAiService.reject_proposal(
+            query_db,
+            proposal_id,
+            current_user.user.user_id,
+        ),
     )
 
 

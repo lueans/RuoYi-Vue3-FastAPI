@@ -12,7 +12,9 @@ const MINDMAP_AI_ERROR_MESSAGES = Object.freeze({
   AI_RETRY_SOURCE_EXPIRED: '原任务输入已过期或不完整，请新建任务',
   AI_RETRY_REQUEST_INVALID: '重试设置与原任务不兼容，请调整 Agent、模型或要求',
   AI_RETRY_STATE_CHANGED: '原任务或会话状态已变化，请刷新后重试',
+  AI_DOCUMENT_CONFLICT: '脑图内容已被协作者修改，AI 直写已停止；请刷新后重试',
   AI_FOLLOWUP_UNAVAILABLE: '当前结果不能继续调整，请选择可继续的完成轮次或新建对话',
+  AI_FOLLOWUP_REVIEW_REQUIRED: '当前结果需要先确认或不采纳，再继续下一轮',
   AI_FOLLOWUP_BASE_INVALID: '继续调整的内容基线无效，请回到原脑图并刷新后重试',
   AI_FOLLOWUP_STATE_CHANGED: '继续调整前任务状态已变化，请刷新后重试',
   AI_PROPOSAL_STALE: '脑图内容已变化，请基于最新版本重新生成提案',
@@ -27,6 +29,7 @@ const MINDMAP_AI_ERROR_MESSAGES = Object.freeze({
   AI_UNDO_SNAPSHOT_INVALID: 'AI 撤销快照不可用，请人工核对脑图',
   AI_SANDBOX_VIOLATION: 'Agent 尝试执行未授权操作，任务已被安全终止',
   AI_PROVIDER_AUTH_FAILED: 'AI 供应商认证失败，请联系管理员检查 Connector',
+  AI_MODEL_CONFIG_INVALID: '所选模型配置无效，请到 AI 模型管理检查提供商、模型编码和 Base URL',
   AI_RATE_LIMITED: 'AI 服务当前请求过多，请稍后重试',
   AI_TASK_CANCELLED: 'AI 任务已取消，可新建任务重新生成',
   AI_ARTIFACT_EXPIRED: 'AI 结果已过期，请重新生成',
@@ -35,6 +38,12 @@ const MINDMAP_AI_ERROR_MESSAGES = Object.freeze({
   AI_STREAM_CONNECTION_FAILED: 'AI 实时连接暂时不可用，正在通过轮询同步',
   AI_AUTH_REQUIRED: '登录状态已失效，请重新登录后继续',
 })
+
+export function isMindmapAiAbortError(error) {
+  return error?.name === 'AbortError'
+    || error?.name === 'CanceledError'
+    || error?.code === 'ERR_CANCELED'
+}
 
 export function resolveMindmapAiErrorCode(error) {
   const candidates = [

@@ -18,7 +18,7 @@
       @transitionend="onMindMapContainerTransitionEnd"
     ></div>
     <WorkspaceActivityBar v-if="!isZenMode" />
-    <MindmapAiDialog :readonly="isReadonly" />
+    <MindmapAiDialog :readonly="aiDialogReadonly" />
     <Navigator v-if="mindMap" :mindMap="mindMap" />
     <OutlineSidebar v-if="mindMap && activeSidebar === 'outline'" :mindMap="mindMap" />
     <AssociativeLineStyle v-if="mindMap" :mindMap="mindMap" />
@@ -62,6 +62,7 @@
         :mindmapId="props.mindmapId"
         :yjsSync="yjsSyncRef"
         :readonly="isReadonly"
+        :ai-preview-active="aiEditingBlocked"
         :flush-changes="flushBeforeLeave"
         :get-content-revision="getCurrentContentRevision"
         :get-content-change-version="getCurrentContentChangeVersion"
@@ -218,6 +219,13 @@ import {
   transitionMindmapAiLocalJournal,
 } from '@/utils/mindmap-ai-local-journal'
 import { createMindmapDraftProtectionTracker } from '@/utils/mindmap-draft-protection'
+import {
+  applyMindmapAiPresentationFrame,
+  clearMindmapAiPresentation,
+  renderMindmapAiPreviewTree as renderAiPreviewTree,
+} from '@/utils/mindmap-ai-presentation'
+import { summarizeMindmapAiDraftChanges } from '@/utils/mindmap-ai-live-preview'
+import { normalizeNumericOwnerUserId } from '@/utils/mindmap-ai-shared'
 import './assets/icon-font/iconfont.css'
 import './styles/markdown.scss'
 
@@ -272,16 +280,40 @@ const serverCanEdit = ref(props.mindmapId ? null : true)
 // 仍属于旧 revision。临时只读门闩阻止它产生新的保存意图；进入门闩前
 // 会先提交并持久化所有活动输入，成功应用权威正文后才解除。
 const authoritativeRecoveryEditingBlocked = ref(false)
+// AI owns the current document while a cloud task is running. Local edits are
+// disabled until the task reaches a terminal state so AI frames never race a
+// stale browser mutation and trigger missing-node merge conflicts.
+const aiEditingBlocked = ref(false)
+// Freeze new input while an unsent AI request drains existing human writes.
+// Unlike AI playback ownership, this gate must not suspend saving/tracking.
+const aiPreparationEditingBlocked = ref(false)
 // 云端 AI apply/undo 在服务端建立全局写栅栏后要求每个在线编辑器先排空。
 // 该门闩只冻结新交互，既有保存仍可继续，以免 ACK 等待与 HTTP 保存死锁。
 const collaborationBarrierEditingBlocked = ref(false)
 let collaborationBarrierToken = ''
 let collaborationBarrierRevision = 0
+let aiFocusRequestId = 0
+let aiFocusLastKey = ''
+let aiFocusRetryTimer = null
 // 历史预览和整图导入都包含不可避免的网络/插件等待窗口。它们只冻结用户
 // 交互，不撤销当前会话的写权限；已经登记的修改仍须能够在门闩内 flush。
 const versionTransitionEditingBlocked = ref(false)
 const importTransitionEditingBlocked = ref(false)
 const isReadonly = computed(() => (
+  props.readonly
+  || authoritativeRecoveryEditingBlocked.value
+  || aiEditingBlocked.value
+  || aiPreparationEditingBlocked.value
+  || collaborationBarrierEditingBlocked.value
+  || versionTransitionEditingBlocked.value
+  || importTransitionEditingBlocked.value
+  || (Boolean(props.mindmapId) && serverCanEdit.value !== true)
+))
+// AI owns the canvas while running, but the AI dialog itself must remain
+// writable enough to receive cloud draft frames. Keep the AI lock out of the
+// dialog's readonly contract to avoid a lock -> readonly -> preview-disabled
+// feedback loop.
+const aiDialogReadonly = computed(() => (
   props.readonly
   || authoritativeRecoveryEditingBlocked.value
   || collaborationBarrierEditingBlocked.value
@@ -299,7 +331,6 @@ const documentData = ref({})
 const showDragMask = ref(false)
 let storeConfigTimer = null
 let localWorkspaceSaveFailureNotified = false
-let enableShowLoading = true
 let autoSaveTimer = null
 let yjsSync = null
 const yjsSyncRef = shallowRef(null)
@@ -356,6 +387,51 @@ const authoritativeResetGeneration = ref(0)
 const saveRecoveryKind = ref('')
 let applyingServerTree = false
 let versionChangeTrackingPaused = false
+let aiDraftPreviewState = null
+let aiCanvasPreparation = null
+let aiPresentationSessionSequence = 0
+let aiPresentationDetached = false
+
+function previewDocumentDataChanged(nextDocumentData) {
+  if (nextDocumentData === undefined) return false
+  const current = normalizeMindmapDocumentData(documentData.value)
+  const next = normalizeMindmapDocumentData(nextDocumentData)
+  return JSON.stringify(current) !== JSON.stringify(next)
+}
+
+function assertAiPresentationSession(session, activeMindMap = session?.mindMap) {
+  if (!session || session !== aiDraftPreviewState || activeMindMap !== mindMap.value) {
+    throw new Error('AI 画布会话已过期')
+  }
+}
+
+function shouldDeferAiAuthoritativeDocument() {
+  return Boolean(
+    aiEditingBlocked.value
+    && aiDraftPreviewState?.directCommitted === true,
+  )
+}
+
+async function commitAiAuthoritativeDocument(session, { abortPreparation = false } = {}) {
+  assertAiPresentationSession(session)
+  if (!session.directCommitted) throw new Error('当前画布不是 AI 云端编辑会话')
+  // A presentation commit may reconcile remote changes, never discard an
+  // unsaved human mutation (including a rejected/unknown creation attempt).
+  if (hasUnsavedChanges() || viewSaveRequested || viewSaveInProgress) {
+    throw new Error('人工修改尚未保存，不能同步 AI 云端结果')
+  }
+  // Commit through the existing authoritative transaction: tree, metadata,
+  // history, node revisions and Yjs baseline must advance together. A cached
+  // Yjs tree alone cannot establish a safe baseline for subsequent edits.
+  const applied = await reloadLatestServerDocument({
+    allowAiPresentationCommit: true,
+    aiPresentationSession: session,
+    serverData: abortPreparation ? null : session.commitServerData,
+  })
+  assertAiPresentationSession(session)
+  if (!applied) throw new Error('AI 已更新云端，最终同步尚未完成，请重试同步')
+  return true
+}
 let terminatingSession = false
 let componentMounted = false
 let initialRenderReady = false
@@ -680,8 +756,7 @@ function advanceLocalAiJournalToAppliedConfirmed(identity, entry, serverConfirme
 }
 
 function currentLocalAiOwnerUserId() {
-  const ownerUserId = String(userStore.id ?? '').trim()
-  return /^[1-9]\d{0,63}$/.test(ownerUserId) ? ownerUserId : ''
+  return normalizeNumericOwnerUserId(userStore.id)
 }
 
 function localAiJournalIdentity(proposalId, documentId) {
@@ -2287,7 +2362,7 @@ function createYjsSyncInstance() {
       name: userStore.nickName || userStore.name,
       avatar: userStore.avatar,
     },
-    readonly: isReadonly.value,
+    readonly: !hasRealWritePermission(),
     getDocumentData: () => normalizeMindmapDocumentData(documentData.value),
     getClientMutationId: () => pendingClientMutationId,
     getClientMutationBaseRevision: clientMutationId => (
@@ -2329,6 +2404,19 @@ function createYjsSyncInstance() {
     // Yjs 帧无法保证全部落在同一 revision，先仅保留本地并由紧随其后的
     // HTTP 批次权威提交，避免连续输入时被服务端误判成旧基线写入。
     canSendRealtimeMutation: () => !activeSaveMutation,
+    // Direct AI jobs persist each cloud checkpoint while the browser is still
+    // playing its presentation timeline. Keep consuming Yjs, but hold the
+    // complete authoritative tree away from the visible canvas until playback
+    // explicitly commits.
+    shouldDeferRemoteDocumentApply: shouldDeferAiAuthoritativeDocument,
+    shouldDeferContentRevision: (data) => {
+      if (!shouldDeferAiAuthoritativeDocument()) return false
+      // Defer painting, not knowledge of the minimum durable revision. A
+      // collaborator advancing the cloud during playback must prevent an
+      // older final checkpoint from being accepted as the editable baseline.
+      raiseAuthoritativeReloadMinimumRevision(data)
+      return true
+    },
     beforeRemoteDocumentApply: protectActiveTextEditorBeforeRemoteDocumentApply,
     captureDocumentBeforeRemoteApply: captureProtectedDocumentWithActiveEditorInput,
     onDocumentApplyError: (error, context) => {
@@ -3191,17 +3279,6 @@ async function retirePendingViewSaveForAuthoritativeReload() {
   savedViewChangeVersion = viewChangeVersion
 }
 
-async function settlePendingViewSave(maxPasses = CLOUD_EXIT_MAX_PASSES) {
-  for (let pass = 0; pass < maxPasses; pass += 1) {
-    if (!viewSaveRequested && !viewSaveInProgress) return true
-    clearTimeout(viewSaveTimer)
-    viewSaveTimer = null
-    const saved = await flushPendingViewSave()
-    if (saved !== true) return false
-  }
-  return !viewSaveRequested && !viewSaveInProgress
-}
-
 function onBusViewDataChange(data, sourceMindMap = null) {
   if (!isCurrentMindmapEventSource(sourceMindMap, mindMap.value)) return
   if (localAiUndoInProgress) return
@@ -3380,6 +3457,30 @@ function syncEditingBlockedMode() {
   mindMap.value?.setMode?.(isReadonly.value ? 'readonly' : 'edit')
 }
 
+function setAiEditingBlocked(blocked) {
+  const nextBlocked = blocked === true
+  // A transient terminal/polling state cannot unlock an uncommitted surface.
+  if (!nextBlocked && (
+    aiDraftPreviewState?.directCommitted
+    || aiDraftPreviewState?.clearing
+    || aiPresentationDetached
+  )) return false
+  if (aiEditingBlocked.value === nextBlocked) return false
+  if (nextBlocked) {
+    clearTimeout(autoSaveTimer)
+    commitActiveEditorsBeforeTermination()
+    bus.emit('closeOutlineEdit')
+    mindMap.value?.renderer?.textEdit?.hideEditTextBox?.()
+  }
+  aiEditingBlocked.value = nextBlocked
+  syncEditingBlockedMode()
+  if (!nextBlocked) {
+    bindYjsDetailTracking()
+    resumePendingSaveAfterNodeEditLeaseSettles()
+  }
+  return true
+}
+
 function setVersionTransitionEditingBlocked(blocked) {
   const nextBlocked = blocked === true
   if (versionTransitionEditingBlocked.value === nextBlocked) return false
@@ -3449,6 +3550,8 @@ function rejectEditModeDuringEditingTransition(mode, activeMindMap) {
     || (
       !versionTransitionEditingBlocked.value
       && !importTransitionEditingBlocked.value
+      && !aiPreparationEditingBlocked.value
+      && !aiEditingBlocked.value
     )
   ) return false
   actions.setIsReadonly(true)
@@ -3621,6 +3724,7 @@ function scheduleAuthoritativeReload(delay = 0) {
 
 async function performAuthoritativeReload({ allowDuringEditingTransition = false } = {}) {
   if (!authoritativeReloadRequired) return true
+  if (shouldDeferAiAuthoritativeDocument()) return false
   if (hasActiveEditingTransition() && !allowDuringEditingTransition) return false
   if (isSaving.value) {
     // 远端 apply 失败可能在一个 HTTP 保存仍在途时销毁旧 Y.Doc。保护快照
@@ -4119,7 +4223,11 @@ async function saveToBackend() {
             || pendingClientMutationId !== preparePendingMutationId
             || pendingContentOperations.length > 0
           )
-          if (changedDuringPluginPreparation) {
+          if (shouldDeferAiAuthoritativeDocument()) {
+            // The save started before AI acquired presentation ownership.
+            // Keep its durable revision, but never paint this late full tree.
+            markAuthoritativeReloadRequired()
+          } else if (changedDuringPluginPreparation) {
             markAuthoritativeReloadRequired()
             ElNotification.info({
               title: '检测到新的本地修改',
@@ -4310,6 +4418,7 @@ function blockRemoteDocumentResetRetry(actionTitle, message) {
 }
 
 function drainPendingRemoteDocumentReset({ allowUnsaved = false, forceRetry = false } = {}) {
+  if (shouldDeferAiAuthoritativeDocument()) return false
   if (forceRetry) remoteDocumentResetRetryBlocked = false
   if (
     !pendingRemoteDocumentReset
@@ -4352,6 +4461,7 @@ async function handleStaleCollaborationState(data) {
   // 随即因 resolvingStaleState 返回，也必须先提升单调版本下界，防止旧
   // HTTP 响应销毁持有更高 pending revision 的 Yjs 实例并宣告恢复成功。
   raiseAuthoritativeReloadMinimumRevision(data)
+  if (shouldDeferAiAuthoritativeDocument()) return
   // 历史版本画布不是可保存/可备份的当前文档。先只记录单调 revision
   // 下界，退出预览后再由 onVersionChangeTracking 锁定编辑并权威回源。
   if (versionChangeTrackingPaused || resolvingStaleState || !mindMap.value) return
@@ -4614,7 +4724,16 @@ async function reloadLatestServerDocument(options = {}) {
     minimumContentRevision = null,
     serverData = null,
     allowDuringEditingTransition = false,
+    allowAiPresentationCommit = false,
+    aiPresentationSession = null,
   } = options
+  const aiPresentationCommitExpired = () => allowAiPresentationCommit && (
+    !aiPresentationSession
+    || aiDraftPreviewState !== aiPresentationSession
+    || mindMap.value !== aiPresentationSession.mindMap
+  )
+  if (aiPresentationCommitExpired()) return false
+  if (shouldDeferAiAuthoritativeDocument() && !allowAiPresentationCommit) return false
   const transitionGenerationAtRequest = editingTransitionGeneration
   if (hasActiveEditingTransition() && !allowDuringEditingTransition) {
     markAuthoritativeReloadRequired()
@@ -4648,7 +4767,7 @@ async function reloadLatestServerDocument(options = {}) {
       // 自动补拉由本组件聚合为一次可恢复状态，避免每轮后台重试都弹全局错误。
       silentError: requireClean,
     })
-  if (sessionCancelled(signal) || !mindMap.value) return false
+  if (sessionCancelled(signal) || !mindMap.value || aiPresentationCommitExpired()) return false
   const data = response.data
   const serverContentRevision = Number(data?.contentRevision)
   const pendingResetRevision = Number(pendingRemoteDocumentReset?.contentRevision)
@@ -4668,7 +4787,7 @@ async function reloadLatestServerDocument(options = {}) {
     )
   )
   await ensureMindmapDocumentPlugins(serverDocument, activeMindMap)
-  if (sessionCancelled(signal) || mindMap.value !== activeMindMap) return false
+  if (sessionCancelled(signal) || mindMap.value !== activeMindMap || aiPresentationCommitExpired()) return false
   if (
     editingTransitionGeneration !== transitionGenerationAtRequest
     || (hasActiveEditingTransition() && !allowDuringEditingTransition)
@@ -4716,6 +4835,7 @@ async function reloadLatestServerDocument(options = {}) {
   if (
     sessionCancelled(signal)
     || mindMap.value !== activeMindMap
+    || aiPresentationCommitExpired()
     || editingTransitionGeneration !== transitionGenerationAtRequest
     || (hasActiveEditingTransition() && !allowDuringEditingTransition)
     || hasLocalChangesSinceRequest()
@@ -4730,17 +4850,35 @@ async function reloadLatestServerDocument(options = {}) {
     return false
   }
   const protectedDocumentBeforeApply = getCurrentDocument()
+  // A request started before AI acquired the canvas must also respect the
+  // fence when it resolves. Never let a late HTTP response overtake playback.
+  if (aiPresentationCommitExpired()) return false
+  if (shouldDeferAiAuthoritativeDocument() && !allowAiPresentationCommit) return false
+  if (allowAiPresentationCommit) {
+    serverDocument.view = cloneRequestPayload(activeMindMap.getData?.(true)?.view)
+  }
   try {
     applyingServerTree = true
     try {
-      applyAuthoritativeMindmapDocument(activeMindMap, serverDocument)
+      applyAuthoritativeMindmapDocument(activeMindMap, serverDocument, {
+        // AI frames are presentation-only, not local edits. Rebase from the
+        // tree captured when ownership was acquired, even when playback has
+        // already reached the cloud target. This also preserves independent
+        // local undo when a confirmed rejected preparation releases its lock.
+        historyCurrentTree: allowAiPresentationCommit
+          ? aiPresentationSession.baseline.root
+          : undefined,
+      })
+      if (allowAiPresentationCommit) await renderAiPreviewTree(activeMindMap, serverDocument.root)
       await nextTick()
+      if (aiPresentationCommitExpired()) return false
     } finally {
-      applyingServerTree = false
+      if (!aiPresentationCommitExpired()) applyingServerTree = false
     }
     documentData.value = nextDocumentData
     applyMindmapDocumentConfig(mindMap.value, documentData.value)
   } catch (error) {
+    if (aiPresentationCommitExpired()) return false
     await enterAuthoritativeApplyFailureRecovery(
       protectedDocumentBeforeApply,
       { eventKey: 'authoritative-reload-apply' },
@@ -4750,6 +4888,7 @@ async function reloadLatestServerDocument(options = {}) {
   if (
     sessionCancelled(signal)
     || !mindMap.value
+    || aiPresentationCommitExpired()
     || isBelowRequiredRevision()
   ) {
     if (!sessionCancelled(signal) && mindMap.value) {
@@ -5149,6 +5288,7 @@ async function onSetData(data, request = {}) {
         || sessionCancelled(sessionController?.signal)
         || props.readonly
         || serverCanEdit.value !== true
+        || aiEditingBlocked.value
         || authoritativeRecoveryEditingBlocked.value
       ) {
         throw new Error('脑图会话已经变化，请重新导入')
@@ -5165,6 +5305,7 @@ async function onSetData(data, request = {}) {
         || sessionCancelled(sessionController?.signal)
         || props.readonly
         || serverCanEdit.value !== true
+        || aiEditingBlocked.value
         || authoritativeRecoveryEditingBlocked.value
       ) {
         throw new Error('脑图会话已经变化，请重新导入')
@@ -5193,6 +5334,7 @@ async function onSetData(data, request = {}) {
         || sessionCancelled(sessionController?.signal)
         || props.readonly
         || serverCanEdit.value !== true
+        || aiEditingBlocked.value
         || authoritativeRecoveryEditingBlocked.value
       ) {
         throw new Error('脑图会话已经变化，请重新导入')
@@ -5844,7 +5986,7 @@ async function onRequestAiMindmapContext(request = {}) {
       revision,
       mindmapId: props.mindmapId,
       selectedNodeUids,
-      readonly: isReadonly.value,
+      readonly: aiDialogReadonly.value,
       documentHash,
       lastAppliedProposal,
       canUndoAiProposal,
@@ -5922,6 +6064,353 @@ async function onAiCloudProposalApplied(payload = {}, request = {}) {
   }
 }
 
+function assertAiCanvasPreparation(preparation) {
+  if (aiCanvasPreparation !== preparation || mindMap.value !== preparation.mindMap
+    || !componentMounted || terminalState || sessionCancelled(sessionController?.signal)
+    || !hasRealWritePermission() || hasActiveEditingTransition() || versionChangeTrackingPaused) {
+    throw new Error('AI 准备期间脑图会话或编辑权限已变化')
+  }
+}
+
+async function drainAiCanvasPreparation(preparation) {
+  assertAiCanvasPreparation(preparation)
+  // Commit DOM-only text before readonly rejects editor commands. Keep the
+  // input fence raised while transferring an early dialog lock into a drain
+  // gate: existing writes can save, but the user cannot introduce a new one.
+  commitActiveEditorsBeforeTermination()
+  aiPreparationEditingBlocked.value = true
+  syncEditingBlockedMode()
+  setAiEditingBlocked(false)
+  await nextTick()
+  assertAiCanvasPreparation(preparation)
+  if (await flushBeforeLeave() !== true) {
+    throw new Error('人工修改尚未保存，已保留当前内容，请保存成功后重试 AI 编辑')
+  }
+  assertAiCanvasPreparation(preparation)
+  // A successful save can still require a merged cloud snapshot. Establish
+  // that baseline before deferring remote paints to the AI presentation owner.
+  if (authoritativeReloadRequired && await performAuthoritativeReload() !== true) {
+    throw new Error('人工修改已保存，云端画布尚未同步，请完成同步后重试 AI 编辑')
+  }
+  assertAiCanvasPreparation(preparation)
+  if (hasUnsavedChanges() || viewSaveRequested || viewSaveInProgress
+    || authoritativeReloadRequired || authoritativeReloadInProgress || pendingRemoteDocumentReset
+    || authoritativeRecoveryEditingBlocked.value || collaborationBarrierEditingBlocked.value) {
+    throw new Error('脑图仍有待保存或待同步的修改，暂不能交给 AI 编辑')
+  }
+}
+
+// Render AI draft frames in-place without feeding them into the user's save
+// pipeline. The dialog owns frame pacing/typewriter slicing; the editor only
+// swaps the visible runtime tree and restores the captured baseline on revert.
+async function onAiDraftPreview(payload = {}, request = {}) {
+  try {
+    const phase = String(payload.phase || '')
+    const jobId = String(payload.jobId || '')
+    if (!jobId) throw new Error('脑图编辑器尚未就绪')
+    if (aiCanvasPreparation && phase === 'detach' && aiCanvasPreparation.jobId === jobId
+      && payload.reason === 'session-ended') {
+      aiCanvasPreparation = null
+      aiPreparationEditingBlocked.value = false
+      aiPresentationDetached = true
+      setAiEditingBlocked(true)
+      request.resolve?.({ detached: true })
+      return
+    }
+    if (aiCanvasPreparation && ['prepare', 'start', 'preparation-aborted'].includes(phase)) {
+      throw new Error('人工修改正在排空，请等待 AI 画布准备完成')
+    }
+    // A prepare handshake can be rejected before acquiring any editor state
+    // (history preview, editor not mounted). A confirmed unsent/absent request
+    // then only needs to clear the dialog's owner; no cloud read or paint is
+    // required. Never acknowledge this path while a different owner exists.
+    if (phase === 'preparation-aborted' && !aiDraftPreviewState && payload.notCreated === true) {
+      request.resolve?.({ cleared: true })
+      return
+    }
+    if (!mindMap.value) throw new Error('脑图编辑器尚未就绪')
+    if (phase === 'start' || phase === 'prepare') {
+      // Monitoring and playback both announce start. Never recapture a cloud
+      // tree that has already advanced or reset a partially played session.
+      if (aiDraftPreviewState?.jobId === jobId) {
+        request.resolve?.({ document: cloneRequestPayload(aiDraftPreviewState.baseline) })
+        return
+      }
+      if (phase === 'start' && payload.preparationId
+        && aiDraftPreviewState?.jobId === payload.preparationId) {
+        if (!aiDraftPreviewState.preparing || payload.directCommitted !== true) {
+          throw new Error('AI 画布准备会话无法交接')
+        }
+        aiDraftPreviewState.jobId = jobId
+        aiDraftPreviewState.preparing = false
+        request.resolve?.({ document: cloneRequestPayload(aiDraftPreviewState.baseline) })
+        return
+      }
+      if (aiDraftPreviewState) throw new Error('上一轮 AI 画布尚未完成同步')
+      if (hasActiveEditingTransition() || versionChangeTrackingPaused || terminalState) {
+        throw new Error('历史预览或文档切换尚未结束，暂不能开始 AI 编辑')
+      }
+      let preparation = null
+      try {
+        if (phase === 'prepare' && payload.directCommitted === true && payload.drainLocalChanges === true) {
+          preparation = {
+            jobId, mindMap: mindMap.value, previousAiEditingBlocked: aiEditingBlocked.value,
+          }
+          aiCanvasPreparation = preparation
+          await drainAiCanvasPreparation(preparation)
+          assertAiCanvasPreparation(preparation)
+        }
+        clearMindmapAiPresentation(mindMap.value, { render: false })
+        aiPresentationDetached = false
+        setAiEditingBlocked(true)
+        if (preparation && (hasUnsavedChanges() || viewSaveRequested || viewSaveInProgress
+          || authoritativeReloadRequired || authoritativeReloadInProgress || pendingRemoteDocumentReset)) {
+          throw new Error('脑图仍有待保存或待同步的修改，暂不能交给 AI 编辑')
+        }
+        aiDraftPreviewState = {
+          id: ++aiPresentationSessionSequence,
+          jobId,
+          mindMap: mindMap.value,
+          preparing: phase === 'prepare',
+          directCommitted: payload.directCommitted === true,
+          baseline: cloneRequestPayload(getCurrentDocument()),
+          rendered: null,
+          targetGeneration: 0,
+          targetToken: null,
+          rendering: false,
+          committing: false,
+        }
+        aiDraftPreviewState.rendered = cloneRequestPayload(aiDraftPreviewState.baseline)
+        request.resolve?.({ document: cloneRequestPayload(aiDraftPreviewState.baseline) })
+      } finally {
+        if (preparation && aiCanvasPreparation === preparation) {
+          aiCanvasPreparation = null
+          // Never open an editable gap between draining and AI ownership.
+          if (!aiDraftPreviewState && mindMap.value === preparation.mindMap) {
+            pendingSave.value ||= hasUnsavedChanges()
+            setAiEditingBlocked(preparation.previousAiEditingBlocked)
+          }
+          aiPreparationEditingBlocked.value = false
+          syncEditingBlockedMode()
+          if (!aiDraftPreviewState) {
+            bindYjsDetailTracking()
+            resumePendingSaveAfterNodeEditLeaseSettles()
+          }
+        }
+      }
+      return
+    }
+    if (phase === 'detach') {
+      if (aiDraftPreviewState?.jobId !== jobId) {
+        request.resolve?.({ detached: false })
+        return
+      }
+      if (payload.reason !== 'session-ended') throw new Error('只能在编辑器会话结束时释放 AI 画布')
+      clearMindmapAiPresentation(mindMap.value, { render: false })
+      aiDraftPreviewState = null
+      aiPresentationDetached = true
+      applyingServerTree = false
+      versionChangeTrackingPaused = false
+      // Account/route teardown invalidates local ownership, not the cloud job.
+      // Never briefly enable editing while that teardown is still in flight.
+      setAiEditingBlocked(true)
+      request.resolve?.({ detached: true })
+      return
+    }
+    if (phase === 'preparation-aborted') {
+      const session = aiDraftPreviewState
+      if (session?.jobId !== jobId) throw new Error('AI 画布会话已过期')
+      if (!session.preparing || payload.notCreated !== true || session.committing) {
+        throw new Error('必须确认 AI 任务未创建后才能释放准备会话')
+      }
+      session.committing = true
+      try {
+        // Only a confirmed absent job permits this path. An unknown create
+        // response must keep the frozen canvas until idempotency reconciliation.
+        await commitAiAuthoritativeDocument(session, { abortPreparation: true })
+        assertAiPresentationSession(session)
+        await clearMindmapAiPresentation(session.mindMap)
+        assertAiPresentationSession(session)
+        aiDraftPreviewState = null
+        request.resolve?.({ cleared: true })
+      } finally {
+        session.committing = false
+      }
+      return
+    }
+    if (phase === 'authoritative-target') {
+      if (aiDraftPreviewState?.jobId !== jobId || !aiDraftPreviewState.directCommitted) {
+        throw new Error('AI 画布会话已过期')
+      }
+      const session = aiDraftPreviewState
+      if (session.preparing || session.committing) throw new Error('AI 画布尚未准备好同步终态')
+      const targetGeneration = ++session.targetGeneration
+      session.targetToken = null
+      const { data } = await getMindmap(props.mindmapId, { signal: sessionController?.signal })
+      assertAiPresentationSession(session)
+      const document = {
+        root: data.nodeTree || defaultData,
+        layout: data.layout || 'logicalStructure',
+        theme: normalizeServerTheme(data.theme),
+        documentData: normalizeMindmapDocumentData(data.documentData),
+      }
+      await ensureMindmapDocumentPlugins(document, session.mindMap)
+      assertAiPresentationSession(session)
+      if (targetGeneration !== session.targetGeneration) throw new Error('AI 云端目标已被更新请求替代')
+      session.commitServerData = data
+      session.commitDocument = document
+      session.targetToken = `${session.id}:${targetGeneration}`
+      request.resolve?.({ document, targetToken: session.targetToken })
+      return
+    }
+    if (phase === 'direct-committed') {
+      const session = aiDraftPreviewState
+      if (session?.jobId !== jobId) throw new Error('AI 画布会话已过期')
+      if (session.preparing || !session.directCommitted || session.rendering || session.committing
+        || !session.targetToken || payload.targetToken !== session.targetToken
+        || !session.commitDocument?.root
+        || summarizeMindmapAiDraftChanges(session.rendered?.root, session.commitDocument.root).total !== 0) {
+        throw new Error('AI 云端目标尚未完整显示，不能结束画布会话')
+      }
+      session.committing = true
+      try {
+        await commitAiAuthoritativeDocument(session)
+        assertAiPresentationSession(session)
+        await clearMindmapAiPresentation(session.mindMap)
+        assertAiPresentationSession(session)
+        aiDraftPreviewState = null
+        request.resolve?.({ committed: true })
+      } finally {
+        session.committing = false
+      }
+      return
+    }
+    if (phase === 'accepted' || phase === 'clear') {
+      if (aiDraftPreviewState?.jobId !== jobId) {
+        request.resolve?.({ cleared: false })
+        return
+      }
+      if (aiDraftPreviewState.directCommitted) {
+        throw new Error('AI 云端编辑只能在流式显示完成并校准后结束')
+      }
+      if (aiDraftPreviewState.rendering) throw new Error('AI 画布仍在渲染，请等待当前帧完成')
+      const session = aiDraftPreviewState
+      if (session.committing) throw new Error('AI 画布仍在收尾，请等待同步完成')
+      // Non-direct acceptance is emitted without awaiting its receipt. Keep
+      // ownership/read-only through the asynchronous visibility cleanup and
+      // remember a terminal unlock instead of requiring another watcher tick.
+      session.unlockAfterClear ||= !aiEditingBlocked.value
+      session.clearing = true
+      session.committing = true
+      setAiEditingBlocked(true)
+      try {
+        await clearMindmapAiPresentation(session.mindMap)
+        assertAiPresentationSession(session)
+        aiDraftPreviewState = null
+        if (session.unlockAfterClear) setAiEditingBlocked(false)
+        request.resolve?.({ cleared: true })
+      } catch (error) {
+        if (aiDraftPreviewState === session) {
+          ElMessage.warning({
+            message: 'AI 显示状态恢复失败，已保持只读，请刷新页面重新加载',
+            grouping: true,
+          })
+        }
+        throw error
+      } finally {
+        // Keep clearing latched on failure; only a successful retry may
+        // release this canvas. This finally touches no successor session.
+        session.committing = false
+      }
+      return
+    }
+    if (phase === 'revert') {
+      if (aiDraftPreviewState?.jobId !== jobId) {
+        request.resolve?.({ restored: false })
+        return
+      }
+      const session = aiDraftPreviewState
+      if (session.directCommitted) throw new Error('AI 云端编辑不能回退到本地预览基线')
+      if (session.rendering) throw new Error('AI 画布仍在渲染，请等待当前帧完成')
+      clearMindmapAiPresentation(mindMap.value, { render: false })
+      if (aiDraftPreviewState?.jobId === jobId && aiDraftPreviewState.baseline?.root) {
+        applyingServerTree = true
+        versionChangeTrackingPaused = true
+        try {
+          await renderAiPreviewTree(session.mindMap, session.baseline.root)
+          assertAiPresentationSession(session)
+          if (previewDocumentDataChanged(session.baseline.documentData)) {
+            documentData.value = normalizeMindmapDocumentData(session.baseline.documentData)
+            applyMindmapDocumentConfig(mindMap.value, documentData.value)
+          }
+        } finally {
+          if (session === aiDraftPreviewState) {
+            versionChangeTrackingPaused = false
+            applyingServerTree = false
+          }
+        }
+      }
+      assertAiPresentationSession(session)
+      aiDraftPreviewState = null
+      request.resolve?.({ restored: true })
+      return
+    }
+    if (phase !== 'update' || !payload.document?.root) {
+      request.resolve?.({})
+      return
+    }
+    if (!aiDraftPreviewState || aiDraftPreviewState.jobId !== jobId) {
+      throw new Error('AI 实时预览会话已过期')
+    }
+    const session = aiDraftPreviewState
+    if (session.preparing || session.rendering || session.committing) {
+      throw new Error('AI 画布当前不能接收新的显示帧')
+    }
+    // Planner frames are immutable, in-process values. Only structural writes
+    // clone at the renderer boundary; a character must not clone the full
+    // document or read/serialize the viewport on every tick.
+    const previewDocument = payload.document
+    session.rendering = true
+    applyingServerTree = true
+    versionChangeTrackingPaused = true
+    try {
+      await applyMindmapAiPresentationFrame(session.mindMap, session.rendered, {
+        document: previewDocument,
+        typewriterTarget: payload.typewriterTarget,
+        change: payload.change,
+      })
+      assertAiPresentationSession(session)
+      session.rendered = previewDocument
+      if (payload.change?.uid) {
+        onAiNodeFocus({
+          jobId,
+          focusKey: payload.focusKey,
+          nodeUids: [payload.change.uid],
+        })
+      }
+    } finally {
+      session.rendering = false
+      if (session === aiDraftPreviewState) {
+        versionChangeTrackingPaused = false
+        applyingServerTree = false
+      }
+    }
+    request.resolve?.({ rendered: true })
+  } catch (error) {
+    request.reject?.(error)
+  }
+}
+
+function onAiEditingState(payload = {}) {
+  // Status watchers cannot reopen input or suspend the save being drained.
+  if (aiCanvasPreparation) return
+  if (aiDraftPreviewState && String(payload.jobId || '') !== aiDraftPreviewState.jobId) return
+  if (aiDraftPreviewState?.clearing && typeof payload.locked === 'boolean') {
+    aiDraftPreviewState.unlockAfterClear = payload.locked === false
+  }
+  setAiEditingBlocked(payload.locked === true)
+}
+
 function onNodeTagClick(node, _tag, _index, _element, sourceMindMap) {
   const activeMindMap = mindMap.value
   if (
@@ -5947,11 +6436,15 @@ function bindBusEvents() {
   bus.on('searchPanelVisibilityChange', onSearchPanelVisibilityChange)
   bus.on('toggleOpenNodeRichText', onToggleOpenNodeRichText)
   bus.on('requestAiMindmapContext', onRequestAiMindmapContext)
+  bus.on('aiDraftPreview', onAiDraftPreview)
+  bus.on('aiEditingState', onAiEditingState)
   bus.on('aiCloudProposalApplied', onAiCloudProposalApplied)
   bus.on('openAiArtifactAsLocal', onOpenAiArtifactAsLocal)
   bus.on('replaceLocalWithAiArtifact', onReplaceLocalWithAiArtifact)
   bus.on('insertAiArtifactBranch', onInsertAiArtifactBranch)
   bus.on('undoLocalAiProposal', onUndoLocalAiProposal)
+  bus.on('focusAiNode', onAiNodeFocus)
+  bus.emit('aiEditingStateRequest')
   // Toolbar/Dialog may mount before the editor has completed its first
   // authoritative load. Announce the recovery endpoint only after all
   // handlers above are bound so a persisted cloud intent can safely resume.
@@ -5973,11 +6466,22 @@ function unbindBusEvents() {
   bus.off('view_data_change', onBusViewDataChange)
   bus.off('toggleOpenNodeRichText', onToggleOpenNodeRichText)
   bus.off('requestAiMindmapContext', onRequestAiMindmapContext)
+  bus.off('aiDraftPreview', onAiDraftPreview)
+  bus.off('aiEditingState', onAiEditingState)
+  clearMindmapAiPresentation(mindMap.value, { render: false })
+  aiDraftPreviewState = null
+  aiCanvasPreparation = null
+  aiPreparationEditingBlocked.value = false
   bus.off('aiCloudProposalApplied', onAiCloudProposalApplied)
   bus.off('openAiArtifactAsLocal', onOpenAiArtifactAsLocal)
   bus.off('replaceLocalWithAiArtifact', onReplaceLocalWithAiArtifact)
   bus.off('insertAiArtifactBranch', onInsertAiArtifactBranch)
   bus.off('undoLocalAiProposal', onUndoLocalAiProposal)
+  aiFocusRequestId += 1
+  window.clearTimeout(aiFocusRetryTimer)
+  aiFocusRetryTimer = null
+  aiFocusLastKey = ''
+  bus.off('focusAiNode', onAiNodeFocus)
   bus.off('hide_text_edit', onHideTextEdit)
 }
 
@@ -6056,6 +6560,7 @@ function isContentDetailTrackingSuspended() {
 function isChangeTrackingSuspended() {
   return Boolean(terminalState)
     || terminatingSession
+    || aiEditingBlocked.value
     || importTransitionEditingBlocked.value
     || authoritativeRecoveryEditingBlocked.value
     || protectingActiveEditorFromRemoteDelete
@@ -6064,13 +6569,55 @@ function isChangeTrackingSuspended() {
     || Boolean(yjsSync && (yjsSync.isApplyingRemote() || yjsSync.isPaused()))
 }
 
-function focusNodeByUid(nodeUid) {
+function focusNodeByUid(nodeUid, { presentationOnly = false } = {}) {
   const normalizedUid = typeof nodeUid === 'string' ? nodeUid.trim() : ''
   if (!normalizedUid || normalizedUid.length > 64 || !mindMap.value) return false
   const targetNode = mindMap.value.renderer?.findNodeByUid?.(normalizedUid)
   if (!targetNode) return false
-  mindMap.value.execCommand?.('GO_TARGET_NODE', normalizedUid)
+  if (presentationOnly) {
+    // The presenter exposes collapsed ancestors without changing cloud data.
+    // GO_TARGET_NODE would persist expand=true into that otherwise read-only
+    // tree and undo the presentation-only expansion contract.
+    mindMap.value.renderer.moveNodeToCenter?.(targetNode)
+  } else {
+    mindMap.value.execCommand?.('GO_TARGET_NODE', normalizedUid)
+  }
   return true
+}
+
+function onAiNodeFocus(payload = {}) {
+  const session = aiDraftPreviewState
+  const activeMindMap = mindMap.value
+  if (session && String(payload.jobId || '') !== session.jobId) return
+  const nodeUids = Array.isArray(payload.nodeUids)
+    ? payload.nodeUids.map(uid => String(uid || '').trim()).filter(Boolean)
+    : []
+  const targetUid = nodeUids[nodeUids.length - 1]
+  if (!targetUid) return
+  const focusKey = String(payload.focusKey || `${payload.jobId || ''}:${targetUid}`)
+  if (focusKey && focusKey === aiFocusLastKey) return
+  aiFocusLastKey = focusKey
+  window.clearTimeout(aiFocusRetryTimer)
+  aiFocusRetryTimer = null
+  const requestId = ++aiFocusRequestId
+  let attempts = 0
+  const focus = () => {
+    if (requestId !== aiFocusRequestId || terminalState || !mindMap.value
+      || mindMap.value !== activeMindMap || aiDraftPreviewState !== session) return
+    const renderer = mindMap.value.renderer
+    // Never center against coordinates from the previous layout. Waiting for
+    // the pending RAF also collapses duplicate server/polling notifications
+    // into a single visible camera movement.
+    if (!renderer?.isRendering && !renderer?.renderTimer
+      && focusNodeByUid(targetUid, { presentationOnly: Boolean(session) })) {
+      aiFocusRetryTimer = null
+      return
+    }
+    // The event may arrive just before the live-preview frame is rendered.
+    attempts += 1
+    if (attempts < 20) aiFocusRetryTimer = window.setTimeout(focus, 40)
+  }
+  focus()
 }
 
 function onVersionEditingTransition(blocked) {

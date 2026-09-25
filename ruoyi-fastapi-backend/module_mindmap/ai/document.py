@@ -94,6 +94,22 @@ def compute_document_hash(document: dict[str, Any]) -> str:
     return f'{SMM_HASH_PREFIX}{hashlib.sha256(canonical_json_bytes(document)).hexdigest()}'
 
 
+def document_from_mindmap_detail(detail: Any) -> dict[str, Any]:
+    """Map a detail VO to an editor document without normalizing its content.
+
+    Preserve nullable metadata, blank nodes and view state: callers choose
+    their existing source/projection policy and retain permission checks.
+    This mapping, like an inline envelope, does not copy the referenced data.
+    """
+    return {
+        'root': getattr(detail, 'node_tree', None),
+        'layout': getattr(detail, 'layout', None),
+        'theme': getattr(detail, 'theme', None),
+        'view': getattr(detail, 'view_data', None),
+        'documentData': getattr(detail, 'document_data', None),
+    }
+
+
 def _clean_text(value: Any, label: str, max_length: int) -> str:
     if not isinstance(value, str):
         raise MindmapArtifactError(f'{label}必须是字符串')

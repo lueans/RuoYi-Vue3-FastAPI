@@ -57,9 +57,16 @@ WORKER_PROGRESS_STAGES = frozenset({
 
 ALLOWED_TOOL_NAMES = (
     'read_projection',
+    'read_document_detail',
+    'get_node_tags',
+    'search_tags',
+    'suggest_tags',
     'start_document',
     'add_nodes',
     'update_nodes',
+    'edit_node_text',
+    'edit_node_tags',
+    'add_comment',
     'move_nodes',
     'remove_nodes',
     'set_document_meta',
@@ -79,13 +86,16 @@ _DISABLED_SKILLS_CONFIG = 'skills.config=[' + ','.join(
     f'{{name="{name}",enabled=false}}' for name in DISABLED_CODEX_SKILL_NAMES
 ) + ']'
 
-def _codex_result_schema() -> dict[str, Any]:
+def _codex_result_schema(execution_mode: str = 'preview') -> dict[str, Any]:
+    completion_states = ['artifact_completed', 'needs_input']
+    if execution_mode == 'direct':
+        completion_states.insert(0, 'direct_completed')
     return {
         'type': 'object',
         'properties': {
             'completionState': {
                 'type': 'string',
-                'enum': ['artifact_completed', 'needs_input'],
+                'enum': completion_states,
             },
             'title': {'type': ['string', 'null']},
             'questions': {
@@ -106,8 +116,6 @@ def _codex_result_schema() -> dict[str, Any]:
         'additionalProperties': False,
     }
 
-
-CODEX_RESULT_SCHEMA = _codex_result_schema()
 
 CODEX_DISCUSSION_RESULT_SCHEMA = {
     'type': 'object',
@@ -336,6 +344,9 @@ def _validated_request(request: Any) -> dict[str, Any]:  # noqa: PLR0912
     ):
         raise WorkerFailure('AI_SESSION_UNAVAILABLE')
     max_budget_usd = request.get('maxBudgetUsd')
+    execution_mode = request.get('executionMode', 'preview')
+    if execution_mode not in {'preview', 'direct'}:
+        raise WorkerFailure('AI_CAPABILITY_UNSUPPORTED')
     if (
         isinstance(max_budget_usd, bool)
         or not isinstance(max_budget_usd, (int, float))
@@ -374,7 +385,17 @@ def _validated_request(request: Any) -> dict[str, Any]:  # noqa: PLR0912
         or any(not isinstance(name, str) for name in allowed_tools)
         or len(set(allowed_tools)) != len(allowed_tools)
         or not set(allowed_tools).issubset(ALLOWED_TOOL_NAMES)
-        or allowed_tools[-1] != 'complete_artifact'
+        or (
+            execution_mode != 'direct'
+            and allowed_tools[-1] != 'complete_artifact'
+        )
+        or (
+            execution_mode == 'direct'
+            and (
+                'complete_artifact' in allowed_tools
+                or allowed_tools[-1] != 'validate_draft'
+            )
+        )
     ):
         raise WorkerFailure('AI_CAPABILITY_UNSUPPORTED')
     return request
@@ -404,6 +425,7 @@ def _validated_generated_result(
     _allowed_tool_names: tuple[str, ...] = ALLOWED_TOOL_NAMES,
     *,
     operation: str = 'generate',
+    execution_mode: str = 'preview',
 ) -> dict[str, Any]:
     if not isinstance(raw_result, str) or not raw_result.strip():
         raise WorkerFailure('AI_OUTPUT_INVALID')
@@ -429,6 +451,14 @@ def _validated_generated_result(
             raise WorkerFailure('AI_OUTPUT_INVALID')
         return generated
     completion_state = generated.get('completionState')
+    if execution_mode == 'direct' and completion_state == 'direct_completed':
+        if (
+            set(generated) != {'completionState', 'title', 'questions'}
+            or not isinstance(generated.get('title'), str)
+            or generated.get('questions') != []
+        ):
+            raise WorkerFailure('AI_OUTPUT_INVALID')
+        return generated
     if completion_state == 'artifact_completed':
         if (
             set(generated) != {'completionState', 'title', 'questions'}
@@ -696,6 +726,16 @@ async def run_request(  # noqa: PLR0912, PLR0915
             base_instructions = (
                 CODEX_DISCUSSION_INSTRUCTIONS if discussion else CODEX_BASE_INSTRUCTIONS
             )
+            if not discussion and request.get('executionMode') == 'direct':
+                base_instructions = base_instructions.replace(
+                    'explicitly call complete_artifact as your final tool call.',
+                    'call validate_draft after the final mutation and then return '
+                    'direct_completed; do not call complete_artifact.',
+                )
+                base_instructions += (
+                    '\n本轮是 direct 直写模式：每个成功的变更工具都会由父服务实时提交权威云端脑图；'
+                    '完成 validate_draft 后返回 direct_completed。\n'
+                )
             thread_options = {
                 'model': request['model'],
                 'approval_mode': ApprovalMode.deny_all,
@@ -733,7 +773,7 @@ async def run_request(  # noqa: PLR0912, PLR0915
                 output_schema=(
                     CODEX_DISCUSSION_RESULT_SCHEMA
                     if discussion
-                    else _codex_result_schema()
+                    else _codex_result_schema(request.get('executionMode', 'preview'))
                 ),
                 sandbox=Sandbox.read_only,
                 cwd=os.getcwd(),
@@ -788,6 +828,7 @@ async def run_request(  # noqa: PLR0912, PLR0915
                 final_response if final_response is not None else unknown_phase_response,
                 _configured_tools(request),
                 operation=request['operation'],
+                execution_mode=request.get('executionMode', 'preview'),
             )
             usage_with_cost = _usage_with_estimated_cost(
                 usage,

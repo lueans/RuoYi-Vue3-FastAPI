@@ -28,6 +28,8 @@ RECOVERY_TEST_PAGE_SIZE = 200
 MAX_CANCEL_WAIT_SECONDS = 0.25
 MAX_RECOVERY_PAGE_SIZE = 2_000
 OWNED_SDK_SESSION_ID = 'provider-child-session'
+EXPECTED_RELEASE_UPDATES = 2
+EXPECTED_RELEASE_REVISION = 11
 
 
 class _SessionFactory:
@@ -155,6 +157,10 @@ async def test_recovery_uses_keyset_pages_without_legacy_500_job_cap() -> None:
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_recoverable_jobs',
             new=list_recoverable,
         ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_jobs',
+            new=AsyncMock(return_value=[]),
+        ),
         patch.object(MindmapAiTaskManager, 'schedule', new=MagicMock(return_value=True)) as schedule,
         patch.object(
             MindmapAiConfig,
@@ -172,6 +178,302 @@ async def test_recovery_uses_keyset_pages_without_legacy_500_job_cap() -> None:
     assert list_recoverable.await_args_list[0].kwargs['after_created_time'] is None
     assert list_recoverable.await_args_list[1].kwargs['after_created_time'] == jobs[199].created_time
     assert list_recoverable.await_args_list[1].kwargs['after_id'] == 'job-199'
+
+
+@pytest.mark.asyncio
+async def test_wake_waiting_followups_releases_only_the_oldest_queued_turn() -> None:
+    parent = SimpleNamespace(
+        id='queue-parent',
+        session_id='queue-session',
+        user_id=7,
+        status='ready',
+        artifact_id=None,
+    )
+    first_child = SimpleNamespace(
+        id='queue-child-1',
+        parent_job_id=parent.id,
+        status='waiting_turn',
+        turn_index=2,
+        created_time=datetime.now() - timedelta(seconds=2),
+        request_json=json.dumps({'source': {'type': 'none'}}),
+        base_hash=None,
+    )
+    second_child = SimpleNamespace(
+        id='queue-child-2',
+        parent_job_id=parent.id,
+        status='waiting_turn',
+        turn_index=3,
+        created_time=datetime.now() - timedelta(seconds=1),
+        request_json=json.dumps({'source': {'type': 'none'}}),
+        base_hash=None,
+    )
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+            new=_SessionFactory(database),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=parent),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
+            new=AsyncMock(return_value=[second_child, first_child]),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
+            new=AsyncMock(),
+        ) as update_job,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+            new=AsyncMock(),
+        ) as add_event,
+        patch.object(MindmapAiTaskManager, 'schedule', new=MagicMock()) as schedule,
+        patch('module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event') as metric,
+    ):
+        await MindmapAiTaskManager._wake_waiting_followups(parent.id)
+
+    update_job.assert_any_await(
+        database,
+        first_child.id,
+        {
+            'status': 'queued',
+            'progress': 0,
+            'error_code': None,
+            'error_message': None,
+        },
+    )
+    update_job.assert_any_await(
+        database,
+        second_child.id,
+        {'parent_job_id': first_child.id},
+    )
+    assert update_job.await_count == EXPECTED_RELEASE_UPDATES
+    schedule.assert_called_once_with(first_child.id)
+    assert add_event.await_count == EXPECTED_RELEASE_UPDATES
+    metric.assert_called_once_with('job_released')
+
+
+@pytest.mark.asyncio
+async def test_next_route_waits_for_parent_proposal_to_be_applied() -> None:
+    parent = SimpleNamespace(
+        id='route-parent',
+        session_id='route-session',
+        user_id=7,
+        status='ready',
+        proposal_id='route-proposal',
+        artifact_id='route-artifact',
+    )
+    child = SimpleNamespace(
+        id='route-child',
+        parent_job_id=parent.id,
+        status='waiting_turn',
+        turn_index=2,
+        created_time=datetime.now(),
+        request_json=json.dumps({
+            'queueRoute': 'next',
+            'source': {'type': 'local_snapshot'},
+        }),
+        base_hash='old-hash',
+    )
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+            new=_SessionFactory(database),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=parent),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
+            new=AsyncMock(return_value=[child]),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
+            new=AsyncMock(),
+        ) as update_job,
+        patch.object(MindmapAiTaskManager, 'schedule', new=MagicMock()) as schedule,
+        patch('module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event') as metric,
+    ):
+        await MindmapAiTaskManager._wake_waiting_followups(parent.id)
+
+    database.rollback.assert_awaited_once()
+    database.commit.assert_not_awaited()
+    update_job.assert_not_awaited()
+    schedule.assert_not_called()
+    metric.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_direct_undo_wakes_followup_against_authoritative_document() -> None:
+    """A direct receipt has no artifact, so an undone parent must still rebase its child."""
+    parent = SimpleNamespace(
+        id='direct-undone-parent',
+        session_id='direct-session',
+        user_id=7,
+        status='undone',
+        artifact_id=None,
+        source_type='cloud_document',
+        source_mindmap_id=42,
+        proposal_id='direct-undone-parent',
+        request_json=json.dumps({'executionMode': 'direct'}),
+    )
+    old_document = {
+        'root': {
+            'data': {'uid': 'root', 'text': 'old'},
+            'children': [],
+        },
+    }
+    child = SimpleNamespace(
+        id='direct-undone-child',
+        parent_job_id=parent.id,
+        status='waiting_turn',
+        turn_index=2,
+        created_time=datetime.now(),
+        request_json=json.dumps({
+            'agentKey': 'native_mindmap',
+            'intent': 'expand',
+            'prompt': '继续补充',
+            'target': 'file',
+            'executionMode': 'direct',
+            'source': {
+                'type': 'cloud_document',
+                'mindmapId': 42,
+                'revision': 3,
+                'documentHash': 'old-hash',
+                'document': old_document,
+                'baselineDocument': old_document,
+            },
+        }),
+        base_hash='old-hash',
+    )
+    authoritative_document = {
+        'root': {
+            'data': {'uid': 'root', 'text': 'after undo'},
+            'children': [],
+        },
+    }
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+            new=_SessionFactory(database),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=parent),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
+            new=AsyncMock(return_value=[child]),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
+            new=AsyncMock(),
+        ) as update_job,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+            new=AsyncMock(),
+        ),
+        patch.object(MindmapAiTaskManager, 'schedule', new=MagicMock()) as schedule,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiService._prepare_source_for_job',
+            new=AsyncMock(return_value=(authoritative_document, 11, 'new-hash', 42, 'epoch-11')),
+        ) as prepare_source,
+        patch('module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event'),
+    ):
+        await MindmapAiTaskManager._wake_waiting_followups(parent.id)
+
+    prepare_source.assert_awaited_once()
+    released_values = update_job.await_args.args[2]
+    request_payload = json.loads(released_values['request_json'])
+    assert released_values['status'] == 'queued'
+    assert released_values['base_revision'] == EXPECTED_RELEASE_REVISION
+    assert released_values['base_hash'] == 'new-hash'
+    assert released_values['base_room_epoch'] == 'epoch-11'
+    assert request_payload['source']['revision'] == EXPECTED_RELEASE_REVISION
+    assert request_payload['source']['documentHash'] == 'new-hash'
+    assert request_payload['source']['document'] == authoritative_document
+    schedule.assert_called_once_with(child.id)
+
+
+@pytest.mark.asyncio
+async def test_review_parent_does_not_release_queued_followups_before_user_decision() -> None:
+    parent = SimpleNamespace(
+        id='review-parent',
+        session_id='review-session',
+        user_id=7,
+        status='needs_review',
+        artifact_id='review-artifact',
+    )
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+            new=_SessionFactory(database),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=parent),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
+            new=AsyncMock(),
+        ) as list_waiting,
+        patch.object(MindmapAiTaskManager, 'schedule', new=MagicMock()) as schedule,
+    ):
+        await MindmapAiTaskManager._wake_waiting_followups(parent.id)
+
+    list_waiting.assert_not_awaited()
+    schedule.assert_not_called()
+    database.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rejected_parent_closes_waiting_followups_during_recovery() -> None:
+    parent = SimpleNamespace(
+        id='rejected-parent',
+        session_id='rejected-session',
+        user_id=7,
+        status='rejected',
+        artifact_id='rejected-artifact',
+    )
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+            new=_SessionFactory(database),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=parent),
+        ),
+        patch.object(
+            MindmapAiTaskManager,
+            '_close_waiting_followups',
+            new=AsyncMock(),
+        ) as close_waiting_followups,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
+            new=AsyncMock(),
+        ) as list_waiting,
+    ):
+        await MindmapAiTaskManager._wake_waiting_followups(parent.id)
+
+    close_waiting_followups.assert_awaited_once_with(
+        parent.id,
+        parent_status='rejected',
+    )
+    list_waiting.assert_not_awaited()
+    database.rollback.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -500,6 +802,7 @@ async def test_completion_gate_rejects_deleting_session_before_result_writes() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('source_kind', ['none', 'branch', 'recovered_branch'])
 @pytest.mark.parametrize(
     ('failure_stage', 'reconciliation', 'expects_purge'),
     [
@@ -515,12 +818,33 @@ async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
     failure_stage: str,
     reconciliation: bool | None,
     expects_purge: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
 ) -> None:
+    monkeypatch.setattr(
+        'module_mindmap.service.mindmap_ai_service.load_ai_tag_catalog',
+        AsyncMock(return_value=[{'tagId': 7, 'text': 'Known', 'status': 0}]),
+    )
+    source_document = {'root': {'data': {'uid': 'root', 'text': 'Source'}, 'children': [
+        {'data': {'uid': 'allowed', 'text': 'Allowed'}, 'children': []},
+        {'data': {'uid': 'private', 'text': 'Private'}, 'children': []},
+    ]}}
+    source = {'type': 'none'} if source_kind == 'none' else {
+        'type': 'local_snapshot', 'documentId': 'source', 'revision': 1,
+        'document': source_document, 'scope': {'type': 'branch', 'rootUid': 'allowed'},
+    }
+    monkeypatch.setattr(MindmapAiTaskManager, '_emit', AsyncMock())
+    if source_kind == 'recovered_branch':
+        monkeypatch.setattr('module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_draft_checkpoint', AsyncMock())
+        monkeypatch.setattr(MindmapAiTaskManager, '_draft_checkpoint_preview', MagicMock(return_value={
+            'operationCursor': 1, 'previewEpoch': 1,
+            'document': {'root': source_document['root']['children'][0]},
+        }))
     request_json = json.dumps({
         'agentKey': 'codex',
         'intent': 'create',
         'prompt': '生成脑图',
-        'source': {'type': 'none'},
+        'source': source,
         'target': 'file',
     })
     job = SimpleNamespace(
@@ -576,7 +900,12 @@ async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
     )
 
     async def run_adapter(context: object, _emit: object) -> AgentRunResult:
-        context.tool_service.start_document('AI 脑图', 'logicalStructure')
+        if source_kind == 'none':
+            context.tool_service.start_document('AI 脑图', 'logicalStructure')
+        else:
+            assert context.source_document['root']['data']['uid'] == 'allowed'
+            assert 'private' not in json.dumps(context.source_document)
+        assert [tag['tagId'] for tag in context.tool_service.search_tags('Known')] == [7]
         return result
 
     adapter = SimpleNamespace(
@@ -633,7 +962,8 @@ async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
         ),
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_draft_event_payloads',
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=[json.dumps({'previewVersion': 1, 'previewEpoch': 1})]
+                          if source_kind == 'recovered_branch' else []),
         ),
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',

@@ -1,5 +1,5 @@
 import { assertMindmapImportDocument } from './mindmap-import-validation.js'
-import { isRecord, stableJsonValue } from './mindmap-ai-shared.js'
+import { isRecord, sha256Hex, stableJsonValue } from './mindmap-ai-shared.js'
 
 export const MINDMAP_AI_FORMAT = 'ruoyi-mindmap'
 export const MINDMAP_AI_SCHEMA_VERSION = 2
@@ -48,17 +48,12 @@ export function canonicalMindmapJson(value) {
   return JSON.stringify(stableJsonValue(value))
 }
 
-function bytesToHex(bytes) {
-  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
-}
-
 export async function computeMindmapDocumentHash(document) {
   if (!globalThis.crypto?.subtle) {
     throw artifactError('当前浏览器不支持安全哈希校验', 'AI_HASH_UNAVAILABLE')
   }
   const bytes = new TextEncoder().encode(canonicalMindmapJson(document))
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
-  return `${MINDMAP_AI_HASH_PREFIX}${bytesToHex(new Uint8Array(digest))}`
+  return `${MINDMAP_AI_HASH_PREFIX}${await sha256Hex(bytes)}`
 }
 
 export function normalizeMindmapAiSourceSnapshot(document) {

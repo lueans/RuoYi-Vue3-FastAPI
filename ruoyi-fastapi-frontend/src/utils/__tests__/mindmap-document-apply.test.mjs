@@ -657,3 +657,47 @@ test('权威树与本地撤销历史竞争时建立当前静默基线', () => {
   assert.equal(mindMap.command.history.length, 1)
   assert.equal(JSON.parse(mindMap.command.history[0]).data.text, '云端竞争值')
 })
+
+test('云端确认 AI 预览时不把未采纳的预览帧写入本地撤销历史', () => {
+  const baselineRoot = {
+    data: { uid: 'root', text: '原脑图' },
+    children: [],
+  }
+  const confirmed = {
+    root: {
+      data: { uid: 'root', text: '原脑图' },
+      children: [{ data: { uid: 'ai-case', text: 'AI 用例' }, children: [] }],
+    },
+    layout: 'logicalStructure',
+    theme: { template: 'default', config: {} },
+  }
+  const mindMap = createMindMap(confirmed)
+  const addHistory = () => {}
+  addHistory.cancel = () => {}
+  mindMap.command = {
+    history: [JSON.stringify(baselineRoot)],
+    activeHistoryIndex: 0,
+    isPause: false,
+    mindMap: { opt: {} },
+    addHistory,
+    getCopyData: () => mindMap.getData().root,
+    pause() { this.isPause = true },
+    recovery() { this.isPause = false },
+    resetHistoryBaseline() {
+      this.history = [JSON.stringify(this.getCopyData())]
+      this.activeHistoryIndex = 0
+    },
+  }
+
+  assert.equal(applyAuthoritativeMindmapDocument(
+    mindMap,
+    structuredClone(confirmed),
+    { historyCurrentTree: baselineRoot },
+  ), 'incremental')
+  assert.deepEqual(mindMap.calls, ['updateData'])
+  assert.equal(mindMap.command.history.length, 1)
+  assert.equal(
+    JSON.parse(mindMap.command.history[0]).children[0].data.uid,
+    'ai-case',
+  )
+})

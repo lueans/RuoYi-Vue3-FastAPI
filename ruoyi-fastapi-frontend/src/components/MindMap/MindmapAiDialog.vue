@@ -2,6 +2,7 @@
   <el-drawer
     v-model="visible"
     class="mindmapAiDrawer"
+    :class="{ isDark: settingsStore.isDark }"
     direction="ltr"
     size="500px"
     :modal="false"
@@ -28,14 +29,14 @@
         :width="332"
         trigger="click"
         popper-class="mindmapAiSessionPopper"
-        :disabled="running || actionBusy"
+        :disabled="running || actionBusy || livePreviewCanvasMutationBlocked"
         @show="loadRecentSessions"
       >
         <template #reference>
           <button
             type="button"
             class="newConversationButton"
-            :disabled="running || actionBusy"
+            :disabled="running || actionBusy || livePreviewCanvasMutationBlocked"
             aria-haspopup="menu"
             :aria-expanded="sessionMenuVisible"
           >
@@ -44,7 +45,13 @@
           </button>
         </template>
         <div class="sessionMenu" role="menu" aria-label="AI 对话历史">
-          <button type="button" class="sessionNewAction" role="menuitem" @click="startNewJob">
+          <button
+            type="button"
+            class="sessionNewAction"
+            role="menuitem"
+            :disabled="livePreviewCanvasMutationBlocked"
+            @click="startNewJob"
+          >
             <el-icon aria-hidden="true"><Plus /></el-icon>
             <span><strong>新建对话</strong><small>开始一个独立的 AI 任务</small></span>
           </button>
@@ -67,8 +74,10 @@
               type="button"
               role="menuitem"
               :class="{ 'is-current': session.sessionId === job?.sessionId }"
-              :disabled="Boolean(sessionUnavailableReason(session))"
-              :title="sessionUnavailableReason(session) || session.title"
+              :disabled="Boolean(sessionUnavailableReason(session)) || livePreviewCanvasMutationBlocked"
+              :title="livePreviewCanvasMutationBlocked
+                ? '请先采纳或不采纳当前 AI 实时预览'
+                : sessionUnavailableReason(session) || session.title"
               @click="switchToSession(session)"
             >
               <span class="sessionListCopy">
@@ -81,15 +90,6 @@
         </div>
       </el-popover>
       <div class="aiPanelHeaderActions">
-        <el-button
-          v-if="!messageModeActive && (draftDocument?.root || running)"
-          class="mobilePreviewToggle"
-          text
-          aria-controls="mindmap-ai-realtime-preview"
-          :aria-label="mobilePreviewVisible ? '返回 AI 对话' : '查看实时脑图'"
-          :aria-pressed="mobilePreviewVisible"
-          @click="mobilePreviewVisible = !mobilePreviewVisible"
-        >{{ mobilePreviewVisible ? '返回对话' : '实时脑图' }}</el-button>
         <span
           class="connectionBadge"
           :class="`is-${realtimeConnectionState}`"
@@ -106,7 +106,7 @@
           ><el-icon><Setting /></el-icon></el-button>
         </el-tooltip>
         <el-tooltip content="关闭 AI 面板" placement="bottom" popper-class="mindmapAiTooltipPopper">
-          <el-button circle text aria-label="关闭 AI 面板" @click="visible = false">
+          <el-button circle text aria-label="关闭 AI 面板" @click="requestDialogClose">
             <el-icon><Close /></el-icon>
           </el-button>
         </el-tooltip>
@@ -122,7 +122,7 @@
         <div class="activityHeader">
           <div>
             <strong>会话记录</strong>
-            <small>{{ conversationTurns.length }} 轮对话 · 生成过程可展开</small>
+            <small>{{ conversationTurns.length + (pendingFollowupPrompt ? 1 : 0) }} 轮对话 · 生成过程可展开</small>
           </div>
           <div class="activityHeaderActions">
             <el-button
@@ -130,12 +130,12 @@
               link
               type="danger"
               :loading="deletingSession"
-              :disabled="actionBusy"
+              :disabled="actionBusy || livePreviewCanvasMutationBlocked"
               @click="deleteSessionRecord"
             >删除记录</el-button>
           </div>
         </div>
-        <el-skeleton v-if="timelineLoading" :rows="5" animated />
+        <el-skeleton v-if="timelineLoading && !conversationTurns.length" :rows="5" animated />
         <div v-else-if="timelineError" class="timelineLoadFailure">
           <el-alert
             :title="timelineError"
@@ -148,7 +148,7 @@
             type="warning"
             plain
             :loading="timelineLoading"
-            :disabled="!job?.sessionId"
+            :disabled="!job?.sessionId || livePreviewCanvasMutationBlocked"
             @click="retrySessionTimeline"
           >重新加载会话记录</el-button>
         </div>
@@ -163,7 +163,7 @@
             :key="`turn:${turn.job.id}`"
             type="button"
             :class="{ 'is-selected': selectedTurnJobId === String(turn.job.id) }"
-            :disabled="selectedArtifactLoading || actionBusy"
+            :disabled="selectedArtifactLoading || actionBusy || livePreviewCanvasMutationBlocked"
             @click="selectSessionTurn(turn)"
           >
             <span>第 {{ turn.job.turnIndex || 1 }} 轮</span>
@@ -173,7 +173,7 @@
             v-if="job && !job.artifactId"
             type="button"
             :class="{ 'is-selected': selectedTurnJobId === String(job.id) }"
-            :disabled="selectedArtifactLoading || actionBusy"
+            :disabled="selectedArtifactLoading || actionBusy || livePreviewCanvasMutationBlocked"
             @click="selectCurrentLiveTurn"
           >
             <span>第 {{ job.turnIndex || 1 }} 轮 · 实时</span>
@@ -205,6 +205,20 @@
                 <span>{{ displayJobStatusLabel(turn.job) }}</span>
               </div>
               <p>{{ assistantMessageText(turn) }}</p>
+              <section v-if="turn.tagSuggestions.items.length" class="tagSuggestions" aria-label="本轮标签建议">
+                <strong>标签建议 · 未创建、未绑定</strong>
+                <p>本轮仅提出建议。请手动创建标签后，在下一轮要求 AI 引用；不会自动创建或继续执行。</p>
+                <ul>
+                  <li v-for="suggestion in turn.tagSuggestions.items" :key="suggestion.key">
+                    <strong>{{ suggestion.name }}</strong>
+                    <p v-if="suggestion.reason">{{ suggestion.reason }}</p>
+                    <small v-if="suggestion.nodeUids.length">
+                      建议关联 {{ suggestion.nodeUids.length }} 个节点{{ suggestion.nodeUidsTruncated ? '（数量已截断）' : '' }}
+                    </small>
+                  </li>
+                </ul>
+                <small v-if="turn.tagSuggestions.truncated">展示已达上限，部分建议、说明或目标节点已省略。</small>
+              </section>
               <div v-if="turn.usage" class="usageSummary" aria-label="本轮 AI 用量">
                 <span v-if="Number.isSafeInteger(turn.usage.totalTokens)">Token {{ turn.usage.totalTokens }}</span>
                 <span v-if="Number.isFinite(turn.usage.totalCostUsd)">
@@ -222,6 +236,16 @@
                 </ol>
                 <small v-if="turn.events.length > 20">仅显示最近 20 条；完整记录仍保存在服务端会话中。</small>
               </details>
+            </div>
+          </li>
+          <li v-if="pendingFollowupPrompt" class="conversationTurn">
+            <div class="conversationMessage is-user">
+              <div class="conversationMessageMeta"><strong>你</strong></div>
+              <p>{{ pendingFollowupPrompt }}</p>
+            </div>
+            <div class="conversationMessage is-assistant">
+              <div class="conversationMessageMeta"><strong>AI · 新一轮</strong><span>正在创建</span></div>
+              <p>正在准备本轮任务…</p>
             </div>
           </li>
         </ol>
@@ -263,6 +287,7 @@
                 type="warning"
                 plain
                 :loading="cloudMutationRecovering"
+                :disabled="livePreviewCanvasMutationBlocked"
                 @click="retryCloudMutationRecovery"
               >重新同步云端 AI 操作</el-button>
               <el-button
@@ -270,7 +295,7 @@
                 size="small"
                 type="danger"
                 plain
-                :disabled="cloudMutationRecovering"
+                :disabled="cloudMutationRecovering || livePreviewCanvasMutationBlocked"
                 @click="discardPermanentCloudMutationRecovery"
               >已人工核对，清除记录</el-button>
             </div>
@@ -288,13 +313,154 @@
                 type="warning"
                 plain
                 :loading="restoringJob"
+                :disabled="restoringJob || (livePreviewCanvasMutationBlocked && !directCanvasRecoveryJobId)"
                 @click="retryStoredJobRecovery"
               >重试恢复任务</el-button>
-              <el-button size="small" :disabled="restoringJob" @click="discardStoredJobRecovery">
+              <el-button
+                size="small"
+                :disabled="restoringJob || livePreviewCanvasMutationBlocked"
+                @click="discardStoredJobRecovery"
+              >
                 放弃恢复并新建
               </el-button>
             </div>
           </div>
+          <div
+            v-if="livePreviewPreparing"
+            class="liveDraftNotice is-preparing"
+            role="status"
+            aria-live="off"
+          >
+            <i aria-hidden="true"></i>
+            <div>
+              <strong>{{ livePreviewPreparingTitle }}</strong>
+              <span>{{ livePreviewPreparingDescription }}</span>
+            </div>
+          </div>
+          <div
+            v-if="livePreviewNoticeVisible"
+            ref="livePreviewNoticeRef"
+            class="liveDraftNotice"
+            :class="{ 'is-complete': !running && !applying && !cancelling && !livePreviewReverting && !livePreviewPaused && !livePreviewCatchingUp }"
+            role="status"
+            aria-live="off"
+            tabindex="-1"
+          >
+            <i aria-hidden="true"></i>
+            <div>
+              <strong>{{ livePreviewNoticeTitle }}</strong>
+              <span>{{ livePreviewNoticeDescription }}</span>
+            </div>
+            <el-button
+              v-if="livePreviewPlaybackAvailable"
+              class="livePreviewPlaybackButton"
+              size="small"
+              text
+              :disabled="livePreviewRendering"
+              @click="toggleLivePreviewPlayback()"
+            >{{ livePreviewPaused ? '继续显示' : '暂停显示' }}</el-button>
+          </div>
+          <div
+            v-if="directExecutionNoticeVisible"
+            class="liveDraftNotice is-direct"
+            :class="{ 'is-complete': !running }"
+            role="status"
+            aria-live="polite"
+          >
+            <i aria-hidden="true"></i>
+            <div>
+              <strong>{{ directExecutionNoticeTitle }}</strong>
+              <span>{{ directExecutionNoticeDescription }}</span>
+            </div>
+          </div>
+          <p
+            v-if="livePreviewAccessibleAnnouncement"
+            class="mindmapAiSrOnly"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >{{ livePreviewAccessibleAnnouncement }}</p>
+          <el-alert
+            v-if="livePreviewError"
+            :title="livePreviewError"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
+          <el-button
+            v-if="uncertainCanvasCreation"
+            size="small"
+            type="warning"
+            plain
+            :loading="livePreviewRecovering"
+            @click="reconcilePendingCanvasCreation"
+          >确认创建结果并恢复</el-button>
+          <el-button
+            v-if="livePreviewError && directCanvasOwned && !uncertainCanvasCreation"
+            size="small"
+            type="warning"
+            plain
+            :loading="livePreviewRecovering"
+            @click="retryLivePreviewSync"
+          >{{ isTerminalStatus(job?.status) ? '重新同步云端结果' : '重试流式显示' }}</el-button>
+          <el-button
+            v-if="job?.status === 'ready' && livePreviewAutoAcceptFailedJobId === String(job.id)"
+            size="small"
+            type="warning"
+            plain
+            :loading="applying"
+            :disabled="actionBusy"
+            @click="acceptCompletedLivePreviewByDefault(job.id, { retry: true })"
+          >重试保存 AI 结果</el-button>
+          <el-alert
+            v-if="realtimeError"
+            :title="realtimeError"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
+          <div v-if="livePreviewRecoveryAvailable" class="livePreviewRecovery" role="status">
+            <span>已保留当前画布内容，可以立即尝试恢复实时草稿同步。</span>
+            <el-button
+              size="small"
+              type="warning"
+              plain
+              :loading="livePreviewRecovering"
+              :disabled="actionBusy || livePreviewRecovering"
+              @click="retryLivePreviewSync"
+            >重新同步画布</el-button>
+          </div>
+          <div v-if="draftFreshnessMessage" class="draftFreshnessRecovery">
+            <el-alert
+              :title="draftFreshnessMessage"
+              :type="['stale', 'restarted'].includes(draftFreshness) ? 'warning' : 'info'"
+              show-icon
+              :closable="false"
+            />
+            <el-button
+              v-if="sourceBaselineMismatch"
+              size="small"
+              type="warning"
+              plain
+              :disabled="actionBusy || livePreviewCanvasMutationBlocked"
+              @click="startNewJob"
+            >基于当前脑图重新生成</el-button>
+          </div>
+          <el-alert
+            v-if="viewingHistoricalArtifact"
+            :title="`正在查看第 ${selectedArtifactJob?.turnIndex || 1} 轮历史结果；应用与撤销仍锁定当前轮次。`"
+            type="info"
+            show-icon
+            :closable="false"
+          />
+          <el-button
+            v-if="isTerminalStatus(job?.status) && terminalHydrationState === 'error'"
+            size="small"
+            type="warning"
+            plain
+            :disabled="actionBusy"
+            @click="retryTerminalHydration"
+          >重试加载预览</el-button>
 
           <section v-if="!job && !agentEvents.length" class="aiWelcome">
             <div class="aiWelcomeMark" aria-hidden="true">
@@ -302,21 +468,14 @@
             </div>
             <h2>今天想做点什么？</h2>
             <div class="starterGrid">
-              <button type="button" @click="usePromptStarter('research')">
-                <el-icon><DataAnalysis /></el-icon>
-                <span>调研一个主题并总结要点</span>
-              </button>
-              <button type="button" @click="usePromptStarter('plan')">
-                <el-icon><List /></el-icon>
-                <span>把一个项目拆解成执行计划</span>
-              </button>
-              <button type="button" @click="usePromptStarter('trends')">
-                <el-icon><TrendCharts /></el-icon>
-                <span>梳理某个领域的发展趋势</span>
-              </button>
-              <button type="button" @click="usePromptStarter('optimize')">
+              <button
+                v-for="starter in starterItems"
+                :key="starter.type"
+                type="button"
+                @click="usePromptStarter(starter.type)"
+              >
                 <el-icon><MagicStick /></el-icon>
-                <span>分析并优化我的思维导图</span>
+                <span>{{ starter.label }}</span>
               </button>
             </div>
           </section>
@@ -408,7 +567,7 @@
               <el-option
                 v-for="model in availableModels"
                 :key="model.modelId"
-                :label="model.modelName || model.modelCode"
+                :label="`${model.modelName || model.modelCode} · ${model.provider}/${model.modelCode}`"
                 :value="model.modelId"
               />
             </el-select>
@@ -474,7 +633,7 @@
           />
         </el-form-item>
 
-        <div class="formGrid compactGrid">
+        <div class="formGrid">
           <el-form-item label="输出语言">
             <el-select
               v-model="form.language"
@@ -504,7 +663,7 @@
                 :value="item.value"
               />
             </el-select>
-            <div v-if="targetLayoutLocked" class="fieldHint">{{ targetLayoutHint }}</div>
+            <div v-if="targetLayoutLocked" class="fieldHint">局部编辑只修改授权节点，保持当前脑图布局。</div>
             <div v-else class="fieldHint">生成过程和最终结果都会使用所选布局。</div>
           </el-form-item>
           <el-form-item label="内容密度">
@@ -518,6 +677,22 @@
               <el-option label="标准" value="standard" />
               <el-option label="详细" value="detailed" />
             </el-select>
+          </el-form-item>
+          <el-form-item v-if="!discussionMode" label="生成方式">
+            <el-select
+              v-model="form.generationMode"
+              class="fullWidth"
+              popper-class="mindmapAiSelectPopper"
+              :disabled="taskConfigurationLocked"
+            >
+              <el-option
+                v-for="item in generationModeOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+            <div class="fieldHint">{{ generationModeHint }}</div>
           </el-form-item>
           <el-form-item label="最多节点">
             <el-input-number
@@ -547,9 +722,8 @@
             <strong>{{ statusLabel }}</strong>
             <small>{{ job.agentKey }} · {{ job.id }}</small>
           </div>
-          <span>{{ job.progress || 0 }}%</span>
+          <span class="jobActivitySummary">{{ jobActivitySummary }}</span>
         </div>
-        <el-progress :percentage="job.progress || 0" :status="progressStatus" />
         <el-alert
           v-if="job.errorMessage || job.errorCode"
           :title="job.errorCode ? `${job.errorCode}：${jobErrorMessage}` : jobErrorMessage"
@@ -566,29 +740,6 @@
           </ol>
           <span v-else class="fieldHint">正在从安全审计记录恢复补充问题……</span>
           <span class="fieldHint">在下方填写答案后会创建新的任务轮次；当前轮次保持终态，不会被重新启动。</span>
-        </div>
-        <div v-if="retryAvailable" class="retryPanel">
-          <strong>重试任务 · 创建独立的新轮次</strong>
-          <el-input
-            v-model="retryPrompt"
-            type="textarea"
-            :rows="3"
-            maxlength="20000"
-            show-word-limit
-            placeholder="可编辑本轮要求；留空则复用原任务要求"
-          />
-          <div class="retryActions">
-            <span class="fieldHint">
-              可在上方切换 Agent 或模型。重试保留本会话的交互审计，但不会复用失败任务的供应商会话。
-            </span>
-            <el-button
-              type="primary"
-              plain
-              :loading="retrying"
-              :disabled="actionBusy"
-              @click="retryJob"
-            >重试任务</el-button>
-          </div>
         </div>
         <div v-if="!messageModeActive && job.artifactId" class="resultSummary">
           <span>{{ isDraftArtifact(job.artifactId) ? '结果为安全草稿' : '已生成并通过 SMM v2 校验' }}</span>
@@ -607,7 +758,7 @@
             plain
             :loading="proposalLoading"
             :disabled="actionBusy"
-            @click="reloadProposal"
+            @click="loadProposal"
           >重新加载提案差异</el-button>
         </div>
         <div v-if="terminalHydrationState === 'error'" class="proposalLoadFailure">
@@ -628,47 +779,53 @@
         </div>
         <details
           v-if="!messageModeActive && proposal"
+          ref="proposalReviewRef"
           class="proposalPreview"
           :open="!proposalReviewFinalized"
           aria-label="AI 提案差异预览"
+          tabindex="-1"
         >
           <summary v-if="proposalReviewFinalized" class="proposalReviewSummary">
             <span>
-              <strong>{{ job.status === 'undone' ? '已撤销提案差异' : '已应用提案差异' }}</strong>
-              <small>
-                新增 {{ proposal.impact?.createdCount || 0 }} ·
-                修改 {{ proposal.impact?.updatedCount || 0 }} ·
-                移动 {{ proposal.impact?.movedCount || 0 }} ·
-                删除 {{ proposal.impact?.deletedCount || 0 }}
+              <strong>{{ job.status === 'undone'
+                ? '已撤销提案差异'
+                : job.status === 'rejected' ? '已拒绝提案差异' : '已应用提案差异' }}</strong>
+              <small v-if="resultImpactSummaryAvailable">
+                新增 {{ resultImpactForDisplay.createdCount }} ·
+                修改 {{ resultImpactForDisplay.updatedCount }} ·
+                移动 {{ resultImpactForDisplay.movedCount }} ·
+                删除 {{ resultImpactForDisplay.deletedCount }}
               </small>
+              <small v-else>变更统计暂不可用，已完成的云端直写仍可在脑图正文中查看</small>
             </span>
             <el-icon aria-hidden="true"><ArrowDown /></el-icon>
           </summary>
           <div class="proposalReviewBody">
-            <div class="diffCounts">
-              <span>新增 {{ proposal.impact?.createdCount || 0 }}</span>
-              <span>修改 {{ proposal.impact?.updatedCount || 0 }}</span>
-              <span>移动 {{ proposal.impact?.movedCount || 0 }}</span>
-              <span>删除 {{ proposal.impact?.deletedCount || 0 }}</span>
+            <div v-if="resultImpactSummaryAvailable" class="diffCounts">
+              <span>新增 {{ resultImpactForDisplay.createdCount }}</span>
+              <span>修改 {{ resultImpactForDisplay.updatedCount }}</span>
+              <span>移动 {{ resultImpactForDisplay.movedCount }}</span>
+              <span>删除 {{ resultImpactForDisplay.deletedCount }}</span>
             </div>
+            <div v-else class="diffCounts is-unavailable">变更统计暂不可用</div>
             <el-alert
-              v-if="proposal.impact?.highImpact"
-              :title="proposal.impact.highImpactReasons?.join('；') || '这是高影响提案'"
+              v-if="resultImpactForDisplay?.highImpact"
+              :title="resultImpactForDisplay.highImpactReasons?.join('；') || '这是高影响提案'"
               type="warning"
               show-icon
               :closable="false"
             />
-            <ul v-if="proposal.impact?.changes?.length" class="diffList">
+            <ul v-if="resultImpactForDisplay?.changes?.length" class="diffList">
               <li
-                v-for="(change, index) in proposal.impact.changes.slice(0, 12)"
+                v-for="(change, index) in resultImpactForDisplay.changes.slice(0, 12)"
                 :key="`${change.type}:${change.nodeUid || index}`"
               >
                 {{ changeTypeLabel(change.type) }} · {{ change.path || change.fromPath || '文档设置' }}
                 <span v-if="change.subtreeSize">（子树 {{ change.subtreeSize }} 个节点）</span>
               </li>
             </ul>
-            <div v-if="proposal.impact?.changes?.length > 12" class="fieldHint">
-              另有 {{ proposal.impact.changes.length - 12 }} 项变化未展开。
+            <div v-if="resultImpactForDisplay?.changes?.length > 12" class="fieldHint">
+              另有 {{ resultImpactForDisplay.changes.length - 12 }} 项变化未展开。
             </div>
             <el-checkbox
               v-if="!proposalReviewFinalized"
@@ -682,126 +839,9 @@
             </el-checkbox>
           </div>
         </details>
-        <section
-          v-if="followupAvailable"
-          class="followupPanel"
-        >
-          <strong>{{ followupParentJob?.status === 'needs_input' ? '补充信息' : '继续调整' }} · 基于第 {{ followupParentJob?.turnIndex || 1 }} 轮</strong>
-          <el-input
-            v-model="followupPrompt"
-            type="textarea"
-            :rows="3"
-            maxlength="20000"
-            show-word-limit
-            :placeholder="followupParentJob?.status === 'needs_input'
-              ? '请按上方问题补充必要信息'
-              : '例如：保留现有结构，再补充异常场景并减少重复节点'"
-          />
-          <div class="followupActions">
-            <span class="fieldHint">
-              {{ followupParentJob?.status === 'needs_input'
-                ? '补充信息会继续当前任务，不能切换讨论/编辑模式。'
-                : discussionMode
-                  ? '下一轮将基于当前结果进行讨论，只返回回答，不修改脑图。'
-                  : '下一轮将基于当前结果继续编辑脑图；可调整 Agent、模型与本轮要求。' }}
-              切换 Agent 或讨论/编辑模式时，不迁移供应商隐藏上下文。
-            </span>
-            <el-button
-              type="primary"
-              plain
-              :loading="continuing"
-              :disabled="!followupPrompt.trim() || actionBusy"
-              @click="continueJob"
-            >继续生成</el-button>
-          </div>
-        </section>
           </section>
         </section>
 
-        <Teleport to="body">
-        <section
-          v-if="visible && !messageModeActive && (draftDocument?.root || running)"
-          id="mindmap-ai-realtime-preview"
-          class="previewPanel aiDraftStage"
-          :class="{ 'is-mobile-visible': mobilePreviewVisible }"
-          aria-label="AI 实时脑图预览"
-        >
-          <div class="previewHeader">
-            <el-button
-              class="mobilePreviewBack"
-              text
-              aria-label="返回 AI 对话"
-              @click="mobilePreviewVisible = false"
-            >返回 AI 对话</el-button>
-            <div>
-              <strong>实时脑图</strong>
-              <small>{{ previewSubtitle }}</small>
-            </div>
-            <div class="previewActions">
-              <span v-if="draftDocument?.root" class="previewMetric">{{ draftNodeCount }} 节点</span>
-              <span v-if="latestPreviewVersion >= 0" class="previewMetric">变化版本 {{ latestPreviewVersion }}</span>
-              <el-button size="small" :disabled="!draftDocument?.root" @click="fitPreview">适应画布</el-button>
-            </div>
-          </div>
-          <el-alert
-            v-if="viewingHistoricalArtifact"
-            :title="`正在查看第 ${selectedArtifactJob?.turnIndex || 1} 轮历史结果；应用与撤销仍锁定当前轮次。`"
-            type="info"
-            show-icon
-            :closable="false"
-          />
-          <el-alert
-            v-if="realtimeError"
-            class="previewError"
-            :title="realtimeError"
-            type="warning"
-            show-icon
-            :closable="false"
-          />
-          <el-alert
-            v-if="draftFreshnessMessage"
-            class="previewError"
-            :title="draftFreshnessMessage"
-            :type="['stale', 'restarted'].includes(draftFreshness) ? 'warning' : 'info'"
-            show-icon
-            :closable="false"
-          />
-          <el-button
-            v-if="isTerminalStatus(job?.status) && terminalHydrationState === 'error'"
-            size="small"
-            type="warning"
-            plain
-            :disabled="actionBusy"
-            @click="retryTerminalHydration"
-          >重试加载预览</el-button>
-          <div v-if="draftDocument?.root" class="previewCanvas">
-            <MindMapPreview
-              key="ai-preview"
-              ref="previewMindMapRef"
-              :model-value="draftDocument.root"
-              :layout="draftDocument.layout || 'logicalStructure'"
-              :theme="draftDocument.theme?.template || 'default'"
-              :theme-config="draftDocument.theme?.config || {}"
-              :readonly="true"
-              width="100%"
-              height="100%"
-              @ready="onPreviewReady"
-            />
-          </div>
-          <div v-else class="previewEmpty" :class="{ 'is-running': waitingForFirstDraft }">
-            <div class="previewEmptyIcon" aria-hidden="true"><el-icon><MagicStick /></el-icon></div>
-            <div v-if="waitingForFirstDraft" class="previewWaitStatus" role="status" aria-live="polite">
-              <span class="previewWaitTime" aria-hidden="true">已等待 {{ generationElapsedSeconds }} 秒</span>
-              <strong>{{ firstDraftStageTitle }}</strong>
-              <span>{{ firstDraftStageDescription }}</span>
-            </div>
-            <template v-else>
-              <strong>等待生成脑图</strong>
-              <span>配置任务并开始生成，或恢复最近一次任务。</span>
-            </template>
-          </div>
-        </section>
-        </Teleport>
       </main>
     </div>
 
@@ -816,7 +856,8 @@
             size="small"
             plain
             :loading="openingLocal"
-            :disabled="actionBusy"
+            :disabled="actionBusy || livePreviewCanvasMutationBlocked"
+            :title="livePreviewCanvasMutationBlocked ? '请先采纳或不采纳当前 AI 实时预览' : undefined"
             @click="openArtifactAsLocal"
           >打开为本地脑图</el-button>
           <el-button
@@ -824,7 +865,8 @@
             size="small"
             plain
             :loading="replacingLocal"
-            :disabled="actionBusy"
+            :disabled="actionBusy || livePreviewCanvasMutationBlocked"
+            :title="livePreviewCanvasMutationBlocked ? '请先采纳或不采纳当前 AI 实时预览' : undefined"
             @click="replaceLocalWithArtifact"
           >替换当前本地脑图</el-button>
           <el-button
@@ -832,7 +874,8 @@
             size="small"
             plain
             :loading="insertingLocal"
-            :disabled="actionBusy"
+            :title="livePreviewCanvasMutationBlocked ? '请先采纳或不采纳当前 AI 实时预览' : undefined"
+            :disabled="actionBusy || livePreviewCanvasMutationBlocked"
             @click="insertArtifactBranch"
           >插入分支</el-button>
           <el-button
@@ -840,37 +883,86 @@
             size="small"
             type="primary"
             :loading="savingCloud"
-            :disabled="actionBusy"
+            :disabled="actionBusy || livePreviewCanvasMutationBlocked"
+            :title="livePreviewCanvasMutationBlocked ? '请先采纳或不采纳当前 AI 实时预览' : undefined"
             @click="saveCloud"
           >保存为云端脑图</el-button>
         </div>
 
-        <div v-if="canApplyCurrentProposal || canUndoCurrentProposal" class="primaryResultAction">
-          <div v-if="canApplyCurrentProposal">
-            <strong>草稿已就绪</strong>
-            <span>{{ sourceContext?.mindmapId
-              ? '确认后直接覆盖当前脑图，并保留撤销快照'
-              : '确认差异后再写入当前脑图' }}</span>
-          </div>
-          <div v-else>
-            <strong>已应用到当前脑图</strong>
-            <span>后续没有修改时可安全撤销</span>
+        <div v-if="canRejectLiveDraft" class="primaryResultAction liveDraftAction">
+          <div>
+            <strong>{{ job?.status === 'ready' ? 'AI 结果已完成 · 已保留在当前脑图' : 'AI 正在实时编辑' }}</strong>
+            <span>{{ job?.status === 'ready'
+              ? '当前结果已经保存；撤销可恢复生成前版本。'
+              : '停止任务会保留已生成修改；如果不需要，可撤销本轮。' }}</span>
           </div>
           <el-button
-            v-if="canApplyCurrentProposal"
+            type="warning"
+            plain
+            :loading="cancelling"
+            :disabled="actionBusy"
+            @click="rejectLiveDraft"
+          >{{ job?.status === 'ready' ? '撤销本轮 AI 修改' : '不采纳并撤销' }}</el-button>
+        </div>
+
+        <div
+          v-if="highImpactReviewRequired"
+          class="primaryResultAction liveDraftAction is-review-required"
+        >
+          <div>
+            <strong>AI 结果需要你确认</strong>
+            <span>{{ livePreviewActive
+              ? '结果已经实时展示在当前画布；请查看差异后明确采纳，或不采纳本轮修改。'
+              : '本轮结果等待你的决定；可以查看差异并采纳，也可以不采纳本轮修改。' }}</span>
+          </div>
+          <el-button
+            type="warning"
+            plain
+            :loading="rejectingReview"
+            :disabled="actionBusy"
+            @click="rejectLiveDraft"
+          >不采纳本轮</el-button>
+          <el-button
             type="primary"
             :loading="applying"
-            :disabled="actionBusy || editorReadonly || !proposal || !diffConfirmed"
-            @click="applyProposal"
-          >{{ sourceContext?.mindmapId ? '覆盖当前脑图' : '应用' }}</el-button>
+            :disabled="actionBusy"
+            @click="applyProposal()"
+          >查看差异并采纳</el-button>
+        </div>
+
+        <div
+          v-if="job?.status === 'rejected' && !viewingHistoricalArtifact"
+          class="primaryResultAction liveDraftAction is-rejected"
+        >
+          <div>
+            <strong>本轮变更未采纳 · 当前脑图保持原内容</strong>
+            <span>可以修改要求，基于当前脑图重新开始一轮；这会创建新的确认边界。</span>
+          </div>
           <el-button
-            v-else
+            type="primary"
+            plain
+            :disabled="actionBusy"
+            @click="startRevisionFromRejected"
+          >修改要求重新生成</el-button>
+        </div>
+
+        <div v-if="(canApplyCurrentProposal && !livePreviewActive) || canUndoCurrentProposal" class="primaryResultAction">
+          <div v-if="canApplyCurrentProposal && !livePreviewActive">
+            <strong>{{ livePreviewAutoAcceptFailedJobId === String(job?.id) ? 'AI 结果保存未完成' : 'AI 结果已完成，正在保存' }}</strong>
+            <span>保存完成后可撤销本次 AI 全部操作</span>
+          </div>
+          <div v-else>
+            <strong>AI 结果已保存</strong>
+            <span>当前画布保持生成结果，如需恢复可撤销本次 AI 全部操作</span>
+          </div>
+          <el-button
+            v-if="canUndoCurrentProposal"
             type="warning"
             plain
             :loading="undoing"
             :disabled="actionBusy && !undoing"
             @click="undoProposal"
-          >撤销</el-button>
+          >撤销 AI 结果</el-button>
         </div>
 
         <div class="aiComposer" :class="{ 'is-discussion': discussionMode }">
@@ -952,6 +1044,7 @@
             </div>
           </div>
           <el-input
+            ref="composerInputRef"
             v-model="composerText"
             type="textarea"
             :autosize="{ minRows: 2, maxRows: 5 }"
@@ -961,6 +1054,32 @@
             :placeholder="composerPlaceholder"
             @keydown="onComposerKeydown"
           />
+          <div v-if="composerPreflightText" class="composerPreflight" role="status">
+            <span class="composerPreflightLabel">发送前确认</span>
+            <span>{{ composerPreflightText }}</span>
+          </div>
+          <div v-if="running" class="composerRoutePicker" role="group" aria-label="运行中消息去向">
+            <span class="composerRouteLabel">这条要求：</span>
+            <button
+              type="button"
+              :class="{ 'is-active': runningMessageRoute === 'current' }"
+              :disabled="composerSending || actionBusy"
+              title="不打断当前已提交修改，在下一个安全边界采用"
+              @click="runningMessageRoute = 'current'"
+            >加入当前任务</button>
+            <button
+              type="button"
+              :class="{ 'is-active': runningMessageRoute === 'next' }"
+              :disabled="composerSending || actionBusy"
+              title="当前轮结束后按队列顺序开始"
+              @click="runningMessageRoute = 'next'"
+            >排到下一轮</button>
+            <span class="composerRouteHint">
+              {{ runningMessageRoute === 'current'
+                ? '将在下一个安全边界采用，不会打断当前画布更新。'
+                : '当前轮完成后自动开始，并显示队列位置。' }}
+            </span>
+          </div>
           <div class="composerToolbar">
             <div class="composerTools">
               <el-tooltip
@@ -1009,7 +1128,17 @@
               <el-button
                 v-if="running"
                 circle
-                aria-label="取消任务"
+                type="primary"
+                aria-label="排到下一轮"
+                :loading="composerSending"
+                :disabled="!composerCanSend"
+                @click="sendComposerMessage"
+              ><el-icon v-if="!composerSending"><Promotion /></el-icon></el-button>
+              <el-button
+                v-if="running"
+                circle
+                aria-label="停止任务并保留已生成结果"
+                title="停止任务并保留已生成结果"
                 :loading="cancelling"
                 :disabled="actionBusy && !cancelling"
                 @click="cancelJob"
@@ -1034,22 +1163,21 @@
 <script setup>
 import { saveAs } from 'file-saver'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute } from 'vue-router'
 import {
   ArrowDown,
   ArrowUp,
   Close,
-  DataAnalysis,
-  List,
   MagicStick,
   MoreFilled,
   Paperclip,
   Plus,
   Promotion,
   Setting,
-  TrendCharts,
   WarningFilled,
 } from '@element-plus/icons-vue'
 import { listModelAll } from '@/api/ai/model'
+import useSettingsStore from '@/store/modules/settings'
 import useUserStore from '@/store/modules/user'
 import {
   ackMindmapAiLocalApply,
@@ -1067,6 +1195,7 @@ import {
   listMindmapAiSessions,
   listMindmapAiAgents,
   prepareMindmapAiLocalApply,
+  rejectMindmapAiProposal,
   reconcileMindmapAiJob,
   retryMindmapAiJob,
   saveMindmapAiArtifactCloud,
@@ -1080,6 +1209,25 @@ import {
   createMindmapAiIdempotencyKey,
 } from '@/utils/mindmap-ai-artifact'
 import { verifyMindmapAiLocalProposal } from '@/utils/mindmap-ai-proposal'
+import {
+  compareMindmapAiPreviewCoordinates,
+  countMindmapAiDraftNodes,
+  describeMindmapAiDraftChange,
+  nextMindmapAiDraftFrame,
+  summarizeMindmapAiDraftChanges,
+} from '@/utils/mindmap-ai-live-preview'
+import {
+  getMindmapAiPendingCharacterCount,
+  getMindmapAiPlaybackPacing,
+} from '@/utils/mindmap-ai-playback-pacing'
+import {
+  directImpactForMindmapAiResult,
+  resolveMindmapAiDirectChangeSummary,
+} from '@/utils/mindmap-ai-result-summary'
+import {
+  collectMindmapAiTagSuggestions,
+  sanitizeMindmapAiTagSuggestionsPayload,
+} from '@/utils/mindmap-ai-tag-suggestions'
 import {
   enqueueMindmapAiLocalAck,
   flushMindmapAiLocalAcks,
@@ -1101,8 +1249,10 @@ import {
 import {
   formatMindmapAiError,
   formatMindmapAiJobError,
+  isMindmapAiAbortError as isAbortError,
   resolveMindmapAiErrorCode,
 } from '@/utils/mindmap-ai-errors'
+import { normalizeNumericOwnerUserId, sha256Hex } from '@/utils/mindmap-ai-shared'
 import {
   buildMindmapAiTimelineEnvelopeKey,
   consumeMindmapAiRealtimeEvents,
@@ -1128,13 +1278,14 @@ import {
 } from '@/utils/mindmap-ai-conversation'
 import { resolveMindmapAiAgentSelection } from '@/utils/mindmap-ai-agent-selection'
 import { layoutList } from './config'
-import MindMapPreview from './index.vue'
 import bus from './useEventBus'
 
 const props = defineProps({
   readonly: { type: Boolean, default: false },
 })
+const route = useRoute()
 const router = useRouter()
+const settingsStore = useSettingsStore()
 const userStore = useUserStore()
 
 const intentOptions = [
@@ -1170,11 +1321,30 @@ const models = ref([])
 const loadingAgents = ref(false)
 const agentError = ref('')
 const submitting = ref(false)
+const preparingCanvas = ref(false)
+// Canvas ownership belongs to a specific task, never to the currently selected
+// conversation. Stale async completions must not unlock its successor.
+const directCanvasOwnerId = ref('')
+const directCanvasOwned = computed(() => Boolean(directCanvasOwnerId.value))
+// A restored cloud canvas cannot subscribe from an old cursor until a latest
+// checkpoint has established its playback floor. Retain this job-scoped gate
+// on failure so retry resumes the same owner without reopening historical SSE.
+const directCanvasRecoveryJobId = ref('')
+const uncertainCanvasCreation = shallowRef(null)
+// During a parent→child handoff the editor is already fenced by the child,
+// while the dialog retains the parent owner until the child's latest checkpoint
+// is known. Teardown must detach the actual editor owner in that interval.
+let pendingHandoffCanvasJobId = ''
+let directTerminalTargetJobId = ''
 const submissionStartedAt = ref(0)
+const runningPrompt = ref('')
+const runningMessageRoute = ref('current')
 const cancelling = ref(false)
+const cancelConfirming = ref(false)
 const downloading = ref(false)
 const savingCloud = ref(false)
 const applying = ref(false)
+const rejectingReview = ref(false)
 const continuing = ref(false)
 const retrying = ref(false)
 const parsingFile = ref(false)
@@ -1189,15 +1359,19 @@ const jobConfiguration = ref(null)
 const proposal = ref(null)
 const diffConfirmed = ref(false)
 const followupPrompt = ref('')
+const pendingFollowupPrompt = ref('')
 const retryPrompt = ref('')
+const composerInputRef = ref(null)
 const selectedNodeUids = ref([])
 const sourceContext = ref(null)
 const editorContext = ref(null)
 const sourceFingerprint = ref('')
+const sourceBaselineMismatch = ref(false)
 const sourceFileInputRef = ref(null)
-const previewMindMapRef = ref(null)
 const activityTimelineRef = ref(null)
 const proposalConfirmationRef = ref(null)
+const proposalReviewRef = ref(null)
+const livePreviewNoticeRef = ref(null)
 const uploadedFileName = ref('')
 const uploadedFileArtifact = ref(null)
 const agentEvents = ref([])
@@ -1206,6 +1380,7 @@ const realtimeConnectionState = ref('idle')
 const realtimeError = ref('')
 const draftFreshness = ref('idle')
 const draftFreshnessMessage = ref('')
+const livePreviewRecovering = ref(false)
 const proposalError = ref('')
 const timelineLoading = ref(false)
 const timelineError = ref('')
@@ -1218,10 +1393,17 @@ const cloudMutationHasPermanentFailure = ref(false)
 const proposalLoading = ref(false)
 const terminalHydrationState = ref('idle')
 const terminalHydrationError = ref('')
+let terminalHydrationGeneration = 0
+let terminalFinalizationState = null
 const selectedArtifactLoading = ref(false)
 const showAdvancedSettings = ref(false)
 const discussionMode = ref(false)
-const mobilePreviewVisible = ref(false)
+const livePreviewActive = ref(false)
+const livePreviewPaused = ref(false)
+const livePreviewReverting = ref(false)
+const livePreviewRevertingJobId = ref('')
+const livePreviewAutoAccepting = ref(false)
+const livePreviewError = ref('')
 const contextPickerVisible = ref(false)
 const sessionMenuVisible = ref(false)
 const recentSessions = ref([])
@@ -1234,14 +1416,52 @@ const selectedTurnJobId = ref('')
 const artifactValidationStatuses = ref({})
 const latestEventSequence = ref(0)
 const latestPreviewVersion = ref(-1)
+const livePreviewRenderedVersion = ref(-1)
+const latestPreviewEpoch = ref(1)
+const livePreviewFramesPending = ref(false)
+const livePreviewRendering = ref(false)
+const livePreviewRenderedNodeCount = ref(0)
+const livePreviewTargetNodeCount = ref(0)
+const livePreviewChangeSummary = ref(null)
+const livePreviewAccessibleAnnouncement = ref('')
 const generationClockNow = ref(Date.now())
+// Keep the canvas moving at roughly 14 fps. The editor still coalesces newer
+// server snapshots, while the shorter cadence removes the visible stop-start
+// feeling caused by 120ms gaps between otherwise small preview frames.
+// A short cadence makes character frames feel like a normal agent stream while
+// still yielding between SVG updates so the canvas remains responsive.
+const LIVE_PREVIEW_FRAME_INTERVAL_MS = 56
+const LIVE_PREVIEW_ANNOUNCEMENT_INTERVAL_MS = 1800
 let pollTimer = null
 let pollController = null
 let draftController = null
+let livePreviewFlushPromise = Promise.resolve()
+let livePreviewRevertPromise = Promise.resolve(true)
+let livePreviewFlushTimer = null
+let livePreviewAutoAcceptTimer = null
+let livePreviewAutoAcceptPromise = null
+let livePreviewDirectSettlePromise = null
+let livePreviewDirectSettleJobId = ''
+const livePreviewAutoAcceptFailedJobId = ref('')
+let livePreviewPendingFrame = null
+let livePreviewOldestPendingAt = null
+let livePreviewFlushInFlight = false
+let livePreviewEditorStarted = false
+let livePreviewRenderedDocument = null
+let livePreviewBaselineDocument = null
+let livePreviewGeneration = 0
+let livePreviewJobId = ''
+let livePreviewRevertFailedJobId = ''
+let livePreviewSuppressedJobId = ''
+let livePreviewApplyingJobId = ''
+let livePreviewAnnouncementTimer = null
+let livePreviewAnnouncementPending = ''
+let livePreviewAnnouncementLastAt = 0
 let realtimeController = null
 let realtimeReconnectTimer = null
 let localAckRetryTimer = null
 let restoreController = null
+let requestedTaskSequence = 0
 let timelineController = null
 let sessionListController = null
 let terminalHydrationRetryTimer = null
@@ -1252,11 +1472,13 @@ let timelineLoadGeneration = 0
 let sessionListGeneration = 0
 let actionGeneration = 0
 let realtimeReconnectAttempt = 0
+let monitoringSuspendedJobId = ''
 let componentAlive = true
 let submitAttempt = null
 let saveCloudAttempt = null
 let followupAttempt = null
 let retryAttempt = null
+let queueAttempt = null
 let pendingDialogPreset = null
 const cloudMutationFlushPromises = new Map()
 const cloudMutationExecutions = new Map()
@@ -1268,6 +1490,7 @@ const jobEventSequences = new Map()
 const ACTIVE_JOB_STORAGE_KEY = 'MINDMAP_AI_ACTIVE_JOB_V1'
 const RECENT_JOB_STORAGE_KEY = 'MINDMAP_AI_RECENT_JOB_V1'
 const ATTEMPTS_STORAGE_KEY = 'MINDMAP_AI_REQUEST_ATTEMPTS_V1'
+const LIVE_PREVIEW_SUPPRESSION_STORAGE_KEY = 'MINDMAP_AI_LIVE_PREVIEW_SUPPRESSION_V1'
 const STORED_JOB_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const ATTEMPT_TTL_MS = 24 * 60 * 60 * 1000
 const TERMINAL_HYDRATION_RETRY_DELAYS = [800, 1800, 4000]
@@ -1290,6 +1513,13 @@ const PERMANENT_CLOUD_MUTATION_CODES = new Set([
   'AI_CLOUD_RECONCILE_STATE_INVALID',
 ])
 const DENSITY_VALUES = new Set(['concise', 'standard', 'detailed'])
+const generationModeOptions = Object.freeze([
+  { value: 'dfs_stream', label: '流式深度', hint: '逐分支构建，实时看到每个分支成形' },
+  { value: 'bfs_stream', label: '流式广度', hint: '逐层构建，实时看到每一层展开' },
+  { value: 'balanced', label: '均衡', hint: '分批构建，兼顾过程呈现与总耗时' },
+  { value: 'complete', label: '完整', hint: '不限制批次节奏，最快得到完整结果' },
+])
+const GENERATION_MODE_VALUES = new Set(generationModeOptions.map(item => item.value))
 const reasoningModes = Object.freeze([
   { value: 'quick', label: '快速', description: '适合简单问题，生成更精简' },
   { value: 'balanced', label: '均衡', description: '适合日常脑图生成与优化' },
@@ -1310,44 +1540,23 @@ const form = reactive({
   language: 'zh-CN',
   layout: 'logicalStructure',
   density: 'standard',
+  generationMode: 'balanced',
   maxNodes: 100,
   maxDepth: 6,
 })
 
 const terminalStatuses = new Set([
-  'ready', 'applied', 'undone', 'completed_file', 'completed_no_change',
+  'ready', 'applied', 'undone', 'completed_file', 'completed_direct', 'completed_no_change',
   'completed_message',
   'needs_review', 'stale', 'cancelled', 'failed', 'expired',
-  'needs_input',
+  'needs_input', 'rejected',
 ])
+function isDirectExecutionJob(candidate = job.value) {
+  return candidate?.executionMode === 'direct'
+}
+
 const retryableStatuses = new Set(['failed', 'cancelled', 'expired', 'stale'])
 const running = computed(() => Boolean(job.value && !terminalStatuses.has(job.value.status)))
-const waitingForFirstDraft = computed(() => Boolean(
-  running.value
-  && !messageModeActive.value
-  && !draftDocument.value?.root
-))
-const generationElapsedSeconds = computed(() => {
-  if (!running.value) return 0
-  const startedAt = Date.parse(job.value?.createdTime || '')
-  if (!Number.isFinite(startedAt)) return 0
-  return Math.max(0, Math.floor((generationClockNow.value - startedAt) / 1000))
-})
-const firstDraftStageTitle = computed(() => {
-  if (['queued', 'preparing'].includes(job.value?.status)) return statusLabel.value
-  if (generationElapsedSeconds.value < 5) return '正在理解你的要求'
-  if (generationElapsedSeconds.value < 15) return '正在准备脑图结构'
-  if (job.value?.agentKey === 'native_mindmap') return '本机模型正在生成首个节点'
-  return 'Agent 正在生成首个节点'
-})
-const firstDraftStageDescription = computed(() => {
-  if (generationElapsedSeconds.value < 5) return 'Agent 正在分析主题、范围和生成约束。'
-  if (generationElapsedSeconds.value < 15) return '首个节点出现后，脑图会在这里逐步展开。'
-  if (job.value?.agentKey === 'native_mindmap') {
-    return '首次唤醒本机模型通常需要 10–30 秒；任务仍在运行，请勿重复提交。'
-  }
-  return '任务仍在运行，首个节点生成后会自动显示，请勿重复提交。'
-})
 const retryAvailable = computed(() => Boolean(
   job.value?.id
   && retryableStatuses.has(job.value.status)
@@ -1358,6 +1567,7 @@ const mutationActionBusy = computed(() => Boolean(
   || cancelling.value
   || savingCloud.value
   || applying.value
+  || rejectingReview.value
   || continuing.value
   || retrying.value
   || openingLocal.value
@@ -1372,6 +1582,10 @@ const reasoningMode = computed(() => ({
   concise: 'quick',
   detailed: 'deep',
 }[form.density] || 'balanced'))
+const generationModeHint = computed(() => (
+  generationModeOptions.find(item => item.value === form.generationMode)?.hint
+  || '分批构建，兼顾过程呈现与总耗时'
+))
 const effectiveFormIntent = computed(() => discussionMode.value ? 'discuss' : form.intent)
 const messageModeActive = computed(() => (
   isMindmapAiMessageJob(job.value) || (!job.value && discussionMode.value)
@@ -1388,29 +1602,54 @@ const currentContextLabel = computed(() => {
   if (form.scopeType === 'branch') return '当前分支'
   return editorContext.value?.title || editorContext.value?.name || '当前脑图'
 })
+const starterItems = computed(() => {
+  const hasEditor = Boolean(editorContext.value?.document?.root)
+  const hasSelection = selectedNodeUids.value.length > 0
+  if (!hasEditor) {
+    return [
+      { type: 'topic', label: '从一个主题开始搭建脑图' },
+      { type: 'outline', label: '先列出这个主题的主要分支' },
+      { type: 'question', label: '和我一起讨论脑图结构' },
+    ]
+  }
+  if (editorReadonly.value) {
+    return [
+      { type: 'analyze', label: '分析这张图的结构和重点' },
+      { type: 'gaps', label: '找出当前脑图的缺口' },
+      { type: 'duplicates', label: '检查重复、冲突和遗漏' },
+    ]
+  }
+  return [
+    { type: 'analyze', label: hasSelection ? '分析当前分支' : '分析这张图' },
+    { type: 'supplement', label: hasSelection ? '补充当前分支' : '补充薄弱分支' },
+    { type: 'duplicates', label: '检查重复、冲突和遗漏' },
+  ]
+})
 const composerText = computed({
   get() {
     if (!job.value) return form.prompt
+    if (running.value) return runningPrompt.value
     if (retryAvailable.value) return retryPrompt.value
     if (followupAvailable.value) return followupPrompt.value
     return ''
   },
   set(value) {
     if (!job.value) form.prompt = value
+    else if (running.value) runningPrompt.value = value
     else if (retryAvailable.value) retryPrompt.value = value
     else if (followupAvailable.value) followupPrompt.value = value
   },
 })
 const composerEnabled = computed(() => Boolean(
-  !running.value
-  && !actionBusy.value
-  && (!job.value || retryAvailable.value || followupAvailable.value)
+  !actionBusy.value
+  && (running.value || !livePreviewCanvasMutationBlocked.value)
+  && (!job.value || running.value || retryAvailable.value || followupAvailable.value)
 ))
 const composerPlaceholder = computed(() => {
   if (running.value) {
     return messageModeActive.value
-      ? 'AI 正在回答，请稍候…'
-      : 'AI 正在生成，脑图变化会实时显示在右侧'
+      ? '继续输入，按 ⌘/Ctrl + Enter 排到下一轮…'
+      : '继续告诉 AI 要怎么改，按 ⌘/Ctrl + Enter 排到下一轮…'
   }
   if (job.value?.status === 'needs_input') return '补充 Agent 需要的信息…'
   if (retryAvailable.value) return '修改要求并重试这一轮…'
@@ -1440,12 +1679,135 @@ const submissionStageDescription = computed(() => {
     ? `连接通过后会立即创建任务并显示实时过程 · ${elapsed}`
     : `正在冻结输入与生成约束，请勿重复提交 · ${elapsed}`
 })
+const composerPreflightText = computed(() => {
+  if (running.value) return ''
+  if (messageModeActive.value || discussionMode.value) {
+    return form.sourceMode === 'current'
+      ? '只讨论当前脑图，不会修改画布。'
+      : '只返回文字回答，不会修改当前画布。'
+  }
+  if (form.sourceMode === 'new' || form.sourceMode === 'file') {
+    return '将生成独立脑图；当前画布保持不变，结果完成后可另存或打开。'
+  }
+  if (
+    form.sourceMode === 'current'
+    && (sourceContext.value?.mindmapId || editorContext.value?.mindmapId)
+    && !editorReadonly.value
+  ) {
+    return form.scopeType === 'document'
+      ? 'AI 会通过受控工具直接写入云端正文，并实时同步到协作者；离开页面后任务仍会继续。'
+      : 'AI 只会通过受控工具直接写入授权范围，并实时同步到协作者；离开页面后任务仍会继续。'
+  }
+  if (form.scopeType === 'branch') return '只读取并编辑当前分支；结果会实时显示在当前画布。'
+  if (form.scopeType === 'selectedNodes') {
+    return `只读取并编辑已选 ${selectedNodeUids.value.length} 个节点及其子树；结果会实时显示在当前画布。`
+  }
+  return '将读取整张当前脑图并实时编辑当前画布；完成后结果默认保留，可撤销本轮。'
+})
 const composerCanSend = computed(() => Boolean(
   composerEnabled.value
   && composerText.value.trim()
   && !restoreError.value
   && selectedAgentReady.value
 ))
+const livePreviewCatchingUp = computed(() => {
+  const received = Number(latestPreviewVersion.value)
+  const rendered = Number(livePreviewRenderedVersion.value)
+  return Boolean(
+    livePreviewActive.value
+    && (
+      livePreviewFramesPending.value
+      || (
+        Number.isSafeInteger(received)
+        && received >= 0
+        && (!Number.isSafeInteger(rendered) || rendered < received)
+      )
+    )
+  )
+})
+const livePreviewNodeProgress = computed(() => {
+  const rendered = Number(livePreviewRenderedNodeCount.value)
+  const target = Number(livePreviewTargetNodeCount.value)
+  if (!livePreviewActive.value || !Number.isSafeInteger(rendered) || rendered < 1
+    || !Number.isSafeInteger(target) || target < 1) return ''
+  if (rendered === target) return `当前画布已显示 ${rendered} 个节点。`
+  if (rendered < target) return `当前画布已显示 ${rendered} / ${target} 个节点。`
+  return `当前画布已显示 ${rendered} 个节点，正在收敛到 ${target} 个节点。`
+})
+function formatLivePreviewChangeSummary(summary) {
+  if (!summary || typeof summary !== 'object') return ''
+  const parts = [
+    Number(summary.added) > 0 ? `新增 ${Number(summary.added)}` : '',
+    Number(summary.updated) > 0 ? `修改 ${Number(summary.updated)}` : '',
+    Number(summary.moved) > 0 ? `移动 ${Number(summary.moved)}` : '',
+    Number(summary.deleted) > 0 ? `删除 ${Number(summary.deleted)}` : '',
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+const livePreviewChangeSummaryText = computed(() => (
+  formatLivePreviewChangeSummary(livePreviewChangeSummary.value)
+))
+const livePreviewNoticeTitle = computed(() => {
+  if (livePreviewAutoAccepting.value) return '正在保存 AI 结果'
+  if (livePreviewAutoAcceptFailedJobId.value === String(job.value?.id || '')) return 'AI 结果仍在画布，保存未完成'
+  if (applying.value) return '正在保存当前 AI 预览'
+  if (cancelling.value && livePreviewActive.value) return '正在停止，保存已生成结果'
+  if (livePreviewReverting.value) return '正在撤回 AI 实时预览'
+  if (cancelling.value) return '正在停止 AI 任务'
+  if (realtimeConnectionState.value === 'offline') return '实时连接已中断，已保留当前预览'
+  if (realtimeConnectionState.value === 'reconnecting') return '正在恢复实时预览'
+  if (livePreviewPausedVisible.value) return '已暂停 AI 实时显示'
+  if (livePreviewRendering.value) return '正在绘制 AI 实时结果'
+  if (running.value) return 'AI 正在当前画布实时预览'
+  if (highImpactReviewRequired.value) return 'AI 结果等待确认'
+  return livePreviewCatchingUp.value ? '正在完成 AI 画布预览' : 'AI 结果已在当前画布预览'
+})
+const livePreviewNoticeDescription = computed(() => {
+  const received = Number(latestPreviewVersion.value)
+  const rendered = Number(livePreviewRenderedVersion.value)
+  const renderedStep = Number.isSafeInteger(rendered) && rendered >= 0 ? `已显示第 ${rendered} 步。` : ''
+  const catchup = livePreviewCatchingUp.value && Number.isSafeInteger(received)
+    ? `正在平滑补齐最新结果（已收到第 ${received} 步）。`
+    : ''
+  const nodeProgress = livePreviewNodeProgress.value
+  const changeSummary = livePreviewChangeSummaryText.value
+    ? `本次变更：${livePreviewChangeSummaryText.value}。`
+    : ''
+  if (livePreviewAutoAccepting.value) {
+    return `${renderedStep}${changeSummary}${catchup}生成已完成，正在保存当前画布结果；完成后可随时撤销本次 AI 操作。`
+  }
+  if (livePreviewAutoAcceptFailedJobId.value === String(job.value?.id || '')) {
+    return `${renderedStep}${changeSummary}${nodeProgress}当前结果已保留，可重试保存或撤销本次 AI 操作。`
+  }
+  if (applying.value) return `${renderedStep}${changeSummary}${catchup}正在完成校验与保存，当前画布会保持不变。`
+  if (cancelling.value && livePreviewActive.value) {
+    return `${renderedStep}${changeSummary}正在停止 AI 任务，已生成内容会继续保留并保存。`
+  }
+  if (livePreviewReverting.value) {
+    return `${renderedStep}${changeSummary}正在撤回当前画布预览，完成后恢复原内容。`
+  }
+  if (cancelling.value) {
+    return `${renderedStep}${changeSummary}正在停止 AI 任务，等待服务端确认最后修改。`
+  }
+  if (['offline', 'reconnecting'].includes(realtimeConnectionState.value)) {
+    return `${renderedStep}${changeSummary}${nodeProgress}当前画面保持不变，连接恢复后会继续接收 AI 结果。`
+  }
+  if (livePreviewPausedVisible.value) {
+    return `${renderedStep}${changeSummary}${nodeProgress}当前画面保持不变，AI 仍在后台生成；点击“继续显示”后会平滑补齐。`
+  }
+  if (livePreviewRendering.value) {
+    return `${renderedStep}${changeSummary}${nodeProgress}正在把当前帧绘制到画布，完成后继续接收下一帧。`
+  }
+  if (!running.value && livePreviewCatchingUp.value) {
+    return `${renderedStep}${changeSummary}${nodeProgress}${catchup}任务已完成，画布正在显示最后的变更。`
+  }
+  if (highImpactReviewRequired.value) {
+    return `${renderedStep}${changeSummary}${nodeProgress}本次包含较大结构变更，请查看差异后明确采纳；也可以撤销本轮修改。`
+  }
+  return running.value
+    ? `${renderedStep}${changeSummary}${nodeProgress}${catchup}画布会随生成过程继续更新，完成后会自动保存当前结果。`
+    : `${renderedStep}${changeSummary}${nodeProgress}结果已完成并保存到当前脑图；如需恢复上一版本，可撤销本次 AI 全部操作。`
+})
 const selectedTurn = computed(() => (
   sessionTurns.value.find(turn => String(turn?.job?.id || '') === selectedTurnJobId.value)
   || null
@@ -1454,7 +1816,10 @@ const conversationTurns = computed(() => buildMindmapAiConversationTurns({
   sessionTurns: sessionTurns.value,
   currentJob: job.value,
   events: agentEvents.value,
-}))
+}).map(turn => ({
+  ...turn,
+  tagSuggestions: collectMindmapAiTagSuggestions(turn.events, turn.job.id),
+})))
 const artifactTurns = computed(() => sessionTurns.value.filter(turn => turn?.job?.artifactId))
 const selectedArtifactJob = computed(() => selectedTurn.value?.job || job.value)
 const viewingHistoricalArtifact = computed(() => Boolean(
@@ -1469,10 +1834,13 @@ const followupParentJob = computed(() => {
   if (
     !viewingHistoricalArtifact.value
     && ['cloud_document', 'local_snapshot'].includes(candidate?.sourceType)
-    && ['applied', 'undone'].includes(candidate?.status)
+    && (
+      ['applied', 'undone'].includes(candidate?.status)
+      || candidate?.status === 'completed_direct'
+    )
   ) return candidate
   return candidate?.artifactId
-    && ['ready', 'completed_file', 'completed_no_change', 'needs_review'].includes(candidate.status)
+    && ['ready', 'completed_file', 'completed_no_change'].includes(candidate.status)
     ? candidate
     : null
 })
@@ -1500,6 +1868,7 @@ const canSwitchInteractionMode = computed(() => Boolean(
   && followupParentJob.value?.status !== 'needs_input'
   && !running.value
   && !actionBusy.value
+  && !livePreviewCanvasMutationBlocked.value
 ))
 const taskConfigurationLocked = computed(() => restoringJob.value || Boolean(job.value))
 const agentSelectionLocked = computed(() => (
@@ -1507,14 +1876,181 @@ const agentSelectionLocked = computed(() => (
   || submitting.value
   || continuing.value
   || retrying.value
+  || livePreviewCanvasMutationBlocked.value
   || (Boolean(job.value) && !followupAvailable.value && !retryAvailable.value)
 ))
 const editorReadonly = computed(() => Boolean(props.readonly || editorContext.value?.readonly))
+const livePreviewEligible = computed(() => Boolean(
+  !messageModeActive.value
+  && form.sourceMode === 'current'
+  // Follow-up jobs temporarily clear sourceContext.document while the server
+  // revalidates the cloud baseline. The editor context is that same validated
+  // current document and keeps live preview available during this handoff.
+  && (sourceContext.value?.document?.root || editorContext.value?.document?.root)
+  && !viewingHistoricalArtifact.value
+  && !props.readonly
+  && sourceContext.value?.readonly !== true
+  && !sourceBaselineMismatch.value
+  && livePreviewSuppressedJobId !== String(job.value?.id || '')
+  && !['applied', 'undone', 'cancelled', 'failed', 'expired', 'stale'].includes(job.value?.status)
+))
+const directExecutionNoticeVisible = computed(() => Boolean(
+  isDirectExecutionJob()
+  && !messageModeActive.value
+  && job.value?.id
+  && (
+    running.value
+    || job.value.status === 'completed_direct'
+    || job.value.status === 'completed_no_change'
+  )
+))
+const directExecutionNoticeTitle = computed(() => {
+  if (job.value?.status === 'completed_direct') return 'AI 已直接更新云端脑图'
+  if (job.value?.status === 'completed_no_change') return 'AI 已完成检查，脑图没有变化'
+  return 'AI 正在后台编辑云端脑图'
+})
+const directExecutionNoticeDescription = computed(() => {
+  if (job.value?.status === 'completed_direct') {
+    return '修改已经写入云端正文并通过协作通道同步；即使关闭当前页面，任务也不会中断。'
+  }
+  if (job.value?.status === 'completed_no_change') {
+    return '本轮没有需要写入的内容；任务已结束，当前脑图保持不变。'
+  }
+  return 'Agent 正在通过受控脑图工具直接写入云端正文；你可以离开页面，任务会在服务端继续执行。'
+})
+const livePreviewNoticeVisible = computed(() => Boolean(
+  livePreviewActive.value
+  || (
+    livePreviewReverting.value
+    && livePreviewRevertingJobId.value
+    && livePreviewRevertingJobId.value === String(job.value?.id || '')
+  )
+))
+const livePreviewPlaybackAvailable = computed(() => Boolean(
+  livePreviewActive.value
+  && livePreviewJobId
+  && livePreviewJobId === String(job.value?.id || '')
+  && (running.value || livePreviewCatchingUp.value)
+  && !actionBusy.value
+  && !livePreviewReverting.value
+))
+const livePreviewCanvasMutationBlocked = computed(() => Boolean(
+  livePreviewActive.value || livePreviewReverting.value || preparingCanvas.value || directCanvasOwned.value
+))
+const livePreviewPausedVisible = computed(() => Boolean(
+  livePreviewPaused.value && livePreviewPlaybackAvailable.value
+))
+const livePreviewPreparing = computed(() => Boolean(
+  running.value
+  && livePreviewEligible.value
+  && !livePreviewActive.value
+  && !cancelling.value
+  && job.value?.status !== 'cancel_requested'
+))
+const livePreviewPreparingTitle = computed(() => (
+  job.value?.status === 'waiting_turn'
+    ? '下一轮已排队'
+    : ['queued', 'preparing'].includes(job.value?.status)
+      ? 'AI 正在准备实时画布'
+      : 'AI 正在生成首个节点'
+))
+const livePreviewPreparingDescription = computed(() => {
+  if (job.value?.status === 'waiting_turn') return '到达安全边界后会自动继续，不需要重新提交。'
+  const startedAt = Date.parse(job.value?.createdTime || '')
+  const elapsed = Number.isFinite(startedAt)
+    ? `已运行 ${Math.max(0, Math.floor((generationClockNow.value - startedAt) / 1_000))} 秒。`
+    : ''
+  return `${elapsed}首个变化出现后会立即显示在当前画布，生成期间可以随时停止任务。`
+})
+const livePreviewRecoveryAvailable = computed(() => Boolean(
+  job.value?.id
+  && !messageModeActive.value
+  && !isTerminalStatus(job.value?.status)
+  && ['stale', 'unavailable', 'restarted'].includes(draftFreshness.value)
+  && realtimeConnectionState.value !== 'offline'
+  && !sourceBaselineMismatch.value
+  && !actionBusy.value
+))
+
+function clearLivePreviewAnnouncement() {
+  clearTimeout(livePreviewAnnouncementTimer)
+  livePreviewAnnouncementTimer = null
+  livePreviewAnnouncementPending = ''
+  livePreviewAnnouncementLastAt = 0
+  livePreviewAccessibleAnnouncement.value = ''
+}
+
+function queueLivePreviewAnnouncement(title, description, force = false) {
+  const message = [title, description].filter(Boolean).join('。')
+  if (!message) return
+  livePreviewAnnouncementPending = message
+  if (force) {
+    clearTimeout(livePreviewAnnouncementTimer)
+    livePreviewAnnouncementTimer = null
+  } else if (livePreviewAnnouncementTimer) {
+    return
+  }
+  const elapsed = Date.now() - livePreviewAnnouncementLastAt
+  const delay = force
+    ? 0
+    : Math.max(0, LIVE_PREVIEW_ANNOUNCEMENT_INTERVAL_MS - elapsed)
+  livePreviewAnnouncementTimer = setTimeout(() => {
+    livePreviewAccessibleAnnouncement.value = livePreviewAnnouncementPending
+    livePreviewAnnouncementPending = ''
+    livePreviewAnnouncementLastAt = Date.now()
+    livePreviewAnnouncementTimer = null
+  }, delay)
+}
+
+watch(
+  [
+    livePreviewPreparing,
+    livePreviewPreparingTitle,
+    livePreviewPreparingDescription,
+    livePreviewNoticeVisible,
+    livePreviewNoticeTitle,
+    livePreviewNoticeDescription,
+  ],
+  (next, previous = []) => {
+    const [preparing, preparingTitle, preparingDescription, active, title, description] = next
+    if (!preparing && !active) {
+      clearLivePreviewAnnouncement()
+      return
+    }
+    const previousPreparing = previous[0]
+    const previousTitle = previous[0] === true ? previous[1] : previous[4]
+    const announcementTitle = preparing ? preparingTitle : title
+    const announcementDescription = preparing ? preparingDescription : description
+    queueLivePreviewAnnouncement(
+      announcementTitle,
+      announcementDescription,
+      preparing !== previousPreparing || announcementTitle !== previousTitle,
+    )
+  },
+)
+const canRejectLiveDraft = computed(() => Boolean(
+  livePreviewActive.value
+  && !isDirectExecutionJob()
+  && !viewingHistoricalArtifact.value
+  && !actionBusy.value
+  && job.value?.id
+  && !['applied', 'undone', 'rejected'].includes(job.value.status)
+  && !highImpactReviewRequired.value
+))
+const canApplyLiveCanvasDraft = computed(() => Boolean(
+  livePreviewActive.value
+  && canApplyCurrentProposal.value
+  && diffConfirmed.value
+  && !livePreviewCatchingUp.value
+  && !livePreviewPreparing.value
+  && !actionBusy.value
+  && !editorReadonly.value
+))
 const canUndoCurrentProposal = computed(() => Boolean(
   !viewingHistoricalArtifact.value
   &&
   job.value?.proposalId
-  && job.value.status === 'applied'
+  && ['applied', 'completed_direct', 'failed', 'stale', 'cancelled'].includes(job.value.status)
   && (
     sourceContext.value?.mindmapId
     || (
@@ -1526,6 +2062,18 @@ const canUndoCurrentProposal = computed(() => Boolean(
 const selectedAgent = computed(() => (
   agents.value.find(item => item.agentKey === form.agentKey) || null
 ))
+const nativeModelConfigurationIssue = computed(() => {
+  if (form.agentKey !== 'native_mindmap') return ''
+  const model = models.value.find(item => String(item.modelId) === String(form.modelId))
+  if (!model) return ''
+  if (
+    model.provider === 'Anthropic'
+    && /\/compatible-mode\//i.test(String(model.baseUrl || ''))
+  ) {
+    return '当前模型使用兼容模式接口，但提供商选了 Anthropic。请在 AI 模型管理中改为 DashScope 或 OpenAI，并填写实际模型编码；也可改选 Ollama 模型。'
+  }
+  return ''
+})
 const agentSelectionIssue = computed(() => {
   if (loadingAgents.value || agentError.value) return ''
   if (!form.agentKey) return agents.value.length
@@ -1544,6 +2092,7 @@ const agentSelectionIssue = computed(() => {
   if (form.agentKey === 'native_mindmap' && !form.modelId) {
     return 'MindMap Agent 没有可用模型，请选择模型或改用其他 Agent。'
   }
+  if (nativeModelConfigurationIssue.value) return nativeModelConfigurationIssue.value
   return ''
 })
 const selectedAgentReady = computed(() => Boolean(
@@ -1579,7 +2128,6 @@ const maxDepthCap = computed(() => Number(selectedAgent.value?.maxDepth || 32))
 const targetLayoutLocked = computed(() => (
   form.sourceMode === 'current' && form.scopeType !== 'document'
 ))
-const targetLayoutHint = computed(() => '局部编辑只修改授权节点，保持当前脑图布局。')
 const availableModels = computed(() => {
   const allowlist = Array.isArray(selectedAgent.value?.modelAllowlist)
     ? selectedAgent.value.modelAllowlist.map(String)
@@ -1599,27 +2147,64 @@ const currentProposalSourceAvailable = computed(() => {
     && sourceFingerprint.value,
   )
 })
+// Direct-write rounds do not create a normal Proposal impact payload.  Prefer
+// the newer counter schema, then the terminal direct_completed event over a
+// same-schema proposal read; fall back to per-batch commit metadata
+// for older tasks.  This keeps the result card from showing four misleading
+// zeros simply because the legacy `{ direct: true }` marker had no counters.
+const resultImpactForDisplay = computed(() => {
+  if (!proposal.value) return null
+  if (!isDirectExecutionJob()) return proposal.value.impact || null
+  return directImpactForMindmapAiResult(proposal.value, resolveMindmapAiDirectChangeSummary({
+    proposal: proposal.value,
+    events: agentEvents.value,
+    jobId: job.value?.id,
+  }))
+})
+const resultImpactSummaryAvailable = computed(() => {
+  const impact = resultImpactForDisplay.value
+  if (!impact) return false
+  return ['createdCount', 'updatedCount', 'movedCount', 'deletedCount'].every(key => {
+    const count = Number(impact[key])
+    return Number.isSafeInteger(count) && count >= 0
+  })
+})
 const canApplyCurrentProposal = computed(() => Boolean(
   !viewingHistoricalArtifact.value
   && !messageModeActive.value
+  && !sourceBaselineMismatch.value
   && currentProposalSourceAvailable.value
   && job.value?.proposalId
-  && job.value.status === 'ready'
+  && (
+    job.value.status === 'ready'
+    || (
+      job.value.status === 'needs_review'
+      && proposal.value?.impact?.highImpact === true
+    )
+  )
+))
+const highImpactReviewRequired = computed(() => Boolean(
+  !viewingHistoricalArtifact.value
+  && !messageModeActive.value
+  && job.value?.status === 'needs_review'
+  && proposal.value?.impact?.highImpact === true
 ))
 const proposalReviewFinalized = computed(() => Boolean(
   proposal.value
-  && ['applied', 'undone'].includes(job.value?.status)
+  && ['applied', 'undone', 'rejected'].includes(job.value?.status)
 ))
 const jobStatusLabels = {
   queued: '任务已排队',
+  waiting_turn: '已收到，等待上一轮结果确认保存',
   preparing: '正在准备安全上下文',
   running: 'Agent 正在构建脑图',
   validating: '正在校验 SMM v2',
-  cancel_requested: '正在取消',
+  cancel_requested: '正在停止',
   ready: '结果已就绪',
   applied: '已应用',
   undone: '已撤销',
   completed_file: '已保存为云端脑图',
+  completed_direct: 'AI 已直接更新云端脑图',
   completed_message: 'AI 已回复',
   completed_no_change: '未发现需要应用的变化',
   cancelled: '任务已取消',
@@ -1627,6 +2212,7 @@ const jobStatusLabels = {
   expired: '结果已过期',
   stale: '基线已过期',
   needs_review: '需要人工确认',
+  rejected: '已拒绝本轮变更',
   needs_input: '等待补充信息',
 }
 function displayJobStatusLabel(candidate) {
@@ -1640,6 +2226,8 @@ function displayJobStatusLabel(candidate) {
 const statusLabel = computed(() => displayJobStatusLabel(job.value))
 const jobErrorMessage = computed(() => formatMindmapAiJobError(job.value, 'AI 脑图任务失败'))
 const connectionStateLabel = computed(() => {
+  if (job.value?.status === 'waiting_turn') return '等待上一轮结果确认保存'
+  if (livePreviewPausedVisible.value) return '已暂停显示'
   if (
     realtimeConnectionState.value === 'connected'
     && ['queued', 'preparing'].includes(job.value?.status)
@@ -1667,28 +2255,49 @@ const connectionStateLabel = computed(() => {
     idle: '待命',
   })[realtimeConnectionState.value] || '待命'
 })
-const draftNodeCount = computed(() => countDraftNodes(draftDocument.value?.root))
-const previewSubtitle = computed(() => {
-  if (viewingHistoricalArtifact.value) return `第 ${selectedArtifactJob.value?.turnIndex || 1} 轮只读历史结果`
-  if (draftDocument.value?.root) return running.value ? '随 Agent 操作实时更新' : '当前任务的最新权威草稿'
-  return running.value
-    ? `${statusLabel.value} · 已等待 ${generationElapsedSeconds.value} 秒`
-    : '只读预览画布'
+const jobActivitySummary = computed(() => {
+  if (job.value?.status === 'waiting_turn') {
+    const queueEvent = [...agentEvents.value].reverse().find(event => (
+      event.jobId === job.value.id
+      && event.eventType === 'job_created'
+      && Number.isSafeInteger(Number(event.payload?.queuePosition))
+    ))
+    const queuePosition = queueEvent?.payload?.queuePosition
+    if (queueEvent?.payload?.route === 'current') {
+      return '已加入当前任务 · 等待下一个安全边界'
+    }
+    return Number(queuePosition) > 1
+      ? `已排入下一轮 · 前方还有 ${Number(queuePosition) - 1} 条要求`
+      : '已排入下一轮，上一轮结果确认保存后自动开始'
+  }
+  if (running.value) {
+    const startedAt = Date.parse(job.value?.createdTime || '')
+    const elapsed = Number.isFinite(startedAt)
+      ? ` · 已运行 ${Math.max(0, Math.floor((generationClockNow.value - startedAt) / 1_000))} 秒`
+      : ''
+    if (livePreviewRenderedNodeCount.value > 0) {
+      return `已在画布显示 ${livePreviewRenderedNodeCount.value} 个节点${elapsed}`
+    }
+    return `${statusLabel.value}${elapsed}`
+  }
+  if (livePreviewChangeSummaryText.value) return `本轮${livePreviewChangeSummaryText.value}`
+  if (job.value?.status === 'rejected') return '高影响变更未采纳，当前脑图保持原内容'
+  if (['ready', 'applied', 'completed_file'].includes(job.value?.status)) return '结果已保存，可撤销本轮 AI 修改'
+  if (job.value?.status === 'completed_direct') return 'AI 已完成后台直写，当前页面会自动同步最新内容'
+  if (job.value?.status === 'completed_message') return '回答已完成'
+  return statusLabel.value
 })
-const progressStatus = computed(() => {
-  if (job.value?.status === 'failed') return 'exception'
-  if (['ready', 'applied', 'completed_file', 'completed_message'].includes(job.value?.status)) return 'success'
-  return undefined
-})
-
-function isAbortError(error) {
-  return error?.name === 'AbortError'
-    || error?.name === 'CanceledError'
-    || error?.code === 'ERR_CANCELED'
-}
 
 function isHttpNotFound(error) {
   return Number(error?.response?.status ?? error?.status) === 404
+}
+
+function isDefinitiveAiCreationRejection(error) {
+  const status = Number(error?.response?.status ?? error?.status)
+  if ([400, 401, 403, 404, 405, 413, 422, 429].includes(status)) return true
+  // Business codes alone cannot establish absence: the server may have
+  // committed already or failed to verify the key after an exception.
+  return error?.data?.creationRejected === true || error?.response?.data?.data?.creationRejected === true
 }
 
 function isTerminalStatus(status) {
@@ -1704,9 +2313,34 @@ function cloneRuntimeValue(value) {
   }
 }
 
+function readLivePreviewSuppression(jobId) {
+  const ownerUserId = currentAiOwnerUserId()
+  if (!ownerUserId || !jobId) return false
+  try {
+    const stored = JSON.parse(
+      readMindmapAiOwnerSessionItem(LIVE_PREVIEW_SUPPRESSION_STORAGE_KEY, ownerUserId) || 'null',
+    )
+    return stored?.ownerUserId === ownerUserId
+      && String(stored.jobId || '') === String(jobId)
+      && Number.isFinite(Number(stored.suppressedAt))
+      && Date.now() - Number(stored.suppressedAt) <= STORED_JOB_TTL_MS
+  } catch {
+    return false
+  }
+}
+
+function persistLivePreviewSuppression(jobId) {
+  const ownerUserId = currentAiOwnerUserId()
+  if (!ownerUserId || !jobId) return false
+  return writeMindmapAiOwnerSessionItem(
+    LIVE_PREVIEW_SUPPRESSION_STORAGE_KEY,
+    ownerUserId,
+    JSON.stringify({ ownerUserId, jobId: String(jobId), suppressedAt: Date.now() }),
+  )
+}
+
 function currentAiOwnerUserId() {
-  const ownerUserId = String(userStore.id ?? '').trim()
-  return /^[1-9]\d{0,63}$/.test(ownerUserId) ? ownerUserId : ''
+  return normalizeNumericOwnerUserId(userStore.id)
 }
 
 function confirmMindmapAiLocalJournalAck(ownerUserId, proposalId, payload, action) {
@@ -1817,8 +2451,7 @@ function writePersistedAttempts(attempts) {
 async function hashAttemptFingerprint(fingerprint) {
   const bytes = new TextEncoder().encode(String(fingerprint || ''))
   if (!globalThis.crypto?.subtle) throw new Error('当前浏览器无法安全保存请求恢复标识')
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
-  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  return sha256Hex(bytes)
 }
 
 async function resolveDurableAttempt(type, currentAttempt, payload, {
@@ -1902,6 +2535,9 @@ function captureJobConfiguration(overrides = {}) {
     language: overrides.language ?? form.language,
     layout: overrides.layout ?? form.layout,
     density: overrides.density ?? form.density,
+    generationMode: GENERATION_MODE_VALUES.has(overrides.generationMode)
+      ? overrides.generationMode
+      : form.generationMode,
     maxNodes: Number(overrides.maxNodes ?? form.maxNodes),
     maxDepth: Number(overrides.maxDepth ?? form.maxDepth),
     interactionMode: overrides.interactionMode
@@ -1959,7 +2595,7 @@ function applyRecentJobDefaults(preset) {
   const explicitFields = new Set(Object.keys(preset))
   const restorableFields = [
     'agentKey', 'modelId', 'intent', 'sourceMode', 'scopeType',
-    'language', 'layout', 'density', 'maxNodes', 'maxDepth',
+    'language', 'layout', 'density', 'generationMode', 'maxNodes', 'maxDepth',
   ]
   for (const field of restorableFields) {
     if (!explicitFields.has(field) && configuration[field] !== undefined) {
@@ -1997,6 +2633,9 @@ function restoreJobConfiguration(snapshot, saved = {}) {
       ? 'new'
       : sourceType === 'uploaded_artifact' ? 'file' : 'current'
   const density = DENSITY_VALUES.has(stored.density) ? stored.density : 'standard'
+  const generationMode = GENERATION_MODE_VALUES.has(stored.generationMode)
+    ? stored.generationMode
+    : (GENERATION_MODE_VALUES.has(snapshot.generationMode) ? snapshot.generationMode : 'balanced')
   const language = OUTPUT_LANGUAGE_VALUES.has(stored.language) ? stored.language : 'zh-CN'
   const layout = AI_LAYOUT_VALUES.has(stored.layout) ? stored.layout : form.layout
   const scopeType = SCOPE_TYPE_VALUES.has(stored.scopeType) ? stored.scopeType : 'document'
@@ -2013,6 +2652,7 @@ function restoreJobConfiguration(snapshot, saved = {}) {
   form.language = language
   form.layout = layout
   form.density = density
+  form.generationMode = generationMode
   discussionMode.value = restoredDiscussionMode
   if (agents.value.some(item => item.agentKey === snapshot.agentKey)) {
     form.agentKey = snapshot.agentKey
@@ -2050,22 +2690,45 @@ function restoreJobSourceState(snapshot, saved = {}) {
     readonly: sourceMatchesEditor ? Boolean(editorContext.value?.readonly || props.readonly) : false,
   }
   sourceFingerprint.value = saved.sourceFingerprint || ''
-  if (sourceContext.value.document?.root) {
+  if (sourceContext.value.document?.root && !isDirectExecutionJob(snapshot)) {
     draftDocument.value = cloneRuntimeValue(sourceContext.value.document)
+  } else if (isDirectExecutionJob(snapshot)) {
+    draftDocument.value = null
   }
 }
 
-function countDraftNodes(root) {
-  if (!root) return 0
-  let count = 0
-  const pending = [root]
-  while (pending.length) {
-    const node = pending.pop()
-    if (!node) continue
-    count += 1
-    pending.push(...(Array.isArray(node.children) ? node.children : []))
+async function reconcileRestoredSourceBaseline(snapshot, saved = {}) {
+  sourceBaselineMismatch.value = false
+  // A direct job advances its own cloud revision on every accepted tool call.
+  // Comparing that revision to its original base mistakes its own work for a
+  // conflict and disables playback after reopening the editor.
+  if (isDirectExecutionJob(snapshot)) return true
+  if (![
+    'waiting_turn', 'queued', 'preparing', 'running', 'validating', 'cancel_requested',
+    'ready', 'needs_review',
+  ].includes(snapshot?.status)) return true
+  const sourceType = saved.sourceType || snapshot?.sourceType
+  let mismatch = false
+  if (sourceType === 'cloud_document') {
+    const expectedRevision = Number(snapshot?.baseRevision ?? saved.sourceRevision)
+    const currentRevision = Number(editorContext.value?.revision)
+    mismatch = Number.isSafeInteger(expectedRevision)
+      && expectedRevision > 0
+      && Number.isSafeInteger(currentRevision)
+      && currentRevision > 0
+      && expectedRevision !== currentRevision
+  } else if (sourceType === 'local_snapshot') {
+    const expectedFingerprint = String(snapshot?.baseHash || saved.sourceFingerprint || '')
+    if (expectedFingerprint && editorContext.value?.document?.root) {
+      const currentFingerprint = await computeMindmapSnapshotFingerprint(editorContext.value.document)
+      mismatch = currentFingerprint !== expectedFingerprint
+    }
   }
-  return count
+  if (!mismatch) return true
+  sourceBaselineMismatch.value = true
+  draftFreshness.value = 'stale'
+  draftFreshnessMessage.value = '当前脑图已在任务开始后发生变化，已停止自动实时预览；请基于最新内容重新生成。'
+  return false
 }
 
 function formatEventTime(value) {
@@ -2113,10 +2776,31 @@ function assistantMessageText(turn) {
   if (turnJob.status === 'failed') {
     return formatMindmapAiJobError(turnJob, '本轮任务失败，请调整要求或重试。')
   }
-  if (turnJob.status === 'cancelled') return '本轮任务已取消。'
+  if (turnJob.status === 'cancelled') {
+    const cancellationReason = String(turnJob.errorMessage || turnJob.error_message || '').trim()
+    return cancellationReason || '本轮任务已取消。'
+  }
+  if (turnJob.status === 'rejected') return '本轮高风险 AI 变更未采纳，当前脑图保持原内容。'
   if (turnJob.status === 'expired') return '本轮结果已过期，可以基于原要求重新生成。'
+  if (turnJob.status === 'stale' && turnJob.errorCode === 'AI_DOCUMENT_CONFLICT') {
+    return 'AI 直写过程中检测到协作者或其他窗口更新，已停止后续写入；请基于当前云端内容重新开始。'
+  }
   if (turnJob.status === 'needs_review') return '脑图草稿已生成，仍有部分内容需要人工确认。'
+  if (turnJob.status === 'waiting_turn') {
+    const queueEvent = [...(turn?.events || [])].reverse().find(event => (
+      event?.eventType === 'job_created'
+      && Number.isSafeInteger(Number(event?.payload?.queuePosition))
+    ))
+    if (queueEvent?.payload?.route === 'current') {
+      return '已加入当前任务，将在下一个安全边界采用。'
+    }
+    const queuePosition = queueEvent?.payload?.queuePosition
+    return Number(queuePosition) > 1
+      ? `已收到你的下一条要求，前方还有 ${Number(queuePosition) - 1} 条要求。`
+      : '已收到你的下一条要求，上一轮结果确认保存后会自动开始。'
+  }
   if (turnJob.status === 'completed_no_change') return '已完成分析，当前脑图不需要应用新的结构变化。'
+  if (turnJob.status === 'completed_direct') return 'AI 已完成后台直写，当前脑图会自动同步最新内容。'
   if (['ready', 'applied', 'undone', 'completed_file'].includes(turnJob.status)) {
     const completedEvent = [...(turn?.events || [])].reverse().find(event => (
       event?.eventType === 'agent_completed'
@@ -2125,7 +2809,7 @@ function assistantMessageText(turn) {
     const title = String(turnJob.title || '脑图结果').trim()
     return Number.isFinite(nodeCount)
       ? `${title}已生成，共 ${nodeCount} 个节点。`
-      : `${title}已生成，可以在右侧预览并检查差异。`
+      : `${title}已生成，当前画布已展示最新结果，可以检查差异。`
   }
   const latestEvent = [...(turn?.events || [])].reverse()[0]
   return latestEvent ? eventDescription(latestEvent, turnJob) : 'AI 正在准备本轮任务…'
@@ -2159,15 +2843,19 @@ function eventTypeLabel(event) {
     agent_event: 'Agent 运行事件',
     agent_completed: 'Agent 完成',
     agent_progress: 'Agent 进度',
+    message_received: '消息已接收',
+    queue_reparented: '队列已调整',
     agent_error: 'Agent 异常',
     tool_started: '工具开始',
     tool_completed: '工具完成',
     tool_failed: '工具失败',
     tool_plan_received: '执行计划',
     tool_plan_failed: '计划失败',
+    tag_suggestions: '标签建议',
     artifact_ready: '结果就绪',
     artifact_needs_review: '等待审核',
     artifact_no_change: '无内容变化',
+    direct_completed: '云端直写完成',
     cancel_requested: '取消请求',
     local_applied: '本地应用',
     local_undone: '本地撤销',
@@ -2175,6 +2863,7 @@ function eventTypeLabel(event) {
     cloud_applied: '云端应用',
     cloud_undone: '云端撤销',
     proposal_stale: '提案过期',
+    proposal_rejected: '提案未采纳',
     needs_input: '需要补充信息',
     stream_error: '实时流异常',
   })[event?.eventType] || '安全审计'
@@ -2191,6 +2880,13 @@ function toolDisplayName(value) {
     set_document_meta: '更新文档设置',
     validate_draft: '校验草稿',
     complete_artifact: '生成结果文件',
+    read_document_detail: '读取脑图详情',
+    get_node_tags: '读取节点标签',
+    search_tags: '检索已有标签',
+    suggest_tags: '提出标签建议',
+    edit_node_text: '编辑节点文本',
+    edit_node_tags: '编辑节点标签',
+    add_comment: '添加脑图评论',
     mindmap_tool: '脑图工具',
   })[String(value || '')] || '脑图工具'
 }
@@ -2208,11 +2904,21 @@ function eventDescription(event, turnJob = job.value) {
     if (payload.sessionMode === 'new' && Number.isSafeInteger(turnIndex) && turnIndex > 1) {
       return `已创建第 ${turnIndex} 轮补充信息任务 · 使用全新 Agent 会话`
     }
+    if (payload.route === 'current') {
+      return '已加入当前任务，将在下一个安全边界采用'
+    }
+    if (payload.route === 'next' && Number.isSafeInteger(Number(payload.queuePosition))) {
+      const position = Number(payload.queuePosition)
+      return position > 1
+        ? `已排入下一轮 · 前方还有 ${position - 1} 条要求`
+      : '已排入下一轮，上一轮结果确认保存后自动开始'
+    }
     return Number.isSafeInteger(turnIndex) && turnIndex > 1
       ? `已创建第 ${turnIndex} 轮任务`
       : '已创建 AI 脑图任务'
   }
   if (event?.eventType === 'agent_progress') return describeMindmapAiAgentProgress(payload)
+  if (event?.eventType === 'tag_suggestions') return '已提出标签建议，尚未创建或绑定；可手动创建后在下一轮引用'
   if (event?.eventType === 'needs_input') {
     const count = Array.isArray(payload.questions) ? payload.questions.length : 0
     return count ? `Agent 请求补充 ${count} 项必要信息` : 'Agent 请求补充必要信息'
@@ -2265,9 +2971,17 @@ function eventDescription(event, turnJob = job.value) {
     return `已接收 ${Number(payload.actionCount) || 0} 项结构化操作计划`
   }
   if (event?.eventType === 'tool_plan_failed') return '结构化操作计划未通过安全校验'
-  if (event?.eventType === 'artifact_ready') return '结果文件与提案已通过校验'
+  if (event?.eventType === 'artifact_ready') return payload.completionReason === 'stopped'
+    ? '任务已停止，已保存当前生成结果'
+    : '结果文件与提案已通过校验'
   if (event?.eventType === 'artifact_needs_review') return '结果已生成，部分内容需要人工确认'
   if (event?.eventType === 'artifact_no_change') return '校验完成，没有发现需要应用的变化'
+  if (event?.eventType === 'direct_completed') {
+    const count = Number(payload.operationCount)
+    return Number.isSafeInteger(count)
+      ? `已直接写入云端脑图 · ${count} 个操作`
+      : '已直接写入云端脑图并同步权威版本'
+  }
   if (event?.eventType === 'cancel_requested') return '已收到取消请求，正在安全停止 Agent'
   if (event?.eventType === 'local_applied') return '提案已应用到当前本地脑图'
   if (event?.eventType === 'local_undone') return '本地 AI 提案已安全撤销'
@@ -2275,16 +2989,9 @@ function eventDescription(event, turnJob = job.value) {
   if (event?.eventType === 'cloud_applied') return '提案已应用到云端脑图并同步权威版本'
   if (event?.eventType === 'cloud_undone') return '云端 AI 提案已安全撤销'
   if (event?.eventType === 'proposal_stale') return '脑图基线已经变化，该提案需要重新生成'
+  if (event?.eventType === 'proposal_rejected') return '本轮高风险 AI 变更未采纳，已恢复生成前内容'
   if (['agent_error', 'stream_error'].includes(event?.eventType)) return '运行发生异常，详情请查看任务状态'
   return '已记录一条经过清洗的运行审计事件'
-}
-
-function fitPreview() {
-  previewMindMapRef.value?.getInstance?.()?.view?.fit?.()
-}
-
-function onPreviewReady(instance) {
-  requestAnimationFrame(() => instance?.view?.fit?.())
 }
 
 function clearStoredActiveJob() {
@@ -2296,13 +3003,17 @@ function clearStoredRecentJob() {
 }
 
 function clearAgentRuntimeState() {
+  terminalFinalizationState?.controller?.abort()
+  terminalFinalizationState = null
   agentEvents.value = []
   agentEventKeys.clear()
   agentEventEnvelopeKeys.clear()
   jobEventSequences.clear()
   draftDocument.value = null
+  sourceBaselineMismatch.value = false
   latestEventSequence.value = 0
   latestPreviewVersion.value = -1
+  latestPreviewEpoch.value = 1
   realtimeConnectionState.value = 'idle'
   realtimeError.value = ''
   draftFreshness.value = 'idle'
@@ -2314,9 +3025,23 @@ function clearAgentRuntimeState() {
   artifactValidationStatuses.value = {}
   terminalHydrationState.value = 'idle'
   terminalHydrationError.value = ''
+  terminalHydrationGeneration += 1
   terminalHydrationRetryCount = 0
   clearTimeout(terminalHydrationRetryTimer)
   terminalHydrationRetryTimer = null
+  livePreviewRenderedVersion.value = -1
+  livePreviewFramesPending.value = false
+  livePreviewRendering.value = false
+  livePreviewPaused.value = false
+  livePreviewRenderedNodeCount.value = 0
+  livePreviewTargetNodeCount.value = 0
+  livePreviewChangeSummary.value = null
+  livePreviewAutoAcceptFailedJobId.value = ''
+  clearTimeout(livePreviewAutoAcceptTimer)
+  livePreviewAutoAcceptTimer = null
+  livePreviewAutoAccepting.value = false
+  runningMessageRoute.value = 'current'
+  clearLivePreviewAnnouncement()
 }
 
 function stopRealtime(state = 'idle') {
@@ -2338,7 +3063,38 @@ function stopPolling() {
   draftController = null
 }
 
-function resetNewJob({ clearStoredJob = true, preserveForm = true } = {}) {
+function resetNewJob({ clearStoredJob = true, preserveForm = true, detach = false } = {}) {
+  if (!detach && (running.value || preparingCanvas.value || directCanvasOwned.value
+    || livePreviewActive.value || livePreviewReverting.value)) return false
+  if (detach) {
+    const ownerId = pendingHandoffCanvasJobId || directCanvasOwnerId.value || uncertainCanvasCreation.value?.preparationId
+    if (ownerId) emitAiCanvasPreviewEvent({ phase: 'detach', jobId: ownerId, reason: 'session-ended' })
+    pendingHandoffCanvasJobId = ''
+    directCanvasOwnerId.value = ''
+    uncertainCanvasCreation.value = null
+    preparingCanvas.value = false
+    livePreviewGeneration += 1
+    livePreviewPendingFrame = null
+    livePreviewOldestPendingAt = null
+    clearTimeout(livePreviewFlushTimer)
+    livePreviewFlushTimer = null
+    livePreviewActive.value = false
+    livePreviewJobId = ''
+    livePreviewEditorStarted = false
+    livePreviewRenderedDocument = null
+    livePreviewBaselineDocument = null
+    livePreviewDirectSettlePromise = null
+    livePreviewDirectSettleJobId = ''
+    directTerminalTargetJobId = ''
+  }
+  monitoringSuspendedJobId = ''
+  directCanvasRecoveryJobId.value = ''
+  const previousJobId = String(job.value?.id || '')
+  if (!detach && previousJobId && !livePreviewActive.value && !isDirectExecutionJob()) {
+    emitAiCanvasPreviewEvent({ phase: 'clear', jobId: previousJobId })
+  }
+  if (!detach && !isDirectExecutionJob()) void revertLiveDraftPreview()
+  livePreviewSuppressedJobId = ''
   invalidateActionIdentity()
   invalidateRestoreOperations()
   stopRealtime('idle')
@@ -2350,7 +3106,9 @@ function resetNewJob({ clearStoredJob = true, preserveForm = true } = {}) {
   proposalLoadGeneration += 1
   proposalLoading.value = false
   diffConfirmed.value = false
+  runningPrompt.value = ''
   followupPrompt.value = ''
+  pendingFollowupPrompt.value = ''
   retryPrompt.value = ''
   sourceContext.value = null
   sourceFingerprint.value = ''
@@ -2358,9 +3116,9 @@ function resetNewJob({ clearStoredJob = true, preserveForm = true } = {}) {
   saveCloudAttempt = null
   followupAttempt = null
   retryAttempt = null
+  queueAttempt = null
   clearAgentRuntimeState()
   currentSessionTitle.value = '新对话'
-  mobilePreviewVisible.value = false
   contextPickerVisible.value = false
   sessionMenuVisible.value = false
   if (clearStoredJob) {
@@ -2375,6 +3133,7 @@ function resetNewJob({ clearStoredJob = true, preserveForm = true } = {}) {
     form.layout = normalizedSourceLayout(editorContext.value?.document)
   }
   restoreDurableAttemptNotice()
+  return true
 }
 
 function appendAgentEvent(jobId, event) {
@@ -2393,7 +3152,9 @@ function appendAgentEvent(jobId, event) {
   if (envelopeKey) agentEventEnvelopeKeys.add(envelopeKey)
   const payload = eventType === 'agent_progress'
     ? sanitizeMindmapAiAgentProgressPayload(rawPayload)
-    : cloneRuntimeValue(rawPayload) || {}
+    : eventType === 'tag_suggestions'
+      ? sanitizeMindmapAiTagSuggestionsPayload(rawPayload)
+      : cloneRuntimeValue(rawPayload) || {}
   const record = {
     key,
     jobId,
@@ -2403,6 +3164,25 @@ function appendAgentEvent(jobId, event) {
     createdTime: event?.data?.createdTime || new Date().toISOString(),
   }
   agentEvents.value = [...agentEvents.value, record]
+  // Keep the canvas centered on the node changed by each AI draft update.
+  // Edit.vue retries until a newly-created node has been rendered.
+  const affectedUids = [
+    ...(Array.isArray(payload?.directCommit?.affectedUids) ? payload.directCommit.affectedUids : []),
+    ...(Array.isArray(payload?.affectedUids) ? payload.affectedUids : []),
+  ]
+    .map(uid => String(uid || '').trim())
+    .filter(Boolean)
+  // Live-preview frames focus after their renderer commit. Focusing here as
+  // well would center the old layout first and the new layout a moment later,
+  // which is perceived as a flash. Keep this event only as a fallback when
+  // the current job has no canvas preview.
+  if (affectedUids.length && !livePreviewEligible.value) {
+    bus.emit('focusAiNode', {
+      jobId: String(jobId),
+      focusKey: `${String(jobId)}:${sequence}:${affectedUids.at(-1)}`,
+      nodeUids: [...new Set(affectedUids)],
+    })
+  }
   return true
 }
 
@@ -2429,7 +3209,566 @@ function syncCurrentJobCursor(jobId) {
   latestEventSequence.value = Math.max(0, Number(jobEventSequences.get(jobId)) || 0)
 }
 
+function livePreviewFrameDelay(frame = livePreviewPendingFrame) {
+  return getMindmapAiPlaybackPacing({
+    pendingCharacters: frame?.pendingCharacters,
+    pendingNodes: frame?.pendingNodes,
+    oldestPendingAt: livePreviewOldestPendingAt,
+    terminal: isTerminalStatus(job.value?.status),
+  }).delayMs
+}
+
+function scheduleLivePreviewFlush(delay = livePreviewFrameDelay()) {
+  if (livePreviewFlushTimer || livePreviewFlushInFlight) return
+  livePreviewFlushTimer = setTimeout(() => {
+    livePreviewFlushTimer = null
+    void flushLiveDraftPreview()
+  }, delay)
+}
+
+function emitAiCanvasPreviewEvent(payload) {
+  if (!payload?.jobId) return
+  void emitEditorRequest('aiDraftPreview', payload).catch(() => {})
+}
+
+function toggleLivePreviewPlayback(paused = !livePreviewPaused.value) {
+  if (!livePreviewPlaybackAvailable.value) return false
+  const nextPaused = Boolean(paused)
+  if (nextPaused && directTerminalTargetJobId === String(job.value?.id || '')) return false
+  if (livePreviewPaused.value === nextPaused) return true
+  livePreviewPaused.value = nextPaused
+  clearTimeout(livePreviewFlushTimer)
+  livePreviewFlushTimer = null
+  if (!nextPaused) {
+    // Resume from the newest queued snapshot. nextMindmapAiDraftFrame keeps
+    // the already rendered tree as its baseline, so resuming never flashes
+    // back to an older server frame.
+    scheduleLivePreviewFlush(0)
+  }
+  return true
+}
+
+async function flushLiveDraftPreview() {
+  if (livePreviewFlushInFlight) return
+  if (livePreviewPaused.value) return
+  const frame = livePreviewPendingFrame
+  livePreviewPendingFrame = null
+  if (!frame) {
+    livePreviewOldestPendingAt = null
+    return
+  }
+  const { generation, jobId, document, operationCursor } = frame
+  livePreviewFlushInFlight = true
+  let previewError = null
+  let shouldRevert = false
+  const request = (async () => {
+    try {
+      // A previous task's revert must finish before this task can capture a
+      // new editor baseline. Recheck identity after the asynchronous barrier.
+      if (!(await livePreviewRevertPromise)) {
+        throw new Error('上一项 AI 实时预览尚未成功撤回')
+      }
+      if (
+        generation !== livePreviewGeneration
+        || job.value?.id !== jobId
+        || !livePreviewActive.value
+        || livePreviewJobId !== jobId
+      ) return
+      if (!livePreviewEditorStarted) {
+        // Capture the editor's actual current tree before drawing anything.
+        // The first draft may already contain a whole batch of new nodes.
+        const started = await emitEditorRequest('aiDraftPreview', {
+          phase: 'start', jobId, operationCursor,
+          directCommitted: isDirectExecutionJob(),
+        })
+        if (generation === livePreviewGeneration && livePreviewActive.value && livePreviewJobId === jobId) {
+          livePreviewEditorStarted = true
+          livePreviewBaselineDocument = cloneRuntimeValue(started?.document)
+          livePreviewRenderedDocument = cloneRuntimeValue(started?.document)
+          // The frame currently being flushed is still waiting to render. It
+          // is requeued below after the editor baseline has been captured.
+          livePreviewFramesPending.value = true
+          livePreviewRenderedNodeCount.value = countMindmapAiDraftNodes(started?.document?.root)
+          const pending = livePreviewPendingFrame || frame
+          livePreviewPendingFrame = {
+            ...pending,
+            pendingCharacters: getMindmapAiPendingCharacterCount(started?.document, pending.document),
+          }
+        }
+        return
+      }
+      // Terminal events use the same node-by-node, character-by-character
+      // planner as running updates; completion never skips queued characters.
+      const nextFrame = nextMindmapAiDraftFrame(livePreviewRenderedDocument, document)
+      const changeSummary = frame.changeSummary || summarizeMindmapAiDraftChanges(
+        livePreviewBaselineDocument?.root,
+        document?.root,
+      )
+      const frameChange = nextFrame.change || describeMindmapAiDraftChange(
+        livePreviewRenderedDocument?.root,
+        nextFrame.document?.root,
+      )
+      // Metadata belongs to the authoritative commit, not to the animation
+      // timeline. A metadata-only target must not force an otherwise identical
+      // root through the renderer or expose the full cloud tree early.
+      const rootNoop = nextFrame.rootUnchanged === true
+      if (!rootNoop) {
+        livePreviewRendering.value = true
+        try {
+          await emitEditorRequest('aiDraftPreview', {
+            phase: 'update',
+            jobId,
+            operationCursor,
+            directCommitted: isDirectExecutionJob(),
+            change: frameChange,
+            changeSummary,
+            previewNodeCount: Number.isSafeInteger(nextFrame.nodeCount)
+              ? nextFrame.nodeCount
+              : countMindmapAiDraftNodes(nextFrame.document?.root),
+            previewTargetNodeCount: livePreviewTargetNodeCount.value,
+            ...(nextFrame.typewriterTarget
+              ? { typewriterTarget: nextFrame.typewriterTarget }
+              : {}),
+            ...(frameChange?.uid
+              ? { focusKey: `${jobId}:${operationCursor}:${frameChange.uid}` }
+              : {}),
+            // The event bus is in-process. Edit.vue clones the root at the
+            // renderer boundary, so cloning the complete frame here would
+            // duplicate the largest cost in the live path.
+            document: nextFrame.document,
+          })
+        } finally {
+          livePreviewRendering.value = false
+        }
+      }
+      if (generation === livePreviewGeneration && livePreviewActive.value && livePreviewJobId === jobId) {
+        livePreviewEditorStarted = true
+        if (!rootNoop) livePreviewRenderedDocument = nextFrame.document
+        livePreviewFramesPending.value = nextFrame.remaining > 0 || Boolean(livePreviewPendingFrame)
+        livePreviewRenderedNodeCount.value = Number.isSafeInteger(nextFrame.nodeCount)
+          ? nextFrame.nodeCount
+          : countMindmapAiDraftNodes(nextFrame.document?.root)
+        livePreviewChangeSummary.value = changeSummary
+        const renderedVersion = Number(operationCursor)
+        if (frame.epoch === latestPreviewEpoch.value && Number.isSafeInteger(renderedVersion) && renderedVersion >= 0) {
+          livePreviewRenderedVersion.value = Math.max(
+            livePreviewRenderedVersion.value,
+            renderedVersion,
+          )
+        }
+        // Continue revealing this batch unless a newer server snapshot arrived.
+        if (nextFrame.remaining > 0 && !livePreviewPendingFrame) {
+          livePreviewPendingFrame = {
+            ...frame,
+            changeSummary,
+            pendingCharacters: Math.max(0, (frame.pendingCharacters || 0) - 1),
+            pendingNodes: nextFrame.remaining,
+          }
+        }
+      }
+    } catch (error) {
+      previewError = formatMindmapAiError(error, 'AI 实时画布预览失败')
+      shouldRevert = generation === livePreviewGeneration
+        && livePreviewActive.value && livePreviewJobId === jobId
+    }
+  })()
+  livePreviewFlushPromise = request
+  await request
+  livePreviewFlushInFlight = false
+
+  if (previewError) {
+    if (generation === livePreviewGeneration) livePreviewError.value = previewError
+    if (shouldRevert && !isDirectExecutionJob()) {
+      // Wait until the in-flight frame is fully out of the way before sending
+      // the revert request; otherwise the revert can overtake the frame.
+      void revertLiveDraftPreview().then((restored) => {
+        if (restored && visible.value && job.value?.id === jobId) {
+          livePreviewError.value = previewError
+        }
+      })
+    }
+  }
+  const pending = livePreviewPendingFrame
+  if (pending && pending.generation === livePreviewGeneration
+    && livePreviewActive.value && livePreviewJobId === pending.jobId
+    && !livePreviewPaused.value) {
+    scheduleLivePreviewFlush()
+  } else if (!pending && !livePreviewFlushInFlight) {
+    livePreviewOldestPendingAt = null
+  }
+}
+
+function queueLiveDraftPreview(document, operationCursor, targetNodeCount = null, { authoritativeTerminal = false } = {}) {
+  const jobId = String(job.value?.id || '')
+  if (!jobId) return
+  if (directTerminalTargetJobId === jobId && !authoritativeTerminal) return
+  if (livePreviewApplyingJobId === jobId) return
+  if (livePreviewSuppressedJobId !== jobId && readLivePreviewSuppression(jobId)) {
+    livePreviewSuppressedJobId = jobId
+  }
+  if (livePreviewSuppressedJobId === jobId) return
+  if ((!livePreviewEligible.value && !authoritativeTerminal) || !document?.root || !job.value?.id) return
+  const generation = livePreviewGeneration
+  if (!livePreviewActive.value) {
+    livePreviewActive.value = true
+    livePreviewJobId = jobId
+    livePreviewPaused.value = false
+    livePreviewError.value = ''
+    livePreviewRenderedVersion.value = -1
+    livePreviewChangeSummary.value = null
+  }
+  const numericTargetNodeCount = Number(targetNodeCount)
+  livePreviewTargetNodeCount.value = targetNodeCount !== null
+    && targetNodeCount !== undefined
+    && Number.isSafeInteger(numericTargetNodeCount)
+    && numericTargetNodeCount >= 0
+    ? numericTargetNodeCount
+    : countMindmapAiDraftNodes(document.root)
+  // Keep only the newest target while the editor renders. The flush reveals
+  // large additive batches node by node without falling behind new snapshots.
+  // The caller already owns an isolated draft snapshot; the in-process event
+  // bus does not need a second full-tree clone here.
+  if (livePreviewOldestPendingAt === null) livePreviewOldestPendingAt = Date.now()
+  livePreviewPendingFrame = {
+    generation,
+    jobId,
+    epoch: latestPreviewEpoch.value,
+    operationCursor,
+    document,
+    // Estimate once per incoming target, not once per character. A replacement
+    // target inherits queue age, so a fast producer cannot postpone catch-up.
+    pendingCharacters: getMindmapAiPendingCharacterCount(livePreviewRenderedDocument, document),
+  }
+  livePreviewFramesPending.value = true
+  // While playback is paused, keep only the newest server snapshot. Do not
+  // schedule no-op flush timers for every incoming frame; resume explicitly
+  // schedules one catch-up pass from that newest snapshot.
+  if (!livePreviewPaused.value && !livePreviewFlushInFlight && !livePreviewFlushTimer) {
+    scheduleLivePreviewFlush(livePreviewEditorStarted ? livePreviewFrameDelay() : 0)
+  }
+}
+
+function revertLiveDraftPreview() {
+  const jobId = livePreviewJobId || String(job.value?.id || '')
+  if (jobId && isDirectExecutionJob()) {
+    return isTerminalStatus(job.value?.status)
+      ? settleDirectLiveDraftPreview(jobId)
+      : Promise.resolve(false)
+  }
+  const shouldRevert = Boolean((livePreviewActive.value || livePreviewJobId) && jobId)
+  livePreviewOldestPendingAt = null
+  livePreviewGeneration += 1
+  if (shouldRevert) {
+    livePreviewReverting.value = true
+    livePreviewRevertingJobId.value = jobId
+  }
+  livePreviewApplyingJobId = ''
+  livePreviewPaused.value = false
+  livePreviewActive.value = false
+  livePreviewJobId = ''
+  livePreviewError.value = ''
+  livePreviewAutoAcceptFailedJobId.value = ''
+  livePreviewPendingFrame = null
+  livePreviewEditorStarted = false
+  livePreviewBaselineDocument = null
+  livePreviewRenderedDocument = null
+  livePreviewRenderedVersion.value = -1
+  livePreviewFramesPending.value = false
+  livePreviewRendering.value = false
+  livePreviewRenderedNodeCount.value = 0
+  livePreviewTargetNodeCount.value = 0
+  livePreviewChangeSummary.value = null
+  clearTimeout(livePreviewFlushTimer)
+  livePreviewFlushTimer = null
+  clearTimeout(livePreviewAutoAcceptTimer)
+  livePreviewAutoAcceptTimer = null
+  if (!shouldRevert) return livePreviewRevertPromise
+  const generation = livePreviewGeneration
+  const previousRevert = livePreviewRevertPromise
+  const revert = (async () => {
+    try {
+      const previousSucceeded = await previousRevert
+      if (!previousSucceeded && livePreviewRevertFailedJobId !== jobId) return false
+      await livePreviewFlushPromise
+      await emitEditorRequest('aiDraftPreview', { phase: 'revert', jobId })
+      livePreviewRevertFailedJobId = ''
+      return true
+    } catch (error) {
+      livePreviewRevertFailedJobId = jobId
+      if (generation === livePreviewGeneration) {
+        livePreviewError.value = formatMindmapAiError(error, 'AI 实时画布撤回失败')
+        if (visible.value && job.value?.id === jobId) {
+          livePreviewActive.value = true
+          livePreviewJobId = jobId
+        }
+      }
+      return false
+    } finally {
+      if (generation === livePreviewGeneration) {
+        livePreviewReverting.value = false
+        livePreviewRevertingJobId.value = ''
+      }
+    }
+  })()
+  livePreviewRevertPromise = revert
+  return revert
+}
+
+function scheduleDefaultLivePreviewAcceptance(jobId) {
+  if (livePreviewAutoAcceptPromise || livePreviewAutoAcceptFailedJobId.value === String(jobId)) return
+  clearTimeout(livePreviewAutoAcceptTimer)
+  livePreviewAutoAcceptTimer = setTimeout(() => {
+    livePreviewAutoAcceptTimer = null
+    void acceptCompletedLivePreviewByDefault(jobId)
+  }, LIVE_PREVIEW_FRAME_INTERVAL_MS)
+}
+
+async function acceptCompletedLivePreviewByDefault(jobId = job.value?.id, { retry = false } = {}) {
+  const normalizedJobId = String(jobId || '')
+  if (livePreviewAutoAcceptPromise) return livePreviewAutoAcceptPromise
+  if (
+    !normalizedJobId
+    || (!retry && livePreviewAutoAcceptFailedJobId.value === normalizedJobId)
+    || livePreviewSuppressedJobId === normalizedJobId
+    || job.value?.id !== normalizedJobId
+    || job.value?.status !== 'ready'
+    || form.sourceMode !== 'current'
+    || !canApplyCurrentProposal.value
+    || (livePreviewActive.value && livePreviewJobId !== normalizedJobId)
+    || !proposal.value
+    || proposal.value.id !== job.value?.proposalId
+  ) return false
+  if (retry) {
+    livePreviewAutoAcceptFailedJobId.value = ''
+    livePreviewError.value = ''
+  }
+  const generation = livePreviewGeneration
+  const acceptance = (async () => {
+    while (
+      livePreviewCatchingUp.value
+      || livePreviewPreparing.value
+      || livePreviewRendering.value
+      || livePreviewFlushInFlight
+      || livePreviewPendingFrame
+      || livePreviewFlushTimer
+      || actionBusy.value
+    ) {
+      if (livePreviewPaused.value && !actionBusy.value) toggleLivePreviewPlayback(false)
+      if (livePreviewPendingFrame && !livePreviewPaused.value
+        && !livePreviewFlushTimer && !livePreviewFlushInFlight) {
+        scheduleLivePreviewFlush(0)
+      }
+      await new Promise(resolve => setTimeout(resolve, LIVE_PREVIEW_FRAME_INTERVAL_MS))
+      if (
+        generation !== livePreviewGeneration
+        || !componentAlive
+        || job.value?.id !== normalizedJobId
+        || job.value?.status !== 'ready'
+        || (livePreviewActive.value && livePreviewJobId !== normalizedJobId)
+      ) return false
+    }
+    if (
+      generation !== livePreviewGeneration
+      || !componentAlive
+      || job.value?.id !== normalizedJobId
+      || job.value?.status !== 'ready'
+      || !canApplyCurrentProposal.value
+      || (livePreviewActive.value && livePreviewJobId !== normalizedJobId)
+    ) return false
+    livePreviewAutoAccepting.value = true
+    return applyProposal({ automatic: true })
+  })()
+  livePreviewAutoAcceptPromise = acceptance
+  try {
+    let accepted = false
+    try {
+      accepted = await acceptance
+    } catch (error) {
+      if (livePreviewApplyingJobId === normalizedJobId) livePreviewApplyingJobId = ''
+      livePreviewError.value = formatMindmapAiError(error, 'AI 结果自动保存失败')
+    }
+    if (!accepted && job.value?.status === 'ready'
+      && (!livePreviewActive.value || livePreviewJobId === normalizedJobId)) {
+      livePreviewAutoAcceptFailedJobId.value = normalizedJobId
+      livePreviewError.value ||= livePreviewActive.value
+        ? 'AI 结果仍保留在画布中，自动保存未完成。可重试保存或撤销 AI 结果。'
+        : 'AI 结果自动保存未完成。可在面板重试保存。'
+    }
+    return accepted
+  } finally {
+    if (livePreviewAutoAcceptPromise === acceptance) livePreviewAutoAcceptPromise = null
+    livePreviewAutoAccepting.value = false
+  }
+}
+
+async function holdLiveDraftPreviewForApply(jobId) {
+  if (!(await livePreviewRevertPromise)) {
+    throw new Error('上一项 AI 实时预览尚未成功撤回')
+  }
+  if (!livePreviewActive.value || livePreviewJobId !== String(jobId)) return ''
+  if (livePreviewCatchingUp.value || livePreviewPreparing.value) {
+    throw new Error('AI 实时画布仍在补齐，请稍后再采纳')
+  }
+  // Stop later draft frames while keeping the already rendered canvas in
+  // place. The editor uses its captured pre-preview baseline for validation.
+  livePreviewApplyingJobId = String(jobId)
+  livePreviewPendingFrame = null
+  livePreviewOldestPendingAt = null
+  clearTimeout(livePreviewFlushTimer)
+  livePreviewFlushTimer = null
+  await livePreviewFlushPromise
+  if (!livePreviewActive.value || livePreviewJobId !== String(jobId)) {
+    if (livePreviewApplyingJobId === String(jobId)) livePreviewApplyingJobId = ''
+    throw new Error('AI 实时预览任务已经变化，请重新确认提案')
+  }
+  // Let an in-flight start request finish recording its editor baseline
+  // before fencing all later frames. Otherwise the editor can be blocked
+  // while this dialog incorrectly believes that no preview was started.
+  livePreviewGeneration += 1
+  livePreviewPendingFrame = null
+  clearTimeout(livePreviewFlushTimer)
+  livePreviewFlushTimer = null
+  return livePreviewEditorStarted ? String(jobId) : ''
+}
+
+async function completeDirectCanvasHandoff(jobId) {
+  try {
+    await activateQueuedFollowupTurn(jobId)
+    if (directCanvasOwnerId.value === jobId) directCanvasOwnerId.value = ''
+    return true
+  } catch (error) {
+    if (componentAlive && directCanvasOwnerId.value === jobId) {
+      livePreviewError.value = formatMindmapAiError(error, '下一轮 AI 任务尚未确认，已保持画布只读，请重试同步')
+    }
+    return false
+  }
+}
+
+function settleDirectLiveDraftPreview(jobId = job.value?.id) {
+  const normalizedJobId = String(jobId || '')
+  if (!normalizedJobId || job.value?.id !== normalizedJobId
+    || !isTerminalStatus(job.value?.status)) return Promise.resolve(false)
+  if (livePreviewSuppressedJobId === normalizedJobId && !directCanvasOwned.value) return Promise.resolve(true)
+  if (livePreviewSuppressedJobId === normalizedJobId && directCanvasOwnerId.value === normalizedJobId) {
+    return completeDirectCanvasHandoff(normalizedJobId)
+  }
+  if (livePreviewDirectSettlePromise) {
+    return livePreviewDirectSettleJobId === normalizedJobId
+      ? livePreviewDirectSettlePromise : Promise.resolve(false)
+  }
+  if (directCanvasOwnerId.value && directCanvasOwnerId.value !== normalizedJobId) return Promise.resolve(false)
+  const generation = livePreviewGeneration
+  const isCurrent = () => componentAlive && job.value?.id === normalizedJobId
+    && generation === livePreviewGeneration && directCanvasOwnerId.value === normalizedJobId
+  const settlement = (async () => {
+    try {
+      directCanvasOwnerId.value = normalizedJobId
+      await emitEditorRequest('aiDraftPreview', {
+        phase: 'start', jobId: normalizedJobId, directCommitted: true,
+      })
+      await reconcileQueuedCanvasRequest(normalizedJobId)
+      if (!isCurrent()) return false
+      // The final HTTP checkpoint is another playback target, never a direct
+      // canvas replacement. This also covers missed SSE frames and failures
+      // after partially committed cloud edits.
+      const terminal = await emitEditorRequest('aiDraftPreview', {
+        phase: 'authoritative-target', jobId: normalizedJobId,
+      })
+      if (!isCurrent()) return false
+      directTerminalTargetJobId = normalizedJobId
+      queueLiveDraftPreview(terminal.document, latestPreviewVersion.value, null, { authoritativeTerminal: true })
+      // Internal draining is not a user playback action. In particular a
+      // cancel request intentionally disables the pause/resume controls.
+      livePreviewPaused.value = false
+      let lastProgressAt = Date.now()
+      let lastRenderedDocument = livePreviewRenderedDocument
+      while (livePreviewFlushInFlight || livePreviewPendingFrame || livePreviewFlushTimer) {
+        if (livePreviewRenderedDocument !== lastRenderedDocument) {
+          lastRenderedDocument = livePreviewRenderedDocument
+          lastProgressAt = Date.now()
+        }
+        if (Date.now() - lastProgressAt > 15_000) {
+          throw new Error('AI 结果显示暂时停滞，已保留当前画布，请重试同步')
+        }
+        if (livePreviewPendingFrame && !livePreviewFlushInFlight && !livePreviewFlushTimer) {
+          scheduleLivePreviewFlush(0)
+        }
+        await new Promise(resolve => setTimeout(resolve, LIVE_PREVIEW_FRAME_INTERVAL_MS))
+        if (!isCurrent()) return false
+      }
+      if (livePreviewError.value) throw new Error(livePreviewError.value)
+      livePreviewApplyingJobId = normalizedJobId
+      await emitEditorRequest('aiDraftPreview', {
+        phase: 'direct-committed',
+        jobId: normalizedJobId,
+        targetToken: terminal.targetToken,
+        nodeCount: livePreviewRenderedNodeCount.value,
+        targetNodeCount: livePreviewTargetNodeCount.value,
+        changeSummary: livePreviewChangeSummary.value,
+        message: job.value?.status === 'completed_no_change'
+          ? 'AI 已完成，当前脑图无需修改'
+          : 'AI 已直接更新当前脑图',
+      })
+    } catch (error) {
+      if (!isCurrent()) return false
+      livePreviewApplyingJobId = ''
+      livePreviewPendingFrame = null
+      livePreviewOldestPendingAt = null
+      clearTimeout(livePreviewFlushTimer)
+      livePreviewFlushTimer = null
+      livePreviewError.value = formatMindmapAiError(error, 'AI 直写结果校准失败')
+      return false
+    }
+    if (!isCurrent()) return false
+    finishLiveDraftPreviewAfterApply(normalizedJobId)
+    directTerminalTargetJobId = ''
+    return completeDirectCanvasHandoff(normalizedJobId)
+  })()
+  livePreviewDirectSettlePromise = settlement
+  livePreviewDirectSettleJobId = normalizedJobId
+  return settlement.finally(() => {
+    if (livePreviewDirectSettlePromise === settlement) {
+      livePreviewDirectSettlePromise = null
+      livePreviewDirectSettleJobId = ''
+    }
+  })
+}
+
+function finishLiveDraftPreviewAfterApply(jobId) {
+  if (livePreviewJobId !== String(jobId)) return
+  if (directCanvasRecoveryJobId.value === String(jobId)) {
+    directCanvasRecoveryJobId.value = ''
+    restoreError.value = ''
+  }
+  livePreviewGeneration += 1
+  livePreviewApplyingJobId = ''
+  // The authoritative job status may arrive a moment after the editor ACK.
+  // Fence late terminal hydration so it cannot reopen an accepted preview.
+  livePreviewSuppressedJobId = String(jobId)
+  persistLivePreviewSuppression(String(jobId))
+  livePreviewPaused.value = false
+  livePreviewActive.value = false
+  livePreviewJobId = ''
+  livePreviewError.value = ''
+  livePreviewAutoAcceptFailedJobId.value = ''
+  livePreviewPendingFrame = null
+  livePreviewOldestPendingAt = null
+  livePreviewEditorStarted = false
+  livePreviewRenderedDocument = null
+  livePreviewRenderedVersion.value = -1
+  livePreviewFramesPending.value = false
+  livePreviewRendering.value = false
+  livePreviewRenderedNodeCount.value = 0
+  livePreviewTargetNodeCount.value = 0
+  livePreviewChangeSummary.value = null
+  clearTimeout(livePreviewFlushTimer)
+  livePreviewFlushTimer = null
+}
+
 function acceptDraftPreview(preview, { realtimeFrame = false } = {}) {
+  // Direct jobs have already persisted this snapshot on the server. The same
+  // checkpoint is still safe to render locally as a read-only progress frame;
+  // final consistency remains guarded by the collaboration revision reload.
   if (messageModeActive.value) return false
   if (selectedTurnJobId.value && selectedTurnJobId.value !== String(job.value?.id || '')) {
     return false
@@ -2444,13 +3783,29 @@ function acceptDraftPreview(preview, { realtimeFrame = false } = {}) {
     return false
   }
   const version = Number(preview?.operationCursor)
+  const epoch = Number(preview?.previewEpoch || 1)
   if (
     !preview.document?.root
     || !Number.isInteger(version)
-    || version <= latestPreviewVersion.value
+    || !Number.isInteger(epoch)
+    || epoch < 1
+    || compareMindmapAiPreviewCoordinates(
+      { epoch, version },
+      { epoch: latestPreviewEpoch.value, version: latestPreviewVersion.value },
+    ) <= 0
   ) return false
+  if (epoch > latestPreviewEpoch.value) {
+    // A restarted generator owns a new monotonic timeline. Preserve the
+    // currently displayed document as its visual baseline, but reset delivery
+    // progress so a lower cursor in the new epoch cannot be mistaken for an
+    // already-rendered old frame.
+    livePreviewRenderedVersion.value = -1
+  }
+  latestPreviewEpoch.value = epoch
   latestPreviewVersion.value = version
   draftDocument.value = cloneRuntimeValue(preview.document)
+  const targetNodeCount = countMindmapAiDraftNodes(draftDocument.value.root)
+  queueLiveDraftPreview(draftDocument.value, version, targetNodeCount)
   if (draftFreshness.value !== 'restarted' || realtimeFrame) {
     draftFreshness.value = 'fresh'
     draftFreshnessMessage.value = ''
@@ -2472,7 +3827,7 @@ function hasUnresolvedGenerationRestart(jobId = job.value?.id) {
 }
 
 function markGenerationRestarted() {
-  if (messageModeActive.value || isTerminalStatus(job.value?.status)) return
+  if (messageModeActive.value || isDirectExecutionJob() || isTerminalStatus(job.value?.status)) return
   draftFreshness.value = 'restarted'
   draftFreshnessMessage.value = draftDocument.value?.root
     ? '生成进程已重启；当前保留从持久检查点恢复的草稿。收到新的草稿帧前，该画面不代表最新结果。'
@@ -2489,10 +3844,9 @@ function applyRealtimeJobEvent(jobId, event) {
     persistActiveJob()
   }
   if (event?.eventType === 'generation_restarted') markGenerationRestarted()
-  if (
-    ['artifact_ready', 'artifact_needs_review', 'artifact_no_change'].includes(event?.eventType)
-    || isTerminalStatus(payload.status)
-  ) schedulePoll(0, true)
+  if (isTerminalStatus(job.value.status)) void finalizeTerminalJob(jobId)
+  else if (['artifact_ready', 'artifact_needs_review', 'artifact_no_change'].includes(event?.eventType)
+    || isTerminalStatus(payload.status)) schedulePoll(0, true)
 }
 
 function agentStatusText(agent) {
@@ -2526,7 +3880,7 @@ function followupSourceType(parentJob = followupParentJob.value) {
 }
 
 function followupContinuationBase(parentJob = followupParentJob.value) {
-  if (!['applied', 'undone'].includes(parentJob?.status)) return 'artifact'
+  if (!['applied', 'undone', 'completed_direct'].includes(parentJob?.status)) return 'artifact'
   if (parentJob?.sourceType === 'cloud_document') return 'current_document'
   if (parentJob?.sourceType === 'local_snapshot') return 'current_snapshot'
   return 'artifact'
@@ -2613,10 +3967,6 @@ async function loadProposal() {
   }
 }
 
-async function reloadProposal() {
-  return loadProposal()
-}
-
 function onIntentChange(intent) {
   if (intent !== 'create' && form.sourceMode === 'new') {
     form.sourceMode = 'current'
@@ -2634,30 +3984,22 @@ function onAgentChange() {
 
 function usePromptStarter(type) {
   const starters = {
-    research: {
-      intent: 'create',
-      prompt: '调研一个主题并总结关键结论、核心概念、事实依据与后续行动。',
-    },
-    plan: {
-      intent: 'create',
-      prompt: '把一个项目拆解为目标、里程碑、具体任务、负责人建议、风险与验收标准。',
-    },
-    trends: {
-      intent: 'create',
-      prompt: '梳理一个领域的发展趋势，按驱动因素、代表方向、机会、风险与观察指标组织。',
-    },
-    optimize: {
-      intent: editorContext.value ? 'reorganize' : 'create',
-      prompt: '分析并优化当前思维导图：保留有效信息，改善层级、命名、一致性和可执行性。',
-    },
+    topic: { intent: 'create', prompt: '从这个主题开始搭建一张清晰的脑图，先列出核心概念和主要分支。' },
+    outline: { intent: 'create', prompt: '先列出这个主题的主要分支，并说明每个分支应该继续展开什么。' },
+    question: { intent: 'discuss', prompt: '和我一起讨论这张脑图适合如何组织，先指出最值得澄清的问题。' },
+    analyze: { intent: 'discuss', prompt: '分析当前脑图的结构、重点和薄弱处，给出可以直接执行的改进建议。' },
+    supplement: { intent: 'expand', prompt: '补充当前最薄弱的分支，优先添加缺失的关键概念、例子和下一步行动。' },
+    gaps: { intent: 'discuss', prompt: '找出当前脑图的信息缺口、结构断点和容易被忽略的内容。' },
+    duplicates: { intent: 'discuss', prompt: '检查当前脑图中的重复、冲突、含义相近节点和层级遗漏，并说明判断依据。' },
   }
   const starter = starters[type]
   if (!starter) return
   form.intent = starter.intent
   form.prompt = starter.prompt
   form.sourceMode = editorContext.value ? 'current' : 'new'
-  discussionMode.value = false
+  discussionMode.value = starter.intent === 'discuss'
   onIntentChange(form.intent)
+  void nextTick(() => composerInputRef.value?.focus?.())
 }
 
 function setReasoningMode(mode) {
@@ -2677,16 +4019,136 @@ function setReasoningMode(mode) {
   }
 }
 
+async function queueRunningMessage() {
+  const parentJob = job.value
+  const prompt = runningPrompt.value.trim()
+  if (!parentJob?.id || !prompt || continuing.value) return false
+  const selectedAgent = agents.value.find(item => item.agentKey === form.agentKey)
+  if (!selectedAgent || selectedAgent.status !== 'enabled') {
+    ElMessage.warning('当前 Agent 暂时不可用，请稍后重试或切换 Agent')
+    return false
+  }
+  const parentJobId = String(parentJob.id)
+  const requestPayload = {
+    prompt,
+    route: runningMessageRoute.value === 'next' ? 'next' : 'current',
+    agentKey: form.agentKey,
+    modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
+    intent: effectiveFormIntent.value,
+  }
+  const identity = beginActionIdentity('queue', { jobId: parentJobId })
+  continuing.value = true
+  let requestStarted = false
+  let responseReceived = false
+  let reusedPersistedAttempt = false
+  try {
+    // Do not overwrite the single durable queue slot while an earlier request
+    // still has an unknown outcome. Recover it before accepting another one.
+    await reconcileQueuedCanvasRequest(parentJobId)
+    assertActionIdentity(identity)
+    const persistedAttemptKey = readPersistedAttempts().queue?.key
+    queueAttempt = await resolveDurableAttempt(
+      'queue',
+      queueAttempt,
+      { parentJobId, requestPayload },
+      {
+        createKey: () => createMindmapAiIdempotencyKey('mindmap-ai-queue'),
+        metadata: {
+          parentJobId,
+          parentTurnIndex: parentJob.turnIndex,
+          sessionId: parentJob.sessionId,
+          knownMaxTurnIndex: Math.max(
+            Number(parentJob.turnIndex || 0),
+            ...sessionTurns.value.map(turn => Number(turn?.job?.turnIndex || 0)),
+          ),
+          knownJobIds: Array.from(new Set([
+            parentJobId,
+            ...sessionTurns.value.map(turn => String(turn?.job?.id || '')),
+          ].filter(Boolean))),
+          requestPayload,
+        },
+      },
+    )
+    reusedPersistedAttempt = queueAttempt.key === persistedAttemptKey
+    const durableAttempt = readPersistedAttempts().queue
+    requestStarted = true
+    const response = await continueMindmapAiJob(
+      parentJobId,
+      requestPayload,
+      queueAttempt.key,
+    )
+    responseReceived = true
+    assertActionIdentity(identity)
+    const childJob = assertFollowupAttemptResult(
+      response.data,
+      durableAttempt,
+      parentJob.sessionId,
+    )
+    upsertSessionTurn(childJob, prompt)
+    appendClientPrompt(childJob.id, prompt, childJob.turnIndex)
+    runningPrompt.value = ''
+    clearDurableAttempt('queue', queueAttempt.key)
+    queueAttempt = null
+    restoreDurableAttemptNotice()
+    ElMessage.success(
+      runningMessageRoute.value === 'current'
+        ? '已加入当前任务，将在下一个安全边界采用'
+        : '已排入下一轮，上一轮结果确认保存后会自动继续',
+    )
+    return true
+  } catch (error) {
+    if (error?.code === 'AI_ACTION_SUPERSEDED') return false
+    if (!requestStarted) {
+      ElMessage.error(formatMindmapAiError(error, '上一条排队请求尚未确认，请恢复连接后重试'))
+      return false
+    }
+    if (!responseReceived && !reusedPersistedAttempt && isDefinitiveAiCreationRejection(error)) {
+      clearDurableAttempt('queue', queueAttempt?.key)
+      queueAttempt = null
+      ElMessage.error(formatMindmapAiError(error, '排队请求被拒绝'))
+      return false
+    }
+    try {
+      const recoveredChild = await reconcileQueuedCanvasRequest(parentJobId)
+      assertActionIdentity(identity)
+      if (recoveredChild) {
+        runningPrompt.value = ''
+        ElMessage.success('已恢复上一条排队请求，当前生成完成后会自动继续')
+        return true
+      }
+    } catch (recoveryError) {
+      if (recoveryError?.code === 'AI_ACTION_SUPERSEDED') return false
+    }
+    if (isDirectExecutionJob(parentJob)) {
+      livePreviewError.value = '下一轮请求结果尚未确认；本轮完成后将保持脑图只读，确认排队任务后继续'
+    }
+    ElMessage.error(formatMindmapAiError(
+      error,
+      runningMessageRoute.value === 'current' ? '加入当前任务失败' : '排队下一轮请求失败',
+    ))
+    return false
+  } finally {
+    continuing.value = false
+  }
+}
+
 async function sendComposerMessage() {
   if (!composerCanSend.value) return
-  if (!job.value) await submitJob()
+  if (running.value) await queueRunningMessage()
+  else if (!job.value) await submitJob()
   else if (retryAvailable.value) await retryJob()
   else if (followupAvailable.value) await continueJob()
 }
 
 function onComposerKeydown(event) {
+  if (event?.key === 'Escape' && running.value && !cancelling.value) {
+    event.preventDefault()
+    void confirmCancelFromKeyboard()
+    return
+  }
   if (
     event?.key !== 'Enter'
+    || (!event.metaKey && !event.ctrlKey)
     || event.shiftKey
     || event.isComposing
     || event.keyCode === 229
@@ -2695,9 +4157,36 @@ function onComposerKeydown(event) {
   void sendComposerMessage()
 }
 
-async function requestEditorContext() {
+async function confirmCancelFromKeyboard() {
+  if (cancelConfirming.value || cancelling.value || !job.value?.id) return false
+  cancelConfirming.value = true
+  try {
+    await ElMessageBox.confirm(
+      '停止后不会继续产生新的 AI 修改；已生成且可保存的画布结果会保留。',
+      '停止 AI 任务？',
+      {
+        type: 'warning',
+        confirmButtonText: '停止任务',
+        cancelButtonText: '继续生成',
+        distinguishCancelAndClose: true,
+        closeOnClickModal: false,
+        closeOnPressEscape: true,
+      },
+    )
+    return await cancelJob()
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(formatMindmapAiError(error, '停止确认窗口打开失败'))
+    }
+    return false
+  } finally {
+    cancelConfirming.value = false
+  }
+}
+
+async function requestEditorContext({ previewJobId = '' } = {}) {
   const context = await new Promise((resolve, reject) => {
-    const handled = bus.emit('requestAiMindmapContext', { resolve, reject })
+    const handled = bus.emit('requestAiMindmapContext', { previewJobId, resolve, reject })
     if (!handled) reject(new Error('脑图编辑器尚未就绪'))
   })
   editorContext.value = context
@@ -2802,20 +4291,19 @@ function persistActiveJob() {
     configuration: cloneRuntimeValue(jobConfiguration.value || captureJobConfiguration()),
     savedAt: Date.now(),
   }
-  if (isTerminalStatus(job.value.status)) {
-    clearMindmapAiOwnerSessionItem(ACTIVE_JOB_STORAGE_KEY, ownerUserId)
-    return writeMindmapAiOwnerSessionItem(
-      RECENT_JOB_STORAGE_KEY,
-      ownerUserId,
-      JSON.stringify(storedJob),
-    )
-  }
-  clearMindmapAiOwnerSessionItem(RECENT_JOB_STORAGE_KEY, ownerUserId)
-  return writeMindmapAiOwnerSessionItem(
-    ACTIVE_JOB_STORAGE_KEY,
-    ownerUserId,
-    JSON.stringify(storedJob),
+  return persistJobPointer(storedJob, job.value.status)
+}
+
+function persistJobPointer(pointer, status) {
+  const terminal = isTerminalStatus(status)
+  const storageKey = terminal ? RECENT_JOB_STORAGE_KEY : ACTIVE_JOB_STORAGE_KEY
+  if (!writeMindmapAiOwnerSessionItem(storageKey, pointer.ownerUserId, JSON.stringify(pointer))) return false
+  // A failed write must not erase the last usable recovery pointer.
+  clearMindmapAiOwnerSessionItem(
+    terminal ? ACTIVE_JOB_STORAGE_KEY : RECENT_JOB_STORAGE_KEY,
+    pointer.ownerUserId,
   )
+  return true
 }
 
 async function restoreSessionTimeline(sessionId, {
@@ -2884,6 +4372,12 @@ async function restoreSessionTimeline(sessionId, {
       String(turn.job?.id) === selectedTurnJobId.value
     ))) selectedTurnJobId.value = String(expectedJobId || '')
     syncCurrentJobCursor(expectedJobId)
+    // Timeline delivery can beat SSE. Its display-event deduplication must not
+    // consume the only trigger for terminal hydration and canvas settlement.
+    // Full restoration waits until source context has been restored below.
+    if (!restoringJob.value && isTerminalStatus(job.value?.status)) {
+      void finalizeTerminalJob(expectedJobId)
+    }
     return sessionTurns.value
   } catch (error) {
     if (
@@ -2902,7 +4396,23 @@ async function restoreSessionTimeline(sessionId, {
 }
 
 function latestSessionTurn() {
-  return [...sessionTurns.value]
+  const turns = [...sessionTurns.value]
+  const activeStatuses = new Set([
+    'queued', 'preparing', 'running', 'validating', 'cancel_requested',
+  ])
+  const activeTurns = turns
+    .filter(turn => activeStatuses.has(turn?.job?.status))
+    .sort((left, right) => (
+      Number(left?.job?.turnIndex || 0) - Number(right?.job?.turnIndex || 0)
+    ))
+  if (activeTurns.length) return activeTurns[0]
+  const waitingTurns = turns
+    .filter(turn => turn?.job?.status === 'waiting_turn')
+    .sort((left, right) => (
+      Number(left?.job?.turnIndex || 0) - Number(right?.job?.turnIndex || 0)
+    ))
+  if (waitingTurns.length) return waitingTurns[0]
+  return turns
     .sort((left, right) => Number(right?.job?.turnIndex || 0) - Number(left?.job?.turnIndex || 0))[0]
     || null
 }
@@ -2928,6 +4438,11 @@ function upsertSessionTurn(jobSnapshot, prompt = '') {
 async function selectSessionTurn(turn) {
   const turnJob = turn?.job
   if (!turnJob?.artifactId || actionBusy.value) return false
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再查看历史轮次')
+    return false
+  }
+  if (livePreviewActive.value && !(await revertLiveDraftPreview())) return false
   const targetJobId = String(turnJob.id)
   const targetArtifactId = String(turnJob.artifactId)
   selectedTurnJobId.value = targetJobId
@@ -2944,6 +4459,7 @@ async function selectSessionTurn(turn) {
     ) return false
     draftDocument.value = cloneRuntimeValue(document)
     latestPreviewVersion.value = -1
+    latestPreviewEpoch.value = 1
     return true
   } catch (error) {
     if (selectedTurnJobId.value === targetJobId) {
@@ -2957,10 +4473,15 @@ async function selectSessionTurn(turn) {
 
 function selectCurrentLiveTurn() {
   if (!job.value?.id) return
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再重新加载当前轮次')
+    return false
+  }
   selectedTurnJobId.value = String(job.value.id)
   draftDocument.value = null
   latestPreviewVersion.value = -1
-  void refreshDraftPreview(job.value.id)
+  latestPreviewEpoch.value = 1
+  return refreshDraftPreview(job.value.id)
 }
 
 async function refreshTimelineAfterSideEffect(identity) {
@@ -2977,7 +4498,7 @@ async function reconcileJobAfterSideEffect(identity) {
   // Job status alone cannot prove that the initiating editor loaded the
   // committed document. Settle any durable cloud intent first; this remains
   // safe even when the dialog action identity was invalidated by close.
-  await flushPendingCloudMutationIntents()
+  await flushPendingCloudMutationIntents({ allowDuringLivePreview: true })
   if (!actionIdentityMatches(identity) || !identity.jobId) return null
   try {
     const response = await getMindmapAiJob(identity.jobId)
@@ -3018,7 +4539,13 @@ function assertFollowupAttemptResult(candidate, attempt, expectedSessionId = '')
     || !parentJobId
     || !attempt?.requestPayload?.prompt
     || !candidateId
-    || candidateParentId !== parentJobId
+    || (
+      candidateParentId !== parentJobId
+      && !(
+        ['current', 'next'].includes(attempt?.requestPayload?.route)
+        && knownJobIds.has(candidateParentId)
+      )
+    )
     || (expectedSessionId && candidateSessionId !== String(expectedSessionId))
     || (Number.isFinite(knownMaxTurnIndex)
       && Number(candidate?.turnIndex || 0) <= knownMaxTurnIndex)
@@ -3089,6 +4616,10 @@ async function replayRetryAttempt(attempt, expectedSessionId, { signal } = {}) {
 
 function retrySessionTimeline() {
   if (!job.value?.sessionId) return Promise.resolve(false)
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再恢复会话记录')
+    return Promise.resolve(false)
+  }
   // A bare timeline reload cannot make a newly-created running child current.
   // Re-run the complete durable recovery: pending follow-ups are reconciled by
   // their exact idempotency key, and otherwise the authoritative latest turn is
@@ -3155,6 +4686,7 @@ function sessionPointer(session) {
       language: 'zh-CN',
       layout: 'logicalStructure',
       density: 'standard',
+      generationMode: 'balanced',
       maxNodes: sessionJob.maxNodes,
       maxDepth: sessionJob.maxDepth,
       interactionMode: isMindmapAiMessageJob(sessionJob) ? 'discussion' : 'edit',
@@ -3163,42 +4695,60 @@ function sessionPointer(session) {
   }
 }
 
-async function switchToSession(session) {
-  if (actionBusy.value || running.value || sessionUnavailableReason(session)) return false
-  if (session.sessionId === job.value?.sessionId) {
+async function switchToSession(session, { authoritativeJob = null } = {}) {
+  if (!componentAlive || sessionSwitching.value || !currentAiOwnerUserId() || sessionUnavailableReason(session)) return false
+  if (String(session.currentJob?.id) === String(job.value?.id)) {
+    visible.value = true
     sessionMenuVisible.value = false
     return true
   }
-  const pointer = sessionPointer(session)
-  if (!pointer.ownerUserId || !pointer.jobId) return false
-  sessionSwitching.value = true
-  sessionMenuVisible.value = false
-  resetNewJob({ clearStoredJob: false, preserveForm: true })
-  const generation = restoreGeneration
-  clearStoredActiveJob()
-  clearStoredRecentJob()
-  const storageKey = isTerminalStatus(session.currentJob?.status)
-    ? RECENT_JOB_STORAGE_KEY
-    : ACTIVE_JOB_STORAGE_KEY
-  const stored = writeMindmapAiOwnerSessionItem(
-    storageKey,
-    pointer.ownerUserId,
-    JSON.stringify(pointer),
-  )
-  if (!stored) {
-    sessionSwitching.value = false
-    restoreError.value = '浏览器无法保存所选会话的恢复指针。'
+  if (actionBusy.value || running.value) return false
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再切换会话')
     return false
   }
-  currentSessionTitle.value = session.title
+  const openingContext = taskOpenContextKey()
+  let generation = restoreGeneration
+  const isCurrent = () => componentAlive && generation === restoreGeneration
+    && openingContext === taskOpenContextKey()
+  sessionSwitching.value = true
+  sessionMenuVisible.value = false
   try {
+    const selectedJob = authoritativeJob || (await getMindmapAiJob(session.currentJob.id)).data
+    if (!isCurrent()) return false
+    if (!selectedJob?.id || !selectedJob.sessionId || String(selectedJob.id) !== String(session.currentJob.id)
+      || selectedJob.sessionId !== session.sessionId
+      || sessionUnavailableReason({ currentJob: selectedJob })) {
+      throw new Error('所选任务与当前脑图或会话不匹配，已停止切换')
+    }
+    // Task-center entry may precede the first opening of the AI panel.
+    if (!agents.value.length) await loadCapabilities({ recoveryGeneration: generation })
+    if (!isCurrent() || running.value || livePreviewCanvasMutationBlocked.value) return false
+    const pointer = sessionPointer({ ...session, currentJob: selectedJob })
+    if (!persistJobPointer(pointer, selectedJob.status)) {
+      throw new Error('浏览器无法保存所选会话的恢复指针。')
+    }
+    // The authoritative job has been accepted. No await separates this final
+    // ownership check and reset; downstream resource failures can retry via
+    // the newly persisted pointer without losing the previous one on failure.
+    if (!resetNewJob({ clearStoredJob: false, preserveForm: true })) return false
+    generation = restoreGeneration
+    visible.value = true
+    currentSessionTitle.value = session.title
     const restored = await restoreActiveJob({ generation, allowRecent: true })
-    if (!restored && generation === restoreGeneration && !restoreError.value) {
+    if (!isCurrent()) return false
+    if (!restored && !restoreError.value) {
       restoreError.value = '所选会话暂时无法恢复，请重试。'
     }
     return restored
+  } catch (error) {
+    if (isCurrent() && !isAbortError(error)) {
+      restoreError.value = formatMindmapAiError(error, '所选会话暂时无法恢复，请重试。')
+    }
+    return false
   } finally {
-    if (generation === restoreGeneration) sessionSwitching.value = false
+    // This flag is a mutex: no successor switch can start before it clears.
+    sessionSwitching.value = false
   }
 }
 
@@ -3274,6 +4824,39 @@ async function restoreActiveJob({
       || generation !== restoreGeneration
       || restoreController !== controller
     ) return false
+    if (reconcilingCreateAttempt && createAttempt.requestPayload?.executionMode === 'direct') {
+      // Restore the request fence before contacting a task that may still be
+      // writing. A page reload must not turn an uncertain POST into an unlocked
+      // editor or treat a racing GET 404 as proof of absence.
+      const preparationId = await prepareDirectCanvasRequest(createAttempt.key)
+      const identity = beginActionIdentity('recover-create', { jobId: null })
+      uncertainCanvasCreation.value = {
+        preparationId,
+        recover: async () => {
+          let recovered
+          try { recovered = await reconcileMindmapAiJob(createAttempt.key) }
+          catch (error) {
+            if (!isHttpNotFound(error)) throw error
+            recovered = await createMindmapAiJob(createAttempt.requestPayload, createAttempt.key)
+          }
+          assertActionIdentity(identity)
+          restoreJobSourceState(recovered.data, saved)
+          const activated = await activateCreatedJob(recovered.data, {
+            identity,
+            requestPayload: createAttempt.requestPayload,
+            requestConfiguration: createAttempt.configuration,
+            attemptKey: createAttempt.key,
+            preparationId,
+            recoverExisting: true,
+          })
+          void restoreSessionTimeline(recovered.data.sessionId, {
+            expectedJobId: recovered.data.id, recoveryGeneration: generation,
+          })
+          return activated
+        },
+      }
+      return await reconcilePendingCanvasCreation()
+    }
     let response
     if (reconcilingCreateAttempt) {
       try {
@@ -3405,6 +4988,7 @@ async function restoreActiveJob({
     if (job.value.status === 'completed_file') clearDurableAttempt('save')
     selectedTurnJobId.value = String(job.value.id)
     restoreJobSourceState(job.value, saved)
+    await reconcileRestoredSourceBaseline(job.value, saved)
     if (!persistActiveJob() && (reconciledFollowupAttemptKey || reconciledRetryAttemptKey)) {
       throw new Error('浏览器无法保存新轮次任务恢复指针，请重试')
     }
@@ -3427,13 +5011,15 @@ async function restoreActiveJob({
       realtimeConnectionState.value = 'completed'
       realtimeError.value = ''
       persistActiveJob()
-      await hydrateTerminalResources(job.value.id, { recoveryGeneration: generation })
+      await finalizeTerminalJob(job.value.id, { recoveryGeneration: generation, refresh: false })
       if (
         !componentAlive
         || generation !== restoreGeneration
         || restoreController !== controller
         || !job.value?.id
       ) return false
+    } else if (isDirectExecutionJob(job.value)) {
+      return await resumeRestoredDirectJob(job.value.id, { generation, signal: controller.signal })
     } else {
       beginJobMonitoring()
     }
@@ -3460,34 +5046,80 @@ async function restoreActiveJob({
 }
 
 function retryStoredJobRecovery() {
+  if (uncertainCanvasCreation.value) return reconcilePendingCanvasCreation()
+  if (directCanvasRecoveryJobId.value
+    && directCanvasRecoveryJobId.value === String(job.value?.id || '')) return retryLivePreviewSync()
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再恢复任务')
+    return false
+  }
   invalidateRestoreOperations()
   return restoreActiveJob({ generation: restoreGeneration })
 }
 
 function discardStoredJobRecovery() {
-  resetNewJob({ clearStoredJob: true, preserveForm: true })
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再放弃恢复任务')
+    return false
+  }
+  if (!resetNewJob({ clearStoredJob: true, preserveForm: true })) return false
   applyDialogPreset(pendingDialogPreset)
   pendingDialogPreset = null
   reconcileAgentSelection()
 }
 
+function requestDialogClose() {
+  visible.value = false
+}
+
 function onDialogClosed() {
-  // 关闭也必须让“读取编辑器上下文 / 加载能力 / 恢复任务”整条异步链失效。
-  // 否则用户在能力请求尚未返回时关闭弹窗，请求返回后仍可能在后台恢复并启动轮询。
-  invalidateRestoreOperations({ clearError: false })
-  invalidateSessionList()
-  invalidateActionIdentity()
-  mobilePreviewVisible.value = false
+  // Closing only hides the panel. The task and canvas remain mounted; only an
+  // explicit undo/reject may restore the pre-AI document.
+  sessionMenuVisible.value = false
+  contextPickerVisible.value = false
+}
+
+async function finishCompletedAiGeneration() {
+  // A running task is durable on the server and its latest preview is stored
+  // in the draft checkpoint. Leaving the route must not cancel or block it;
+  // the next editor instance restores the checkpoint and resumes SSE.
+  if (form.sourceMode === 'current' && !messageModeActive.value && running.value
+    && job.value?.status !== 'cancel_requested'
+    && livePreviewSuppressedJobId !== String(job.value?.id || '')) return true
+  if (livePreviewAutoAcceptPromise) return (await livePreviewAutoAcceptPromise) === true
+  if (job.value?.status !== 'ready' || !job.value?.proposalId
+    || livePreviewSuppressedJobId === String(job.value.id)) return true
+  if (terminalHydrationState.value !== 'ready') {
+    const hydrated = await hydrateTerminalResources(job.value.id)
+    if (!hydrated) return false
+  }
+  return (await acceptCompletedLivePreviewByDefault(job.value.id)) === true
 }
 
 function startNewJob() {
-  resetNewJob({ clearStoredJob: true, preserveForm: true })
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再新建对话')
+    return false
+  }
+  if (!resetNewJob({ clearStoredJob: true, preserveForm: true })) return false
   form.prompt = ''
   discussionMode.value = false
   showAdvancedSettings.value = false
   applyDialogPreset(pendingDialogPreset)
   pendingDialogPreset = null
   reconcileAgentSelection()
+  return true
+}
+
+function startRevisionFromRejected() {
+  if (job.value?.status !== 'rejected' || actionBusy.value) return false
+  const started = startNewJob()
+  if (!started) return false
+  if (editorContext.value?.document?.root) form.sourceMode = 'current'
+  form.prompt = ''
+  void nextTick(() => composerInputRef.value?.focus?.())
+  ElMessage.info('已保留当前脑图，请输入修改要求后重新生成')
+  return true
 }
 
 async function loadCapabilities({ recoveryGeneration = restoreGeneration } = {}) {
@@ -3515,10 +5147,20 @@ async function loadCapabilities({ recoveryGeneration = restoreGeneration } = {})
 }
 
 async function showDialog(preset = {}) {
+  // Hiding/reopening a panel is not a task transition. Preserve its playback,
+  // baseline and cancellation/recovery controls even while it owns the canvas.
+  if (job.value || preparingCanvas.value || directCanvasOwned.value || livePreviewActive.value) {
+    visible.value = true
+    return true
+  }
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再打开新的 AI 任务')
+    return false
+  }
   const explicitPreset = normalizeDialogPreset(preset)
   if (explicitPreset) pendingDialogPreset = explicitPreset
   visible.value = true
-  resetNewJob({ clearStoredJob: false, preserveForm: true })
+  if (!resetNewJob({ clearStoredJob: false, preserveForm: true })) return false
   const generation = restoreGeneration
   editorContext.value = null
   uploadedFileArtifact.value = null
@@ -3560,6 +5202,120 @@ async function showDialog(preset = {}) {
   })
   if (!restored) pendingDialogPreset = null
   if (!restored) restoreDurableAttemptNotice()
+  return restored
+}
+
+function isStoredJobForEditor(storedJob, context) {
+  if (!storedJob || !context) return false
+  if (storedJob.sourceType === 'cloud_document') {
+    return Number.isSafeInteger(Number(context.mindmapId))
+      && Number(context.mindmapId) === Number(storedJob.sourceMindmapId)
+  }
+  if (storedJob.sourceType === 'local_snapshot') {
+    return Boolean(
+      !context.mindmapId
+      && context.documentId
+      && storedJob.sourceDocumentId
+      && String(context.documentId) === String(storedJob.sourceDocumentId),
+    )
+  }
+  return false
+}
+
+function readAutoRecoveryPointer() {
+  const activeJob = readUsableStoredJob(ACTIVE_JOB_STORAGE_KEY)
+  if (activeJob) return activeJob
+  const createAttempt = readPersistedAttempts().create
+  if (!createAttempt?.key || !['cloud_document', 'local_snapshot'].includes(createAttempt.sourceType)) {
+    return null
+  }
+  // The create request may still be in flight when the user leaves. The
+  // normal restore path already knows how to reconcile this key; expose its
+  // source identity here so we can decide whether this editor owns it.
+  return {
+    ...createAttempt,
+    jobId: null,
+    ownerUserId: currentAiOwnerUserId(),
+  }
+}
+
+async function restoreActiveJobWhenEditorReady() {
+  if (!componentAlive || visible.value || restoringJob.value || livePreviewCanvasMutationBlocked.value) return false
+  if (getRequestedAiJobId()) return restoreRequestedAiJob()
+  const storedJob = readAutoRecoveryPointer()
+  if (!storedJob || !['cloud_document', 'local_snapshot'].includes(storedJob.sourceType)) return false
+  try {
+    const context = await requestEditorContext()
+    if (!isStoredJobForEditor(storedJob, context)) return false
+    return await showDialog()
+  } catch (error) {
+    // The editor may announce ready before its context can be read during a
+    // route transition. Keep the durable pointer; the next explicit AI open
+    // or editor-ready event can retry recovery without creating a task.
+    if (!isAbortError(error)) restoreError.value = ''
+    return false
+  }
+}
+
+function getRequestedAiJobId(explicitJobId = '') {
+  const candidate = explicitJobId || route.query?.aiJobId
+  if (Array.isArray(candidate)) return String(candidate[0] || '').trim()
+  return String(candidate || '').trim()
+}
+
+function taskOpenContextKey() {
+  return JSON.stringify([currentAiOwnerUserId(), route.path, route.query])
+}
+
+async function restoreRequestedAiJob(explicitJobId = '') {
+  const requestedJobId = getRequestedAiJobId(explicitJobId)
+  if (!requestedJobId || !componentAlive || !currentAiOwnerUserId() || restoringJob.value || sessionSwitching.value) return false
+  if (String(job.value?.id) === requestedJobId) {
+    requestedTaskSequence += 1
+    return switchToSession({ sessionId: job.value.sessionId, currentJob: job.value })
+  }
+  if (actionBusy.value || running.value || livePreviewCanvasMutationBlocked.value) return false
+  const sequence = ++requestedTaskSequence
+  const openingContext = taskOpenContextKey()
+  const generation = restoreGeneration
+  const isCurrent = () => componentAlive && sequence === requestedTaskSequence
+    && openingContext === taskOpenContextKey()
+  try {
+    const context = await requestEditorContext()
+    if (!isCurrent() || generation !== restoreGeneration) return false
+    const response = await getMindmapAiJob(requestedJobId)
+    if (!isCurrent() || generation !== restoreGeneration) return false
+    const requestedJob = response?.data
+    if (
+      String(requestedJob?.id || '') !== requestedJobId
+      || requestedJob.sourceType !== 'cloud_document'
+      || Number(context?.mindmapId) !== Number(requestedJob.sourceMindmapId)
+    ) {
+      restoreError.value = '这个 AI 任务不属于当前脑图，已停止自动打开。'
+      return false
+    }
+    const restored = await switchToSession({
+      sessionId: requestedJob.sessionId,
+      title: requestedJob.title || 'AI 对话',
+      currentJob: requestedJob,
+    }, { authoritativeJob: requestedJob })
+    if (!isCurrent()) return false
+    if (restored && getRequestedAiJobId() === requestedJobId) {
+      const query = { ...route.query }
+      delete query.aiJobId
+      await router.replace({ path: route.path, query })
+    }
+    return restored
+  } catch (error) {
+    if (isCurrent() && generation === restoreGeneration && !isAbortError(error)) {
+      restoreError.value = formatMindmapAiError(error, 'AI 任务暂时无法恢复')
+    }
+    return false
+  }
+}
+
+async function onDeepLinkedAiTask(event) {
+  await restoreRequestedAiJob(event?.detail?.jobId || '')
 }
 
 function buildScope() {
@@ -3625,7 +5381,7 @@ function effectiveRequestLayout(source) {
 }
 
 function schedulePoll(delay = 900, force = false) {
-  if (!componentAlive || !job.value?.id) return
+  if (!componentAlive || !job.value?.id || job.value.id === monitoringSuspendedJobId) return
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     realtimeConnectionState.value = 'offline'
     return
@@ -3639,8 +5395,108 @@ function schedulePoll(delay = 900, force = false) {
   }, delay)
 }
 
+async function reconcileQueuedCanvasRequest(parentJobId) {
+  const parent = job.value
+  if (!componentAlive || String(parent?.id || '') !== String(parentJobId)) {
+    const error = new Error('排队任务上下文已变化')
+    error.code = 'AI_ACTION_SUPERSEDED'
+    throw error
+  }
+  const attempt = readPersistedAttempts().queue
+  if (!attempt?.key || String(attempt.sessionId || '') !== String(parent.sessionId || '')) return null
+  const child = await replayFollowupAttempt(attempt, parent.sessionId)
+  if (!componentAlive || String(job.value?.id || '') !== String(parentJobId)) {
+    const error = new Error('排队任务上下文已变化')
+    error.code = 'AI_ACTION_SUPERSEDED'
+    throw error
+  }
+  if (!child?.id) throw new Error('下一轮请求尚未确认，请重试同步，脑图保持只读')
+  const prompt = attempt.requestPayload?.prompt || ''
+  upsertSessionTurn(child, prompt)
+  appendClientPrompt(child.id, prompt, child.turnIndex)
+  clearDurableAttempt('queue', attempt.key)
+  if (queueAttempt?.key === attempt.key) queueAttempt = null
+  restoreDurableAttemptNotice()
+  // A previous failed queue recovery must not poison a later successful
+  // terminal drain. Renderer failures are still recorded by the frame loop.
+  if (livePreviewError.value === '下一轮请求结果尚未确认；本轮完成后将保持脑图只读，确认排队任务后继续') {
+    livePreviewError.value = ''
+  }
+  return child
+}
+
+async function activateQueuedFollowupTurn(parentJobId) {
+  if (!componentAlive || String(job.value?.id || '') !== String(parentJobId)) return false
+  // Include a very fast child's terminal state: it still needs to acquire the
+  // canvas and reconcile its final tree before manual editing may resume.
+  const turn = [...sessionTurns.value].sort((a, b) => Number(a.job?.turnIndex || 0) - Number(b.job?.turnIndex || 0)).find(item => (
+    String(item?.job?.parentJobId || '') === String(parentJobId)
+    && String(item?.job?.id || '') !== String(parentJobId)
+  ))
+  if (!turn?.job?.id) return false
+  let childJob = turn.job
+  let initialPreview = null
+  if (isDirectExecutionJob(childJob)) {
+    // The previous settlement has committed but has not released its lock.
+    // Start the child's session synchronously before any async activation work
+    // can let collaboration paint its full cloud document outside playback.
+    pendingHandoffCanvasJobId = String(childJob.id)
+    await emitEditorRequest('aiDraftPreview', {
+      phase: 'start', jobId: String(childJob.id), directCommitted: true,
+    })
+    if (!componentAlive || String(job.value?.id || '') !== String(parentJobId)) return false
+    // Stored queue snapshots usually still say waiting_turn. Re-read the job
+    // under its canvas fence before deciding whether it needs a cursor floor.
+    const refreshed = await getMindmapAiJob(childJob.id)
+    if (!componentAlive || String(job.value?.id || '') !== String(parentJobId)) return false
+    if (String(refreshed.data?.id || '') !== String(childJob.id)) throw new Error('下一轮任务身份尚未确认')
+    childJob = refreshed.data
+    if (!isTerminalStatus(childJob.status) && childJob.status !== 'waiting_turn') {
+      const latest = await getMindmapAiJobDraft(childJob.id)
+      if (!componentAlive || String(job.value?.id || '') !== String(parentJobId)) return false
+      const preview = latest.data
+      const validPreview = preview?.available === true && preview.document?.root
+        && Number.isSafeInteger(Number(preview.operationCursor))
+        && Number(preview.operationCursor) >= 0
+        && Number.isSafeInteger(Number(preview.previewEpoch || 1))
+        && Number(preview.previewEpoch || 1) >= 1
+      if (validPreview) initialPreview = preview
+      else {
+        // Completion can erase the checkpoint between the job and draft GETs.
+        // Conversely a queued/preparing child legitimately has no first draft.
+        const confirmed = await getMindmapAiJob(childJob.id)
+        if (!componentAlive || String(job.value?.id || '') !== String(parentJobId)) return false
+        if (String(confirmed.data?.id || '') !== String(childJob.id)) throw new Error('下一轮任务身份尚未确认')
+        childJob = confirmed.data
+        if (!isTerminalStatus(childJob.status)
+          && !['waiting_turn', 'queued', 'preparing'].includes(childJob.status)) {
+          throw new Error('下一轮最新草稿尚未同步，已保持画布只读，请重试同步')
+        }
+      }
+    }
+  }
+  const identity = beginActionIdentity('queue-activate', { jobId: parentJobId })
+  const prompt = turn.userMessage?.content || ''
+  if (isDirectExecutionJob(childJob)) directCanvasOwnerId.value = String(childJob.id)
+  const activated = await activateFollowupJob(childJob, {
+    identity,
+    requestPayload: {
+      prompt,
+      agentKey: childJob.agentKey || form.agentKey,
+      modelId: childJob.agentKey === 'native_mindmap' ? form.modelId : undefined,
+    },
+    attemptKey: queueAttempt?.key || '',
+    initialPreview,
+  })
+  if (activated && pendingHandoffCanvasJobId === String(childJob.id)) {
+    directCanvasOwnerId.value = String(childJob.id)
+    pendingHandoffCanvasJobId = ''
+  }
+  return activated
+}
+
 async function refreshDraftPreview(jobId) {
-  if (!componentAlive || !jobId || job.value?.id !== jobId) return false
+  if (!componentAlive || !jobId || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return false
   if (isMindmapAiMessageJob(job.value)) return false
   if (selectedTurnJobId.value && selectedTurnJobId.value !== String(jobId)) return false
   draftController?.abort()
@@ -3648,10 +5504,10 @@ async function refreshDraftPreview(jobId) {
   draftController = controller
   try {
     const response = await getMindmapAiJobDraft(jobId, { signal: controller.signal })
-    if (!componentAlive || job.value?.id !== jobId) return false
+    if (!componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return false
     return acceptDraftPreview(response.data)
   } catch (error) {
-    if (!isAbortError(error) && job.value?.id === jobId) {
+    if (!isAbortError(error) && job.value?.id === jobId && jobId !== monitoringSuspendedJobId) {
       realtimeError.value = formatMindmapAiError(error, '实时脑图草稿暂时不可用')
     }
     return false
@@ -3660,10 +5516,136 @@ async function refreshDraftPreview(jobId) {
   }
 }
 
+async function resumeRestoredDirectJob(jobId, { generation = restoreGeneration, signal } = {}) {
+  const normalizedJobId = String(jobId || '')
+  const playbackGeneration = livePreviewGeneration
+  const isCurrent = () => componentAlive && generation === restoreGeneration
+    && playbackGeneration === livePreviewGeneration
+    && job.value?.id === normalizedJobId && !signal?.aborted
+  if (!normalizedJobId || !isCurrent() || !isDirectExecutionJob()) return false
+  if (directCanvasOwnerId.value && directCanvasOwnerId.value !== normalizedJobId) {
+    throw new Error('上一轮 AI 画布尚未完成同步')
+  }
+  directCanvasRecoveryJobId.value = normalizedJobId
+  directCanvasOwnerId.value = normalizedJobId
+  stopPolling()
+  stopRealtime('connecting')
+  try {
+    // Fence collaboration BEFORE reading the checkpoint. Reversing these two
+    // awaits lets a newer HTTP/cloud tree become the baseline while an older
+    // draft response is in flight, causing deletions and a visible rewind.
+    await emitEditorRequest('aiDraftPreview', {
+      phase: 'start', jobId: normalizedJobId, directCommitted: true,
+    })
+    if (!isCurrent()) return false
+    const response = await getMindmapAiJobDraft(normalizedJobId, { signal })
+    if (!isCurrent()) return false
+    const preview = response.data
+    const validPreview = preview?.available === true && preview.document?.root
+      && Number.isSafeInteger(Number(preview.operationCursor))
+      && Number(preview.operationCursor) >= 0
+      && Number.isSafeInteger(Number(preview.previewEpoch || 1))
+      && Number(preview.previewEpoch || 1) >= 1
+    if (validPreview) {
+      if (!acceptDraftPreview(preview)) {
+        // A retry may observe exactly the checkpoint already accepted before
+        // a renderer failure. Never reset the coordinates backwards to force
+        // acceptance of an older response.
+        if (!draftDocument.value?.root || compareMindmapAiPreviewCoordinates(
+          { epoch: preview.previewEpoch || 1, version: preview.operationCursor },
+          { epoch: latestPreviewEpoch.value, version: latestPreviewVersion.value },
+        ) !== 0) throw new Error('最新草稿无法建立恢复起点，请重试同步')
+        queueLiveDraftPreview(draftDocument.value, latestPreviewVersion.value)
+      }
+    } else {
+      // The worker may complete and retire its checkpoint during the GET.
+      // A task still preparing its first draft also has nothing to replay.
+      const confirmed = await getMindmapAiJob(normalizedJobId, { signal })
+      if (!isCurrent()) return false
+      if (String(confirmed.data?.id || '') !== normalizedJobId) throw new Error('恢复任务身份尚未确认')
+      job.value = mergeMindmapAiJobSnapshot(job.value, confirmed.data)
+      if (!isTerminalStatus(job.value.status)
+        && !['waiting_turn', 'queued', 'preparing'].includes(job.value.status)) {
+        throw new Error('最新草稿尚未同步，脑图保持只读，请重试恢复任务')
+      }
+    }
+    restoreError.value = ''
+    livePreviewError.value = ''
+    persistActiveJob()
+    if (isTerminalStatus(job.value.status)) schedulePoll(0, true)
+    else beginJobMonitoring({ resetCursor: false })
+    directCanvasRecoveryJobId.value = ''
+    return true
+  } catch (error) {
+    if (!isCurrent()) return false
+    livePreviewError.value = formatMindmapAiError(error, '最新草稿恢复失败，脑图保持只读，请重试恢复任务')
+    restoreError.value = livePreviewError.value
+    throw error
+  }
+}
+
+async function retryLivePreviewSync() {
+  const jobId = String(job.value?.id || '')
+  if (jobId && directCanvasOwned.value && isTerminalStatus(job.value?.status)) {
+    if (livePreviewRecovering.value) return false
+    livePreviewRecovering.value = true
+    livePreviewError.value = ''
+    try { return await finalizeTerminalJob(jobId, { retry: true }) }
+    finally { livePreviewRecovering.value = false }
+  }
+  if (!jobId || livePreviewRecovering.value || isTerminalStatus(job.value?.status)) return false
+  livePreviewRecovering.value = true
+  const recoveryGeneration = restoreGeneration
+  const retryingRender = Boolean(livePreviewError.value)
+  livePreviewError.value = ''
+  realtimeError.value = ''
+  try {
+    if (directCanvasRecoveryJobId.value === jobId) {
+      return await resumeRestoredDirectJob(jobId, { generation: recoveryGeneration })
+    }
+    const refreshed = await refreshDraftPreview(jobId)
+    if (
+      !componentAlive
+      || recoveryGeneration !== restoreGeneration
+      || job.value?.id !== jobId
+    ) return false
+    if (!refreshed) {
+      // An unchanged cursor is a valid retry after a rendering failure; do not
+      // require the server to produce another edit before playback resumes.
+      if (retryingRender && !realtimeError.value && draftDocument.value?.root) {
+        queueLiveDraftPreview(draftDocument.value, latestPreviewVersion.value)
+      } else throw new Error('实时草稿仍不可用，请稍后重试')
+    }
+    draftFreshness.value = 'fresh'
+    draftFreshnessMessage.value = ''
+    // Refreshing the exact draft repairs the visible canvas first; reconnect
+    // the event stream afterwards so later frames continue without starting a
+    // second AI task or losing the current event cursor.
+    connectRealtime(jobId)
+    schedulePoll(0)
+    return true
+  } catch (error) {
+    if (
+      componentAlive
+      && recoveryGeneration === restoreGeneration
+      && job.value?.id === jobId
+    ) {
+      draftFreshness.value = draftDocument.value?.root ? 'stale' : 'unavailable'
+      draftFreshnessMessage.value = formatMindmapAiError(
+        error,
+        '实时草稿仍未恢复；当前画布已保留，系统会继续自动重试。',
+      )
+    }
+    return false
+  } finally {
+    livePreviewRecovering.value = false
+  }
+}
+
 async function restoreTerminalPreview(jobId, {
   recoveryGeneration = restoreGeneration,
 } = {}) {
-  if (isMindmapAiMessageJob(job.value)) return false
+  if (isMindmapAiMessageJob(job.value) || isDirectExecutionJob(job.value)) return false
   const displayCurrentJob = !selectedTurnJobId.value || selectedTurnJobId.value === String(jobId)
   const restoredDraft = await refreshDraftPreview(jobId)
   if (
@@ -3679,8 +5661,12 @@ async function restoreTerminalPreview(jobId, {
       || job.value?.id !== jobId
       || job.value?.artifactId !== artifactId
     ) return false
-    if (displayCurrentJob && selectedTurnJobId.value === String(jobId)) {
+    if (
+      displayCurrentJob
+      && !['cancelled', 'failed', 'expired', 'stale', 'rejected'].includes(job.value.status)
+    ) {
       draftDocument.value = cloneRuntimeValue(document)
+      queueLiveDraftPreview(draftDocument.value, latestPreviewVersion.value + 1)
     }
     realtimeError.value = ''
     draftFreshness.value = 'final'
@@ -3715,23 +5701,31 @@ async function hydrateTerminalResources(jobId, {
   recoveryGeneration = restoreGeneration,
 } = {}) {
   if (!jobId || job.value?.id !== jobId) return false
+  const hydrationGeneration = ++terminalHydrationGeneration
+  const isCurrent = () => componentAlive && recoveryGeneration === restoreGeneration
+    && hydrationGeneration === terminalHydrationGeneration && job.value?.id === jobId
   terminalHydrationState.value = 'loading'
   terminalHydrationError.value = ''
   const messageJob = isMindmapAiMessageJob(job.value)
   const artifactReady = messageJob || !job.value.artifactId
     || await restoreTerminalPreview(jobId, { recoveryGeneration })
-  if (recoveryGeneration !== restoreGeneration || job.value?.id !== jobId) return false
+  if (!isCurrent()) return false
+  // A direct proposal is a live undo receipt, not an immutable preview. Its
+  // first GET can contain only the first batch (e.g. 8 of a final 84 nodes),
+  // although its ID never changes. Refetch at every terminal hydration,
+  // including failed/cancelled tasks whose earlier batches were committed.
+  // Normal immutable proposals keep their existing same-ID cache behavior.
   const proposalReady = messageJob || !job.value.proposalId
-    || proposal.value?.id === job.value.proposalId
+    || (!isDirectExecutionJob() && proposal.value?.id === job.value.proposalId)
     || await loadProposal()
-  if (recoveryGeneration !== restoreGeneration || job.value?.id !== jobId) return false
+  if (!isCurrent()) return false
   let needsInputReady = job.value.status !== 'needs_input' || needsInputQuestions.value.length > 0
   if (!needsInputReady && job.value.sessionId) {
     await restoreSessionTimeline(job.value.sessionId, {
       expectedJobId: jobId,
       recoveryGeneration,
     })
-    if (recoveryGeneration !== restoreGeneration || job.value?.id !== jobId) return false
+    if (!isCurrent()) return false
     needsInputReady = needsInputQuestions.value.length > 0
   }
   let assistantMessageReady = job.value.status !== 'completed_message'
@@ -3744,7 +5738,7 @@ async function hydrateTerminalResources(jobId, {
       expectedJobId: jobId,
       recoveryGeneration,
     })
-    if (recoveryGeneration !== restoreGeneration || job.value?.id !== jobId) return false
+    if (!isCurrent()) return false
     assistantMessageReady = Boolean(sessionTurns.value.find(turn => (
       String(turn?.job?.id || '') === String(jobId)
       && String(turn?.assistantMessage?.content || '').trim()
@@ -3756,6 +5750,13 @@ async function hydrateTerminalResources(jobId, {
     terminalHydrationRetryCount = 0
     clearTimeout(terminalHydrationRetryTimer)
     terminalHydrationRetryTimer = null
+    if (job.value.status === 'ready' && form.sourceMode === 'current'
+      && canApplyCurrentProposal.value) {
+      // The live canvas is the user's accepted result by default. Wait until
+      // the final queued frame has painted, then persist the same result using
+      // the normal apply path so its full AI undo snapshot is retained.
+      scheduleDefaultLivePreviewAcceptance(jobId)
+    }
     return true
   }
   terminalHydrationState.value = 'error'
@@ -3773,6 +5774,86 @@ async function hydrateTerminalResources(jobId, {
   return false
 }
 
+function terminalJobResourceKey(candidate = job.value) {
+  return JSON.stringify([candidate?.status, candidate?.artifactId || '', candidate?.proposalId || ''])
+}
+
+function finalizeTerminalJob(jobId = job.value?.id, {
+  retry = false,
+  refresh = true,
+  recoveryGeneration = restoreGeneration,
+} = {}) {
+  if (!componentAlive || !jobId || job.value?.id !== jobId
+    || recoveryGeneration !== restoreGeneration || !isTerminalStatus(job.value.status)) return Promise.resolve(false)
+  let state = terminalFinalizationState
+  if (!state || state.jobId !== jobId || state.generation !== recoveryGeneration) {
+    state?.controller?.abort()
+    state = { jobId, generation: recoveryGeneration, promise: null, completedKey: '', failedKey: '', controller: null }
+    terminalFinalizationState = state
+  }
+  // Poll, timeline, repeated SSE and EOF all join the same work. In particular,
+  // a forced poll must not abort or supersede a proposal GET already in flight.
+  if (state.promise) return state.promise
+  let resourceKey = terminalJobResourceKey()
+  if (state.completedKey === resourceKey) return Promise.resolve(true)
+  if (!retry && state.failedKey === resourceKey) return Promise.resolve(false)
+  state.failedKey = ''
+  const controller = new AbortController()
+  state.controller = controller
+  const isCurrent = () => componentAlive && terminalFinalizationState === state
+    && recoveryGeneration === restoreGeneration && job.value?.id === jobId
+  const work = (async () => {
+    try {
+      stopRealtime('completed')
+      stopPolling()
+      if (refresh) {
+        const response = await getMindmapAiJob(jobId, { signal: controller.signal })
+        if (!isCurrent()) return false
+        job.value = mergeMindmapAiJobSnapshot(job.value, response.data)
+        persistActiveJob()
+      }
+      if (!isCurrent() || !isTerminalStatus(job.value.status)) return false
+      resourceKey = terminalJobResourceKey()
+      const direct = isDirectExecutionJob()
+      if (!direct && ['failed', 'cancelled', 'expired', 'stale', 'rejected'].includes(job.value.status)
+        && livePreviewActive.value) {
+        if (!(await revertLiveDraftPreview())) throw new Error(livePreviewError.value || 'AI 实时预览撤回失败，请重试同步')
+        if (!isCurrent()) return false
+      }
+      if (!direct && !livePreviewActive.value) emitAiCanvasPreviewEvent({ phase: 'clear', jobId })
+      const resourcesReady = await hydrateTerminalResources(jobId, { recoveryGeneration })
+      if (!isCurrent() || resourceKey !== terminalJobResourceKey()) return false
+      let canvasReady = true
+      if (direct) canvasReady = await settleDirectLiveDraftPreview(jobId)
+      else if (!livePreviewActive.value) await activateQueuedFollowupTurn(jobId)
+      // Settlement can transfer ownership to a queued child. Do not stop its
+      // stream, overwrite its resource state, or release its canvas afterward.
+      if (!isCurrent()) return canvasReady && resourcesReady
+      if (resourceKey !== terminalJobResourceKey()) return false
+      if (resourcesReady && canvasReady) state.completedKey = resourceKey
+      else state.failedKey = resourceKey
+      return resourcesReady && canvasReady
+    } catch (error) {
+      if (!isCurrent() || isAbortError(error)) return false
+      state.failedKey = resourceKey
+      terminalHydrationState.value = 'error'
+      terminalHydrationError.value = formatMindmapAiError(error, '任务已完成，但结果状态暂时无法同步')
+      scheduleTerminalHydrationRetry(jobId)
+      return false
+    }
+  })()
+  state.promise = work.finally(() => {
+    state.promise = null
+    if (state.controller === controller) state.controller = null
+    // Apply/undo can advance a terminal status while resources are loading.
+    // Finish that new state serially instead of publishing the old completion.
+    if (isCurrent() && resourceKey !== terminalJobResourceKey() && isTerminalStatus(job.value.status)) {
+      void finalizeTerminalJob(jobId)
+    }
+  })
+  return state.promise
+}
+
 function retryTerminalHydration() {
   if (!job.value?.id) return Promise.resolve(false)
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -3786,29 +5867,29 @@ function retryTerminalHydration() {
 }
 
 async function pollJob({ jobId = job.value?.id, force = false } = {}) {
-  if (!componentAlive || !jobId || job.value?.id !== jobId) return
+  if (!componentAlive || !jobId || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     realtimeConnectionState.value = 'offline'
     return
   }
-  if (!force && isTerminalStatus(job.value.status)) return
+  if (isTerminalStatus(job.value.status)) return finalizeTerminalJob(jobId, { retry: force })
   pollController?.abort()
   const controller = new AbortController()
   pollController = controller
   try {
     const response = await getMindmapAiJob(jobId, { signal: controller.signal })
-    if (!componentAlive || job.value?.id !== jobId) return
+    if (!componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return
     job.value = mergeMindmapAiJobSnapshot(job.value, response.data)
     // 权威轮询成功说明任务连接已经恢复。先清除旧 SSE 警告；若随后草稿
     // 拉取仍失败，refreshDraftPreview 会写入更准确的草稿错误。
     realtimeError.value = ''
     persistActiveJob()
     if (isTerminalStatus(job.value.status)) {
-      await hydrateTerminalResources(jobId)
+      return await finalizeTerminalJob(jobId, { retry: force, refresh: false })
     } else if (!isMindmapAiMessageJob(job.value)) {
       await refreshDraftPreview(jobId)
     }
-    if (!componentAlive || job.value?.id !== jobId) return
+    if (!componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return
     if (
       !isMindmapAiMessageJob(job.value)
       && !isTerminalStatus(job.value.status)
@@ -3817,14 +5898,11 @@ async function pollJob({ jobId = job.value?.id, force = false } = {}) {
     ) {
       await loadProposal()
     }
-    if (isTerminalStatus(job.value.status)) {
-      stopRealtime('completed')
-      return
-    }
+    if (isTerminalStatus(job.value.status)) return await finalizeTerminalJob(jobId)
     const delay = realtimeConnectionState.value === 'connected' ? 6000 : 1500
     schedulePoll(delay)
   } catch (error) {
-    if (!isAbortError(error) && job.value?.id === jobId) {
+    if (!isAbortError(error) && job.value?.id === jobId && jobId !== monitoringSuspendedJobId) {
       if (isTerminalStatus(job.value.status) || force) {
         terminalHydrationState.value = 'error'
         terminalHydrationError.value = formatMindmapAiError(
@@ -3879,8 +5957,10 @@ function connectRealtime(jobId) {
   void consumeMindmapAiRealtimeEvents(jobId, {
     afterSequence: latestEventSequence.value,
     previewVersion: latestPreviewVersion.value,
+    previewEpoch: latestPreviewEpoch.value,
     signal: controller.signal,
     fetchDraft: getMindmapAiJobDraft,
+    fetchDraftEnabled: true,
     onOpen: () => {
       if (generation !== realtimeGeneration || job.value?.id !== jobId) return
       realtimeReconnectAttempt = 0
@@ -3892,7 +5972,8 @@ function connectRealtime(jobId) {
       if (event?.eventType === 'stream_error') {
         realtimeError.value = formatMindmapAiError(event?.data, '收到无效的 AI 实时事件')
       }
-      if (appendAgentEvent(jobId, event)) applyRealtimeJobEvent(jobId, event)
+      appendAgentEvent(jobId, event)
+      applyRealtimeJobEvent(jobId, event)
     },
     onDraft: preview => {
       if (generation === realtimeGeneration && job.value?.id === jobId) {
@@ -3914,7 +5995,7 @@ function connectRealtime(jobId) {
       }
       schedulePoll(0)
     },
-  }).then(cursor => {
+  }).then(async cursor => {
     if (generation !== realtimeGeneration || job.value?.id !== jobId) return
     realtimeController = null
     latestEventSequence.value = Math.max(
@@ -3922,13 +6003,17 @@ function connectRealtime(jobId) {
       Number(cursor?.afterSequence) || 0,
     )
     jobEventSequences.set(jobId, latestEventSequence.value)
-    latestPreviewVersion.value = Math.max(
-      latestPreviewVersion.value,
-      Number(cursor?.previewVersion) || -1,
-    )
+    if (compareMindmapAiPreviewCoordinates(
+      { epoch: cursor?.previewEpoch, version: cursor?.previewVersion },
+      { epoch: latestPreviewEpoch.value, version: latestPreviewVersion.value },
+    ) > 0) {
+      latestPreviewEpoch.value = cursor.previewEpoch
+      latestPreviewVersion.value = cursor.previewVersion
+    }
     if (isTerminalStatus(job.value.status)) {
       realtimeConnectionState.value = 'completed'
       realtimeError.value = ''
+      await finalizeTerminalJob(jobId)
       return
     }
     schedulePoll(0)
@@ -3954,17 +6039,141 @@ function beginJobMonitoring({ resetCursor = false } = {}) {
   if (resetCursor) {
     resetCurrentJobCursor(jobId)
     latestPreviewVersion.value = -1
+    latestPreviewEpoch.value = 1
   } else {
     syncCurrentJobCursor(jobId)
   }
   if (hasUnresolvedGenerationRestart(jobId)) markGenerationRestarted()
-  if (!isMindmapAiMessageJob(job.value)) void refreshDraftPreview(jobId)
+  if (livePreviewPreparing.value && isDirectExecutionJob()) {
+    directCanvasOwnerId.value = String(jobId)
+    emitAiCanvasPreviewEvent({
+      phase: 'start',
+      jobId,
+      directCommitted: true,
+    })
+  }
+  if (!isMindmapAiMessageJob(job.value)) {
+    void refreshDraftPreview(jobId)
+  }
   schedulePoll(0)
   connectRealtime(jobId)
 }
 
+async function prepareDirectCanvasRequest(attemptKey, { drainLocalChanges = false } = {}) {
+  const preparationId = `preparing:${attemptKey}`
+  if (directCanvasOwnerId.value && directCanvasOwnerId.value !== preparationId) {
+    throw new Error('上一轮 AI 画布尚未完成同步')
+  }
+  preparingCanvas.value = true
+  directCanvasOwnerId.value = preparationId
+  try {
+    await emitEditorRequest('aiDraftPreview', {
+      phase: 'prepare', jobId: preparationId, directCommitted: true,
+      drainLocalChanges,
+    })
+  } catch (error) {
+    await releaseCanvasPreparation(preparationId)
+    throw error
+  }
+  return preparationId
+}
+
+async function adoptDirectCanvasRequest(nextJob, preparationId) {
+  if (!preparationId) return
+  if (!isDirectExecutionJob(nextJob)) {
+    if (uncertainCanvasCreation.value?.preparationId === preparationId) uncertainCanvasCreation.value = null
+    await releaseCanvasPreparation(preparationId)
+    return
+  }
+  await emitEditorRequest('aiDraftPreview', {
+    phase: 'start', jobId: nextJob.id, preparationId, directCommitted: true,
+  })
+  directCanvasOwnerId.value = String(nextJob.id)
+  preparingCanvas.value = false
+}
+
+async function releaseCanvasPreparation(preparationId) {
+  if (uncertainCanvasCreation.value?.preparationId === preparationId) return false
+  if (preparationId && directCanvasOwnerId.value === preparationId) {
+    try {
+      await emitEditorRequest('aiDraftPreview', {
+        phase: 'preparation-aborted', jobId: preparationId, notCreated: true,
+      })
+    } catch (error) {
+      livePreviewError.value = formatMindmapAiError(error, '云端脑图同步失败')
+      uncertainCanvasCreation.value = { preparationId, recover: async () => null }
+      return false
+    }
+    if (directCanvasOwnerId.value === preparationId) directCanvasOwnerId.value = ''
+  }
+  if (!uncertainCanvasCreation.value) preparingCanvas.value = false
+  emitAiEditingState()
+  return true
+}
+
+// An HTTP error is not evidence that a durable job was not created. Retain the
+// exact request identity and canvas ownership until reconciliation proves its
+// result. The same recovery gate is used by create, follow-up and retry.
+async function reconcilePendingCanvasCreation() {
+  const pending = uncertainCanvasCreation.value
+  if (!pending || livePreviewRecovering.value) return false
+  livePreviewRecovering.value = true
+  try {
+    const recovered = await pending.recover()
+    if (!componentAlive || uncertainCanvasCreation.value !== pending) return false
+    // Only an explicit null means the request never created a job. A stale
+    // activation returning false must keep recovery ownership, not unlock it.
+    if (recovered !== true && recovered !== null) throw new Error('AI 请求结果仍未确认，请重试同步')
+    uncertainCanvasCreation.value = null
+    if (recovered === null && !(await releaseCanvasPreparation(pending.preparationId))) return false
+    preparingCanvas.value = false
+    livePreviewError.value = ''
+    return true
+  } catch (error) {
+    if (componentAlive && uncertainCanvasCreation.value === pending) {
+      livePreviewError.value = formatMindmapAiError(error,
+        '请求结果尚未确认，已保持脑图只读；请恢复连接后重试确认，不要重复创建任务')
+    }
+    return false
+  } finally {
+    livePreviewRecovering.value = false
+  }
+}
+
+async function activateCreatedJob(nextJob, { identity, requestPayload, requestConfiguration, attemptKey, preparationId, recoverExisting = false }) {
+  assertActionIdentity(identity)
+  await adoptDirectCanvasRequest(nextJob, preparationId)
+  assertActionIdentity(identity)
+  submitAttempt = null
+  stopPolling()
+  stopRealtime('idle')
+  clearAgentRuntimeState()
+  job.value = mergeMindmapAiJobSnapshot(job.value, nextJob)
+  identity.jobId = job.value.id
+  discussionMode.value = isMindmapAiMessageJob(job.value)
+  currentSessionTitle.value = deriveMindmapAiSessionTitle(requestPayload.prompt, '新对话')
+  jobConfiguration.value = requestConfiguration
+  appendClientPrompt(job.value.id, requestPayload.prompt, job.value.turnIndex)
+  upsertSessionTurn(job.value, requestPayload.prompt)
+  selectedTurnJobId.value = String(job.value.id)
+  draftDocument.value = discussionMode.value || requestPayload.executionMode === 'direct'
+    ? null : cloneRuntimeValue(sourceContext.value?.document) || null
+  proposal.value = null
+  proposalError.value = ''
+  diffConfirmed.value = false
+  if (persistActiveJob()) clearDurableAttempt('create', attemptKey)
+  else {
+    restoreDurableAttemptNotice()
+    ElMessage.warning('任务已创建；恢复指针未写入，请保持当前页面，原请求号仍可用于恢复')
+  }
+  if (isTerminalStatus(job.value.status)) schedulePoll(0, true)
+  else if (recoverExisting && isDirectExecutionJob()) return resumeRestoredDirectJob(job.value.id)
+  else beginJobMonitoring({ resetCursor: true })
+  return true
+}
+
 async function submitJob() {
-  if (restoringJob.value || actionBusy.value) return
+  if (actionBusy.value || livePreviewCanvasMutationBlocked.value) return
   if (!form.prompt.trim()) return ElMessage.warning(messageModeActive.value ? '请输入想讨论的问题' : '请输入脑图生成要求')
   const requestedIntent = effectiveFormIntent.value
   if (!form.agentKey) return ElMessage.warning('没有可用的 AI Agent')
@@ -3978,12 +6187,23 @@ async function submitJob() {
   if (form.agentKey === 'native_mindmap' && !form.modelId) {
     return ElMessage.warning('请选择自研 MindMap Agent 使用的模型')
   }
+  if (nativeModelConfigurationIssue.value) return ElMessage.warning(nativeModelConfigurationIssue.value)
   submissionStartedAt.value = Date.now()
   submitting.value = true
   const identity = beginActionIdentity('create', { jobId: null })
+  let preparationId = null
+  let recoverCreation = null
+  let creationRequestStarted = false
+  let creationResponseReceived = false
+  let reusedPersistedAttempt = false
   try {
     const source = await buildSource()
     assertActionIdentity(identity)
+    const directExecution = Boolean(
+      !discussionMode.value
+      && source.type === 'cloud_document'
+      && !sourceContext.value?.readonly,
+    )
     const requestPayload = {
       agentKey: form.agentKey,
       modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
@@ -3995,12 +6215,16 @@ async function submitJob() {
         maxDepth: form.maxDepth,
         maxNodes: form.maxNodes,
         density: form.density,
+        generationMode: form.generationMode,
       },
       source,
-      target: discussionMode.value ? 'message' : (
+      target: discussionMode.value ? 'message' : directExecution ? 'file' : (
         ['none', 'uploaded_artifact'].includes(source.type)
         || sourceContext.value?.readonly
       ) ? 'file' : 'proposal',
+      // 云端可编辑脑图走后台直写；本地快照/上传文件仍使用旧的
+      // Artifact/Proposal 预览契约，避免把浏览器私有状态误当成权威正文。
+      executionMode: directExecution ? 'direct' : 'preview',
     }
     const requestConfiguration = captureJobConfiguration({
       agentKey: requestPayload.agentKey,
@@ -4015,6 +6239,7 @@ async function submitJob() {
       maxDepth: requestPayload.parameters.maxDepth,
       interactionMode: discussionMode.value ? 'discussion' : 'edit',
     })
+    const persistedAttemptKey = readPersistedAttempts().create?.key
     submitAttempt = await resolveDurableAttempt('create', submitAttempt, requestPayload, {
       createKey: () => createMindmapAiIdempotencyKey(),
       metadata: {
@@ -4024,42 +6249,57 @@ async function submitJob() {
         sourceRevision: sourceContext.value?.revision ?? null,
         sourceFingerprint: sourceFingerprint.value || '',
         configuration: requestConfiguration,
+        // Cloud sources contain an ID, not a private document snapshot. Keep
+        // the exact payload so recovery can replay the same idempotent request
+        // even when GET reconciliation races an uncommitted original POST.
+        requestPayload: directExecution ? requestPayload : undefined,
       },
     })
+    reusedPersistedAttempt = submitAttempt.key === persistedAttemptKey
     assertActionIdentity(identity)
     const attemptKey = submitAttempt.key
-    const response = await createMindmapAiJob(requestPayload, submitAttempt.key)
-    assertActionIdentity(identity)
-    submitAttempt = null
-    stopPolling()
-    stopRealtime('idle')
-    clearAgentRuntimeState()
-    job.value = mergeMindmapAiJobSnapshot(job.value, response.data)
-    identity.jobId = job.value.id
-    discussionMode.value = isMindmapAiMessageJob(job.value)
-    currentSessionTitle.value = deriveMindmapAiSessionTitle(requestPayload.prompt, '新对话')
-    jobConfiguration.value = requestConfiguration
-    appendClientPrompt(job.value.id, requestPayload.prompt, job.value.turnIndex)
-    upsertSessionTurn(job.value, requestPayload.prompt)
-    selectedTurnJobId.value = String(job.value.id)
-    draftDocument.value = discussionMode.value
-      ? null
-      : cloneRuntimeValue(sourceContext.value?.document) || null
-    proposal.value = null
-    proposalError.value = ''
-    diffConfirmed.value = false
-    const pointerPersisted = persistActiveJob()
-    if (pointerPersisted) {
-      clearDurableAttempt('create', attemptKey)
-    } else {
-      restoreDurableAttemptNotice()
-      ElMessage.warning('任务已创建；恢复指针未写入，请保持当前页面，原请求号仍可用于恢复')
+    if (directExecution) {
+      // Fence every cloud writer BEFORE the request can start backend work.
+      // Otherwise the first Yjs/revision message can paint a complete node
+      // before the browser has even received the new job id.
+      preparationId = await prepareDirectCanvasRequest(attemptKey, { drainLocalChanges: !reusedPersistedAttempt })
+      assertActionIdentity(identity)
     }
-    beginJobMonitoring({ resetCursor: true })
+    const activation = { identity, requestPayload, requestConfiguration, attemptKey, preparationId,
+      recoverExisting: reusedPersistedAttempt }
+    recoverCreation = async () => {
+      let response
+      try { response = await reconcileMindmapAiJob(attemptKey) }
+      catch (error) {
+        if (!isHttpNotFound(error)) throw error
+        // A 404 may overtake the original POST's transaction. Replay exactly
+        // the same key/payload; never translate an unknown result into unlock.
+        response = await createMindmapAiJob(requestPayload, attemptKey)
+      }
+      return activateCreatedJob(response.data, { ...activation, recoverExisting: true })
+    }
+    creationRequestStarted = true
+    const response = await createMindmapAiJob(requestPayload, attemptKey)
+    creationResponseReceived = true
+    await activateCreatedJob(response.data, activation)
   } catch (error) {
-    if (error?.code === 'AI_ACTION_SUPERSEDED') return
+    if (error?.code === 'AI_ACTION_SUPERSEDED') return false
+    if (!creationRequestStarted || (!creationResponseReceived && !reusedPersistedAttempt && isDefinitiveAiCreationRejection(error))) {
+      if (!reusedPersistedAttempt) {
+        clearDurableAttempt('create', submitAttempt?.key)
+        submitAttempt = null
+      }
+      ElMessage.error(formatMindmapAiError(error, 'AI 脑图任务创建被拒绝'))
+      return
+    }
+    if (preparationId && recoverCreation && directCanvasOwnerId.value === preparationId) {
+      uncertainCanvasCreation.value = { preparationId, recover: recoverCreation }
+      await reconcilePendingCanvasCreation()
+      return
+    }
     ElMessage.error(formatMindmapAiError(error, 'AI 脑图任务创建失败'))
   } finally {
+    await releaseCanvasPreparation(preparationId)
     submitting.value = false
     submissionStartedAt.value = 0
   }
@@ -4069,12 +6309,18 @@ async function activateFollowupJob(nextJob, {
   identity,
   requestPayload,
   attemptKey,
+  preparationId,
+  initialPreview = null,
+  recoverExisting = false,
 }) {
+  assertActionIdentity(identity)
+  await adoptDirectCanvasRequest(nextJob, preparationId)
   assertActionIdentity(identity)
   const previousDraft = cloneRuntimeValue(draftDocument.value)
   stopPolling()
   stopRealtime('idle')
   job.value = nextJob
+  monitoringSuspendedJobId = ''
   identity.jobId = job.value.id
   const nextDiscussionMode = isMindmapAiMessageJob(job.value)
   const configuredEditIntent = intentOptions.some(item => (
@@ -4120,6 +6366,7 @@ async function activateFollowupJob(nextJob, {
   upsertSessionTurn(job.value, requestPayload.prompt)
   selectedTurnJobId.value = String(job.value.id)
   followupPrompt.value = ''
+  pendingFollowupPrompt.value = ''
   proposal.value = null
   proposalError.value = ''
   diffConfirmed.value = false
@@ -4128,12 +6375,32 @@ async function activateFollowupJob(nextJob, {
   if (pointerPersisted) clearDurableAttempt('followup', attemptKey)
   followupAttempt = null
   restoreDurableAttemptNotice()
-  await restoreSessionTimeline(job.value.sessionId, {
+  // The child has its own cursor and draft. Start it before fetching the full
+  // conversation, otherwise the parent remains the only visible activity
+  // during the extra timeline round trip.
+  if (isTerminalStatus(job.value.status)) schedulePoll(0, true)
+  else if (recoverExisting && isDirectExecutionJob()) {
+    resetCurrentJobCursor(job.value.id)
+    latestPreviewVersion.value = -1
+    latestPreviewEpoch.value = 1
+    if (!(await resumeRestoredDirectJob(job.value.id))) return false
+  }
+  else {
+    // A direct queued child's older SSE events must not replay over the cloud
+    // baseline captured after its parent committed. Establish the latest
+    // checkpoint floor before subscribing, then preserve those coordinates.
+    if (initialPreview) {
+      resetCurrentJobCursor(job.value.id)
+      latestPreviewVersion.value = -1
+      latestPreviewEpoch.value = 1
+      if (!acceptDraftPreview(initialPreview)) throw new Error('下一轮最新草稿无法建立恢复起点')
+    }
+    beginJobMonitoring({ resetCursor: !initialPreview })
+  }
+  void restoreSessionTimeline(job.value.sessionId, {
     expectedJobId: job.value.id,
     recoveryGeneration: restoreGeneration,
   })
-  assertActionIdentity(identity)
-  beginJobMonitoring({ resetCursor: true })
   if (!pointerPersisted) {
     ElMessage.warning('继续生成任务已创建；请保持当前页面，原请求号仍可用于恢复')
   }
@@ -4145,7 +6412,11 @@ async function activateRetryJob(nextJob, {
   requestPayload,
   attemptKey,
   retryOfJob,
+  preparationId,
+  recoverExisting = false,
 }) {
+  assertActionIdentity(identity)
+  await adoptDirectCanvasRequest(nextJob, preparationId)
   assertActionIdentity(identity)
   stopPolling()
   stopRealtime('idle')
@@ -4193,7 +6464,14 @@ async function activateRetryJob(nextJob, {
     recoveryGeneration: restoreGeneration,
   })
   assertActionIdentity(identity)
-  beginJobMonitoring({ resetCursor: true })
+  if (isTerminalStatus(job.value.status)) schedulePoll(0, true)
+  else if (recoverExisting && isDirectExecutionJob()) {
+    resetCurrentJobCursor(job.value.id)
+    latestPreviewVersion.value = -1
+    latestPreviewEpoch.value = 1
+    if (!(await resumeRestoredDirectJob(job.value.id))) return false
+  }
+  else beginJobMonitoring({ resetCursor: true })
   if (!pointerPersisted) {
     ElMessage.warning('重试任务已创建；请保持当前页面，原请求号仍可用于恢复')
   }
@@ -4202,7 +6480,12 @@ async function activateRetryJob(nextJob, {
 
 async function retryJob() {
   const retriedJob = job.value
-  if (actionBusy.value || !retryAvailable.value || !retriedJob?.id) return
+  if (actionBusy.value || livePreviewCanvasMutationBlocked.value || !retryAvailable.value || !retriedJob?.id) {
+    if (livePreviewCanvasMutationBlocked.value) {
+      ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再重试任务')
+    }
+    return false
+  }
   const selectedAgent = agents.value.find(item => item.agentKey === form.agentKey)
   if (!selectedAgent || selectedAgent.status !== 'enabled') {
     return ElMessage.warning('请选择可用的 AI Agent 后再重试')
@@ -4214,9 +6497,14 @@ async function retryJob() {
   if (form.agentKey === 'native_mindmap' && !form.modelId) {
     return ElMessage.warning('请选择自研 MindMap Agent 使用的模型')
   }
+  if (nativeModelConfigurationIssue.value) return ElMessage.warning(nativeModelConfigurationIssue.value)
   retrying.value = true
   const identity = beginActionIdentity('retry', { jobId: retriedJob.id })
+  let preparationId = null
   let durableRetryAttempt = null
+  let retryRequestStarted = false
+  let retryResponseReceived = false
+  let reusedPersistedAttempt = false
   try {
     const requestPayload = {
       agentKey: form.agentKey,
@@ -4225,12 +6513,14 @@ async function retryJob() {
       parameters: {
         language: jobConfiguration.value?.language || form.language,
         layout: jobConfiguration.value?.layout || form.layout,
+        generationMode: jobConfiguration.value?.generationMode || form.generationMode,
       },
     }
     const knownMaxTurnIndex = Math.max(
       Number(retriedJob.turnIndex || 0),
       ...sessionTurns.value.map(turn => Number(turn?.job?.turnIndex || 0)),
     )
+    const persistedAttemptKey = readPersistedAttempts().retry?.key
     retryAttempt = await resolveDurableAttempt(
       'retry',
       retryAttempt,
@@ -4260,14 +6550,21 @@ async function retryJob() {
         },
       },
     )
+    reusedPersistedAttempt = retryAttempt.key === persistedAttemptKey
     durableRetryAttempt = readPersistedAttempts().retry
     assertActionIdentity(identity)
     const attemptKey = retryAttempt.key
+    if (isDirectExecutionJob(retriedJob)) {
+      preparationId = await prepareDirectCanvasRequest(attemptKey, { drainLocalChanges: !reusedPersistedAttempt })
+    }
+    assertActionIdentity(identity)
+    retryRequestStarted = true
     const response = await retryMindmapAiJob(
       retriedJob.id,
       requestPayload,
       retryAttempt.key,
     )
+    retryResponseReceived = true
     assertActionIdentity(identity)
     const exactRetry = assertRetryAttemptResult(
       response.data,
@@ -4279,9 +6576,19 @@ async function retryJob() {
       requestPayload,
       attemptKey,
       retryOfJob: retriedJob,
+      preparationId,
+      recoverExisting: reusedPersistedAttempt,
     })
   } catch (error) {
     if (error?.code === 'AI_ACTION_SUPERSEDED') return
+    if (!retryRequestStarted || (!retryResponseReceived && !reusedPersistedAttempt && isDefinitiveAiCreationRejection(error))) {
+      if (!reusedPersistedAttempt) {
+        clearDurableAttempt('retry', retryAttempt?.key)
+        retryAttempt = null
+      }
+      ElMessage.error(formatMindmapAiError(error, 'AI 脑图重试任务创建被拒绝'))
+      return
+    }
     try {
       const recoveredRetry = await replayRetryAttempt(
         durableRetryAttempt,
@@ -4294,6 +6601,8 @@ async function retryJob() {
           requestPayload: durableRetryAttempt.requestPayload,
           attemptKey: durableRetryAttempt.key,
           retryOfJob: retriedJob,
+          preparationId,
+          recoverExisting: true,
         })
         ElMessage.warning('重试请求已由原请求号精确恢复')
         return
@@ -4301,8 +6610,24 @@ async function retryJob() {
     } catch (recoveryError) {
       if (recoveryError?.code === 'AI_ACTION_SUPERSEDED') return
     }
+    if (preparationId && directCanvasOwnerId.value === preparationId && durableRetryAttempt) {
+      uncertainCanvasCreation.value = {
+        preparationId,
+        recover: async () => {
+          const recoveredRetry = await replayRetryAttempt(durableRetryAttempt, retriedJob.sessionId)
+          return recoveredRetry && activateRetryJob(recoveredRetry, {
+            identity, requestPayload: durableRetryAttempt.requestPayload,
+            attemptKey: durableRetryAttempt.key, retryOfJob: retriedJob, preparationId,
+            recoverExisting: true,
+          })
+        },
+      }
+      livePreviewError.value = '重试请求结果尚未确认，已保持脑图只读；恢复连接后可按原请求号确认'
+      return
+    }
     ElMessage.error(formatMindmapAiError(error, 'AI 脑图重试任务创建失败'))
   } finally {
+    await releaseCanvasPreparation(preparationId)
     retrying.value = false
   }
 }
@@ -4311,14 +6636,21 @@ async function continueJob() {
   const parentJob = followupParentJob.value
   if (
     actionBusy.value
+    || livePreviewCanvasMutationBlocked.value
     || !parentJob?.id
     || (
       !parentJob.artifactId
       && parentJob.status !== 'needs_input'
       && !(isMindmapAiMessageJob(parentJob) && parentJob.status === 'completed_message')
+      && parentJob.status !== 'completed_direct'
     )
     || !followupPrompt.value.trim()
-  ) return
+  ) {
+    if (livePreviewCanvasMutationBlocked.value) {
+      ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再继续生成')
+    }
+    return false
+  }
   const selectedAgent = agents.value.find(item => item.agentKey === form.agentKey)
   if (!selectedAgent || selectedAgent.status !== 'enabled') {
     return ElMessage.warning('请选择可用的 AI Agent 后再继续')
@@ -4333,10 +6665,25 @@ async function continueJob() {
   if (form.agentKey === 'native_mindmap' && !form.modelId) {
     return ElMessage.warning('请选择自研 MindMap Agent 使用的模型')
   }
+  if (nativeModelConfigurationIssue.value) return ElMessage.warning(nativeModelConfigurationIssue.value)
   continuing.value = true
   const identity = beginActionIdentity('followup', { jobId: job.value?.id })
+  let preparationId = null
   const parentTurnIndex = Number(parentJob.turnIndex || 0)
+  pendingFollowupPrompt.value = followupPrompt.value.trim()
+  const monitoredJobId = String(job.value?.id || '')
+  // Freeze the currently monitored turn as soon as the user submits another.
+  // A delayed poll or draft response must not repaint its old result.
+  monitoringSuspendedJobId = monitoredJobId
+  invalidateRestoreOperations()
+  stopPolling()
+  stopRealtime('idle')
+  clearTimeout(terminalHydrationRetryTimer)
+  terminalHydrationRetryTimer = null
   let durableFollowupAttempt = null
+  let followupRequestStarted = false
+  let followupResponseReceived = false
+  let reusedPersistedAttempt = false
   let currentSnapshotSource
   let expectedParentStatus
   try {
@@ -4464,6 +6811,7 @@ async function continueJob() {
     const persistedRequestPayload = continuationBase === 'current_snapshot'
       ? { ...requestPayload, source: undefined }
       : requestPayload
+    const persistedAttemptKey = readPersistedAttempts().followup?.key
     followupAttempt = await resolveDurableAttempt(
       'followup',
       followupAttempt,
@@ -4486,17 +6834,24 @@ async function continueJob() {
         },
       },
     )
+    reusedPersistedAttempt = followupAttempt.key === persistedAttemptKey
     const persistedFollowupAttempt = readPersistedAttempts().followup
     durableFollowupAttempt = persistedFollowupAttempt
       ? { ...persistedFollowupAttempt, requestPayload }
       : null
     assertActionIdentity(identity)
     const attemptKey = followupAttempt.key
+    if (continuationBase === 'current_document' && !discussionMode.value && sourceContext.value?.readonly !== true) {
+      preparationId = await prepareDirectCanvasRequest(attemptKey, { drainLocalChanges: !reusedPersistedAttempt })
+    }
+    assertActionIdentity(identity)
+    followupRequestStarted = true
     const response = await continueMindmapAiJob(
       parentJobId,
       requestPayload,
       followupAttempt.key,
     )
+    followupResponseReceived = true
     assertActionIdentity(identity)
     const exactChild = assertFollowupAttemptResult(
       response.data,
@@ -4507,9 +6862,19 @@ async function continueJob() {
       identity,
       requestPayload,
       attemptKey,
+      preparationId,
+      recoverExisting: reusedPersistedAttempt,
     })
   } catch (error) {
     if (error?.code === 'AI_ACTION_SUPERSEDED') return
+    if (!followupRequestStarted || (!followupResponseReceived && !reusedPersistedAttempt && isDefinitiveAiCreationRejection(error))) {
+      if (!reusedPersistedAttempt) {
+        clearDurableAttempt('followup', followupAttempt?.key)
+        followupAttempt = null
+      }
+      ElMessage.error(formatMindmapAiError(error, '继续调整任务创建被拒绝'))
+      return
+    }
     try {
       const recoveredChild = await replayFollowupAttempt(
         durableFollowupAttempt,
@@ -4521,6 +6886,8 @@ async function continueJob() {
           identity,
           requestPayload: durableFollowupAttempt.requestPayload,
           attemptKey: durableFollowupAttempt.key,
+          preparationId,
+          recoverExisting: true,
         })
         ElMessage.warning('继续生成请求已由原请求号精确恢复')
         return
@@ -4528,8 +6895,29 @@ async function continueJob() {
     } catch (recoveryError) {
       if (recoveryError?.code === 'AI_ACTION_SUPERSEDED') return
     }
+    if (preparationId && directCanvasOwnerId.value === preparationId && durableFollowupAttempt) {
+      uncertainCanvasCreation.value = {
+        preparationId,
+        recover: async () => {
+          const recoveredChild = await replayFollowupAttempt(durableFollowupAttempt, parentJob.sessionId)
+          return recoveredChild && activateFollowupJob(recoveredChild, {
+            identity, requestPayload: durableFollowupAttempt.requestPayload,
+            attemptKey: durableFollowupAttempt.key, preparationId,
+            recoverExisting: true,
+          })
+        },
+      }
+      livePreviewError.value = '继续生成请求结果尚未确认，已保持脑图只读；恢复连接后可按原请求号确认'
+      return
+    }
     ElMessage.error(formatMindmapAiError(error, '继续调整任务创建失败'))
   } finally {
+    await releaseCanvasPreparation(preparationId)
+    pendingFollowupPrompt.value = ''
+    if (monitoringSuspendedJobId === monitoredJobId) {
+      monitoringSuspendedJobId = ''
+      if (String(job.value?.id || '') === monitoredJobId) schedulePoll(0, true)
+    }
     continuing.value = false
   }
 }
@@ -4567,6 +6955,10 @@ async function downloadArtifact() {
 
 async function openArtifactAsLocal() {
   if (actionBusy.value) return
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再切换当前脑图')
+    return
+  }
   const jobId = job.value?.id
   openingLocal.value = true
   const identity = beginActionIdentity('open-local', { jobId })
@@ -4603,6 +6995,10 @@ async function openArtifactAsLocal() {
 
 async function replaceLocalWithArtifact() {
   if (actionBusy.value) return
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再替换当前脑图')
+    return
+  }
   const identity = beginActionIdentity('replace-local', { jobId: job.value?.id })
   replacingLocal.value = true
   try {
@@ -4628,6 +7024,10 @@ async function replaceLocalWithArtifact() {
 
 async function insertArtifactBranch() {
   if (actionBusy.value) return
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再插入 AI 分支')
+    return
+  }
   const identity = beginActionIdentity('insert-local', { jobId: job.value?.id })
   insertingLocal.value = true
   try {
@@ -4646,6 +7046,10 @@ async function insertArtifactBranch() {
 
 async function saveCloud() {
   if (actionBusy.value || !job.value?.id || !job.value?.artifactId) return
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再保存为云端脑图')
+    return
+  }
   const jobId = job.value.id
   const artifactId = job.value.artifactId
   savingCloud.value = true
@@ -4833,6 +7237,7 @@ async function settleCloudMutationIntent(persistedIntent) {
       mindmapId: intent.mindmapId,
       contentRevision: revision,
       forceOverwrite: intent.requestPayload?.forceOverwrite === true,
+      jobId: intent.jobId,
     })
     assertCloudMutationOwner(intent)
     if (
@@ -4908,7 +7313,7 @@ function updateCloudMutationRecoveryNotice(failures = []) {
   cloudMutationRecoveryError.value = ''
 }
 
-function flushPendingCloudMutationIntents() {
+function flushPendingCloudMutationIntents({ allowDuringLivePreview = false } = {}) {
   const ownerUserId = currentAiOwnerUserId()
   if (!ownerUserId) {
     updateCloudMutationRecoveryNotice()
@@ -4916,6 +7321,10 @@ function flushPendingCloudMutationIntents() {
   }
   const activeFlush = cloudMutationFlushPromises.get(ownerUserId)
   if (activeFlush) return activeFlush
+  if (livePreviewCanvasMutationBlocked.value && !allowDuringLivePreview) {
+    updateCloudMutationRecoveryNotice()
+    return Promise.resolve({ settled: [], failures: [], deferred: true })
+  }
   const operation = (async () => {
     cloudMutationRecovering.value = true
     const failures = []
@@ -4945,6 +7354,10 @@ function flushPendingCloudMutationIntents() {
 }
 
 async function retryCloudMutationRecovery() {
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再同步云端 AI 操作')
+    return { settled: [], failures: [], deferred: true }
+  }
   const result = await flushPendingCloudMutationIntents()
   if (!result.failures.length && result.settled.length) {
     ElMessage.success('云端 AI 操作已与权威画布同步')
@@ -4953,6 +7366,10 @@ async function retryCloudMutationRecovery() {
 }
 
 async function discardPermanentCloudMutationRecovery() {
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再清除云端恢复记录')
+    return false
+  }
   const ownerUserId = currentAiOwnerUserId()
   const permanentIntents = ownerUserId
     ? listMindmapAiCloudMutationIntents(ownerUserId)
@@ -5190,6 +7607,7 @@ async function applyLocalProposal({
   proposalId,
   expectedSourceFingerprint,
   actionIdentity,
+  previewJobId = '',
 }) {
   const prepared = (await prepareMindmapAiLocalApply(proposalId)).data
   assertActionIdentity(actionIdentity)
@@ -5203,7 +7621,7 @@ async function applyLocalProposal({
   assertActionIdentity(actionIdentity)
   await validateMindmapAiArtifact(prepared.artifact, true)
   assertActionIdentity(actionIdentity)
-  const context = await requestEditorContext()
+  const context = await requestEditorContext({ previewJobId })
   assertActionIdentity(actionIdentity)
   if (context.readonly) throw new Error('发起编辑器当前为只读，不能应用 AI 提案')
   if (
@@ -5236,6 +7654,7 @@ async function applyLocalProposal({
   })
   assertActionIdentity(actionIdentity)
   const applied = await emitEditorRequest('setData', verified.document, {
+    aiPreviewJobId: previewJobId,
     aiLocalApply: {
       documentId: context.documentId,
       revision: context.revision,
@@ -5267,8 +7686,9 @@ async function applyCloudProposal({
   baseRoomEpoch,
   actionIdentity,
   forceOverwrite = false,
+  previewJobId = '',
 }) {
-  const context = await requestEditorContext()
+  const context = await requestEditorContext({ previewJobId })
   assertActionIdentity(actionIdentity)
   if (context.readonly) throw new Error('发起编辑器当前为只读，不能应用 AI 提案')
   if (Number(context.mindmapId) !== Number(sourceMindmapId)) {
@@ -5322,13 +7742,185 @@ async function refreshSourceContextAfterMutation(sourceMindmapId, actionIdentity
   persistActiveJob()
 }
 
-async function applyProposal() {
+async function rejectReviewProposal() {
+  const proposalId = String(job.value?.proposalId || proposal.value?.id || '')
+  const jobId = String(job.value?.id || '')
+  if (!proposalId || !jobId || rejectingReview.value) return false
+  rejectingReview.value = true
+  const identity = beginActionIdentity('reject-review', { jobId, proposalId })
+  try {
+    const response = await rejectMindmapAiProposal(proposalId)
+    assertActionIdentity(identity)
+    const nextJob = response?.data
+    if (!nextJob || String(nextJob.id || jobId) !== jobId) {
+      throw new Error('服务端未返回可确认的 AI 拒绝状态')
+    }
+    job.value = mergeMindmapAiJobSnapshot(job.value, nextJob)
+    if (job.value.status === 'rejected') {
+      proposal.value = proposal.value
+        ? { ...proposal.value, status: 'rejected' }
+        : proposal.value
+      stopRealtime('completed')
+      stopPolling()
+      emitAiCanvasPreviewEvent({ phase: 'clear', jobId })
+      upsertSessionTurn(job.value)
+      persistActiveJob()
+      await refreshTimelineAfterSideEffect(identity)
+      ElMessage.success('本轮 AI 结果已不采纳，已恢复生成前内容')
+    } else if (['applied', 'undone'].includes(job.value.status)) {
+      upsertSessionTurn(job.value)
+      persistActiveJob()
+      await refreshTimelineAfterSideEffect(identity)
+      ElMessage.info(job.value.status === 'applied' ? '本轮结果已被采纳' : '本轮结果已被撤销')
+    }
+    return true
+  } catch (error) {
+    if (error?.code === 'AI_ACTION_SUPERSEDED') return false
+    schedulePoll(0, true)
+    ElMessage.error(formatMindmapAiError(error, '不采纳 AI 结果失败，请重试'))
+    return false
+  } finally {
+    rejectingReview.value = false
+  }
+}
+
+async function rejectLiveDraft() {
+  if (!canRejectLiveDraft.value && !highImpactReviewRequired.value) return false
+  const jobId = String(job.value?.id || '')
+  const wasRunning = running.value
+  if (wasRunning) {
+    // Keep cancellation controls locked while the in-flight renderer and
+    // revert request drain. The current canvas remains visible during rollback.
+    cancelling.value = true
+  }
+  const reverted = await revertLiveDraftPreview()
+  if (!reverted) {
+    if (wasRunning) cancelling.value = false
+    ElMessage.error(livePreviewError.value || 'AI 实时预览撤回失败，请在面板重试')
+    return false
+  }
+  // A terminal hydration or page reload must not silently reapply a result
+  // the user has already rejected. A new follow-up/reset clears this fence.
+  livePreviewSuppressedJobId = jobId
+  persistLivePreviewSuppression(jobId)
+  // Both a normal ready result and a high-impact review are persisted
+  // proposals.  Reverting the local preview alone is not enough: without a
+  // server-side rejection a reload/another tab can still apply the ready
+  // proposal (and the default-accept path may resurrect it).
+  if (['ready', 'needs_review'].includes(job.value?.status) && job.value?.proposalId) {
+    return await rejectReviewProposal()
+  }
+  if (wasRunning) {
+    if (!(await cancelJob({ previewAlreadyReverted: true, initiatedByReject: true }))) {
+      ElMessage.warning('画布预览已撤回，但任务可能仍在运行；请在 AI 面板重试取消')
+      return true
+    }
+  }
+  ElMessage.info('AI 实时变更已撤回')
+  return true
+}
+
+async function onAiCanvasDraftAction(payload = {}, request = {}) {
+  const jobId = String(payload.jobId || '')
+  if (payload.action === 'undo') {
+    if (!componentAlive || !jobId || String(job.value?.id || '') !== jobId
+      || !canUndoCurrentProposal.value) {
+      request.resolve?.(false)
+      return
+    }
+    try {
+      if (!visible.value) visible.value = true
+      request.resolve?.(await undoProposal())
+    } catch (error) {
+      request.reject?.(error)
+    }
+    return
+  }
+  if (
+    !componentAlive
+    || !livePreviewActive.value
+    || !jobId
+    || String(job.value?.id || '') !== jobId
+    || livePreviewJobId !== jobId
+  ) {
+    request.resolve?.(false)
+    return
+  }
+  try {
+    if (payload.action === 'pause' || payload.action === 'resume') {
+      request.resolve?.(toggleLivePreviewPlayback(payload.action === 'pause'))
+      return
+    }
+    if (payload.action === 'reject') {
+      if (!canRejectLiveDraft.value) {
+        ElMessage.info('当前 AI 操作正在处理，请稍后再撤回')
+        request.resolve?.(false)
+        return
+      }
+      request.resolve?.(await rejectLiveDraft())
+      return
+    }
+    if (payload.action === 'apply') {
+      if (!canApplyLiveCanvasDraft.value) {
+        ElMessage.info('请先查看并确认 AI 提案差异')
+        request.resolve?.(false)
+        return
+      }
+      request.resolve?.(await applyProposal())
+      return
+    }
+    if (payload.action === 'retry-accept') {
+      request.resolve?.(await acceptCompletedLivePreviewByDefault(jobId, { retry: true }))
+      return
+    }
+    if (payload.action === 'review') {
+      if (!visible.value) visible.value = true
+      await nextTick()
+      if (!componentAlive || job.value?.id !== jobId || livePreviewJobId !== jobId) {
+        request.resolve?.(false)
+        return
+      }
+      const review = proposalReviewRef.value
+      if (review) review.open = true
+      const target = review || activityTimelineRef.value || livePreviewNoticeRef.value
+      target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+      target?.focus?.({ preventScroll: true })
+      request.resolve?.(true)
+      return
+    }
+    request.resolve?.(false)
+  } catch (error) {
+    request.reject?.(error)
+  }
+}
+
+function onAiAcceptedUndoRequested(payload = {}) {
+  if (
+    !componentAlive
+    || !['applied', 'completed_direct', 'failed', 'stale', 'cancelled'].includes(job.value?.status)
+    || !canUndoCurrentProposal.value
+    || (payload.jobId && String(payload.jobId) !== String(job.value.id))
+    || (payload.proposalId && payload.proposalId !== job.value.proposalId)
+  ) return
+  if (!visible.value) visible.value = true
+  void undoProposal()
+}
+
+async function applyProposal({ automatic = false } = {}) {
   if (actionBusy.value) return false
+  if (sourceBaselineMismatch.value) {
+    ElMessage.warning('当前脑图已发生变化，请基于最新内容重新生成后再采纳')
+    return false
+  }
+  if (livePreviewCatchingUp.value || livePreviewPreparing.value) {
+    ElMessage.info('AI 实时画布正在补齐，完成后再采纳')
+    return false
+  }
   const currentJob = job.value
   const currentProposal = proposal.value
-  if (!currentProposal || !diffConfirmed.value) {
-    ElMessage.warning('请先查看并勾选提案差异确认，再应用到当前脑图')
-    if (currentProposal) {
+  if (!currentProposal || (!automatic && !diffConfirmed.value)) {
+    if (!automatic) ElMessage.warning('请先查看并勾选提案差异确认，再应用到当前脑图')
+    if (currentProposal && !automatic) {
       await nextTick()
       const confirmationElement = proposalConfirmationRef.value?.$el
       confirmationElement?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
@@ -5345,7 +7937,14 @@ async function applyProposal() {
   const directCloudOverwrite = Boolean(sourceMindmapId)
   applying.value = true
   const identity = beginActionIdentity('apply', { jobId, proposalId })
+  let previewJobId = ''
+  const acceptedPreviewNodeCount = livePreviewRenderedNodeCount.value
+  const acceptedPreviewTargetNodeCount = livePreviewTargetNodeCount.value
+  const acceptedPreviewChangeSummary = livePreviewChangeSummary.value
+    ? { ...livePreviewChangeSummary.value }
+    : null
   try {
+    previewJobId = await holdLiveDraftPreviewForApply(jobId)
     const result = sourceMindmapId
       ? await applyCloudProposal({
           proposalId,
@@ -5355,12 +7954,15 @@ async function applyProposal() {
           baseRoomEpoch: currentJob.baseRoomEpoch,
           actionIdentity: identity,
           forceOverwrite: directCloudOverwrite,
+          previewJobId,
         })
       : await applyLocalProposal({
           proposalId,
           expectedSourceFingerprint,
           actionIdentity: identity,
+          previewJobId,
         })
+    finishLiveDraftPreviewAfterApply(jobId)
     assertActionIdentity(identity)
     if (sourceMindmapId) {
       await refreshAuthoritativeCloudMutationJob(identity, ['applied', 'undone'])
@@ -5371,12 +7973,24 @@ async function applyProposal() {
     persistActiveJob()
     await refreshSourceContextAfterMutation(sourceMindmapId, identity)
     await refreshTimelineAfterSideEffect(identity)
+    if (job.value.status === 'applied' && canUndoCurrentProposal.value) {
+      emitAiCanvasPreviewEvent({
+        phase: 'accepted',
+        jobId,
+        message: automatic ? 'AI 结果已保存' : 'AI 结果已确认保存',
+        nodeCount: acceptedPreviewNodeCount,
+        targetNodeCount: acceptedPreviewTargetNodeCount,
+        changeSummary: acceptedPreviewChangeSummary,
+      })
+    }
     if (sourceMindmapId && job.value.status === 'undone') {
       ElMessage.warning('AI 提案曾成功应用，但已被后续撤销；当前画布已同步权威版本')
     } else if (result?.receiptUnstored) {
       ElMessage.warning('提案已应用但回执未保存；请恢复网络后重新打开 AI 面板重试')
     } else if (result?.receiptPending) {
       ElMessage.warning('提案已应用；回执因网络问题排队，联网后会自动补发')
+    } else if (automatic) {
+      ElMessage.success('AI 结果已保存；如需恢复可撤销本轮 AI 修改')
     } else if (directCloudOverwrite) {
       ElMessage.success('AI 完整结果已覆盖当前脑图，可随时撤销')
     } else {
@@ -5384,13 +7998,33 @@ async function applyProposal() {
     }
     return true
   } catch (error) {
-    if (error?.code === 'AI_ACTION_SUPERSEDED') return false
-    const reconciled = await reconcileJobAfterSideEffect(identity)
+    if (error?.code === 'AI_ACTION_SUPERSEDED') return
+    let reconciled = null
+    try {
+      reconciled = await reconcileJobAfterSideEffect(identity)
+    } catch (reconcileError) {
+      console.warn('AI 应用状态暂未完成对账:', reconcileError)
+    }
     if (reconciled?.status === 'applied') {
+      // The server may have committed while the editor reload was still in
+      // flight. Keep the accepted result visible until the editor converges;
+      // reverting here would briefly put an already-committed cloud document
+      // back on the old local baseline.
+      finishLiveDraftPreviewAfterApply(jobId)
+      if (canUndoCurrentProposal.value) {
+        emitAiCanvasPreviewEvent({ phase: 'accepted', jobId, message: 'AI 结果已采纳' })
+      }
       if (sourceMindmapId) {
         ElMessage.warning('提案已由服务端应用；编辑器正在恢复权威版本，请稍后重试同步。')
       }
       return true
+    }
+    if (automatic && livePreviewActive.value && livePreviewJobId === String(jobId)) {
+      // A failed automatic commit is not a user undo. Keep the visible final
+      // result and its pre-AI baseline available for retry or explicit undo.
+      if (livePreviewApplyingJobId === String(jobId)) livePreviewApplyingJobId = ''
+    } else if (livePreviewActive.value && livePreviewJobId === String(jobId)) {
+      await revertLiveDraftPreview()
     }
     if (['AI_PROPOSAL_STALE', 'AI_APPLY_CONFLICT'].includes(resolveMindmapAiErrorCode(error))) {
       schedulePoll(0, true)
@@ -5403,7 +8037,7 @@ async function applyProposal() {
 }
 
 async function undoProposal() {
-  if (actionBusy.value || !canUndoCurrentProposal.value) return
+  if (actionBusy.value || !canUndoCurrentProposal.value) return false
   const jobId = job.value.id
   const proposalId = job.value.proposalId
   const sourceMindmapId = sourceContext.value?.mindmapId
@@ -5460,46 +8094,52 @@ async function undoProposal() {
     persistActiveJob()
     await refreshSourceContextAfterMutation(sourceMindmapId, identity)
     await refreshTimelineAfterSideEffect(identity)
+    emitAiCanvasPreviewEvent({ phase: 'clear', jobId })
     ElMessage.success('本次 AI 应用已撤销')
+    return true
   } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    if (error?.code === 'AI_ACTION_SUPERSEDED') return
+    if (error === 'cancel' || error === 'close') return false
+    if (error?.code === 'AI_ACTION_SUPERSEDED') return false
     const reconciled = await reconcileJobAfterSideEffect(identity)
     if (reconciled?.status === 'undone') {
+      emitAiCanvasPreviewEvent({ phase: 'clear', jobId })
       ElMessage.warning('撤销请求已提交，已从服务端恢复撤销状态')
-      return
+      return true
     }
     ElMessage.error(formatMindmapAiError(error, 'AI 应用撤销失败'))
+    return false
   } finally {
     undoing.value = false
   }
 }
 
-async function cancelJob() {
+async function cancelJob({ previewAlreadyReverted = false, initiatedByReject = false } = {}) {
   const jobId = job.value?.id
-  if (!jobId || actionBusy.value) return
+  if (!jobId || (actionBusy.value && !initiatedByReject)) return false
+  const preserveDraft = Boolean(!previewAlreadyReverted && livePreviewActive.value)
   cancelling.value = true
   const identity = beginActionIdentity('cancel', { jobId })
   try {
-    const response = await cancelMindmapAiJob(jobId)
+    const response = await cancelMindmapAiJob(jobId, { preserveDraft })
     assertActionIdentity(identity)
     job.value = mergeMindmapAiJobSnapshot(job.value, response.data)
     realtimeError.value = ''
     persistActiveJob()
     if (isTerminalStatus(job.value.status)) {
-      stopRealtime('completed')
-      stopPolling()
-      if (job.value.artifactId) {
-        await hydrateTerminalResources(jobId)
-        assertActionIdentity(identity)
-      }
+      if (!(await finalizeTerminalJob(jobId, { retry: true, refresh: false }))) return false
+      // Settlement can hand the canvas to a queued successor. The parent's
+      // cancellation must not stop that child's stream or its only terminal
+      // drain timer, nor attempt to revert/hydrate the child's state.
+      if (!componentAlive || job.value?.id !== jobId) return true
       await refreshTimelineAfterSideEffect(identity)
-      return
+      return true
     }
     schedulePoll(200)
+    return true
   } catch (error) {
-    if (error?.code === 'AI_ACTION_SUPERSEDED') return
+    if (error?.code === 'AI_ACTION_SUPERSEDED') return false
     ElMessage.error(formatMindmapAiError(error, '取消任务失败'))
+    return false
   } finally {
     cancelling.value = false
   }
@@ -5508,6 +8148,10 @@ async function cancelJob() {
 async function deleteSessionRecord() {
   const sessionId = job.value?.sessionId
   if (!sessionId || actionBusy.value) return
+  if (livePreviewCanvasMutationBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再删除会话记录')
+    return
+  }
   const jobId = job.value.id
   deletingSession.value = true
   const identity = beginActionIdentity('delete-session', { jobId })
@@ -5571,7 +8215,7 @@ watch(() => userStore.id, (nextUserId, previousUserId) => {
   recentSessions.value = []
   sessionListError.value = ''
   clearLocalAckRetryTimer()
-  resetNewJob({ clearStoredJob: false, preserveForm: true })
+  resetNewJob({ clearStoredJob: false, preserveForm: true, detach: true })
   localAckRecoveryWarnings.clear()
   localAckRecoveryCompleted.clear()
   updateCloudMutationRecoveryNotice()
@@ -5591,6 +8235,16 @@ watch(() => agentEvents.value.length, async (_nextLength, previousLength) => {
   if (timeline && shouldFollowLatest) timeline.scrollTop = timeline.scrollHeight
 })
 
+watch(pendingFollowupPrompt, async (prompt) => {
+  if (!prompt) return
+  const currentTimeline = activityTimelineRef.value
+  const shouldFollowLatest = !currentTimeline
+    || currentTimeline.scrollHeight - currentTimeline.scrollTop - currentTimeline.clientHeight <= 48
+  await nextTick()
+  const timeline = activityTimelineRef.value
+  if (timeline && shouldFollowLatest) timeline.scrollTop = timeline.scrollHeight
+})
+
 watch(() => running.value || submitting.value, (active) => {
   if (!active) {
     clearInterval(generationClockTimer)
@@ -5604,14 +8258,72 @@ watch(() => running.value || submitting.value, (active) => {
   }, 1_000)
 }, { immediate: true })
 
+function emitAiEditingState() {
+  const aiCanvasTask = Boolean(
+    job.value?.id
+    && form.sourceMode === 'current'
+    && !messageModeActive.value
+    && !viewingHistoricalArtifact.value
+    && sourceContext.value?.readonly !== true
+    && (
+      running.value
+      || livePreviewActive.value
+      || livePreviewRendering.value
+      || livePreviewReverting.value
+      || livePreviewAutoAccepting.value
+      || applying.value
+      || cancelling.value
+    )
+  )
+  bus.emit('aiEditingState', {
+    jobId: String(job.value?.id || ''),
+    // A terminal status alone cannot unlock direct tasks: canvas ownership
+    // lasts until playback drains and the authoritative baseline is settled.
+    locked: aiCanvasTask || preparingCanvas.value || directCanvasOwned.value,
+  })
+}
+
+watch(
+  [
+    () => running.value,
+    preparingCanvas,
+    directCanvasOwned,
+    livePreviewEligible,
+    livePreviewActive,
+    livePreviewRendering,
+    livePreviewReverting,
+    livePreviewAutoAccepting,
+    applying,
+    cancelling,
+    () => job.value?.status,
+  ],
+  emitAiEditingState,
+  { immediate: true },
+)
+watch(livePreviewCanvasMutationBlocked, (blocked, wasBlocked) => {
+  if (componentAlive && wasBlocked && !blocked) void flushPendingCloudMutationIntents()
+})
+
 async function onNetworkOnline() {
+  if (uncertainCanvasCreation.value) await reconcilePendingCanvasCreation()
   await flushPendingCloudMutationIntents()
   await flushLocalApplyAcks()
   try { await requestEditorContext() } catch {}
   if (terminalHydrationState.value === 'error' && isTerminalStatus(job.value?.status)) {
     retryTerminalHydration()
   }
+  if (job.value?.status === 'ready'
+    && livePreviewAutoAcceptFailedJobId.value === String(job.value.id)) {
+    void acceptCompletedLivePreviewByDefault(job.value.id, { retry: true })
+  }
   if (running.value && job.value?.id) {
+    if (directCanvasRecoveryJobId.value === String(job.value.id)) {
+      // Reconnection is subject to the same latest-checkpoint barrier as an
+      // explicit retry. Online events must not reopen historical SSE while a
+      // failed/in-flight restoration still has no safe playback floor.
+      if (!restoringJob.value) await retryLivePreviewSync()
+      return
+    }
     schedulePoll(0)
     connectRealtime(job.value.id)
   }
@@ -5636,21 +8348,31 @@ defineExpose({
   realtimeError,
   proposalError,
   resetNewJob,
+  finishCompletedAiGeneration,
 })
 
 onMounted(() => {
   bus.on('showAiMindmap', showDialog)
+  bus.on('mindmapEditorReady', restoreActiveJobWhenEditorReady)
+  bus.on('aiCanvasDraftAction', onAiCanvasDraftAction)
+  bus.on('aiAcceptedUndoRequested', onAiAcceptedUndoRequested)
   bus.on('aiCloudMutationRecoveryReady', onCloudMutationRecoveryReady)
   bus.on('aiLocalJournalRecovered', onLocalAiJournalRecovered)
+  bus.on('aiEditingStateRequest', emitAiEditingState)
   bus.on('node_active', onEditorNodeActive)
   window.addEventListener('online', onNetworkOnline)
   window.addEventListener('offline', onNetworkOffline)
+  window.addEventListener('mindmap-ai-open-task', onDeepLinkedAiTask)
   void flushPendingCloudMutationIntents()
   void flushLocalApplyAcks()
 })
 
 onBeforeUnmount(() => {
   componentAlive = false
+  clearLivePreviewAnnouncement()
+  // Route exit leaves the durable server job running; it is not completion or
+  // rejection, and must never initiate an authoritative settlement.
+  resetNewJob({ clearStoredJob: false, preserveForm: true, detach: true })
   clearInterval(generationClockTimer)
   generationClockTimer = null
   invalidateActionIdentity()
@@ -5661,11 +8383,16 @@ onBeforeUnmount(() => {
   stopRealtime('idle')
   stopPolling()
   bus.off('showAiMindmap', showDialog)
+  bus.off('mindmapEditorReady', restoreActiveJobWhenEditorReady)
+  bus.off('aiCanvasDraftAction', onAiCanvasDraftAction)
+  bus.off('aiAcceptedUndoRequested', onAiAcceptedUndoRequested)
   bus.off('aiCloudMutationRecoveryReady', onCloudMutationRecoveryReady)
   bus.off('aiLocalJournalRecovered', onLocalAiJournalRecovered)
+  bus.off('aiEditingStateRequest', emitAiEditingState)
   bus.off('node_active', onEditorNodeActive)
   window.removeEventListener('online', onNetworkOnline)
   window.removeEventListener('offline', onNetworkOffline)
+  window.removeEventListener('mindmap-ai-open-task', onDeepLinkedAiTask)
 })
 </script>
 
@@ -5679,8 +8406,7 @@ onBeforeUnmount(() => {
 }
 
 .activitySidebar,
-.controlPane,
-.previewPanel {
+.controlPane {
   min-width: 0;
   border: 1px solid var(--el-border-color-light);
   border-radius: 12px;
@@ -5698,8 +8424,6 @@ onBeforeUnmount(() => {
 
 .activityHeader,
 .activityHeaderActions,
-.previewHeader,
-.previewActions,
 .agentOption,
 .jobHeader,
 .resultSummary {
@@ -5825,8 +8549,7 @@ onBeforeUnmount(() => {
   }
 }
 
-.activityEmpty,
-.previewEmpty {
+.activityEmpty {
   display: flex;
   min-height: 160px;
   align-items: center;
@@ -5854,10 +8577,8 @@ onBeforeUnmount(() => {
 }
 
 .workspaceMain {
-  display: grid;
+  display: block;
   min-height: 0;
-  grid-template-columns: minmax(390px, 0.82fr) minmax(480px, 1.18fr);
-  gap: 16px;
 }
 
 .controlPane {
@@ -5865,92 +8586,11 @@ onBeforeUnmount(() => {
   overflow: auto;
 }
 
-.previewPanel {
-  display: flex;
-  min-height: 0;
-  padding: 14px;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--el-fill-color-extra-light);
-}
-
-.previewHeader {
-  padding-bottom: 12px;
-
-  > div:first-child {
-    display: grid;
-    gap: 3px;
-  }
-
-  small { color: var(--el-text-color-secondary); }
-}
-
-.previewActions {
-  justify-content: flex-end;
-  flex-wrap: wrap;
-}
-
-.previewMetric {
-  padding: 3px 8px;
-  border-radius: 999px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.previewError { margin-bottom: 10px; }
-
-.previewCanvas {
-  min-height: 360px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
-  flex: 1 1 auto;
-  overflow: hidden;
-  background-color: var(--el-bg-color);
-  background-image: radial-gradient(var(--el-border-color-lighter) 1px, transparent 1px);
-  background-size: 18px 18px;
-}
-
-.previewEmptyIcon {
-  display: grid;
-  width: 54px;
-  height: 54px;
-  margin-bottom: 4px;
-  place-items: center;
-  border-radius: 16px;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-  font-size: 30px;
-}
-
-.previewEmpty.is-running .previewEmptyIcon {
-  animation: aiPulse 1.6s ease-in-out infinite;
-}
-
-.previewWaitStatus {
-  display: flex;
-  align-items: center;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.previewWaitTime {
-  padding: 3px 9px;
-  border-radius: 999px;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .formGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 14px;
 }
-
-.compactGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 .fullWidth { width: 100%; }
 
@@ -6176,9 +8816,7 @@ onBeforeUnmount(() => {
   }
 }
 
-.proposalPreview,
-.followupPanel,
-.retryPanel {
+.proposalPreview {
   display: grid;
   padding-top: 10px;
   border-top: 1px solid var(--el-border-color-light);
@@ -6217,23 +8855,18 @@ onBeforeUnmount(() => {
   .el-icon { transform: rotate(180deg); }
 }
 
-.followupPanel,
-.retryPanel { padding-top: 12px; }
-
-.followupActions,
-.retryActions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
 .diffCounts {
   display: flex;
   flex-wrap: wrap;
   font-size: 13px;
   font-weight: 600;
   gap: 8px 16px;
+
+  &.is-unavailable {
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+    font-weight: 400;
+  }
 }
 
 .diffList {
@@ -6251,19 +8884,13 @@ onBeforeUnmount(() => {
 @media (max-width: 1240px) {
   .aiDialogBody { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); }
 
-  .workspaceMain {
-    grid-template-columns: 1fr;
-    overflow: auto;
-  }
+  .workspaceMain { overflow: auto; }
 
   .controlPane { overflow: visible; }
-
-  .previewPanel { min-height: 460px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .connectionBadge i,
-  .previewEmptyIcon { animation: none !important; }
+  .connectionBadge i { animation: none !important; }
 }
 
 @media (max-width: 760px) {
@@ -6276,26 +8903,12 @@ onBeforeUnmount(() => {
 
   .workspaceMain { overflow: visible; }
 
-  .formGrid,
-  .compactGrid { grid-template-columns: 1fr; }
-
-  .previewPanel { min-height: 400px; }
-
-  .previewCanvas { min-height: 310px; }
-
-  .previewHeader,
-  .followupActions,
-  .retryActions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .previewActions { justify-content: flex-start; }
+  .formGrid { grid-template-columns: 1fr; }
 }
 </style>
 
 <style lang="scss">
-/* XMind 风格的 AI 工作台：左侧对话、右侧唯一的实时脑图舞台。 */
+/* XMind 风格的 AI 工作台：对话和当前编辑画布保持在同一工作区。 */
 .mindmapAiDrawer {
   --el-color-primary: #7a5af8;
   --el-color-primary-light-9: #f2efff;
@@ -6304,9 +8917,45 @@ onBeforeUnmount(() => {
   --ai-ink: #20211f;
   --ai-muted: #72746f;
   --ai-border: rgba(25, 28, 24, 0.1);
+  --ai-soft-bg: #f0f1ed;
+  --ai-soft-hover: #e8e9e4;
+  --ai-audit-bg: #f6f7f4;
+  --ai-welcome-start: #ffffff;
+  --ai-welcome-end: #eee9ff;
+  --ai-live-bg: #f2efff;
+  --ai-live-border: rgba(122, 90, 248, 0.2);
+  --ai-live-dot: #7a5af8;
+  --ai-live-complete-bg: #f2fbf5;
+  --ai-live-complete-border: rgba(47, 158, 96, 0.24);
+  --ai-live-complete-dot: #2f9e60;
+  --ai-action-bg: #faf9ff;
+  --ai-control-border: rgba(25, 28, 24, 0.16);
   height: 100% !important;
   background: var(--ai-panel-bg);
   box-shadow: 10px 0 34px rgba(20, 24, 20, 0.12);
+
+  &.isDark {
+    --el-color-primary-light-9: #302956;
+    --ai-panel-bg: #1d2025;
+    --ai-card-bg: #25282d;
+    --ai-ink: #edf0f4;
+    --ai-muted: #a9b0ba;
+    --ai-border: rgba(255, 255, 255, 0.12);
+    --ai-soft-bg: #30343b;
+    --ai-soft-hover: #3a4048;
+    --ai-audit-bg: #2b2f35;
+    --ai-welcome-start: #2d2945;
+    --ai-welcome-end: #25282d;
+    --ai-live-bg: #302956;
+    --ai-live-border: rgba(169, 144, 255, 0.36);
+    --ai-live-dot: #b29bff;
+    --ai-live-complete-bg: #21382b;
+    --ai-live-complete-border: rgba(103, 211, 142, 0.34);
+    --ai-live-complete-dot: #67d38e;
+    --ai-action-bg: #2b2745;
+    --ai-control-border: rgba(255, 255, 255, 0.16);
+    box-shadow: 10px 0 34px rgba(0, 0, 0, 0.34);
+  }
 
   .el-drawer__body {
     display: flex;
@@ -6374,11 +9023,6 @@ onBeforeUnmount(() => {
     color: var(--el-color-primary);
     background: var(--el-color-primary-light-9);
   }
-}
-
-.mobilePreviewToggle,
-.mobilePreviewBack {
-  display: none;
 }
 
 .mindmapAiDrawer .aiDialogBody {
@@ -6479,6 +9123,22 @@ onBeforeUnmount(() => {
   strong { color: var(--ai-ink); font-size: 12px; }
 }
 
+.tagSuggestions {
+  display: grid;
+  padding: 9px 10px;
+  border: 1px solid var(--ai-border);
+  border-radius: 8px;
+  background: var(--ai-soft-bg);
+  color: var(--ai-ink);
+  font-size: 12px;
+  gap: 6px;
+
+  p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+  strong { overflow-wrap: anywhere; }
+  > p, small { color: var(--ai-muted); font-size: 11px; }
+  ul { display: grid; margin: 0; padding-left: 17px; gap: 7px; }
+}
+
 .usageSummary {
   display: flex;
   flex-wrap: wrap;
@@ -6488,7 +9148,7 @@ onBeforeUnmount(() => {
     padding: 3px 7px;
     border-radius: 999px;
     color: var(--ai-muted);
-    background: #f0f1ed;
+    background: var(--ai-soft-bg);
     font-size: 10px;
   }
 }
@@ -6516,7 +9176,7 @@ onBeforeUnmount(() => {
       display: grid;
       padding: 7px 8px 7px 18px;
       border-radius: 8px;
-      background: #f6f7f4;
+      background: var(--ai-audit-bg);
       gap: 2px;
 
       &::before {
@@ -6577,7 +9237,7 @@ onBeforeUnmount(() => {
     border: 1px solid rgba(122, 90, 248, 0.12);
     border-radius: 50%;
     color: #7657f6;
-    background: linear-gradient(145deg, #ffffff, #eee9ff);
+    background: linear-gradient(145deg, var(--ai-welcome-start), var(--ai-welcome-end));
     box-shadow: 0 8px 24px rgba(98, 71, 208, 0.15);
     font-size: 22px;
   }
@@ -6656,9 +9316,6 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.mindmapAiDrawer .followupPanel,
-.mindmapAiDrawer .retryPanel { display: none; }
-
 .mindmapAiDrawer .proposalPreview {
   padding-top: 12px;
   border-color: var(--ai-border);
@@ -6717,9 +9374,110 @@ onBeforeUnmount(() => {
   span { color: var(--el-text-color-secondary); font-size: 11px; }
 }
 
+.liveDraftNotice {
+  display: flex;
+  margin-bottom: 12px;
+  padding: 10px 11px;
+  align-items: flex-start;
+  border: 1px solid rgba(122, 90, 248, 0.2);
+  border-radius: 10px;
+  color: var(--ai-ink);
+  border-color: var(--ai-live-border);
+  background: var(--ai-live-bg);
+  gap: 9px;
+
+  > i {
+    width: 8px;
+    height: 8px;
+    margin-top: 4px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--ai-live-dot);
+    animation: aiPulse 1.2s ease-in-out infinite;
+  }
+
+  > div {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  strong { font-size: 12px; }
+  span { color: var(--ai-muted); font-size: 11px; line-height: 1.45; }
+
+  .livePreviewPlaybackButton {
+    margin-left: auto;
+    flex: 0 0 auto;
+    align-self: center;
+    padding-inline: 4px;
+    font-size: 11px;
+  }
+
+  &.is-complete {
+    border-color: var(--ai-live-complete-border);
+    background: var(--ai-live-complete-bg);
+
+    > i {
+      background: var(--ai-live-complete-dot);
+      animation: none;
+    }
+  }
+
+  &.is-direct {
+    border-color: color-mix(in srgb, var(--el-color-primary) 28%, transparent);
+    background: color-mix(in srgb, var(--el-color-primary) 8%, var(--el-bg-color));
+  }
+}
+
+.livePreviewRecovery {
+  display: flex;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--el-color-warning-light-5);
+  border-radius: 9px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-color-warning-light-9);
+  font-size: 11px;
+  line-height: 1.45;
+  gap: 10px;
+
+  span { min-width: 0; }
+  .el-button { flex: 0 0 auto; }
+}
+
+.draftFreshnessRecovery {
+  display: grid;
+  margin-bottom: 12px;
+  gap: 8px;
+
+  > .el-button {
+    justify-self: start;
+    margin-left: 34px;
+  }
+}
+
+.mindmapAiSrOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.liveDraftAction {
+  border-color: rgba(122, 90, 248, 0.22);
+  background: var(--ai-action-bg);
+}
+
 .aiComposer {
   padding: 10px;
-  border: 1px solid rgba(25, 28, 24, 0.16);
+  border: 1px solid var(--ai-control-border);
   border-radius: 15px;
   background: var(--ai-card-bg);
   box-shadow: 0 8px 26px rgba(20, 24, 20, 0.09);
@@ -6755,6 +9513,62 @@ onBeforeUnmount(() => {
   }
 }
 
+.composerPreflight {
+  display: flex;
+  margin: 2px 2px 4px;
+  align-items: baseline;
+  color: var(--ai-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  gap: 6px;
+}
+
+.composerPreflightLabel {
+  flex: 0 0 auto;
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+.composerRoutePicker {
+  display: flex;
+  min-height: 28px;
+  margin: 2px 0 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--ai-muted);
+  font-size: 11px;
+  gap: 4px;
+}
+
+.composerRouteLabel { flex: 0 0 auto; }
+
+.composerRoutePicker button {
+  padding: 4px 8px;
+  border: 1px solid var(--ai-control-border);
+  border-radius: 999px;
+  color: var(--ai-muted);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.composerRoutePicker button:hover:not(:disabled),
+.composerRoutePicker button.is-active {
+  border-color: color-mix(in srgb, var(--el-color-primary) 48%, var(--ai-control-border));
+  color: var(--el-color-primary);
+  background: color-mix(in srgb, var(--el-color-primary) 9%, transparent);
+}
+
+.composerRoutePicker button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.composerRouteHint {
+  flex: 1 1 180px;
+  min-width: 150px;
+}
+
 .composerContextRow,
 .composerToolbar,
 .composerTools,
@@ -6776,7 +9590,7 @@ onBeforeUnmount(() => {
   align-items: center;
   border-radius: 999px;
   color: var(--ai-muted);
-  background: #f0f1ed;
+  background: var(--ai-soft-bg);
   font-size: 11px;
   line-height: 1;
   overflow: hidden;
@@ -6790,7 +9604,7 @@ button.contextChip {
   font-family: inherit;
   cursor: pointer;
 
-  &:hover:not(:disabled) { color: var(--ai-ink); background: #e8e9e4; }
+  &:hover:not(:disabled) { color: var(--ai-ink); background: var(--ai-soft-hover); }
   &:disabled { cursor: default; opacity: 0.72; }
 }
 
@@ -6803,7 +9617,7 @@ button.contextChip {
   display: flex;
   padding: 2px;
   border-radius: 9px;
-  background: #f0f1ed;
+  background: var(--ai-soft-bg);
 
   button {
     padding: 5px 7px;
@@ -6814,47 +9628,8 @@ button.contextChip {
     font-size: 11px;
     cursor: pointer;
 
-    &.is-active { color: var(--ai-ink); background: #fff; box-shadow: 0 1px 3px rgba(20, 24, 20, 0.12); }
+    &.is-active { color: var(--ai-ink); background: var(--ai-card-bg); box-shadow: 0 1px 3px rgba(20, 24, 20, 0.12); }
     &:disabled { cursor: default; opacity: 0.7; }
-  }
-}
-
-.aiDraftStage {
-  position: fixed;
-  z-index: 1900;
-  top: 58px;
-  right: 0;
-  bottom: 0;
-  left: 500px;
-  display: flex;
-  min-height: 0;
-  padding: 18px;
-  border: 0;
-  border-left: 1px solid rgba(25, 28, 24, 0.08);
-  border-radius: 0;
-  background: #f7f8f5;
-  box-shadow: none;
-
-  .previewHeader {
-    position: absolute;
-    z-index: 2;
-    top: 14px;
-    right: 18px;
-    left: 18px;
-    padding: 9px 10px;
-    border: 1px solid rgba(25, 28, 24, 0.08);
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.9);
-    box-shadow: 0 4px 18px rgba(20, 24, 20, 0.06);
-    backdrop-filter: blur(12px);
-  }
-
-  .previewCanvas {
-    min-height: 0;
-    margin-top: 56px;
-    border: 0;
-    border-radius: 14px;
-    background-color: #fff;
   }
 }
 
@@ -6904,11 +9679,6 @@ button.contextChip {
 .sessionListCopy,
 .contextMenu > button {
   min-width: 0;
-}
-
-.sessionNewAction > span:last-child,
-.sessionListCopy,
-.contextMenu > button {
   strong,
   small { display: block; }
   strong { font-size: 12px; }
@@ -6968,37 +9738,12 @@ button.contextChip {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .starterGrid button { transition: none; }
+  .starterGrid button,
+  .liveDraftNotice > i { animation: none; transition: none; }
 }
 
 @media (max-width: 760px) {
   .mindmapAiDrawer { width: 100% !important; }
-  .mobilePreviewToggle { display: inline-flex; }
-
-  .aiDraftStage:not(.is-mobile-visible) { display: none; }
-
-  .aiDraftStage.is-mobile-visible {
-    z-index: 4100;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    display: flex;
-    padding: 12px;
-
-    .previewHeader {
-      top: 12px;
-      right: 12px;
-      left: 12px;
-      display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      align-items: center;
-    }
-
-    .previewCanvas { margin-top: 70px; }
-  }
-
-  .mobilePreviewBack { display: inline-flex; }
   .starterGrid,
   .mindmapAiDrawer .formGrid { grid-template-columns: 1fr; }
   .reasoningModes button { padding-inline: 6px; }

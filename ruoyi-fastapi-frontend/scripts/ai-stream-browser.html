@@ -1,0 +1,311 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AI mindmap streaming regression</title>
+<style>#map { width: 1100px; height: 800px } body { margin: 0 }</style>
+<div id="map"></div>
+<pre id="result">RUNNING</pre>
+<script type="module">
+import MindMap from '/src/libs/simple-mind-map/index.js'
+import { reactive } from 'vue'
+import { nextMindmapAiDraftFrame } from '/src/utils/mindmap-ai-live-preview.js'
+import { applyMindmapAiPresentationFrame, clearMindmapAiPresentation, renderMindmapAiPreviewTree } from '/src/utils/mindmap-ai-presentation.js'
+import { plainRevealText } from '/src/libs/simple-mind-map/src/utils/textReveal.js'
+import { getMindmapAiPendingCharacterCount } from '/src/utils/mindmap-ai-playback-pacing.js'
+
+const result = document.querySelector('#result')
+const node = (uid, text, children = [], richText = false) => ({ data: { uid, text, richText }, children })
+const assert = (ok, message) => { if (!ok) throw new Error(message) }
+const paint = () => new Promise(resolve => requestAnimationFrame(resolve))
+function visibleText(element) {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+  let text = ''
+  while (walker.nextNode()) {
+    if (getComputedStyle(walker.currentNode.parentElement).visibility !== 'hidden') text += walker.currentNode.data
+  }
+  return text.replace(/[\n\uFEFF]/g, '')
+}
+const errors = []
+window.addEventListener('error', event => errors.push(event.message))
+window.addEventListener('unhandledrejection', event => errors.push(String(event.reason)))
+try {
+  assert(getMindmapAiPendingCharacterCount(
+    { root: node('rich-estimate', '<p><b>富</b></p>', [], true) },
+    { root: node('rich-estimate', '<p><strong>富文本</strong></p><p>👨‍👩‍👧‍👦é</p>', [], true) },
+  ) === 4, 'rich-text work estimate must count visible graphemes, not HTML markup')
+  assert(getMindmapAiPendingCharacterCount(
+    { root: node('rich-estimate', '富文本') },
+    { root: node('rich-estimate', '<p><strong>富文本</strong></p>', [], true) },
+  ) === 1, 'format-only work still requires a frame')
+  let current = { root: node('root', '根', [node('existing', '原来的长节点文字'), node('other', '不能提前改变')]) }
+  const mindMap = new MindMap({ el: document.querySelector('#map'), data: structuredClone(current.root), layout: 'logicalStructure', readonly: true, textAutoWrapWidth: 90 })
+  await new Promise(resolve => mindMap.render(resolve))
+  const rootGroup = mindMap.renderer.findNodeByUid('root').group.node
+  let fullRenders = 0
+  let clears = 0
+  const render = mindMap.renderAsync.bind(mindMap)
+  mindMap.renderAsync = (...args) => { fullRenders++; return render(...args) }
+  const clearDraw = mindMap.clearDraw.bind(mindMap)
+  mindMap.clearDraw = (...args) => { clears++; return clearDraw(...args) }
+  let frames = 0
+  let observations = 0
+  const firstTexts = {}
+  async function play(target, options = {}) {
+    // Match Dialog's ref(document): descendants are Vue proxies in the app.
+    target = reactive(target)
+    const preserved = new Map((options.preserve || []).map(uid => {
+      const runtime = mindMap.renderer.findNodeByUid(uid)
+      return [uid, { runtime, group: runtime.group.node, text: visibleText(runtime._textData.node.node) }]
+    }))
+    for (let i = 0; i < 300; i++) {
+      const frame = nextMindmapAiDraftFrame(current, target)
+      if (frame.rootUnchanged) break
+      const changed = frame.typewriterTarget?.uid
+      const expected = new Map()
+      const collect = n => { expected.set(n.data.uid, n); (n.children || []).forEach(collect) }
+      collect(frame.document.root)
+      const check = () => {
+        observations++
+        for (const [uid, previous] of preserved) {
+          assert(previous.group.isConnected, `${uid}: existing subtree disappeared while waiting for a new parent`)
+          assert(visibleText(previous.runtime._textData.node.node) === previous.text, `${uid}: existing text restarted during reparent`)
+        }
+        for (const [uid, n] of expected) {
+          const runtime = mindMap.renderer.findNodeByUid(uid)
+          if (!runtime?._textData?.node?.node?.isConnected || uid !== changed) continue
+          const actual = visibleText(runtime._textData.node.node)
+          const wanted = plainRevealText(n.data.text, n.data.richText).replace(/\n/g, '')
+          // A pending structural render can still show the preceding frame,
+          // but must never paint more characters than the scheduled prefix.
+          assert(actual.length <= wanted.length, `${uid}: leaked text '${actual}' before '${wanted}'`)
+        }
+      }
+      const observer = new MutationObserver(() => { try { check() } catch (e) { errors.push(e.message) } })
+      observer.observe(document.querySelector('#map'), { subtree: true, childList: true, characterData: true })
+      const previousRuntime = changed && mindMap.renderer.findNodeByUid(changed)
+      const previousTextElement = previousRuntime?._textData?.node?.node
+      const previousTarget = previousRuntime?._textData?.reveal?.targetText
+      const previousGeometry = previousRuntime && [previousRuntime.left, previousRuntime.top, previousRuntime.width, previousRuntime.height]
+      await applyMindmapAiPresentationFrame(mindMap, current, frame)
+      await paint()
+      observer.disconnect()
+      for (const [uid, previous] of preserved) {
+        assert(mindMap.renderer.findNodeByUid(uid) === previous.runtime, `${uid}: runtime recreated during reparent`)
+        assert(previous.group.isConnected, `${uid}: group disconnected after reparent`)
+      }
+      if (changed) {
+        const runtime = mindMap.renderer.findNodeByUid(changed)
+        const wanted = plainRevealText(expected.get(changed).data.text, expected.get(changed).data.richText).replace(/\n/g, '')
+        assert(visibleText(runtime._textData.node.node) === wanted, `${changed}: wrong prefix '${visibleText(runtime._textData.node.node)}', wanted '${wanted}'; ${runtime._textData.node.node.outerHTML}`)
+        firstTexts[changed] ??= wanted
+        if (previousTarget === frame.typewriterTarget.text) {
+          assert(runtime._textData.node.node === previousTextElement, `${changed}: recreated text DOM while typing`)
+          assert(JSON.stringify([runtime.left, runtime.top, runtime.width, runtime.height]) === JSON.stringify(previousGeometry), `${changed}: geometry moved while typing`)
+        }
+      }
+      assert(mindMap.renderer.findNodeByUid('root').group.node === rootGroup, 'root group replaced')
+      assert(errors.length === 0, errors.join('; '))
+      current = frame.document
+      frames++
+      if (options.retarget && i === options.retarget.afterFrame) {
+        target = reactive(options.retarget.document)
+        continue
+      }
+      if (!frame.remaining) break
+    }
+    assert(JSON.stringify(current.root) === JSON.stringify(target.root), 'playback did not converge')
+  }
+  await play({ root: node('root', '根', [
+    node('existing', '新文字'), node('other', '稍后修改'),
+    node('first', '第一个节点的长文字需要自动换行'),
+    node('rich', '<p><strong>富文本</strong>逐字</p><p>第二行👨‍👩‍👧‍👦</p>', [], true),
+    node('blankline', '甲\n\n乙'),
+    node('last', '最后一个节点'),
+  ]) })
+  await play({ root: node('root', '根', [
+    node('last', '最后一个节点'), node('existing', '新文字追加'),
+    node('rich', '<p><strong>富文本</strong>逐字</p><p>第二行👨‍👩‍👧‍👦</p>', [], true),
+    node('mixed', '移动与新增同时播放'),
+  ]) })
+  // An existing subtree must remain mounted while root text/new ancestors are
+  // being typed. When the parent becomes available, move it without replay.
+  const existing = JSON.parse(JSON.stringify(current.root.children.find(n => n.data.uid === 'existing')))
+  const rich = JSON.parse(JSON.stringify(current.root.children.find(n => n.data.uid === 'rich')))
+  await play({ root: node('root', '新的根节点名称', [
+    node('new-parent', '新增父节点', [existing, rich]),
+  ]) }, { preserve: ['existing', 'rich'] })
+  const preservedBranch = JSON.parse(JSON.stringify(current.root.children[0]))
+  await play({ root: node('root', '再次更新根节点', [
+    node('replacement-parent', '替换被删除的旧父节点', preservedBranch.children),
+  ]) }, { preserve: ['existing', 'rich'] })
+  const base = JSON.parse(JSON.stringify(current.root))
+  await play({ root: { ...base, children: [...base.children, node('retarget', '原目标还在逐字输出')] } }, {
+    retarget: {
+      afterFrame: 1,
+      document: { root: { ...base, children: [...base.children, node('retarget', '原目标后来由AI补充更多内容')] } },
+    },
+    preserve: ['existing', 'rich'],
+  })
+  assert(firstTexts.first === '第', 'first new node did not start with one character')
+  assert(firstTexts.rich === '富', 'rich text did not start with one character')
+  assert(clears === 0, 'canvas was cleared')
+  assert(fullRenders < frames / 2, 'typing triggered full tree renders')
+  await clearMindmapAiPresentation(mindMap)
+
+  const expectRejected = async (operation, message) => {
+    let failure
+    try { await operation() } catch (error) { failure = error }
+    assert(failure?.message.includes(message), `expected '${message}', got ${failure?.message || 'success'}`)
+  }
+  const makeMap = async documentData => {
+    const el = document.createElement('div')
+    el.style.cssText = 'width:1100px;height:800px'
+    document.body.append(el)
+    const map = new MindMap({ el, data: structuredClone(documentData.root), layout: 'logicalStructure', readonly: true })
+    await new Promise(resolve => map.render(resolve))
+    return { map, close: () => { map.destroy(); el.remove() } }
+  }
+  const recoveryChecks = []
+  // Catch both the first RAF phase and later timer phases; a rejected frame
+  // must end its transaction and let the same renderer retry successfully.
+  for (const phase of ['layout-entry', 'layout-timer', 'node', 'finalizer']) {
+    const before = { root: node('recovery-root', '根') }
+    const target = { root: node('recovery-root', '根', [node('recovery-child', '恢复节点')]) }
+    const frame = nextMindmapAiDraftFrame(before, target)
+    const { map, close } = await makeMap(before)
+    const owner = phase.startsWith('layout') ? map.renderer.layout : Object.getPrototypeOf(map.renderer.root)
+    const method = { 'layout-entry': 'doLayout', 'layout-timer': 'computedTopValue', node: 'renderSelf', finalizer: 'finishRender' }[phase]
+    const original = owner[method]
+    let injected = false
+    owner[method] = function (...args) {
+      if (!injected && (phase.startsWith('layout') || this.uid === 'recovery-child')) {
+        injected = true
+        throw new Error(`injected-${phase}`)
+      }
+      return original.apply(this, args)
+    }
+    try {
+      await expectRejected(() => applyMindmapAiPresentationFrame(map, before, frame), `injected-${phase}`)
+      assert(!map.renderer.isRendering && !map.renderer.renderSession, `${phase}: failed render transaction remained active`)
+      await applyMindmapAiPresentationFrame(map, before, frame)
+      assert(visibleText(map.renderer.findNodeByUid('recovery-child')._textData.node.node) === '恢', `${phase}: retry leaked text or failed`)
+      assert(!map.renderer.renderRecoveryRequired, `${phase}: recovery marker was not committed`)
+      recoveryChecks.push(phase)
+    } finally { owner[method] = original; close() }
+  }
+  // A timed-out layout can call back late; it must neither ACK nor overwrite
+  // the successor transaction. Only shorten the presenter's timeout in test.
+  {
+    const before = { root: node('timeout-root', '基线') }
+    const { map, close } = await makeMap(before)
+    const original = map.renderer.layout.doLayout
+    const originalTimer = window.setTimeout
+    let lateLayout
+    map.renderer.layout.doLayout = callback => { lateLayout = callback }
+    window.setTimeout = (callback, delay, ...args) => originalTimer(callback, delay === 15000 ? 100 : delay, ...args)
+    try {
+      await expectRejected(() => renderMindmapAiPreviewTree(map, node('timeout-root', '旧目标')), '超时')
+      assert(!map.renderer.isRendering, 'timeout did not abort the renderer')
+      map.renderer.layout.doLayout = original
+      const replacement = renderMindmapAiPreviewTree(map, node('timeout-root', '最新目标'))
+      lateLayout?.(map.renderer.root)
+      await replacement
+      lateLayout?.(map.renderer.root)
+      assert(map.renderer.root.getData('text') === '最新目标', 'late callback replaced the latest document')
+      recoveryChecks.push('timeout-stale-callback')
+    } finally { window.setTimeout = originalTimer; map.renderer.layout.doLayout = original; close() }
+  }
+  // Cloud expand=false is never edited. The presentation overlay keeps both
+  // siblings visible across structural frames and clears through an explicit
+  // awaited render (including retry after a cleanup-render failure).
+  {
+    const collapsed = children => ({ root: node('collapsed-root', '根', [
+      { ...node('collapsed-parent', '折叠分支', children), data: { uid: 'collapsed-parent', text: '折叠分支', richText: false, expand: false } },
+    ]) })
+    let displayed = collapsed([])
+    const target = collapsed([node('child-one', '第一节点'), node('child-two', '第二节点')])
+    const { map, close } = await makeMap(displayed)
+    let firstGroup
+    const seen = []
+    try {
+      for (let i = 0; i < 30; i++) {
+        const frame = nextMindmapAiDraftFrame(displayed, target)
+        await applyMindmapAiPresentationFrame(map, displayed, frame)
+        const active = map.renderer.findNodeByUid(frame.change.uid)
+        assert(active?.group?.node?.isConnected, 'AI child in a collapsed branch was not mounted')
+        active.active()
+        map.renderer.moveNodeToCenter(active)
+        assert(map.renderer.findNodeByUid('collapsed-parent').getData('expand') === false, 'AI focus dirtied cloud expansion data')
+        assert(frame.document.root.children[0].data.expand === false, 'planner changed cloud expansion data')
+        if (frame.change.uid === 'child-one') firstGroup ||= active.group.node
+        else assert(firstGroup.isConnected, 'next structural frame collapsed the first streamed child')
+        assert(visibleText(active._textData.node.node) === frame.change.text, 'collapsed node leaked full target text')
+        seen.push(frame.change.text)
+        displayed = frame.document
+        if (!frame.remaining) break
+      }
+      assert(seen[0] === '第' && seen[4] === '第', 'each collapsed child must start from its first character')
+      const original = map.renderer.layout.computedTopValue
+      let failCleanup = true
+      map.renderer.layout.computedTopValue = function (...args) {
+        if (failCleanup) { failCleanup = false; throw new Error('injected-cleanup') }
+        return original.apply(this, args)
+      }
+      await expectRejected(() => clearMindmapAiPresentation(map), 'injected-cleanup')
+      assert(map.renderer.aiPresentationVisibilityRestorePending, 'failed cleanup forgot its retry obligation')
+      await clearMindmapAiPresentation(map)
+      assert(!map.renderer.findNodeByUid('child-one'), 'cleanup did not explicitly restore original collapsed state')
+      assert(!map.renderer.aiPresentationVisibilityRestorePending, 'successful cleanup remained pending')
+      map.renderer.layout.computedTopValue = original
+      recoveryChecks.push('collapsed-stream-and-cleanup-retry')
+
+      const nextTarget = collapsed([...target.root.children[0].children, node('child-three', '第三节点')])
+      const first = nextMindmapAiDraftFrame(displayed, nextTarget)
+      await applyMindmapAiPresentationFrame(map, displayed, first)
+      const layout = map.renderer.layout.doLayout
+      let oldCallback
+      let entered
+      const began = new Promise(resolve => { entered = resolve })
+      map.renderer.layout.doLayout = callback => { oldCallback = callback; entered() }
+      const obsoleteCleanup = clearMindmapAiPresentation(map)
+      const rejectedCleanup = expectRejected(() => obsoleteCleanup, '替代')
+      await began
+      await clearMindmapAiPresentation(map, { render: false })
+      await rejectedCleanup
+      map.renderer.layout.doLayout = layout
+      const second = nextMindmapAiDraftFrame(first.document, nextTarget)
+      const newPresentation = applyMindmapAiPresentationFrame(map, first.document, second)
+      oldCallback(map.renderer.root)
+      await newPresentation
+      oldCallback(map.renderer.root)
+      await paint()
+      assert(map.renderer.findNodeByUid('child-three')?.group?.node?.isConnected, 'stale cleanup collapsed the successor presentation')
+      assert(visibleText(map.renderer.findNodeByUid('child-three')._textData.node.node) === '第三', 'successor prefix changed after stale cleanup')
+      assert(map.renderer.aiPresentationExpandedNodeUids.has('collapsed-parent'), 'old cleanup cleared successor overlay')
+      recoveryChecks.push('cleanup-successor-isolation')
+    } finally { close() }
+  }
+
+  {
+    const existing = node('move-only', '保持原有文字')
+    const parent = children => ({ ...node('move-parent', '折叠父节点', children), data: { uid: 'move-parent', text: '折叠父节点', richText: false, expand: false } })
+    const before = { root: node('move-root', '根', [existing, parent([])]) }
+    const target = { root: node('move-root', '根', [parent([existing])]) }
+    const { map, close } = await makeMap(before)
+    try {
+      const frame = nextMindmapAiDraftFrame(before, target)
+      assert(!frame.typewriterTarget && frame.change.uid === 'move-only', 'expected a structural-only move')
+      await applyMindmapAiPresentationFrame(map, before, frame)
+      assert(map.renderer.findNodeByUid('move-only')?.group?.node?.isConnected, 'move-only AI operation stayed hidden under collapsed parent')
+      assert(map.renderer.findNodeByUid('move-parent').getData('expand') === false, 'move-only expansion changed authoritative data')
+      await clearMindmapAiPresentation(map)
+      recoveryChecks.push('collapsed-move-only')
+    } finally { close() }
+  }
+  assert(errors.length === 0, errors.join('; '))
+  result.textContent = JSON.stringify({ status: 'PASS', frames, observations, fullRenders, clears, firstTexts, recoveryChecks })
+  window.__aiStreamTestResult = { status: 'PASS', frames, observations, fullRenders, clears, firstTexts, recoveryChecks }
+} catch (error) {
+  result.textContent = 'FAIL: ' + error.stack
+  window.__aiStreamTestResult = { status: 'FAIL', error: error.stack }
+}
+</script>

@@ -2199,6 +2199,42 @@ test('当前客户端自己的保存确认不等待 WebSocket 回环增量', asy
   sync.destroy({ flushCheckpoint: false })
 })
 
+test('AI 直写预览延后自身 revision 广播并在结束时只消费最新版本', () => {
+  const staleEvents = []
+  let deferAiRevision = true
+  const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 1, {
+    shouldDeferContentRevision: data => (
+      deferAiRevision && String(data?.clientMutationId || '').startsWith('ai:job-direct:')
+    ),
+    onStaleState: data => staleEvents.push(data),
+  })
+
+  sync._handleContentRevisionChanged({
+    contentRevision: 2,
+    clientMutationId: 'ai:job-direct:1',
+    authoritativeReloadRequired: true,
+    yjsUpdateCount: 0,
+  })
+  sync._handleContentRevisionChanged({
+    contentRevision: 3,
+    clientMutationId: 'ai:job-direct:2',
+    authoritativeReloadRequired: true,
+    yjsUpdateCount: 0,
+  })
+
+  assert.equal(sync.contentRevision, 1)
+  assert.deepEqual(staleEvents, [])
+  assert.equal(sync._deferredContentRevision?.contentRevision, 3)
+
+  deferAiRevision = false
+  assert.equal(sync.flushDeferredContentRevision(), true)
+  assert.equal(sync.flushDeferredContentRevision(), false)
+  assert.equal(staleEvents.length, 1)
+  assert.equal(staleEvents[0].contentRevision, 3)
+  assert.equal(staleEvents[0].reason, 'concurrent_merge')
+  sync.destroy({ flushCheckpoint: false })
+})
+
 test('本地权威保存广播必须等 HTTP 响应后才解除检查点栅栏', () => {
   const sync = new YjsMindmapSync(1, createMindmap(createDocument()), 1)
   sync.initFromMindmap(createDocument())
@@ -2608,6 +2644,33 @@ test('远端树覆盖画布前允许上层同步保护仍停留在浮层编辑�
   assert.deepEqual(sequence, ['protect', 'apply'])
   assert.equal(mindMap.getData().children.length, 0)
   mindMap.emit('node_tree_render_end')
+  sync.destroy()
+})
+
+test('AI 播放期间消费云端 Yjs 但不让完整权威树抢占展示画布', async () => {
+  const document = createDocument()
+  const mindMap = createMindmap(document)
+  let deferredDocument = null
+  let applyCount = 0
+  const originalUpdateData = mindMap.updateData
+  mindMap.updateData = root => {
+    applyCount += 1
+    originalUpdateData(root)
+  }
+  const sync = new YjsMindmapSync(1, mindMap, 1, {
+    shouldDeferRemoteDocumentApply: () => true,
+    onRemoteDocumentDeferred: documentToCommit => {
+      deferredDocument = structuredClone(documentToCommit)
+    },
+  })
+  sync.initFromMindmap(document)
+  sync.yNodes.delete('child')
+  sync.yNodes.get('root').get('children').delete(0, 1)
+
+  assert.equal(await sync._applyYjsToMindmap(), true)
+  assert.equal(applyCount, 0)
+  assert.equal(mindMap.getData().children.length, 1)
+  assert.equal(deferredDocument.root.children.length, 0)
   sync.destroy()
 })
 
@@ -6347,6 +6410,58 @@ test('AI 协作栅栏冻结写入并仅在强制检查点之后发送 ready ACK'
   assert.equal(released.length, 1)
   assert.equal(resets.length, 1)
   assert.equal(sync._authoritativeRevisionPending, 5)
+  sync.destroy({ flushCheckpoint: false })
+})
+
+test('AI 预览暂停期间仍以原 Yjs 文档确认云端应用栅栏', async () => {
+  const token = 'abcdef0123456789abcdef0123456789'
+  const mindMap = createMindmap(createDocument())
+  const sync = new YjsMindmapSync(1, mindMap, 4, {
+    onCollaborationBarrierPrepare: async () => ({
+      ready: true,
+      contentRevision: 4,
+    }),
+  })
+  sync.initFromMindmap(createDocument())
+  sync.serverCapabilities = new Set([
+    'collaboration-mutation-barrier-v1',
+    'yjs-checkpoint-v1',
+  ])
+  const sent = []
+  sync.wsClient.send = message => {
+    sent.push(message)
+    return true
+  }
+  sync.pause()
+  // The canvas can now show speculative AI content. The Y.Doc checkpoint
+  // must still describe the original committed tree.
+  const originalNodeCount = sync.yNodes.size
+  mindMap.updateData({
+    data: { uid: 'root', text: '预览' },
+    children: [
+      { data: { uid: 'child', text: '原节点' }, children: [] },
+      { data: { uid: 'preview-only', text: 'AI 新节点' }, children: [] },
+    ],
+  })
+  assert.equal(sync.yNodes.size, originalNodeCount)
+  sync._checkpointDirty = true
+  assert.equal(sync._flushCheckpoint(), false)
+
+  await sync._handleCollaborationBarrierPrepare({
+    token,
+    operation: 'apply',
+    contentRevision: 4,
+  })
+  const messages = sent.filter(message => (
+    message.type === 'checkpoint' || message.type === 'collaboration_barrier_ack'
+  ))
+  assert.deepEqual(messages.map(message => message.type), [
+    'checkpoint',
+    'collaboration_barrier_ack',
+  ])
+  assert.equal(messages[0].barrierToken, token)
+  assert.equal(messages[1].ready, true)
+  assert.equal(sync.yNodes.size, originalNodeCount)
   sync.destroy({ flushCheckpoint: false })
 })
 

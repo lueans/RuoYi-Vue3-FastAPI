@@ -1,9 +1,9 @@
-const OWNER_USER_ID_PATTERN = /^[1-9]\d{0,63}$/
+import { normalizeNumericOwnerUserId } from './mindmap-ai-shared.js'
 
 export function buildMindmapAiOwnerSessionKey(baseKey, ownerUserId) {
   const normalizedBaseKey = String(baseKey || '').trim()
-  const normalizedOwnerUserId = String(ownerUserId ?? '').trim()
-  if (!normalizedBaseKey || !OWNER_USER_ID_PATTERN.test(normalizedOwnerUserId)) return ''
+  const normalizedOwnerUserId = normalizeNumericOwnerUserId(ownerUserId)
+  if (!normalizedBaseKey || !normalizedOwnerUserId) return ''
   return `${normalizedBaseKey}:${normalizedOwnerUserId}`
 }
 

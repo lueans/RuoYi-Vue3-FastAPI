@@ -9,18 +9,22 @@
           退出预览
         </el-button>
       </div>
+      <div v-if="aiPreviewBlocked" class="previewBanner aiPreviewBlockedBanner">
+        <el-icon><InfoFilled /></el-icon>
+        <span>AI 正在实时预览，请先采纳或不采纳当前变更后再查看历史版本</span>
+      </div>
 
       <!-- 操作栏 -->
       <div class="actionBar" v-if="!isReadonly">
-        <el-button type="primary" size="small" :loading="['confirm-save', 'save'].includes(operationType)" :disabled="isPreviewing || isOperating" @click="handleSaveVersion">
+        <el-button type="primary" size="small" :loading="['confirm-save', 'save'].includes(operationType)" :disabled="isPreviewing || isOperating || aiPreviewBlocked" @click="handleSaveVersion">
           保存正式版本
         </el-button>
       </div>
 
       <!-- 版本类型切换 -->
       <el-tabs v-model="activeTab" @tab-change="onTabChange">
-        <el-tab-pane label="正式版本" name="formal" :disabled="isPreviewing || isOperating" />
-        <el-tab-pane label="草稿版本" name="draft" :disabled="isPreviewing || isOperating" />
+        <el-tab-pane label="正式版本" name="formal" :disabled="isPreviewing || isOperating || aiPreviewBlocked" />
+        <el-tab-pane label="草稿版本" name="draft" :disabled="isPreviewing || isOperating || aiPreviewBlocked" />
       </el-tabs>
 
       <!-- 版本列表 -->
@@ -47,7 +51,7 @@
             </div>
           </div>
           <div class="versionActions">
-            <el-button link type="primary" size="small" :disabled="isOperating" @click="handlePreview(item)">
+            <el-button link type="primary" size="small" :disabled="isOperating || aiPreviewBlocked" @click="handlePreview(item)">
               查看
             </el-button>
             <el-button link type="primary" size="small" :loading="[`confirm-restore:${item.id}`, `restore:${item.id}`].includes(operationType)" :disabled="isOperating" @click="handleRestore(item)" v-if="!isReadonly">
@@ -71,7 +75,7 @@
         <el-pagination
           size="small"
           layout="prev, pager, next"
-          :disabled="isOperating || isPreviewing"
+          :disabled="isOperating || isPreviewing || aiPreviewBlocked"
           :total="total"
           :page-size="pageSize"
           v-model:current-page="pageNum"
@@ -103,6 +107,7 @@ const props = defineProps({
   applyAuthoritativeDocument: { type: Function, default: null },
   authoritativeResetGeneration: { type: Number, default: 0 },
   readonly: { type: Boolean, default: false },
+  aiPreviewActive: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['change-tracking', 'editing-transition'])
@@ -117,6 +122,7 @@ const pageNum = ref(1)
 const pageSize = ref(20)
 const activeTab = ref('formal')
 const isReadonly = computed(() => props.readonly || store.isReadonly)
+const aiPreviewBlocked = computed(() => props.aiPreviewActive === true)
 const isPreviewing = ref(false)
 const operationType = ref('')
 const isOperating = computed(() => Boolean(operationType.value))
@@ -311,7 +317,7 @@ async function loadVersions() {
 }
 
 async function handleSaveVersion() {
-  if (!props.mindmapId || isOperating.value || isPreviewing.value) return
+  if (!props.mindmapId || isReadonly.value || aiPreviewBlocked.value || isOperating.value || isPreviewing.value) return
   const session = captureSession()
   const operationToken = beginOperation('confirm-save')
   let versionName
@@ -360,6 +366,10 @@ async function handleSaveVersion() {
 
 async function handlePreview(item) {
   if (!props.mindMap || isOperating.value) return
+  if (aiPreviewBlocked.value) {
+    ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再查看历史版本')
+    return
+  }
   const versionId = getListedVersionId(item)
   if (!versionId) return
   const session = captureSession()
@@ -541,7 +551,7 @@ onBeforeUnmount(() => {
 })
 
 async function handleRestore(item) {
-  if (isOperating.value) return
+  if (isReadonly.value || aiPreviewBlocked.value || isOperating.value) return
   const versionId = getListedVersionId(item)
   if (!versionId) return
   const session = captureSession()
@@ -643,7 +653,7 @@ async function handleRestore(item) {
 }
 
 async function handleDelete(item) {
-  if (isOperating.value) return
+  if (isReadonly.value || aiPreviewBlocked.value || isOperating.value) return
   const versionId = getListedVersionId(item, { formalOnly: true })
   if (!versionId) return
   const session = captureSession()

@@ -91,6 +91,7 @@ class MindmapCommentDao:
                 select(MindmapCommentThread)
                 .where(*filters)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalars().first()
 
@@ -148,6 +149,52 @@ class MindmapCommentDao:
                 MindmapComment.client_request_id == request_id,
             )
         )).first()
+
+    @classmethod
+    async def list_ai_comment_thread_ids(
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        user_id: int,
+        request_prefix: str,
+    ) -> list[int]:
+        """Discover candidates without locking comments before their threads."""
+        return list((await db.execute(
+            select(MindmapComment.thread_id)
+            .where(
+                MindmapComment.mindmap_id == mindmap_id,
+                MindmapComment.created_by == user_id,
+                MindmapComment.client_request_id.like(f'{request_prefix}%'),
+                MindmapComment.del_flag == '0',
+            )
+            .distinct()
+            .order_by(MindmapComment.thread_id.asc())
+        )).scalars().all())
+
+    @classmethod
+    async def list_ai_comments_for_update(
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        user_id: int,
+        request_prefix: str,
+        *,
+        thread_id: int,
+    ) -> list[MindmapComment]:
+        """Re-read task comments only after the caller holds their thread lock."""
+        return list((await db.execute(
+            select(MindmapComment)
+            .where(
+                MindmapComment.mindmap_id == mindmap_id,
+                MindmapComment.created_by == user_id,
+                MindmapComment.client_request_id.like(f'{request_prefix}%'),
+                MindmapComment.thread_id == thread_id,
+                MindmapComment.del_flag == '0',
+            )
+            .order_by(MindmapComment.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )).scalars().all())
 
     @classmethod
     async def list_threads(
@@ -243,15 +290,15 @@ class MindmapCommentDao:
         comment_id: int,
         *,
         include_deleted: bool = False,
+        for_update: bool = False,
     ) -> MindmapComment | None:
         filters = [MindmapComment.id == comment_id]
         if not include_deleted:
             filters.append(MindmapComment.del_flag == '0')
-        return (
-            await db.execute(
-                select(MindmapComment).where(*filters)
-            )
-        ).scalars().first()
+        statement = select(MindmapComment).where(*filters)
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return (await db.execute(statement)).scalars().first()
 
     @classmethod
     async def soft_delete_comment(cls, db: AsyncSession, comment_id: int, now: datetime) -> None:
@@ -275,29 +322,28 @@ class MindmapCommentDao:
         )
 
     @classmethod
-    async def count_active_messages(cls, db: AsyncSession, thread_id: int) -> int:
-        return int((await db.execute(
-            select(func.count(MindmapComment.id)).where(
-                MindmapComment.thread_id == thread_id,
-                MindmapComment.del_flag == '0',
-            )
-        )).scalar_one() or 0)
-
-    @classmethod
-    async def touch_thread_from_latest_comment(
+    async def refresh_thread_after_comment_delete(
         cls,
         db: AsyncSession,
         thread_id: int,
-        fallback: datetime,
-    ) -> None:
+        now: datetime,
+    ) -> bool:
+        """Under the thread lock, use a current read even at REPEATABLE READ."""
         latest = (await db.execute(
-            select(func.max(MindmapComment.created_time)).where(
+            select(MindmapComment.created_time).where(
                 MindmapComment.thread_id == thread_id,
                 MindmapComment.del_flag == '0',
             )
+            .order_by(MindmapComment.created_time.desc(), MindmapComment.id.desc())
+            .limit(1)
+            .with_for_update()
         )).scalar_one_or_none()
+        if latest is None:
+            await cls.soft_delete_thread(db, thread_id, now)
+            return True
         await db.execute(
             update(MindmapCommentThread)
             .where(MindmapCommentThread.id == thread_id)
-            .values(last_comment_time=latest or fallback)
+            .values(last_comment_time=latest)
         )
+        return False

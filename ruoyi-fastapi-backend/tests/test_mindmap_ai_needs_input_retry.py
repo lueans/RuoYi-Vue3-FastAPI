@@ -338,7 +338,8 @@ async def test_cancellation_and_timeout_propagate_without_retry(failure: BaseExc
 
 
 @pytest.mark.asyncio
-async def test_task_persists_needs_input_status_and_safe_questions_atomically() -> None:
+async def test_task_persists_needs_input_status_and_safe_questions_atomically(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_service.load_ai_tag_catalog', AsyncMock(return_value=[]))
     job_id = '12345678-1234-1234-1234-123456789012'
     session_id = '22345678-1234-1234-1234-123456789012'
     request_json = json.dumps({

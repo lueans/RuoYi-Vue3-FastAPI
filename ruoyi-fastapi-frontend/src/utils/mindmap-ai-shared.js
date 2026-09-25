@@ -22,6 +22,20 @@ export function normalizeOwnerUserId(value) {
   return null
 }
 
+export function isNumericOwnerUserId(value) {
+  return typeof value === 'string' && /^[1-9]\d{0,63}$/.test(value)
+}
+
+export function normalizeNumericOwnerUserId(value) {
+  const ownerUserId = String(value ?? '').trim()
+  return isNumericOwnerUserId(ownerUserId) ? ownerUserId : ''
+}
+
+export async function sha256Hex(bytes) {
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
 export function stableJsonValue(value) {
   if (Array.isArray(value)) return value.map(stableJsonValue)
   if (value === null || typeof value !== 'object') return value

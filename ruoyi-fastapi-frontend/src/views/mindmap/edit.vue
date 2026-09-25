@@ -376,7 +376,7 @@ import {
   normalizeMindmapContentState,
 } from '@/utils/mindmap-content-state'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { parseTime } from '@/utils/ruoyi'
 
 const route = useRoute()
@@ -775,6 +775,11 @@ function handleMetadataUpdated(metadata) {
 }
 
 async function confirmEditorNavigation() {
+  const aiFinished = await editRef.value?.finishCompletedAiGeneration?.()
+  if (aiFinished === false) {
+    ElMessage.warning('AI 结果尚未完成保存，请完成保存或撤销后再离开')
+    return false
+  }
   if (isReadonly.value) return true
   const saved = await editRef.value?.prepareForCloudExit?.()
   if (saved !== false) return true

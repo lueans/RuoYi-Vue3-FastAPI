@@ -200,6 +200,14 @@ class AiUtil:
                 ollama_options['num_predict'] = max_tokens_value
             if ollama_options:
                 params['options'] = ollama_options
+        if provider == 'Anthropic':
+            # Agno Claude does not declare a top-level base_url field; the
+            # underlying Anthropic client accepts it through client_params.
+            params.pop('base_url', None)
+            if base_url:
+                client_params = dict(params.get('client_params') or {})
+                client_params['base_url'] = base_url
+                params['client_params'] = client_params
         if provider == 'DashScope' and not base_url:
             params['base_url'] = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
         model_class = cls._resolve_provider_class(provider)

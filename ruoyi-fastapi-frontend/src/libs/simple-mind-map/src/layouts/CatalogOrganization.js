@@ -10,7 +10,7 @@ class CatalogOrganization extends Base {
   }
 
   //  布局
-  doLayout(callback) {
+  doLayout(callback, renderSession) {
     let task = [
       () => {
         this.computedBaseValue()
@@ -25,7 +25,7 @@ class CatalogOrganization extends Base {
         callback(this.root)
       }
     ]
-    asyncRun(task)
+    asyncRun(task, () => {}, renderSession)
   }
 
   //  遍历数据计算节点的left、width、height

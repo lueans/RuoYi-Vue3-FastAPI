@@ -33,6 +33,14 @@ test('version operations share one busy lock and destructive actions cannot over
   assert.match(source, /:disabled="isOperating"/)
 })
 
+test('AI 实时预览期间禁止历史版本覆盖当前画布', () => {
+  assert.match(source, /aiPreviewActive: \{ type: Boolean, default: false \}/)
+  assert.match(source, /const aiPreviewBlocked = computed\(\(\) => props\.aiPreviewActive === true\)/)
+  assert.match(source, /请先采纳或不采纳当前 AI 实时预览，再查看历史版本/)
+  assert.match(source, /:disabled="isOperating \|\| aiPreviewBlocked"/)
+  assert.match(editorSource, /:ai-preview-active="aiEditingBlocked"/)
+})
+
 test('formal version creation freezes editing across flush and snapshot creation', () => {
   const saveBlock = source.match(/async function handleSaveVersion[\s\S]*?\n\}/)?.[0] || ''
   const transitionIndex = saveBlock.indexOf('beginEditingTransition(session)')
@@ -103,7 +111,7 @@ test('version transitions gate every editor while allowing the frozen batch to f
   )
   assert.match(
     editorSource,
-    /const isReadonly = computed[\s\S]*?versionTransitionEditingBlocked\.value[\s\S]*?importTransitionEditingBlocked\.value/,
+    /const aiDialogReadonly = computed[\s\S]*?versionTransitionEditingBlocked\.value[\s\S]*?importTransitionEditingBlocked\.value/,
   )
   assert.match(
     editorSource,
@@ -295,7 +303,7 @@ test('version confirmations lock before dialogs and only act on current listed t
   assert.match(source, /Number\.isSafeInteger\(id\)/)
   assert.match(source, /getListedVersionId\(item, \{ formalOnly: true \}\) !== versionId/)
   assert.match(source, /size="small"/)
-  assert.match(source, /:disabled="isOperating \|\| isPreviewing"/)
+  assert.match(source, /:disabled="isOperating \|\| isPreviewing \|\| aiPreviewBlocked"/)
   assert.doesNotMatch(source, /\n\s+small\n/)
 })
 

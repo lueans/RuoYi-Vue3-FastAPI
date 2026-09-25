@@ -155,8 +155,7 @@ function applyUpdate(document, operation) {
   for (const field of operation.payload.unset) delete node.data[field]
 }
 
-function detachNode(document, uid) {
-  const indexed = indexDocument(document)
+function detachNode(indexed, uid) {
   const parentUid = indexed.parents.get(uid)
   if (parentUid === null || parentUid === undefined) {
     throw proposalError('不能移动或删除脑图根节点')
@@ -164,8 +163,7 @@ function detachNode(document, uid) {
   const parent = indexed.nodes.get(parentUid)
   const index = parent.children.findIndex(child => child?.data?.uid === uid)
   if (index < 0) throw proposalError(`节点父子关系损坏: ${uid}`)
-  const [node] = parent.children.splice(index, 1)
-  return { node, parent, index, indexed }
+  return parent.children.splice(index, 1)[0]
 }
 
 function applyMove(document, operation) {
@@ -182,17 +180,14 @@ function applyMove(document, operation) {
     if (ancestorUid === uid) throw proposalError('移动节点不能形成循环')
     ancestorUid = before.parents.get(ancestorUid) ?? null
   }
-  const detached = detachNode(document, uid)
   // 位置基于节点从原父节点移除后的目标 children 数组。
+  const targetChildCount = targetParent.children.length - Number(before.parents.get(uid) === parentUid)
   if (
     !Number.isSafeInteger(operation.payload.index)
     || operation.payload.index < 0
-    || operation.payload.index > targetParent.children.length
-  ) {
-    detached.parent.children.splice(detached.index, 0, detached.node)
-    throw proposalError('移动节点位置越界')
-  }
-  targetParent.children.splice(operation.payload.index, 0, detached.node)
+    || operation.payload.index > targetChildCount
+  ) throw proposalError('移动节点位置越界')
+  targetParent.children.splice(operation.payload.index, 0, detachNode(before, uid))
 }
 
 function applyDelete(document, operation) {
@@ -201,7 +196,7 @@ function applyDelete(document, operation) {
   const indexed = indexDocument(document)
   if (uid === indexed.rootUid) throw proposalError('不能删除脑图根节点')
   if (!indexed.nodes.has(uid)) throw proposalError(`删除节点不存在: ${uid}`)
-  detachNode(document, uid)
+  detachNode(indexed, uid)
 }
 
 function applyDocumentMeta(document, operation) {

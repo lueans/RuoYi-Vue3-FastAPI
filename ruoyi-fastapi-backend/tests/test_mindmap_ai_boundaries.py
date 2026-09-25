@@ -334,7 +334,10 @@ def test_message_ready_event_never_persists_response_body() -> None:
 @pytest.mark.parametrize('commit_fails', [False, True], ids=['committed', 'commit-failed'])
 async def test_discussion_completion_persists_message_atomically_without_artifact(  # noqa: PLR0915
     commit_fails: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    tag_catalog = AsyncMock(side_effect=AssertionError('discussion must not load tag catalog'))
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_service.load_ai_tag_catalog', tag_catalog)
     job_id = '12345678-1234-4234-8234-123456789012'
     session_id = '22345678-1234-4234-8234-123456789012'
     response_content = '当前脑图覆盖登录主流程，建议补充账号锁定场景。'
@@ -520,6 +523,7 @@ async def test_discussion_completion_persists_message_atomically_without_artifac
         await MindmapAiTaskManager._run_job(job_id)
 
     add_artifact.assert_not_awaited()
+    tag_catalog.assert_not_awaited()
     add_proposal.assert_not_awaited()
     assert database.pending == []
 
@@ -900,7 +904,14 @@ async def test_session_cancellation_is_one_durable_conditional_update() -> None:
     assert 'session-delete' in parameter_values
     assert requested_time in parameter_values
     assert any(
-        set(value) == {'queued', 'preparing', 'running', 'validating', 'cancel_requested'}
+        set(value) == {
+            'waiting_turn',
+            'queued',
+            'preparing',
+            'running',
+            'validating',
+            'cancel_requested',
+        }
         for value in parameter_values
         if isinstance(value, (list, tuple))
     )
@@ -919,9 +930,15 @@ async def test_delete_job_payloads_locks_jobs_before_deleting_children() -> None
     counts = await MindmapAiDao.delete_job_payloads(database, ['job-1', 'job-2'])
 
     first_statement = str(database.execute.await_args_list[0].args[0])
+    undo_statement = database.execute.await_args_list[1].args[0]
     assert first_statement.startswith('SELECT mindmap_ai_job.id')
     assert 'ORDER BY mindmap_ai_job.id ASC' in first_statement
     assert first_statement.endswith('FOR UPDATE')
+    assert 'mindmap_ai_undo.proposal_id IN' in str(undo_statement)
+    assert any(
+        value == ['job-1', 'job-2']
+        for value in undo_statement.compile().params.values()
+    )
     assert counts == {
         'events': 1,
         'checkpoints': 1,

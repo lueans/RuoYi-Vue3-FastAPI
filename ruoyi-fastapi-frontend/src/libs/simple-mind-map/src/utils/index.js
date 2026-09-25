@@ -264,7 +264,19 @@ export const downloadFile = (file, fileName) => {
 }
 
 //  异步执行任务队列
-export const asyncRun = (taskList, callback = () => {}) => {
+export const asyncRun = (taskList, callback = () => {}, renderSession = null) => {
+  if (renderSession) {
+    let index = 0
+    const advance = () => {
+      if (index >= taskList.length) {
+        renderSession.run(callback)
+        return
+      }
+      if (renderSession.run(taskList[index++])) renderSession.schedule(advance)
+    }
+    advance()
+    return
+  }
   let index = 0
   let len = taskList.length
   if (len <= 0) {

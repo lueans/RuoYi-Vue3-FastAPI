@@ -205,6 +205,8 @@ class MindmapAiParametersModel(BaseModel):
     max_depth: int = Field(default=6, ge=2, le=32)
     max_nodes: int = Field(default=100, ge=5, le=2000)
     density: Literal['concise', 'standard', 'detailed'] = 'standard'
+    # 生成节奏只影响 add_nodes/update_nodes 的批次提示词；工具层硬上限不变。
+    generation_mode: Literal['dfs_stream', 'bfs_stream', 'balanced', 'complete'] = 'balanced'
 
     @field_validator('language')
     @classmethod
@@ -242,6 +244,9 @@ class MindmapAiJobCreateModel(BaseModel):
     parameters: MindmapAiParametersModel = Field(default_factory=MindmapAiParametersModel)
     source: MindmapAiSourceModel = Field(default_factory=MindmapAiSourceModel)
     target: Literal['file', 'proposal', 'message'] = 'file'
+    # preview 保留旧的 Artifact/Proposal 结果契约；direct 将 Agent 的每个
+    # 已验证工具批次直接提交到云端脑图，任务不依赖当前页面存活。
+    execution_mode: Literal['preview', 'direct'] = 'preview'
 
     @field_validator('prompt')
     @classmethod
@@ -269,6 +274,13 @@ class MindmapAiJobCreateModel(BaseModel):
             raise ValueError('只有现有本地或云端脑图才能生成 proposal')
         if self.source.type == 'none' and self.intent not in {'create', 'discuss'}:
             raise ValueError('该意图必须提供脑图来源')
+        if self.execution_mode == 'direct':
+            if self.intent == 'discuss':
+                raise ValueError('讨论模式不能直接写入脑图')
+            if self.source.type != 'cloud_document' or self.source.mindmap_id is None:
+                raise ValueError('直接写入模式必须使用可编辑的云端脑图')
+            if self.target != 'file':
+                raise ValueError('直接写入模式不生成提案或文字消息，target 必须为 file')
         return self
 
 
@@ -287,10 +299,11 @@ class MindmapAiMessageModel(BaseModel):
     agent_key: str | None = Field(default=None, min_length=1, max_length=64)
     model_id: int | None = Field(default=None, gt=0)
     intent: str | None = Field(default=None, min_length=1, max_length=32)
+    route: Literal['current', 'next'] = 'current'
     continuation_base: Literal[
         'artifact', 'current_document', 'current_snapshot',
     ] = 'artifact'
-    expected_parent_status: Literal['applied', 'undone'] | None = None
+    expected_parent_status: Literal['applied', 'undone', 'completed_direct'] | None = None
     source: MindmapAiSourceModel | None = None
 
     @field_validator('prompt')
@@ -323,6 +336,14 @@ class MindmapAiMessageModel(BaseModel):
         return self
 
 
+class MindmapAiCancelModel(BaseModel):
+    """Cancellation intent; preserving a live draft creates an undoable result."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    preserve_draft: bool = False
+
+
 class MindmapAiRetryParametersModel(BaseModel):
     """Retry-only parameter overrides; omitted fields inherit the failed turn."""
 
@@ -333,6 +354,9 @@ class MindmapAiRetryParametersModel(BaseModel):
     max_depth: int | None = Field(default=None, ge=2, le=32)
     max_nodes: int | None = Field(default=None, ge=5, le=2000)
     density: Literal['concise', 'standard', 'detailed'] | None = None
+    generation_mode: Literal[
+        'dfs_stream', 'bfs_stream', 'balanced', 'complete',
+    ] | None = None
 
     @field_validator('language')
     @classmethod
@@ -435,6 +459,7 @@ class MindmapAiJobModel(BaseModel):
     retention_days: int
     intent: str
     target: str
+    execution_mode: Literal['preview', 'direct'] = 'preview'
     source_type: str
     source_mindmap_id: int | None = None
     base_revision: int | None = None

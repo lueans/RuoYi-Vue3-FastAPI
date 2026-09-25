@@ -618,7 +618,9 @@ class MindMapNode {
     // 更新节点位置
     const t = this.group.transform()
     // 保存一份当前节点数据快照 - 延迟序列化避免每次渲染都执行
-    if (!readonly && !this._snapshotPending) {
+    // Readonly only disables editing; layout still needs the last displayed
+    // data to detect remote/AI changes after runtime nodes are rebound.
+    if (!this._snapshotPending) {
       this._snapshotPending = true
       Promise.resolve().then(() => {
         this._snapshotPending = false
@@ -937,7 +939,12 @@ class MindMapNode {
     }
     this._lineRenderVersion = (Number(this._lineRenderVersion) || 0) + 1
     const lineRenderVersion = this._lineRenderVersion
-    let childrenLen = this.getChildrenLength()
+    // Some layouts (notably LogicalStructure) still iterate the complete
+    // child array while rendering lines, including children hidden by an
+    // expand/collapse state. Keep the line pool at least as large as that
+    // array so a streamed/partially materialized AI frame cannot pass an
+    // undefined line into the layout's setLineStyle routine.
+    let childrenLen = Math.max(this.getChildrenLength(), this.children?.length || 0)
     // 切换为鱼骨结构时，清空根节点和二级节点的连线
     if (this.mindMap.renderer.layout.nodeIsRemoveAllLines) {
       if (this.mindMap.renderer.layout.nodeIsRemoveAllLines(this)) {

@@ -81,7 +81,7 @@ class Fishbone extends Base {
   }
 
   //  布局
-  doLayout(callback) {
+  doLayout(callback, renderSession) {
     let task = [
       () => {
         this.computedBaseValue()
@@ -98,7 +98,7 @@ class Fishbone extends Base {
         callback(this.root)
       }
     ]
-    asyncRun(task)
+    asyncRun(task, () => {}, renderSession)
   }
 
   // 创建鱼尾

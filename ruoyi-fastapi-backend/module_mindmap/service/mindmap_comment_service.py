@@ -105,7 +105,21 @@ class MindmapCommentService:
         model: MindmapCommentCreateModel,
         user_id: int,
         request_id: str | None = None,
+        *,
+        commit: bool = True,
+        broadcast: bool = True,
     ) -> dict:
+        """Create a comment thread.
+
+        ``commit=False`` is used by compound domain operations (for example an
+        AI direct-write batch) so the caller can commit the comment together
+        with the document mutation and its audit/checkpoint rows.  The
+        broadcast is deliberately deferred as well; notifying collaborators
+        before the enclosing transaction commits can expose a state that is
+        still rollback-able.
+        """
+        if not commit and broadcast:
+            raise ServiceException(message='延迟提交时必须同时关闭评论广播')
         normalized_request_id = cls._normalize_request_id(request_id)
         if normalized_request_id:
             existing = await MindmapCommentDao.get_by_request_id(
@@ -141,7 +155,8 @@ class MindmapCommentService:
             # 标量，避免提交后访问属性触发异步上下文外的隐式查询（MissingGreenlet）。
             thread_id = thread.id
             comment_id = comment.id
-            await db.commit()
+            if commit:
+                await db.commit()
         except IntegrityError:
             await db.rollback()
             if not normalized_request_id:
@@ -150,6 +165,12 @@ class MindmapCommentService:
                 db, user_id, normalized_request_id,
             )
             if not existing:
+                raise
+            # A deferred compound transaction cannot safely turn a uniqueness
+            # race into a replay: rolling back the failed INSERT also rolls
+            # back any document mutation staged by the caller.  Let the caller
+            # retry the whole operation with the same idempotency key.
+            if not commit:
                 raise
             return cls._resolve_replay(
                 existing,
@@ -161,7 +182,8 @@ class MindmapCommentService:
         except Exception:
             await db.rollback()
             raise
-        await cls._broadcast_change(model.mindmap_id, 'created', thread_id, model.node_uid)
+        if broadcast:
+            await cls._broadcast_change(model.mindmap_id, 'created', thread_id, model.node_uid)
         return {'threadId': thread_id, 'commentId': comment_id, 'idempotentReplay': False}
 
     @classmethod
@@ -295,6 +317,12 @@ class MindmapCommentService:
         if not thread:
             await db.rollback()
             raise ServiceException(message='评论线程不存在')
+        comment = await MindmapCommentDao.get_comment(
+            db, comment_id, include_deleted=True, for_update=True,
+        )
+        if comment is None or comment.thread_id != thread.id:
+            await db.rollback()
+            raise ServiceException(message='评论不存在')
         _, _, is_owner = await MindmapService.resolve_mindmap_access(
             db, thread.mindmap_id, user_id, require_edit=False,
         )
@@ -327,12 +355,8 @@ class MindmapCommentService:
                 action = 'thread_deleted'
             else:
                 await MindmapCommentDao.soft_delete_comment(db, comment.id, now)
-                remaining = await MindmapCommentDao.count_active_messages(db, thread.id)
-                if remaining == 0:
-                    await MindmapCommentDao.soft_delete_thread(db, thread.id, now)
+                if await MindmapCommentDao.refresh_thread_after_comment_delete(db, thread.id, now):
                     action = 'thread_deleted'
-                else:
-                    await MindmapCommentDao.touch_thread_from_latest_comment(db, thread.id, now)
             await db.commit()
         except Exception:
             await db.rollback()
@@ -343,6 +367,52 @@ class MindmapCommentService:
             'threadDeleted': action == 'thread_deleted',
             'alreadyDeleted': False,
         }
+
+    @classmethod
+    async def delete_ai_comments_for_job(
+        cls,
+        db: AsyncSession,
+        mindmap_id: int,
+        user_id: int,
+        job_id: str,
+    ) -> list[dict[str, Any]]:
+        """Compensate only comments created by one direct AI task.
+
+        Replies from collaborators stay visible. A thread is soft-deleted only
+        when no active messages remain after removing the AI-authored message.
+        The caller owns the surrounding transaction and broadcasts afterwards.
+        """
+        request_prefix = f'ai:{job_id}:'
+        thread_ids = await MindmapCommentDao.list_ai_comment_thread_ids(
+            db,
+            mindmap_id,
+            user_id,
+            request_prefix,
+        )
+        deleted: list[dict[str, Any]] = []
+        now = datetime.now()
+        for thread_id in thread_ids:
+            thread = await MindmapCommentDao.get_thread_for_update(
+                db,
+                thread_id,
+                include_deleted=True,
+            )
+            if thread is None or thread.mindmap_id != mindmap_id:
+                continue
+            comments = await MindmapCommentDao.list_ai_comments_for_update(
+                db, mindmap_id, user_id, request_prefix, thread_id=thread_id,
+            )
+            if not comments:
+                continue
+            for comment in comments:
+                await MindmapCommentDao.soft_delete_comment(db, comment.id, now)
+            thread_deleted = await MindmapCommentDao.refresh_thread_after_comment_delete(db, thread.id, now)
+            deleted.append({
+                'threadId': int(thread.id),
+                'nodeUid': str(thread.node_uid),
+                'threadDeleted': thread_deleted,
+            })
+        return deleted
 
     @staticmethod
     def _normalize_request_id(request_id: str | None) -> str | None:

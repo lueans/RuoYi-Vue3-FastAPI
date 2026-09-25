@@ -11,7 +11,9 @@ from utils.log_util import logger
 
 AGENT_KEY_PATTERN = re.compile(r'^[a-z][a-z0-9_]{1,63}$')
 VERSION_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
-ALLOWED_OUTCOMES = frozenset({'success', 'cancelled', 'timeout', 'invalid', 'error'})
+ALLOWED_OUTCOMES = frozenset({
+    'success', 'cancelled', 'timeout', 'invalid', 'error', 'conflict',
+})
 ALLOWED_EVENTS = frozenset({
     'job_created',
     'artifact_ready',
@@ -20,8 +22,11 @@ ALLOWED_EVENTS = frozenset({
     'cloud_saved',
     'cloud_applied',
     'proposal_stale',
+    'proposal_rejected',
     'cloud_undone',
     'message_ready',
+    'direct_completed',
+    'direct_conflict',
 })
 MAX_AGENT_SERIES = 128
 

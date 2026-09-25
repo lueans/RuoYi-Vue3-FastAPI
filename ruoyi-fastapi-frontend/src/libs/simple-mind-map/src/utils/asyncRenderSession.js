@@ -2,13 +2,26 @@
 // 防止旧任务继续修改已经失效的 SVG 节点。
 export const createAsyncRenderSession = ({
   setTimer = setTimeout,
-  clearTimer = clearTimeout
+  clearTimer = clearTimeout,
+  onError = null
 } = {}) => {
   let active = true
   const timers = new Set()
   const visited = new WeakSet()
 
-  return {
+  const session = {
+    run(task) {
+      if (!active) return false
+      try {
+        task()
+        return active
+      } catch (error) {
+        session.cancel()
+        if (onError) onError(error)
+        else throw error
+        return false
+      }
+    },
     claim(target) {
       if (!active || !target || typeof target !== 'object') return false
       if (visited.has(target)) return false
@@ -20,7 +33,7 @@ export const createAsyncRenderSession = ({
       if (!active) return false
       const timer = setTimer(() => {
         timers.delete(timer)
-        if (active) task()
+        session.run(task)
       }, 0)
       timers.add(timer)
       return true
@@ -41,4 +54,5 @@ export const createAsyncRenderSession = ({
       return timers.size
     }
   }
+  return session
 }

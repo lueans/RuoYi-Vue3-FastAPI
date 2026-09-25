@@ -304,6 +304,11 @@ class MindMap {
     this.renderer.render(callback, source)
   }
 
+  renderAsync(callback, source = '', onError) {
+    this.initTheme()
+    return this.renderer.renderAsync(callback, source, onError)
+  }
+
   //  重新渲染
   reRender(callback, source = '') {
     this.renderer.reRender = true // 标记为重新渲染

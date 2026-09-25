@@ -1,4 +1,6 @@
 import json
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -7,6 +9,7 @@ from module_mindmap.ai.document import (
     MindmapArtifactError,
     build_smm_artifact,
     compute_document_hash,
+    document_from_mindmap_detail,
     normalize_ai_editable_source_document,
     validate_smm_artifact,
 )
@@ -18,6 +21,151 @@ TWO_NODES = 2
 THREE_ITEMS = 3
 TASK_NODE_LIMIT = 100
 AI_JOB_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+
+def test_tag_catalog_search_and_fork_are_read_only_and_references_use_trusted_snapshots() -> None:
+    catalog = [{'tagId': 7, 'text': 'Smoke', 'style': {'color': '#123456'}, 'status': 0,
+                'ownerId': 8, 'description': '支付覆盖'},
+               {'tagId': 8, 'text': 'Disabled', 'status': 1}]
+    tools = MindmapToolService(tag_catalog=catalog)
+    catalog[0]['text'] = '外部篡改'
+    assert tools.search_tags('支付', 1)[0]['text'] == 'Smoke'
+    assert tools.search_tags('Disabled') == []
+    copy = tools.fork()
+    result = copy.search_tags()
+    result[0]['text'] = '返回值篡改'
+    assert tools.search_tags()[0]['text'] == copy.search_tags()[0]['text'] == 'Smoke'
+    assert tools.operation_cursor() == copy.operation_cursor() == 0
+    root = tools.start_document('Root')['rootUid']
+    tools.add_nodes([{'parentUid': root, 'text': 'Child', 'tag': [{'tagId': 7}]}])
+    tag = tools.read_projection()['root']['children'][0]['data']['tag'][0]
+    assert tag == {'tagId': 7, 'text': 'Smoke', 'style': {'color': '#123456'}, 'status': 0}
+
+
+@pytest.mark.parametrize('tags', [
+    ['Smoke'], [{'text': 'Smoke'}], [{'tagId': True}], [{'tagId': '7'}], [{'tagId': 0}],
+    [{'tagId': -1}], [{'tagId': 999}], [{'tagId': 7, 'text': '伪造'}],
+    [{'tagId': 7, 'style': {'color': 'red'}}], [{'tagId': 7}, {'tagId': 7}],
+])
+def test_ai_tag_writes_reject_creation_unknown_ids_and_metadata_atomically(tags: Any) -> None:
+    tools = MindmapToolService(base_document=_document(), tag_catalog=[{'tagId': 7, 'text': 'Smoke'}])
+    before = tools.read_projection()
+    for write in (
+        lambda: tools.add_nodes([{'parentUid': 'root', 'text': 'New', 'tag': tags}]),
+        lambda: tools.update_nodes([{'nodeUid': 'child', 'patch': {'tag': tags}}]),
+        lambda: tools.edit_node_tags('child', tags),
+    ):
+        with pytest.raises(MindmapArtifactError):
+            write()
+        assert tools.read_projection() == before
+        assert tools.operation_cursor() == 0
+
+
+def test_bound_tag_snapshot_fallback_is_scoped_and_disabled_binding_only_stays_on_original_node() -> None:
+    document = _document()
+    document['root']['data']['tag'] = [{'tagId': 9, 'text': 'Private', 'status': 0}]
+    document['root']['children'][0]['data']['tag'] = [{'tagId': 7, 'text': 'Disabled', 'status': 1}]
+    tools = MindmapToolService(base_document=document, scope={'type': 'branch', 'rootUid': 'child'})
+    assert tools.search_tags() == []
+    tools.edit_node_tags('child', [{'tagId': 7}])
+    assert tools.get_node_tags('child')[0]['status'] == 1
+    for tag_id in (7, 9):
+        with pytest.raises(MindmapArtifactError):
+            tools.add_nodes([{'parentUid': 'child', 'text': 'New', 'tag': [{'tagId': tag_id}]}])
+
+
+@pytest.mark.parametrize('catalog', [[], [{'tagId': 9, 'text': 'Public', 'status': 0}]])
+def test_explicit_catalog_does_not_offer_or_rebind_other_nodes_private_tags(catalog: list[dict]) -> None:
+    document = _document()
+    private_tag = {'tagId': 7, 'text': 'Owner private', 'status': 0, 'placement': 'top', 'align': 'left'}
+    document['root']['data']['tag'] = [private_tag]
+    tools = MindmapToolService(base_document=document, tag_catalog=catalog)
+    assert tools.search_tags() == catalog
+    assert tools.fork().search_tags() == catalog
+    tools.edit_node_tags('root', [{'tagId': 7}])
+    assert tools.get_node_tags('root') == [private_tag]
+    before, cursor = tools.read_projection(), tools.operation_cursor()
+    for write in (
+        lambda: tools.edit_node_tags('child', [{'tagId': 7}]),
+        lambda: tools.add_nodes([{'parentUid': 'root', 'text': 'New', 'tag': [{'tagId': 7}]}]),
+    ):
+        with pytest.raises(MindmapArtifactError):
+            write()
+        assert tools.read_projection() == before
+        assert tools.operation_cursor() == cursor
+
+
+def test_tag_definition_refresh_preserves_existing_local_placement_without_accepting_model_layout() -> None:
+    document = _document()
+    document['root']['children'][0]['data']['tag'] = [{
+        'tagId': 7, 'text': 'Old', 'style': {'color': 'red'}, 'placement': 'bottom', 'align': 'right',
+    }]
+    tools = MindmapToolService(base_document=document, tag_catalog=[{
+        'tagId': 7, 'text': 'New', 'style': {'color': 'blue'}, 'placement': 'top', 'align': 'left',
+    }])
+    tools.edit_node_tags('child', [{'tagId': 7}])
+    assert tools.get_node_tags('child') == [{
+        'tagId': 7, 'text': 'New', 'style': {'color': 'blue'}, 'placement': 'bottom', 'align': 'right',
+    }]
+    tools.add_nodes([{'parentUid': 'root', 'text': 'New', 'tag': [{'tagId': 7}]}])
+    assert tools.read_projection()['root']['children'][1]['data']['tag'] == [{
+        'tagId': 7, 'text': 'New', 'style': {'color': 'blue'},
+    }]
+    with pytest.raises(MindmapArtifactError):
+        tools.edit_node_tags('child', [{'tagId': 7, 'placement': 'top'}])
+
+
+def test_catalog_tag_writes_reuse_authorized_node_tags_without_reprojecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _document()
+    original_tag = {'tagId': 7, 'text': 'Private', 'placement': 'bottom', 'align': 'right'}
+    document['root']['children'][0]['data']['tag'] = [original_tag]
+    tools = MindmapToolService(base_document=document, tag_catalog=[])
+
+    def unexpected_tag_projection(*_args: Any, **_kwargs: Any) -> Any:
+        pytest.fail('tag writes already have the authorized node; do not rebuild its full projection')
+
+    monkeypatch.setattr(tools, 'get_node_tags', unexpected_tag_projection)
+    # Retention checks use the batch's original binding, including repeated
+    # updates to the same node, just as before the projection optimization.
+    updates = [
+        {'nodeUid': 'child', 'patch': {'tag': []}},
+        {'nodeUid': 'child', 'patch': {'tag': [{'tagId': 7}], 'text': 'Updated'}},
+    ]
+    tools.update_nodes(updates)
+    updates[1]['patch']['tag'][0]['tagId'] = 999
+    updates[1]['patch']['text'] = 'Caller mutation'
+    assert tools.read_projection()['root']['children'][0]['data']['tag'] == [original_tag]
+    assert tools.read_projection()['root']['children'][0]['data']['text'] == 'Updated'
+    delta = tools.build_stream_delta(after_cursor=0, tool_name='update_nodes')
+    assert delta['operations'][0]['payload']['set'] == {'tag': []}
+    assert delta['operations'][1]['payload']['set'] == {'tag': [original_tag], 'text': 'Updated'}
+    delta['operations'][1]['payload']['set']['tag'][0]['text'] = 'Returned mutation'
+    assert tools.build_stream_delta(after_cursor=0, tool_name='update_nodes')['operations'][1]['payload']['set']['tag'] == [original_tag]
+
+
+def test_tag_suggestions_are_bounded_scoped_and_do_not_change_draft_or_cursor() -> None:
+    tools = MindmapToolService(base_document=_document(), scope={'type': 'branch', 'rootUid': 'child'})
+    before = tools.read_projection()
+    suggestion = {'name': ' 新标签 ', 'reason': ' 用户下一轮手动创建后引用 ', 'nodeUids': ['child']}
+    assert tools.suggest_tags([suggestion]) == [{**suggestion, 'name': '新标签', 'reason': '用户下一轮手动创建后引用'}]
+    assert tools.operation_cursor() == 0
+    assert tools.read_projection() == before
+    for invalid in [[], [suggestion] * 11, [{**suggestion, 'name': 'x' * 101}],
+                    [{**suggestion, 'reason': 'x' * 501}], [{**suggestion, 'nodeUids': ['root']}],
+                    [{**suggestion, 'nodeUids': ['child', 'child']}], [{**suggestion, 'name': 'a\nb'}],
+                    [{**suggestion, 'tagId': 7}]]:
+        with pytest.raises(MindmapArtifactError):
+            tools.suggest_tags(invalid)
+    assert tools.operation_cursor() == 0
+    assert tools.read_projection() == before
+
+
+@pytest.mark.parametrize('query,limit', [('x' * 201, 20), ('', 0), ('', 51), ('', True), (None, 20)])
+def test_tag_catalog_search_rejects_invalid_bounds(query: Any, limit: Any) -> None:
+    with pytest.raises(MindmapArtifactError):
+        MindmapToolService().search_tags(query, limit)
 
 
 def _document() -> dict:
@@ -594,3 +742,43 @@ def test_proposal_requires_an_existing_document_source() -> None:
             'source': {'type': 'none'},
             'target': 'proposal',
         })
+
+
+@pytest.mark.parametrize('metadata', [
+    {'layout': None, 'theme': None, 'view_data': None, 'document_data': None},
+    {'layout': 'mindMap', 'theme': {'template': 'default', 'config': {'lineColor': '#123456'}},
+     'view_data': {'scale': 2}, 'document_data': {'name': 'Raw editor document'}},
+    {'layout': '', 'theme': {}, 'view_data': {}, 'document_data': {}},
+])
+def test_detail_document_mapping_preserves_raw_content_and_normalized_hash(metadata: dict[str, Any]) -> None:
+    detail = SimpleNamespace(node_tree={
+        'data': {'uid': 'root', 'text': '', 'tag': [{'tagId': 7, 'text': 'Known', 'style': {}}]},
+        'children': [{'data': {'uid': 'child', 'text': ' '}, 'children': []}],
+    }, **metadata)
+    original_envelope = {
+        'root': detail.node_tree,
+        'layout': detail.layout,
+        'theme': detail.theme,
+        'view': detail.view_data,
+        'documentData': detail.document_data,
+    }
+
+    document = document_from_mindmap_detail(detail)
+
+    assert document == original_envelope
+    assert all(document[key] is value for key, value in original_envelope.items())
+    normalized, summary = normalize_ai_editable_source_document(document)
+    original_normalized, original_summary = normalize_ai_editable_source_document(original_envelope)
+    assert normalized == original_normalized
+    assert summary == original_summary
+    assert compute_document_hash(normalized) == compute_document_hash(original_normalized)
+    assert detail.node_tree['data']['text'] == ''
+    assert detail.node_tree['children'][0]['data']['text'] == ' '
+
+
+def test_detail_document_mapping_does_not_apply_gateway_fallbacks() -> None:
+    legacy_root = {'root': {'data': {'uid': 'root', 'text': 'Legacy'}, 'children': []}, 'layout': 'mindMap'}
+
+    assert document_from_mindmap_detail(SimpleNamespace(node_tree=legacy_root)) == {
+        'root': legacy_root, 'layout': None, 'theme': None, 'view': None, 'documentData': None,
+    }

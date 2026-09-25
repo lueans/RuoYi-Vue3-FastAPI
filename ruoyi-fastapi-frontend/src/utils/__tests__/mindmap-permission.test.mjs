@@ -38,3 +38,12 @@ test('simple-mind-map 只读命令总线只允许浏览行为', async () => {
   }
   assert.match(source, /if \(this\.mindMap\.opt\.readonly && !READONLY_COMMANDS\.has\(name\)\) \{[\s\S]*?return/)
 })
+
+test('只读模式的节点选中只更新导航标记，不开放通用节点写入', async () => {
+  const source = await readFile(
+    new URL('../../libs/simple-mind-map/src/core/render/Render.js', import.meta.url),
+    'utf8',
+  )
+  assert.match(source, /setNodeActive\(node, active\) \{[\s\S]*if \(this\.mindMap\.opt\.readonly\) \{[\s\S]*node\.nodeData\.data\.isActive = active/)
+  assert.match(source, /else \{[\s\S]*this\.mindMap\.execCommand\('SET_NODE_DATA', node/)
+})

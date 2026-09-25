@@ -1,9 +1,10 @@
-import asyncio
 import importlib
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import Mock
 
 import pytest
 
@@ -69,19 +70,14 @@ def load_adapter_module() -> Callable[[str], ModuleType]:
 
 
 @pytest.fixture(autouse=True)
-def dispose_async_db_engine_after_test() -> None:
-    """
-    在每个 TUI adapter 测试结束后尝试释放全局异步数据库连接池。
+def isolate_search_suggestion_providers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Snapshot tests exercise search context without querying live completions.
 
-    这些适配器测试会按需导入运行时模块；若其中某些路径触发真实数据库访问，
-    模块级 `async_engine` 可能在测试进程结束前仍持有连接，从而在 GC 阶段产生
-    SQLAlchemy 未归还连接告警。这里统一在测试后主动 `dispose()`，将清理职责收口
-    到测试夹具而非业务代码。
-
-    :return: None
+    Nested CLI command doubles do not cover the separate completion providers.
+    Replace that I/O boundary instead of disposing a real connection afterwards.
     """
-    yield
-    database_module = sys.modules.get('config.database')
-    async_engine = getattr(database_module, 'async_engine', None) if database_module is not None else None
-    if async_engine is not None:
-        asyncio.run(async_engine.dispose())
+    search = importlib.import_module('cli.tui.search')
+    providers = search.TUI_SEARCH_SERVICE.provider_registry.providers
+    for key, provider in tuple(providers.items()):
+        if provider.suggestion_provider is not None:
+            monkeypatch.setitem(providers, key, replace(provider, suggestion_provider=Mock(return_value=[])))

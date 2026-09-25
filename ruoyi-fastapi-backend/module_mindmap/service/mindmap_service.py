@@ -3230,7 +3230,12 @@ class MindmapService:
                         },
                     )
                 result = {**previous_result, 'idempotentReplay': True}
-                await query_db.rollback()
+                # A deferred caller may have staged related rows (for example
+                # the direct-write undo receipt and task event) in this same
+                # transaction.  Only the default standalone path owns the
+                # transaction and may roll it back here.
+                if commit:
+                    await query_db.rollback()
                 return result
 
             request_operations = [

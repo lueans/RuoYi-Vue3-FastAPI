@@ -512,6 +512,47 @@ class MindmapDocumentDataPersistenceTest(unittest.IsolatedAsyncioTestCase):
         db.commit.assert_not_awaited()
         update_content.assert_not_awaited()
 
+    async def test_deferred_idempotent_replay_preserves_callers_transaction(self) -> None:
+        request = MindmapContentBatchModel(
+            baseRevision=1,
+            clientMutationId='replayed-deferred-mutation',
+            operations=[{'type': 'file.view.update'}],
+            nodeTree={'data': {'uid': 'root', 'text': 'root'}, 'children': []},
+            viewData={'scale': 1},
+        )
+        mindmap = SimpleNamespace(content_revision=99)
+        previous = SimpleNamespace(result_data={
+            'contentRevision': 2,
+            'clientMutationId': 'replayed-deferred-mutation',
+            'concurrentMerge': False,
+        })
+        db = SimpleNamespace(rollback=AsyncMock(), commit=AsyncMock(), add=Mock())
+
+        with (
+            patch.object(MindmapService, 'check_mindmap_access', new=AsyncMock()),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapDao.get_mindmap_for_update',
+                new=AsyncMock(return_value=mindmap),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_service.MindmapContentDao.get_change_by_mutation',
+                new=AsyncMock(return_value=previous),
+            ),
+        ):
+            result = await MindmapService.update_content_batch_services(
+                db,
+                mindmap_id=8,
+                page_object=request,
+                user_id=3,
+                user_name='ai-agent',
+                commit=False,
+                broadcast=False,
+            )
+
+        self.assertTrue(result['idempotentReplay'])
+        db.rollback.assert_not_awaited()
+        db.commit.assert_not_awaited()
+
     async def test_sync_confirmation_advances_only_revision_and_skips_draft_snapshot(self) -> None:
         tree = {'data': {'uid': 'root', 'text': 'root'}, 'children': []}
         mindmap = SimpleNamespace(

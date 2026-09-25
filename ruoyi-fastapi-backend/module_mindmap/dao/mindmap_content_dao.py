@@ -628,6 +628,25 @@ class MindmapContentDao:
         return (await db.execute(query)).scalars().first()
 
     @classmethod
+    async def get_changes_by_mutations(
+        cls,
+        db: AsyncSession,
+        file_id: int,
+        client_mutation_ids: list[str],
+    ) -> list[MindmapChangeLog]:
+        """Read only explicitly task-owned groups, in bounded SQL batches."""
+        result = []
+        for offset in range(0, len(client_mutation_ids), WRITE_BATCH_SIZE):
+            query = select(MindmapChangeLog).where(
+                MindmapChangeLog.file_id == file_id,
+                MindmapChangeLog.client_mutation_id.in_(
+                    client_mutation_ids[offset:offset + WRITE_BATCH_SIZE],
+                ),
+            )
+            result.extend((await db.execute(query)).scalars().all())
+        return result
+
+    @classmethod
     async def get_changes_after(
         cls,
         db: AsyncSession,

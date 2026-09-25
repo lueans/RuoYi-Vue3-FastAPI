@@ -79,7 +79,7 @@ test('运行期协作重载和冲突处理也服从当前会话取消边界', as
 
   assert.match(reloadBlock, /const signal = sessionController\?\.signal/)
   assert.match(reloadBlock, /getMindmap\(props\.mindmapId, \{[\s\S]*?signal,[\s\S]*?silentError: requireClean/)
-  assert.match(reloadBlock, /if \(sessionCancelled\(signal\) \|\| !mindMap\.value\) return false/)
+  assert.match(reloadBlock, /if \(sessionCancelled\(signal\) \|\| !mindMap\.value \|\| aiPresentationCommitExpired\(\)\) return false/)
   assert.match(reloadBlock, /return true/)
   assert.match(conflictEntryBlock, /if \(conflictResolutionPromise\) return conflictResolutionPromise/)
   assert.match(conflictEntryBlock, /conflictResolutionPromise = operation/)

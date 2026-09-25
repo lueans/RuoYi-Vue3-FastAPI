@@ -701,7 +701,13 @@ test('concurrent merge defers authoritative replacement while newer local edits 
     /requireClean[\s\S]*?hasUnsavedChanges\(\)[\s\S]*?viewSaveRequested[\s\S]*?viewSaveInProgress[\s\S]*?return false/,
   )
   assert.match(reloadBlock, /viewChangeVersion !== cleanViewChangeVersion/)
-  assert.match(reloadBlock, /applyAuthoritativeMindmapDocument\(activeMindMap, serverDocument\)/)
+  assert.match(
+    reloadBlock,
+    /applyAuthoritativeMindmapDocument\(activeMindMap, serverDocument, \{[\s\S]*?historyCurrentTree: allowAiPresentationCommit[\s\S]*?aiPresentationSession\.baseline\.root/,
+  )
+  assert.match(reloadBlock, /shouldDeferAiAuthoritativeDocument\(\) && !allowAiPresentationCommit/)
+  assert.match(reloadBlock, /aiDraftPreviewState !== aiPresentationSession/)
+  assert.match(reloadBlock, /if \(allowAiPresentationCommit\) await renderAiPreviewTree/)
   assert.doesNotMatch(reloadBlock, /activeMindMap\.setFullData\(serverDocument\)/)
 })
 

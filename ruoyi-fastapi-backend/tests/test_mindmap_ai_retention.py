@@ -241,9 +241,9 @@ async def test_cleanup_scrubs_applied_audit_but_deletes_unapplied_payloads() -> 
         result = await MindmapAiRetentionManager.cleanup_once()
 
     assert set(list_expired.await_args.args[2]) == {
-        'ready', 'applied', 'undone', 'completed_file', 'completed_no_change',
+        'ready', 'applied', 'undone', 'completed_file', 'completed_direct', 'completed_no_change',
         'completed_message', 'needs_review', 'needs_input', 'stale', 'cancelled',
-        'failed', 'expired',
+        'failed', 'expired', 'rejected',
     }
     list_surviving_references.assert_awaited_once_with(
         database,

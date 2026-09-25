@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,7 @@ from exceptions.exception import ServiceException, ServiceWarning
 from module_ai.dao.ai_model_dao import AiModelDao
 from module_ai.entity.do.ai_model_do import AiModels
 from module_mindmap.ai.adapters.base import (
+    AgentDirectResult,
     AgentMessageResult,
     AgentNeedsInputResult,
     AgentRunContext,
@@ -32,6 +34,11 @@ from module_mindmap.ai.adapters.base import (
 )
 from module_mindmap.ai.adapters.conformance import build_agent_conformance_report
 from module_mindmap.ai.adapters.factory import get_mindmap_agent_registry
+from module_mindmap.ai.change_summary import (
+    CHANGE_SUMMARY_VERSION,
+    has_complete_change_evidence,
+    summarize_committed_node_changes,
+)
 from module_mindmap.ai.checkpoint_crypto import MindmapAiCheckpointCrypto
 from module_mindmap.ai.credentials import resolve_connector_credential
 from module_mindmap.ai.diff import build_document_diff
@@ -39,8 +46,10 @@ from module_mindmap.ai.document import (
     AI_MAX_FILE_BYTES,
     AI_MAX_NODE_COUNT,
     MindmapArtifactError,
+    build_smm_artifact,
     canonical_json_bytes,
     compute_document_hash,
+    document_from_mindmap_detail,
     normalize_ai_editable_source_document,
     validate_smm_artifact,
 )
@@ -50,8 +59,9 @@ from module_mindmap.ai.proposal_operations import (
     normalize_proposal_operations_for_apply,
     verify_proposal_document_integrity,
 )
-from module_mindmap.ai.tool_contract import MindmapToolService
+from module_mindmap.ai.tool_contract import MindmapToolService, normalize_tag_suggestions
 from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
+from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
 from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiCloudApplyModel,
     MindmapAiCloudSaveModel,
@@ -71,6 +81,9 @@ from module_mindmap.service.mindmap_ai_metrics import (
     record_mindmap_ai_event,
     record_mindmap_ai_run,
 )
+from module_mindmap.service.mindmap_ai_mutation_gateway import MindmapAiMutationGateway, _document_from_detail
+from module_mindmap.service.mindmap_ai_tag_catalog import load_ai_tag_catalog
+from module_mindmap.service.mindmap_comment_service import MindmapCommentService
 from module_mindmap.service.mindmap_service import MindmapService
 from utils.ai_util import AiUtil
 from utils.crypto_util import CryptoUtil
@@ -87,7 +100,9 @@ TERMINAL_JOB_STATUSES = frozenset({
     'undone',
     'completed_file',
     'completed_no_change',
+    'completed_direct',
     'needs_review',
+    'rejected',
     'stale',
     'cancelled',
     'failed',
@@ -97,17 +112,23 @@ TERMINAL_JOB_STATUSES = frozenset({
 })
 RETRYABLE_JOB_STATUSES = frozenset({'failed', 'cancelled', 'expired', 'stale'})
 RETENTION_ELIGIBLE_JOB_STATUSES = TERMINAL_JOB_STATUSES
-RETAINED_AUDIT_JOB_STATUSES = frozenset({'applied', 'undone', 'completed_file'})
+RETAINED_AUDIT_JOB_STATUSES = frozenset({'applied', 'undone', 'completed_file', 'completed_direct'})
 RETENTION_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 ACTIVE_JOB_STATUSES = frozenset({
     'queued', 'preparing', 'running', 'validating', 'cancel_requested',
 })
+WAITING_TURN_STATUS = 'waiting_turn'
+WAITING_FOLLOWUP_ROUTES = frozenset({'current', 'next'})
 JOB_STATUS_PREDECESSORS: dict[str, frozenset[str]] = {
     'preparing': frozenset({'queued'}),
     'running': frozenset({'preparing'}),
     'validating': frozenset({'running'}),
-    'queued': frozenset({'preparing', 'running', 'validating'}),
-    'cancelled': ACTIVE_JOB_STATUSES,
+    'queued': frozenset({'preparing', 'running', 'validating', WAITING_TURN_STATUS}),
+    'cancelled': ACTIVE_JOB_STATUSES | {WAITING_TURN_STATUS},
+    # A direct-write task may have already committed earlier batches before a
+    # later batch races with a collaborator. Keep that outcome distinct from
+    # a provider failure so the UI can ask the user to resync/retry knowingly.
+    'stale': ACTIVE_JOB_STATUSES,
     'failed': frozenset({'queued', 'preparing', 'running', 'validating'}),
     'needs_input': frozenset({'running'}),
 }
@@ -128,11 +149,15 @@ AI_EVENT_SAFE_FIELDS = frozenset({
     'previewAvailable', 'previewVersion', 'previewEpoch', 'changeCount', 'issueCount', 'messageType',
     'intent', 'sourceType', 'revision', 'mindmapId', 'contentRevision', 'usage',
     'rebasedFromRevision', 'forceOverwrite',
-    'sessionMode', 'continuationBase', 'budgetEnforcement', 'responseId',
-    'questions',
+    'sessionMode', 'continuationBase', 'budgetEnforcement', 'responseId', 'executionMode',
+    'directCommit', 'operationGroupId', 'operationCount', 'affectedUids', 'commentCount',
+    'changeSummary', 'changeSummaryVersion',
+    'questions', 'route', 'queuePosition',
+    'completionReason',
+    'suggestions',
 })
 AI_EVENT_SUMMARY_FIELDS = frozenset({
-    'nodeCount', 'treeDepth', 'bytes', 'issueCount', 'status',
+    'nodeCount', 'treeDepth', 'bytes', 'issueCount', 'status', 'changeSummary',
 })
 AI_EVENT_USAGE_FIELDS = frozenset({'inputTokens', 'outputTokens', 'totalTokens'})
 AI_TIMELINE_EVENT_PAGE_SIZE = 1_000
@@ -295,6 +320,44 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
 
 
+def _request_with_undo_baseline(payload: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    """Attach server-only raw bytes after public-model validation/fingerprinting."""
+    result = dict(payload)
+    result.pop('_directUndoBaseline', None)
+    if baseline:
+        result['_directUndoBaseline'] = baseline
+    return result
+
+
+def _restore_preview_document(request: MindmapAiJobCreateModel, document: dict[str, Any]) -> dict[str, Any]:
+    if request.source.document is None:
+        return document
+    tools = MindmapToolService(
+        base_document=request.source.document,
+        scope=request.source.scope.model_dump(by_alias=True, exclude_none=True),
+        trusted_source=True,
+    )
+    return tools.restore_checkpoint_projection(document)
+
+
+def _raw_direct_undo_baseline(job: Any) -> dict[str, Any] | None:
+    payload = _json_loads(getattr(job, 'request_json', None), {})
+    baseline = payload.get('_directUndoBaseline')
+    if not isinstance(baseline, dict) or any((
+        baseline.get('schemaVersion') != 1,
+        baseline.get('mindmapId') != job.source_mindmap_id,
+        baseline.get('revision') != job.base_revision,
+        baseline.get('documentHash') != getattr(job, 'base_hash', None),
+        not isinstance(baseline.get('document'), dict),
+    )):
+        return None
+    try:
+        normalized, _summary = normalize_ai_editable_source_document(baseline['document'])
+    except (MindmapArtifactError, TypeError, ValueError):
+        return None
+    return baseline['document'] if compute_document_hash(normalized) == baseline['documentHash'] else None
+
+
 def _initial_session_title(prompt: str) -> str:
     """Create a deterministic title before any provider response exists."""
     normalized = ' '.join(_SESSION_TITLE_CONTROL_PATTERN.sub(' ', prompt).split())
@@ -308,6 +371,23 @@ def _json_loads(value: str | None, default: Any = None) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return default
+
+
+def _is_high_impact_proposal(proposal: Any) -> bool:
+    impact = _json_loads(getattr(proposal, 'impact_json', None), {})
+    return isinstance(impact, dict) and impact.get('highImpact') is True
+
+
+def _waiting_followup_route(job: Any) -> str:
+    """Read the durable route selected for a queued follow-up.
+
+    ``queueRoute`` was added after the first queue implementation.  Existing
+    rows intentionally fall back to ``current`` so an upgrade never strands a
+    message waiting for a route value that was not persisted at creation time.
+    """
+    payload = _json_loads(getattr(job, 'request_json', None), {})
+    route = payload.get('queueRoute') if isinstance(payload, dict) else None
+    return route if route in WAITING_FOLLOWUP_ROUTES else 'current'
 
 
 def _proposal_integrity_service_exception(exc: BaseException) -> ServiceException:
@@ -417,7 +497,158 @@ def _compatible_persisted_error_code(
     return error_code
 
 
-def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912
+def _safe_persisted_scalar(value: Any) -> str | int | float | bool | None:
+    """Return a JSON-safe scalar for event/checkpoint/cache summaries.
+
+    Provider telemetry is not trusted input.  In particular, NaN/Infinity are
+    valid Python floats but invalid JSON when ``allow_nan=False`` is used by
+    the durable serializers.  Filtering them at this shared boundary keeps a
+    malformed progress frame from aborting an otherwise valid AI turn.
+    """
+    if isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return None
+
+
+def _safe_draft_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+    """Use the same content-free scalar projection for durable/cache summaries."""
+    return {
+        key: safe_item
+        for key, item in (summary or {}).items()
+        if key in AI_EVENT_SUMMARY_FIELDS
+        and (safe_item := _safe_persisted_scalar(item)) is not None
+    }
+
+
+def _safe_change_summary(value: Any) -> dict[str, int]:
+    """Normalize the content-free direct-write counters for API/event output."""
+    result = {'added': 0, 'updated': 0, 'moved': 0, 'deleted': 0, 'total': 0}
+    if not isinstance(value, dict):
+        return result
+    aliases = {
+        'added': ('added', 'createdCount'),
+        'updated': ('updated', 'updatedCount'),
+        'moved': ('moved', 'movedCount'),
+        'deleted': ('deleted', 'deletedCount'),
+    }
+    for output_key, candidates in aliases.items():
+        raw = next((value[key] for key in candidates if key in value), 0)
+        if isinstance(raw, bool):
+            raw = 0
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = 0
+        result[output_key] = max(0, parsed)
+    result['total'] = sum(result[key] for key in aliases)
+    return result
+
+
+def _merge_change_summary(
+    target: dict[str, int],
+    incoming: Any,
+) -> dict[str, int]:
+    normalized = _safe_change_summary(incoming)
+    for key in ('added', 'updated', 'moved', 'deleted'):
+        target[key] = max(0, int(target.get(key, 0))) + normalized[key]
+    target['total'] = sum(target[key] for key in ('added', 'updated', 'moved', 'deleted'))
+    return target
+
+
+async def _direct_job_change_result(db: AsyncSession, job: Any) -> dict[str, Any]:  # noqa: PLR0912
+    """Resolve a versioned net summary from this task's durable commits only.
+
+    Counts in old events are operation totals, so prefer canonical logs even
+    when those counts exist. If retention removed any required log, fall back
+    to the complete terminal receipt (or legacy batch totals), explicitly at
+    the legacy version; never mislabel a partial reconstruction as net impact.
+    """
+    commits: list[dict[str, Any]] = []
+    seen_group_ids: set[str] = set()
+    event_cursor = 0
+    terminal: dict[str, Any] | None = None
+    while True:
+        event_page = await MindmapAiDao.list_events(
+            db,
+            str(job.id),
+            event_cursor,
+            limit=AI_TIMELINE_EVENT_PAGE_SIZE,
+        )
+        if not event_page:
+            break
+        for event in event_page:
+            payload = _json_loads(event.payload_json, {})
+            if not isinstance(payload, dict):
+                continue
+            direct_commit = payload.get('directCommit')
+            if event.event_type == 'draft_changed' and isinstance(direct_commit, dict):
+                if direct_commit.get('idempotentReplay') is True:
+                    continue
+                group_id = str(direct_commit.get('operationGroupId') or '')
+                if group_id and group_id in seen_group_ids:
+                    continue
+                if group_id:
+                    seen_group_ids.add(group_id)
+                commits.append(direct_commit)
+            elif event.event_type == 'direct_completed':
+                summary = payload.get('changeSummary')
+                if isinstance(summary, dict):
+                    terminal = {
+                        'changeSummary': _safe_change_summary(summary),
+                        'changeSummaryVersion': (
+                            CHANGE_SUMMARY_VERSION
+                            if payload.get('changeSummaryVersion') == CHANGE_SUMMARY_VERSION else 1
+                        ),
+                    }
+        next_cursor = int(event_page[-1].sequence)
+        if len(event_page) < AI_TIMELINE_EVENT_PAGE_SIZE or next_cursor <= event_cursor:
+            break
+        event_cursor = next_cursor
+
+    if terminal and terminal['changeSummaryVersion'] == CHANGE_SUMMARY_VERSION:
+        return terminal
+    changes = []
+    if seen_group_ids and getattr(job, 'source_mindmap_id', None):
+        changes = await MindmapContentDao.get_changes_by_mutations(
+            db, int(job.source_mindmap_id), sorted(seen_group_ids),
+        )
+    by_group = {str(change.client_mutation_id): change for change in changes}
+    groups = []
+    complete = True
+    for commit in commits:
+        change = by_group.get(str(commit.get('operationGroupId') or ''))
+        if change is not None and isinstance(change.operations, list):
+            groups.append(change.operations)
+        elif commit.get('operationCount') == 0 and not _safe_change_summary(commit.get('changeSummary'))['total']:
+            # Pure comments / no-op batches have no document change-log row.
+            continue
+        else:
+            complete = False
+    if complete and has_complete_change_evidence(groups) and (commits or terminal is None):
+        return {
+            'changeSummary': summarize_committed_node_changes(groups),
+            'changeSummaryVersion': CHANGE_SUMMARY_VERSION,
+        }
+    if terminal:
+        return terminal
+    # Legacy per-batch totals are only needed when neither a complete net
+    # reconstruction nor a durable terminal receipt can answer the request.
+    # Do not compute/discard every batch's projection on the normal v2 path.
+    fallback = _safe_change_summary(None)
+    for commit in commits:
+        change = by_group.get(str(commit.get('operationGroupId') or ''))
+        summary = (
+            summarize_committed_node_changes([change.operations])
+            if change is not None and isinstance(change.operations, list)
+            else commit.get('changeSummary')
+        )
+        _merge_change_summary(fallback, summary)
+    return {'changeSummary': fallback, 'changeSummaryVersion': 1}
+
+
+def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     """把供应商事件收敛为不含 prompt、节点正文和完整文档的审计摘要。"""
     output: dict[str, Any] = {}
     for key, value in payload.items():
@@ -425,12 +656,10 @@ def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR
             continue
         if key == 'summary':
             if isinstance(value, dict):
-                output[key] = {
-                    item_key: item_value
-                    for item_key, item_value in value.items()
-                    if item_key in AI_EVENT_SUMMARY_FIELDS
-                    and isinstance(item_value, (str, int, float, bool))
-                }
+                summary = _safe_draft_summary(value)
+                if 'changeSummary' in value:
+                    summary['changeSummary'] = _safe_change_summary(value['changeSummary'])
+                output[key] = summary
             continue
         if key == 'tools':
             if isinstance(value, list):
@@ -448,6 +677,12 @@ def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR
             except MindmapArtifactError:
                 continue
             continue
+        if key == 'suggestions':
+            try:
+                output[key] = normalize_tag_suggestions(value)
+            except MindmapArtifactError:
+                continue
+            continue
         if key == 'usage':
             if isinstance(value, dict):
                 output[key] = {
@@ -459,10 +694,41 @@ def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR
                     and item_value >= 0
                 }
             continue
-        if isinstance(value, str):
-            output[key] = value[:500]
-        elif isinstance(value, (int, float, bool)):
-            output[key] = value
+        if key == 'directCommit':
+            if isinstance(value, dict):
+                safe_commit: dict[str, Any] = {}
+                for item_key in (
+                    'contentRevision',
+                    'operationGroupId',
+                    'operationCount',
+                    'commentCount',
+                    'proposalId',
+                ):
+                    item_value = value.get(item_key)
+                    if isinstance(item_value, (str, int)) and not isinstance(item_value, bool):
+                        safe_commit[item_key] = str(item_value)[:100] if isinstance(item_value, str) else item_value
+                replay = value.get('idempotentReplay')
+                if isinstance(replay, bool):
+                    safe_commit['idempotentReplay'] = replay
+                uids = value.get('affectedUids')
+                if isinstance(uids, list):
+                    safe_commit['affectedUids'] = [str(uid)[:64] for uid in uids[:200]]
+                if 'changeSummary' in value:
+                    safe_commit['changeSummary'] = _safe_change_summary(value.get('changeSummary'))
+                output[key] = safe_commit
+            continue
+        if key == 'changeSummary':
+            output[key] = _safe_change_summary(value)
+            continue
+        if key == 'affectedUids':
+            if isinstance(value, list):
+                output[key] = [str(uid)[:64] for uid in value[:200]]
+            continue
+        safe_value = _safe_persisted_scalar(value)
+        if isinstance(safe_value, str):
+            output[key] = safe_value[:500]
+        elif safe_value is not None:
+            output[key] = safe_value
     if 'errorCode' in output:
         output['errorCode'] = _compatible_persisted_error_code(
             output['errorCode'],
@@ -530,6 +796,10 @@ def _validate_job_result_artifact(
 
 
 def _job_model(job: Any) -> MindmapAiJobModel:
+    request_payload = _json_loads(getattr(job, 'request_json', None), {})
+    execution_mode = request_payload.get('executionMode', 'preview')
+    if execution_mode not in {'preview', 'direct'}:
+        execution_mode = 'preview'
     return MindmapAiJobModel(
         id=job.id,
         sessionId=job.session_id,
@@ -550,6 +820,7 @@ def _job_model(job: Any) -> MindmapAiJobModel:
         ),
         intent=job.intent,
         target=job.target,
+        executionMode=execution_mode,
         sourceType=job.source_type,
         sourceMindmapId=job.source_mindmap_id,
         baseRevision=job.base_revision,
@@ -576,6 +847,10 @@ class MindmapAiTaskManager:
 
     _tasks: dict[str, asyncio.Task[None]] = {}
     _draft_preview_runs: dict[str, DraftPreviewRun] = {}
+    # Expected cloud revision for the next direct mutation batch. This is a
+    # process-local fast path; the persisted job baseline remains the recovery
+    # fallback after a worker restart.
+    _direct_commit_revisions: dict[str, int] = {}
     _claimed_execution_epochs: dict[str, int] = {}
     _recovery_task: asyncio.Task[None] | None = None
     _recovery_stop_event: asyncio.Event | None = None
@@ -766,12 +1041,6 @@ class MindmapAiTaskManager:
         expires_time: datetime,
     ) -> dict[str, Any]:
         """Build an encrypted checkpoint without exposing content to events/logs."""
-        safe_summary = {
-            key: item
-            for key, item in (summary or {}).items()
-            if key in AI_EVENT_SUMMARY_FIELDS
-            and isinstance(item, (str, int, float, bool))
-        }
         normalized_document, _normalized_summary = normalize_ai_editable_source_document(
             document,
         )
@@ -832,7 +1101,7 @@ class MindmapAiTaskManager:
             'operations_ciphertext': operations_ciphertext,
             'initial_state_ciphertext': initial_state_ciphertext,
             'document_hash': document_hash,
-            'summary_json': _json_dumps(safe_summary),
+            'summary_json': _json_dumps(_safe_draft_summary(summary)),
             'expires_time': expires_time,
         }
 
@@ -898,12 +1167,7 @@ class MindmapAiTaskManager:
                 'operationCursor': version,
                 'previewEpoch': epoch,
                 'document': document,
-                'summary': {
-                    key: item
-                    for key, item in summary.items()
-                    if key in AI_EVENT_SUMMARY_FIELDS
-                    and isinstance(item, (str, int, float, bool))
-                },
+                'summary': _safe_draft_summary(summary),
                 'updatedTime': checkpoint.update_time.isoformat(),
             }
         except Exception:
@@ -1024,12 +1288,7 @@ class MindmapAiTaskManager:
             'previewEpoch': max(1, int(preview_epoch)),
             'document': normalized_document,
             'documentHash': compute_document_hash(normalized_document),
-            'summary': {
-                key: item
-                for key, item in (summary or {}).items()
-                if key in AI_EVENT_SUMMARY_FIELDS
-                and isinstance(item, (str, int, float, bool))
-            },
+            'summary': _safe_draft_summary(summary),
             'updatedTime': datetime.now().isoformat(),
             'executionEpoch': execution_epoch,
         }
@@ -1389,6 +1648,7 @@ class MindmapAiTaskManager:
                 cls._tasks.pop(job_id, None)
                 cls._draft_preview_runs.pop(job_id, None)
                 cls._claimed_execution_epochs.pop(job_id, None)
+                cls._direct_commit_revisions.pop(job_id, None)
 
         task.add_done_callback(forget_finished_run)
         return True
@@ -1568,6 +1828,13 @@ class MindmapAiTaskManager:
         if cls._shutting_down:
             return 0
         scheduled = 0
+        async with AsyncSessionLocal() as db:
+            waiting_jobs = await MindmapAiDao.list_waiting_jobs(db)
+        # A process can stop after committing the parent's terminal artifact but
+        # before the child release transaction. Re-run the release check during
+        # recovery so an already persisted next turn never waits forever.
+        for waiting_job in waiting_jobs:
+            await cls._wake_waiting_followups(str(waiting_job.parent_job_id or ''))
         cursor_created_time: datetime | None = None
         cursor_id: str | None = None
         batch_size = int(MindmapAiConfig.mindmap_ai_recovery_batch_size)
@@ -1645,7 +1912,278 @@ class MindmapAiTaskManager:
         cls._redis = None
 
     @classmethod
-    async def _emit(cls, job_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    async def _ensure_direct_undo_receipt(
+        cls,
+        db: AsyncSession,
+        job: Any,
+    ) -> str | None:
+        """Create the durable undo anchor before the first direct mutation.
+
+        Direct jobs intentionally do not create a preview Proposal.  The
+        existing undo table is still a durable, conditional receipt, so a
+        stopped or partially failed direct turn can be reverted without
+        inventing a second document snapshot.  The job id is used as the
+        receipt id because it is stable across retries and already exposed to
+        the client as the task identity.
+        """
+        request_payload = _json_loads(getattr(job, 'request_json', None), {})
+        if (
+            request_payload.get('executionMode', 'preview') != 'direct'
+            or getattr(job, 'source_type', None) != 'cloud_document'
+            or not getattr(job, 'source_mindmap_id', None)
+        ):
+            return None
+        receipt_id = str(getattr(job, 'proposal_id', '') or job.id)
+        existing = await MindmapAiDao.get_undo(db, receipt_id, int(job.user_id))
+        if existing is not None:
+            if getattr(existing, 'status', None) == 'available' and _raw_direct_undo_baseline(job) is None:
+                await MindmapAiDao.update_undo(db, receipt_id, {'status': 'blocked'})
+            if not getattr(job, 'proposal_id', None):
+                await MindmapAiDao.update_job(db, str(job.id), {
+                    'proposal_id': receipt_id,
+                })
+                try:
+                    job.proposal_id = receipt_id
+                except Exception:
+                    pass
+            return receipt_id
+        source = request_payload.get('source')
+        source_document = (
+            source.get('baselineDocument') or source.get('document')
+            if isinstance(source, dict)
+            else None
+        )
+        if not isinstance(source_document, dict):
+            raise MindmapArtifactError(
+                '直写任务缺少可撤销的云端基线',
+                code='AI_OUTPUT_INVALID',
+            )
+        normalized_before, _summary = normalize_ai_editable_source_document(
+            source_document,
+            max_node_count=AI_MAX_NODE_COUNT,
+        )
+        raw_before = _raw_direct_undo_baseline(job)
+        before_hash = compute_document_hash(normalized_before)
+        now = datetime.now()
+        await MindmapAiDao.add_undo(db, {
+            'proposal_id': receipt_id,
+            'user_id': int(job.user_id),
+            'mindmap_id': int(job.source_mindmap_id),
+            'before_document_json': _json_dumps(raw_before or normalized_before),
+            'before_hash': before_hash,
+            'applied_hash': before_hash,
+            'applied_revision': int(job.base_revision or 1),
+            # Older rows have only the lossy Agent projection. Keep their
+            # receipt visible, but never pretend it can restore original bytes.
+            'status': 'available' if raw_before is not None else 'blocked',
+            'created_time': now,
+            'expires_time': getattr(job, 'expires_time', None) or now,
+        })
+        await MindmapAiDao.update_job(db, str(job.id), {
+            'proposal_id': receipt_id,
+        })
+        try:
+            job.proposal_id = receipt_id
+        except Exception:
+            pass
+        return receipt_id
+
+    @staticmethod
+    async def _record_direct_undo_commit(
+        db: AsyncSession, job: Any, receipt_id: str, result: dict[str, Any],
+    ) -> None:
+        receipt = await MindmapAiDao.get_undo(db, receipt_id, int(job.user_id))
+        previous_revision = int(getattr(receipt, 'applied_revision', job.base_revision) or 1)
+        revision = int(result['contentRevision'])
+        replay = bool(result.get('idempotentReplay'))
+        step = int(int(result.get('operationCount') or 0) > 0 and not replay)
+        blocked = (
+            _raw_direct_undo_baseline(job) is None
+            or getattr(receipt, 'status', None) != 'available'
+            or bool(result.get('concurrentMerge'))
+            or revision != previous_revision + step
+        )
+        values = {'applied_revision': revision, 'applied_hash': result.get('documentHash')}
+        if blocked:
+            # Whole-document undo is safe only across an uninterrupted chain
+            # of this task's commits. Once foreign work is absorbed, later AI
+            # commits/no-ops must never make the receipt available again.
+            values['status'] = 'blocked'
+        await MindmapAiDao.update_undo(db, receipt_id, values)
+
+    @staticmethod
+    def _project_committed_preview(
+        job: Any, document: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Keep cloud truth without broadening the task's authorized projection."""
+        request = _json_loads(getattr(job, 'request_json', None), {})
+        source = request.get('source') or {}
+        normalized_document, _summary = normalize_ai_editable_source_document(document)
+        tool = MindmapToolService(
+            base_document=normalized_document,
+            scope=source.get('scope') if isinstance(source, dict) else None,
+            trusted_source=True,
+        )
+        return tool.read_projection(), tool.authorized_scope_summary()
+
+    @staticmethod
+    def _tag_catalog_target_mindmap_id(request: MindmapAiJobCreateModel) -> int | None:
+        # A file result belongs to the requesting user, even when its input
+        # came from a shared map. Only edits of that existing map inherit its
+        # owner's tag-binding restrictions.
+        if request.execution_mode == 'direct' or request.target == 'proposal':
+            return request.source.mindmap_id
+        return None
+
+    @staticmethod
+    async def _resolve_run_source_document(
+        db: AsyncSession,
+        job: Any,
+        request: MindmapAiJobCreateModel,
+        recovered_preview: dict[str, Any] | None,
+        *,
+        has_draft_history: bool,
+    ) -> dict[str, Any] | None:
+        # Legacy direct checkpoints can contain pre-commit tool values. They
+        # are coordinates for resuming playback, not authority for restarting
+        # writes. Recover the complete current cloud tree; the new tool then
+        # reapplies the original scope before exposing anything to the agent.
+        if request.execution_mode == 'direct' and (recovered_preview is not None or has_draft_history):
+            detail = await MindmapAiMutationGateway.read_document(
+                db, int(request.source.mindmap_id), int(job.user_id),
+            )
+            document, _summary = normalize_ai_editable_source_document(_document_from_detail(detail))
+            return document
+        return (
+            _restore_preview_document(request, recovered_preview['document'])
+            if recovered_preview is not None else request.source.document
+        )
+
+    @classmethod
+    async def _validate_tag_suggestions(
+        cls, db: AsyncSession, job: Any, payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        suggestions = normalize_tag_suggestions(payload.get('suggestions'))
+        target_uids = {uid for suggestion in suggestions for uid in suggestion['nodeUids']}
+        if not target_uids:
+            return suggestions
+        request = _json_loads(getattr(job, 'request_json', None), {})
+        if request.get('executionMode') == 'direct':
+            detail = await MindmapAiMutationGateway.read_document(
+                db, int(job.source_mindmap_id), int(job.user_id),
+            )
+            projection, _summary = cls._project_committed_preview(job, _document_from_detail(detail))
+        else:
+            checkpoint = await MindmapAiDao.get_draft_checkpoint(db, str(job.id))
+            preview = cls._draft_checkpoint_preview(checkpoint)
+            projection = preview['document'] if preview is not None else None
+            if projection is None:
+                source = request.get('source') or {}
+                if isinstance(source, dict) and isinstance(source.get('document'), dict):
+                    projection, _summary = cls._project_committed_preview(job, source['document'])
+        allowed_uids: set[str] = set()
+        pending = [projection.get('root')] if isinstance(projection, dict) else []
+        while pending:
+            node = pending.pop()
+            if not isinstance(node, dict):
+                continue
+            allowed_uids.add(str((node.get('data') or {}).get('uid') or ''))
+            pending.extend(node.get('children') or [])
+        if not target_uids <= allowed_uids:
+            raise MindmapArtifactError('标签建议引用了任务授权范围以外的节点', code='AI_OUTPUT_INVALID')
+        return suggestions
+
+    @classmethod
+    async def _commit_direct_draft(
+        cls,
+        db: AsyncSession,
+        job: Any,
+        operations: list[dict[str, Any]],
+        operation_cursor: int,
+    ) -> dict[str, Any] | None:
+        """Commit one Agent draft delta through the authoritative map gateway."""
+        request_payload = _json_loads(getattr(job, 'request_json', None), {})
+        if request_payload.get('executionMode', 'preview') != 'direct':
+            return None
+        if job.source_type != 'cloud_document' or not job.source_mindmap_id:
+            raise MindmapArtifactError(
+                '直接写入任务缺少云端脑图目标',
+                code='AI_DOCUMENT_CONFLICT',
+            )
+        if not operations:
+            return None
+        source = request_payload.get('source') or {}
+        scope = source.get('scope') if isinstance(source, dict) else None
+        # ``operation_cursor`` is the globally monotonic preview cursor, not
+        # the adapter-local cursor. A recovered worker starts its in-memory
+        # DraftOperation list at zero again; using the local value here would
+        # reuse an earlier mutation id for a different batch.
+        mutation_id = f'ai:{job.id}:{int(operation_cursor)}'
+        expected_revision = cls._direct_commit_revisions.get(
+            str(job.id),
+            int(job.base_revision or 1),
+        )
+        try:
+            result = await MindmapAiMutationGateway.apply_draft_operations(
+                db,
+                int(job.source_mindmap_id),
+                operations,
+                int(job.user_id),
+                mutation_id=mutation_id,
+                scope=scope if isinstance(scope, dict) else None,
+                user_name=f'ai-agent:{job.agent_key}',
+                expected_revision=expected_revision,
+                commit=False,
+                broadcast=False,
+            )
+            committed_revision = result.get('contentRevision')
+            if isinstance(committed_revision, int) and committed_revision >= expected_revision:
+                # The surrounding _emit transaction still contains the draft
+                # checkpoint and event. Advance the process-local baseline only
+                # after that outer transaction commits successfully.
+                result['_nextExpectedRevision'] = committed_revision
+            return result
+        except ServiceWarning as exc:
+            message = str(exc.message or '脑图已被其他协作者修改，AI 直写需要重新同步')
+            raise MindmapArtifactError(
+                message,
+                code='AI_DOCUMENT_CONFLICT',
+            ) from exc
+        except ServiceException as exc:
+            # The mutation gateway deliberately uses the application's
+            # ServiceException for permission, integrity and CAS failures.
+            # This callback runs inside the Agent's required-event path; let a
+            # domain failure retain a stable AI error code instead of being
+            # mistaken for an event-table outage (which used to surface as
+            # ``AI_AGENT_UNAVAILABLE: 实时事件持久化失败``).
+            message = str(exc.message or '脑图当前状态不允许继续直写，请重新读取后重试')
+            raise MindmapArtifactError(
+                message,
+                code='AI_DOCUMENT_CONFLICT',
+            ) from exc
+        except IntegrityError as exc:
+            # A duplicate comment/mutation receipt is a domain-level replay
+            # race, not an event-store outage.  Preserve a retryable conflict
+            # code so the worker can stop cleanly and the UI can resync.
+            raise MindmapArtifactError(
+                'AI 直写幂等提交发生冲突，请重新同步后重试',
+                code='AI_DOCUMENT_CONFLICT',
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            # A malformed provider operation is a terminal contract failure,
+            # not a persistence outage.  Keep the original exception private.
+            raise MindmapArtifactError(
+                'AI 直写操作未通过脑图内容校验',
+                code='AI_OUTPUT_INVALID',
+            ) from exc
+
+    @classmethod
+    async def _emit(  # noqa: PLR0912, PLR0915
+        cls,
+        job_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
         if not await cls._owns_current_job_lease(job_id):
             return
         async with AsyncSessionLocal() as db:
@@ -1665,16 +2203,69 @@ class MindmapAiTaskManager:
             ):
                 return
             event_payload = dict(payload)
+            if event_type == 'tag_suggestions':
+                # This event is recoverable advice, never a document mutation.
+                event_payload = {
+                    'suggestions': await cls._validate_tag_suggestions(db, job, event_payload),
+                }
             preview_state = event_payload.pop('previewState', None)
             operations = event_payload.pop('operations', None)
             initial_state = event_payload.pop('initialState', None)
+            direct_commit: dict[str, Any] | None = None
+            direct_undo_id: str | None = None
+            coordinates: tuple[int, int] | None = None
+            if event_type == 'draft_changed' and isinstance(operations, list):
+                operation_cursor = int(event_payload.get('operationCursor') or 0)
+                coordinates = cls._draft_preview_coordinates(job_id, operation_cursor)
+                if coordinates is None:
+                    raise MindmapArtifactError(
+                        'AI 实时草稿版本超过上限，无法继续直写',
+                        code='AI_BUDGET_EXCEEDED',
+                    )
+                direct_commit = await cls._commit_direct_draft(
+                    db,
+                    job,
+                    operations,
+                    coordinates[0],
+                )
+                if direct_commit is not None:
+                    committed_document = direct_commit.pop('_committedDocument', None)
+                    if not isinstance(committed_document, dict):
+                        raise MindmapArtifactError(
+                            'AI 直写提交未返回权威正文，无法保存实时检查点',
+                            code='AI_DOCUMENT_CONFLICT',
+                        )
+                    preview_state, committed_summary = cls._project_committed_preview(job, committed_document)
+                    event_payload['summary'] = committed_summary
+                    if (
+                        int(direct_commit.get('operationCount') or 0) > 0
+                        or int(direct_commit.get('commentCount') or 0) > 0
+                    ):
+                        direct_undo_id = await cls._ensure_direct_undo_receipt(db, job)
+                    if direct_undo_id and isinstance(
+                        direct_commit.get('contentRevision'), int,
+                    ):
+                        await cls._record_direct_undo_commit(db, job, direct_undo_id, direct_commit)
+                    event_payload['directCommit'] = {
+                        'contentRevision': direct_commit.get('contentRevision'),
+                        'operationGroupId': direct_commit.get('operationGroupId'),
+                        'operationCount': direct_commit.get('operationCount', len(operations)),
+                        'affectedUids': direct_commit.get('affectedUids', []),
+                        'commentCount': direct_commit.get('commentCount', 0),
+                        'changeSummary': direct_commit.get(
+                            'changeSummary',
+                            {'added': 0, 'updated': 0, 'moved': 0, 'deleted': 0, 'total': 0},
+                        ),
+                        'idempotentReplay': bool(direct_commit.get('idempotentReplay')),
+                        'proposalId': direct_undo_id,
+                    }
+                    event_payload['changeSummary'] = direct_commit.get(
+                        'changeSummary',
+                        {'added': 0, 'updated': 0, 'moved': 0, 'deleted': 0, 'total': 0},
+                    )
             cache_after_commit: dict[str, Any] | None = None
             if event_type == 'draft_changed':
                 event_payload['changeCount'] = len(operations) if isinstance(operations, list) else 0
-                coordinates = cls._draft_preview_coordinates(
-                    job_id,
-                    int(event_payload.get('operationCursor') or 0),
-                )
                 event_payload.pop('operationCursor', None)
                 if coordinates is not None:
                     preview_version, preview_epoch = coordinates
@@ -1707,10 +2298,27 @@ class MindmapAiTaskManager:
                     summary=event_payload.get('summary'),
                     expires_time=job.expires_time,
                 )
-                _checkpoint, checkpoint_changed = await MindmapAiDao.upsert_draft_checkpoint(
-                    db,
-                    checkpoint_values,
-                )
+                try:
+                    _checkpoint, checkpoint_changed = await MindmapAiDao.upsert_draft_checkpoint(
+                        db,
+                        checkpoint_values,
+                    )
+                except ValueError as exc:
+                    # The DAO raises ValueError only when a replayed preview
+                    # coordinate is paired with a different document hash.
+                    # That is a stale/ambiguous draft frame, not a database
+                    # outage; preserve a stable domain code so adapters do
+                    # not turn it into AgentEventDeliveryError.
+                    await db.rollback()
+                    if '坐标冲突' in str(exc):
+                        raise MindmapArtifactError(
+                            'AI 实时草稿版本冲突，请重新同步后重试',
+                            code='AI_DOCUMENT_CONFLICT',
+                        ) from exc
+                    raise MindmapArtifactError(
+                        'AI 实时草稿检查点数据无效',
+                        code='AI_OUTPUT_INVALID',
+                    ) from exc
                 checkpoint_matches = (
                     int(_checkpoint.preview_epoch) == preview_epoch
                     and int(_checkpoint.preview_version) == preview_version
@@ -1728,12 +2336,70 @@ class MindmapAiTaskManager:
             elif event_type in {'draft_changed', 'draft_initialized'}:
                 event_payload['previewAvailable'] = False
             safe_payload = _safe_event_payload(event_payload)
-            await MindmapAiDao.add_event(db, job_id, event_type, _json_dumps(safe_payload))
-            await db.commit()
+            try:
+                event_record = await MindmapAiDao.add_event(
+                    db,
+                    job_id,
+                    event_type,
+                    _json_dumps(safe_payload),
+                )
+            except IntegrityError as exc:
+                # A duplicate event sequence can occur when a recovered
+                # worker races a late frame from the previous lease.  The
+                # direct mutation/checkpoint are staged in this transaction,
+                # so roll them back together and surface a retryable domain
+                # conflict rather than an infrastructure persistence error.
+                await db.rollback()
+                raise MindmapArtifactError(
+                    'AI 实时事件序号冲突，请重新同步后重试',
+                    code='AI_DOCUMENT_CONFLICT',
+                ) from exc
+            # add_event returns None when a concurrent terminal transition
+            # makes this frame stale. No checkpoint (and especially no direct
+            # document mutation) may commit without its durable event/audit
+            # anchor in that case. Rolling back for every event also prevents
+            # a late preview frame from resurrecting a terminal task's draft.
+            if event_record is None:
+                await db.rollback()
+                return
+            try:
+                await db.commit()
+            except IntegrityError as exc:
+                # Some dialects defer unique/FK checks until commit.  Keep
+                # the same classification as the flush path above while
+                # allowing genuine operational/database errors to retain the
+                # AgentEventDeliveryError path for diagnostics.
+                await db.rollback()
+                raise MindmapArtifactError(
+                    'AI 实时事件提交发生冲突，请重新同步后重试',
+                    code='AI_DOCUMENT_CONFLICT',
+                ) from exc
+            # The direct document mutation is staged in this same transaction
+            # as the checkpoint and event. Only notify collaborators after the
+            # commit succeeds; otherwise a client could reload a revision that
+            # is later rolled back with the task event.
+            if direct_commit is not None and job.source_mindmap_id:
+                next_revision = direct_commit.get('_nextExpectedRevision')
+                if isinstance(next_revision, int):
+                    cls._direct_commit_revisions[job_id] = next_revision
+                await MindmapAiMutationGateway.publish_direct_commit(
+                    int(job.source_mindmap_id),
+                    direct_commit,
+                )
         # Redis is a disposable read cache. Populate it only after the durable
         # checkpoint and its content-free event metadata commit together.
         if cache_after_commit is not None:
-            await cls._store_draft_preview(job_id, **cache_after_commit)
+            try:
+                await cls._store_draft_preview(job_id, **cache_after_commit)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A cache outage must not turn an already committed document
+                # mutation + audit event into a provider failure. The durable
+                # checkpoint remains the recovery source for the next poll.
+                logger.exception(
+                    f'AI 脑图实时草稿缓存写入异常，已保留数据库检查点: job_id={job_id}',
+                )
 
     @classmethod
     async def _set_status(
@@ -1797,6 +2463,394 @@ class MindmapAiTaskManager:
         return True
 
     @classmethod
+    async def _wake_waiting_followups(  # noqa: PLR0912, PLR0915
+        cls,
+        parent_job_id: str,
+    ) -> None:
+        """Release prompts submitted during a turn after its result is durable."""
+        released_ids: list[str] = []
+        try:
+            async with AsyncSessionLocal() as db:
+                parent = await MindmapAiDao.get_job(db, parent_job_id, for_update=True)
+                if parent is None:
+                    return
+                if parent.status in {
+                    'cancelled', 'failed', 'expired', 'stale', 'rejected',
+                }:
+                    await db.rollback()
+                    await cls._close_waiting_followups(
+                        parent_job_id,
+                        parent_status=str(parent.status),
+                    )
+                    return
+                if parent.status not in {
+                    'ready', 'applied', 'undone', 'completed_file',
+    'completed_no_change', 'completed_direct', 'needs_review', 'completed_message',
+                }:
+                    return
+                # A review result is visible in the canvas, but its proposed
+                # write has not been accepted yet.  Do not let a queued child
+                # consume that unconfirmed artifact.  The explicit apply or
+                # reject path wakes/closes children after its own commit.
+                if parent.status == 'needs_review':
+                    return
+                waiting_jobs = await MindmapAiDao.list_waiting_followups(
+                    db,
+                    parent_job_id,
+                    for_update=True,
+                )
+                if not waiting_jobs:
+                    return
+                # A user may submit several follow-up prompts while one turn is
+                # running. Keep them as a real queue: release only the oldest
+                # child and attach any legacy siblings to that child so the
+                # next result becomes the source for the following turn.
+                waiting_jobs.sort(
+                    key=lambda item: (
+                        int(getattr(item, 'turn_index', 0) or 0),
+                        getattr(item, 'created_time', datetime.min),
+                        str(getattr(item, 'id', '')),
+                    ),
+                )
+                next_waiting_job = waiting_jobs[0]
+                deferred_jobs = waiting_jobs[1:]
+                waiting_job = next_waiting_job
+                waiting_route = _waiting_followup_route(waiting_job)
+                # ``next`` is deliberately tied to an accepted result.  A
+                # ready proposal is only a preview; starting its successor
+                # here would make the successor depend on a document change
+                # the user may still reject.  Check this before reading the
+                # artifact so the waiting path has no observable side effect.
+                if (
+                    waiting_route == 'next'
+                    and parent.status == 'ready'
+                    and parent.proposal_id
+                ):
+                    await db.rollback()
+                    return
+                artifact_document = None
+                artifact_hash = None
+                if parent.artifact_id:
+                    artifact = await MindmapAiDao.get_artifact(
+                        db,
+                        parent.artifact_id,
+                        parent.user_id,
+                    )
+                    if artifact is not None:
+                        artifact_payload = _json_loads(artifact.content_json, {})
+                        artifact_document = artifact_payload.get('document')
+                        artifact_hash = artifact_payload.get('manifest', {}).get('documentHash')
+                for waiting_job in deferred_jobs:
+                    deferred_route = _waiting_followup_route(waiting_job)
+                    await MindmapAiDao.update_job(db, waiting_job.id, {
+                        'parent_job_id': next_waiting_job.id,
+                    })
+                    await MindmapAiDao.add_event(
+                        db,
+                        waiting_job.id,
+                        'queue_reparented',
+                        _event_json({
+                            'status': WAITING_TURN_STATUS,
+                            'progress': 0,
+                            'parentJobId': next_waiting_job.id,
+                            'route': deferred_route,
+                        }),
+                    )
+                waiting_job = next_waiting_job
+                values: dict[str, Any] = {
+                    'status': 'queued',
+                    'progress': 0,
+                    'error_code': None,
+                    'error_message': None,
+                }
+                # Direct turns have no historical artifact in older rows (and
+                # deliberately write the authoritative document in place).
+                # A queued child must nevertheless be rebased to the document
+                # that the parent actually left behind; carrying the frozen
+                # request snapshot here would make the child run against a
+                # stale CAS revision after the parent completed.
+                parent_request_payload = _json_loads(
+                    getattr(parent, 'request_json', None),
+                )
+                direct_authoritative_parent = (
+                    getattr(parent, 'source_type', None) == 'cloud_document'
+                    and getattr(parent, 'source_mindmap_id', None)
+                    and (
+                        parent.status == 'completed_direct'
+                        or (
+                            parent.status == 'undone'
+                            and (
+                                parent_request_payload.get('executionMode') == 'direct'
+                                or getattr(parent, 'proposal_id', None) == str(parent.id)
+                            )
+                        )
+                    )
+                )
+                if direct_authoritative_parent:
+                    request_payload = _json_loads(waiting_job.request_json, {})
+                    source_payload = request_payload.get('source') or {}
+                    if source_payload.get('type') != 'cloud_document':
+                        raise MindmapArtifactError(
+                            '排队直写任务缺少云端脑图来源',
+                            code='AI_FOLLOWUP_BASE_INVALID',
+                        )
+                    authoritative_request = dict(request_payload)
+                    authoritative_request['source'] = dict(source_payload)
+                    authoritative_model = MindmapAiJobCreateModel.model_validate(
+                        authoritative_request,
+                    )
+                    undo_baseline: dict[str, Any] = {}
+                    (
+                        authoritative_document,
+                        authoritative_revision,
+                        authoritative_hash,
+                        authoritative_mindmap_id,
+                        authoritative_room_epoch,
+                    ) = await MindmapAiService._prepare_source_for_job(
+                        db,
+                        authoritative_model,
+                        parent.user_id,
+                        capture_editor_document=undo_baseline,
+                    )
+                    if (
+                        not isinstance(authoritative_document, dict)
+                        or authoritative_mindmap_id != parent.source_mindmap_id
+                    ):
+                        raise MindmapArtifactError(
+                            '无法冻结排队任务的最新云端脑图基线',
+                            code='AI_FOLLOWUP_BASE_INVALID',
+                        )
+                    source_payload = dict(source_payload)
+                    source_payload['document'] = authoritative_document
+                    source_payload['baselineDocument'] = authoritative_document
+                    source_payload['revision'] = authoritative_revision
+                    source_payload['documentHash'] = authoritative_hash
+                    source_payload['roomEpoch'] = authoritative_room_epoch
+                    source_payload['mindmapId'] = authoritative_mindmap_id
+                    request_payload['source'] = source_payload
+                    values.update({
+                        'request_json': _json_dumps(_request_with_undo_baseline(request_payload, undo_baseline)),
+                        'source_type': 'cloud_document',
+                        'base_revision': authoritative_revision,
+                        'base_hash': authoritative_hash,
+                        'base_room_epoch': authoritative_room_epoch,
+                    })
+                elif isinstance(artifact_document, dict):
+                    request_payload = _json_loads(waiting_job.request_json, {})
+                    source_payload = request_payload.get('source') or {}
+                    source_type = source_payload.get('type')
+                    if source_type in {'local_snapshot', 'cloud_document'}:
+                        if parent.status in {'applied', 'undone'}:
+                            # Once the parent has been accepted (or undone),
+                            # the next turn must start from the authoritative
+                            # document, not the old cumulative proposal base.
+                            # Cloud documents are re-read after the write
+                            # barrier; local documents use the applied artifact
+                            # or the original baseline for an undo.
+                            if source_type == 'cloud_document':
+                                authoritative_request = dict(request_payload)
+                                authoritative_request['source'] = dict(source_payload)
+                                authoritative_model = MindmapAiJobCreateModel.model_validate(
+                                    authoritative_request,
+                                )
+                                undo_baseline = {}
+                                (
+                                    authoritative_document,
+                                    authoritative_revision,
+                                    authoritative_hash,
+                                    authoritative_mindmap_id,
+                                    authoritative_room_epoch,
+                                ) = await MindmapAiService._prepare_source_for_job(
+                                    db,
+                                    authoritative_model,
+                                    parent.user_id,
+                                    capture_editor_document=undo_baseline,
+                                )
+                                if (
+                                    not isinstance(authoritative_document, dict)
+                                    or authoritative_mindmap_id != parent.source_mindmap_id
+                                ):
+                                    raise MindmapArtifactError(
+                                        '无法冻结排队任务的最新云端脑图基线',
+                                        code='AI_FOLLOWUP_BASE_INVALID',
+                                    )
+                                source_payload['document'] = authoritative_document
+                                source_payload['baselineDocument'] = authoritative_document
+                                source_payload['revision'] = authoritative_revision
+                                source_payload['documentHash'] = authoritative_hash
+                                source_payload['roomEpoch'] = authoritative_room_epoch
+                                request_payload = _request_with_undo_baseline(request_payload, undo_baseline)
+                                values['base_revision'] = authoritative_revision
+                                values['base_hash'] = authoritative_hash
+                                values['base_room_epoch'] = authoritative_room_epoch
+                            else:
+                                proposal = await MindmapAiDao.get_proposal(
+                                    db,
+                                    parent.proposal_id,
+                                    parent.user_id,
+                                ) if parent.proposal_id else None
+                                if parent.status == 'applied':
+                                    authoritative_document = artifact_document
+                                    authoritative_hash = artifact_hash or compute_document_hash(
+                                        authoritative_document,
+                                    )
+                                else:
+                                    authoritative_document = (
+                                        source_payload.get('baselineDocument')
+                                        or source_payload.get('document')
+                                    )
+                                    authoritative_document, _summary = (
+                                        normalize_ai_editable_source_document(
+                                            authoritative_document,
+                                        )
+                                    )
+                                    authoritative_hash = compute_document_hash(
+                                        authoritative_document,
+                                    )
+                                source_payload['document'] = authoritative_document
+                                source_payload['baselineDocument'] = authoritative_document
+                                source_payload['documentHash'] = authoritative_hash
+                                applied_revision = getattr(proposal, 'applied_revision', None)
+                                if applied_revision is not None:
+                                    authoritative_revision = int(applied_revision)
+                                    if parent.status == 'undone':
+                                        authoritative_revision += 1
+                                    source_payload['revision'] = authoritative_revision
+                                    values['base_revision'] = authoritative_revision
+                                values['base_hash'] = authoritative_hash
+                        else:
+                            original_document = (
+                                source_payload.get('baselineDocument')
+                                or source_payload.get('document')
+                            )
+                            source_payload['baselineDocument'] = original_document
+                            source_payload['document'] = artifact_document
+                            if artifact_hash:
+                                source_payload['documentHash'] = artifact_hash
+                            values['base_hash'] = waiting_job.base_hash
+                        request_payload['source'] = source_payload
+                    else:
+                        request_payload['source'] = {
+                            'type': 'uploaded_artifact',
+                            'scope': source_payload.get('scope') or {'type': 'document'},
+                            'document': artifact_document,
+                        }
+                        request_payload['target'] = 'file'
+                    values['request_json'] = _json_dumps(request_payload)
+                    values['source_type'] = request_payload['source']['type']
+                    if 'base_hash' not in values:
+                        values['base_hash'] = waiting_job.base_hash
+                await MindmapAiDao.update_job(db, waiting_job.id, values)
+                await MindmapAiDao.add_event(
+                    db,
+                    waiting_job.id,
+                    'status_changed',
+                    _event_json({
+                        'status': 'queued',
+                        'progress': 0,
+                        'parentJobId': parent_job_id,
+                        'route': waiting_route,
+                    }),
+                )
+                released_ids.append(str(waiting_job.id))
+                await db.commit()
+        except Exception:
+            logger.exception(f'AI 排队轮次释放失败: parent_job_id={parent_job_id}')
+            return
+        for released_id in released_ids:
+            MindmapAiTaskManager.schedule(released_id)
+        if released_ids:
+            record_mindmap_ai_event('job_released')
+
+    @classmethod
+    async def _close_waiting_followups(
+        cls,
+        parent_job_id: str,
+        *,
+        parent_status: str,
+    ) -> None:
+        """Finish queued prompts when their parent can no longer produce a base.
+
+        A waiting child is deliberately not started from a failed or cancelled
+        parent: doing so could silently use a stale document revision or a
+        partial draft. Keep the message and let the user resend it explicitly
+        against the current canvas instead of leaving an invisible queue item
+        behind forever.
+        """
+        try:
+            async with AsyncSessionLocal() as db:
+                root = await MindmapAiDao.get_job(
+                    db,
+                    parent_job_id,
+                    for_update=True,
+                )
+                if root is None:
+                    return
+                session_jobs = await MindmapAiDao.list_jobs_for_session(
+                    db,
+                    root.session_id,
+                    for_update=True,
+                )
+                by_parent: dict[str, list[Any]] = {}
+                for session_job in session_jobs:
+                    if session_job.status != WAITING_TURN_STATUS:
+                        continue
+                    by_parent.setdefault(str(session_job.parent_job_id or ''), []).append(session_job)
+                waiting_jobs: list[Any] = []
+                pending_parent_ids = [str(parent_job_id)]
+                seen_parent_ids: set[str] = set()
+                while pending_parent_ids:
+                    current_parent_id = pending_parent_ids.pop(0)
+                    if current_parent_id in seen_parent_ids:
+                        continue
+                    seen_parent_ids.add(current_parent_id)
+                    children = by_parent.get(current_parent_id, [])
+                    waiting_jobs.extend(children)
+                    pending_parent_ids.extend(str(child.id) for child in children)
+                if not waiting_jobs:
+                    return
+                now = datetime.now()
+                error_code = 'AI_PARENT_TASK_CANCELLED'
+                error_message = (
+                    '上一轮 AI 任务已取消，排队要求暂未执行；请基于当前脑图重新发送。'
+                    if parent_status == 'cancelled'
+                    else '上一轮 AI 结果未被采纳，排队要求暂未执行；请基于当前脑图重新发送。'
+                    if parent_status == 'rejected'
+                    else '上一轮 AI 任务未完成，排队要求暂未执行；请基于当前脑图重新发送。'
+                )
+                for waiting_job in waiting_jobs:
+                    await MindmapAiDao.update_job(db, waiting_job.id, {
+                        'status': 'cancelled',
+                        'progress': 100,
+                        'error_code': error_code,
+                        'error_message': error_message,
+                        'completed_time': now,
+                    })
+                    await MindmapAiDao.add_event(
+                        db,
+                        waiting_job.id,
+                        'status_changed',
+                        _event_json({
+                            'status': 'cancelled',
+                            'progress': 100,
+                            'errorCode': error_code,
+                            'errorMessage': error_message,
+                            'parentJobId': waiting_job.parent_job_id or parent_job_id,
+                            'route': 'next',
+                        }),
+                    )
+                await db.commit()
+        except Exception:
+            # Cancellation must still return the authoritative parent status if
+            # a best-effort queue cleanup loses a database race. Recovery scans
+            # waiting descendants again, so swallowing this error cannot start
+            # a stale child or lose the user's message.
+            logger.exception(
+                f'AI 排队轮次收敛失败，将由恢复任务重试: parent_job_id={parent_job_id}'
+            )
+        record_mindmap_ai_event('queued_followup_closed')
+
+    @classmethod
     async def _resolve_native_model(cls, db: AsyncSession, user_id: int, model_id: int | None) -> Any:
         if model_id is not None:
             record = await AiModelDao.get_ai_model_detail_by_id(db, model_id)
@@ -1814,16 +2868,42 @@ class MindmapAiTaskManager:
             )).scalars().first()
         if record is None or record.status != '0':
             raise MindmapArtifactError('没有可用的 AI 模型配置', code='AI_PROVIDER_AUTH_FAILED')
-        real_api_key = CryptoUtil.decrypt(record.api_key) if record.api_key else None
-        return AiUtil.get_model_from_factory(
-            provider=record.provider,
-            model_code=record.model_code,
-            model_name=record.model_name,
-            api_key=real_api_key,
-            base_url=record.base_url,
-            temperature=record.temperature,
-            max_tokens=record.max_tokens,
-        )
+        provider = str(getattr(record, 'provider', '') or '').strip()
+        base_url = getattr(record, 'base_url', None)
+        # DashScope's OpenAI-compatible endpoint must be constructed through
+        # the DashScope/OpenAI adapter.  Passing it to Claude can otherwise
+        # fail later with an opaque provider error (and needlessly decrypt a
+        # credential first).
+        if provider.lower() == 'anthropic' and base_url and 'dashscope.aliyuncs.com/compatible-mode' in str(base_url).lower():
+            raise MindmapArtifactError(
+                '当前地址是 DashScope 兼容接口，请将提供商改为 DashScope 或 OpenAI 后重试。',
+                code='AI_MODEL_CONFIG_INVALID',
+            )
+        try:
+            api_key = getattr(record, 'api_key', None)
+            real_api_key = CryptoUtil.decrypt(api_key) if api_key else None
+        except Exception as exc:
+            logger.warning('AI 模型密钥解密失败: provider=%s, model=%s', provider, getattr(record, 'model_code', None))
+            raise MindmapArtifactError(
+                'AI 模型密钥无法解密，请重新保存密钥后重试。',
+                code='AI_MODEL_CONFIG_INVALID',
+            ) from exc
+        try:
+            return AiUtil.get_model_from_factory(
+                provider=provider,
+                model_code=getattr(record, 'model_code', ''),
+                model_name=getattr(record, 'model_name', None),
+                api_key=real_api_key,
+                base_url=base_url,
+                temperature=getattr(record, 'temperature', None),
+                max_tokens=getattr(record, 'max_tokens', None),
+            )
+        except Exception as exc:
+            logger.warning('AI 模型构造失败: provider=%s, model=%s', provider, getattr(record, 'model_code', None))
+            raise MindmapArtifactError(
+                'AI 模型配置无效，请检查提供商、模型和接口地址后重试。',
+                code='AI_MODEL_CONFIG_INVALID',
+            ) from exc
 
     @staticmethod
     def _agent_context_metadata(
@@ -2284,6 +3364,22 @@ class MindmapAiTaskManager:
                     getattr(job, 'timeout_seconds', MindmapAiConfig.mindmap_ai_job_timeout_seconds)
                 )
                 request_model = MindmapAiJobCreateModel.model_validate(_json_loads(job.request_json, {}))
+                if request_model.execution_mode == 'direct':
+                    # A worker restart loses the process-local fast path. Seed
+                    # the next CAS revision from durable direct-commit event
+                    # metadata before the recovered adapter emits another
+                    # batch; mutation ids remain globally monotonic below.
+                    durable_revision = int(job.base_revision or 1)
+                    for payload_json in draft_event_payloads:
+                        payload = _json_loads(payload_json, {})
+                        commit = payload.get('directCommit') if isinstance(payload, dict) else None
+                        revision = commit.get('contentRevision') if isinstance(commit, dict) else None
+                        if isinstance(revision, int) and not isinstance(revision, bool):
+                            durable_revision = max(durable_revision, revision)
+                    cls._direct_commit_revisions[str(job_id)] = max(
+                        durable_revision,
+                        cls._direct_commit_revisions.get(str(job_id), durable_revision),
+                    )
                 adapter = get_mindmap_agent_registry().get(job.agent_key)
                 manifest = adapter.get_manifest()
                 max_nodes = int(getattr(job, 'max_nodes', manifest.max_nodes))
@@ -2312,10 +3408,14 @@ class MindmapAiTaskManager:
                 diff_base_document = (
                     request_model.source.baseline_document or original_source_document
                 )
-                source_document = (
-                    recovered_preview['document']
-                    if recovered_preview is not None
-                    else original_source_document
+                source_document = await cls._resolve_run_source_document(
+                    db, job, request_model, recovered_preview,
+                    has_draft_history=bool(draft_event_payloads),
+                )
+                tag_catalog = (
+                    [] if discussion_job else await load_ai_tag_catalog(
+                        db, int(job.user_id), mindmap_id=cls._tag_catalog_target_mindmap_id(request_model),
+                    )
                 )
                 external_session_id = None
                 if job.parent_job_id:
@@ -2341,25 +3441,17 @@ class MindmapAiTaskManager:
                     model = await cls._resolve_native_model(db, job.user_id, request_model.model_id)
 
             try:
-                tool_service = (
-                    MindmapToolService(
-                        base_document=source_document,
-                        scope=request_model.source.scope.model_dump(
-                            by_alias=True,
-                            exclude_none=True,
-                        ),
-                        trusted_source=True,
-                        intent=request_model.intent,
-                        ai_job_id=job_id,
-                        max_nodes=max_nodes,
-                        max_depth=max_depth,
-                    )
-                    if source_document else MindmapToolService(
-                        intent=request_model.intent,
-                        ai_job_id=job_id,
-                        max_nodes=max_nodes,
-                        max_depth=max_depth,
-                    )
+                tool_options = {
+                    'scope': request_model.source.scope.model_dump(by_alias=True, exclude_none=True)
+                    if source_document else None,
+                    'trusted_source': bool(source_document),
+                    'intent': request_model.intent,
+                    'ai_job_id': job_id,
+                    'max_nodes': max_nodes,
+                    'max_depth': max_depth,
+                }
+                tool_service = MindmapToolService(
+                    base_document=source_document or None, tag_catalog=tag_catalog, **tool_options,
                 )
                 source_projection = tool_service.read_projection() if source_document else None
                 source_scope_summary = (
@@ -2371,16 +3463,7 @@ class MindmapAiTaskManager:
                     and diff_base_document is not None
                 ):
                     baseline_tool_service = MindmapToolService(
-                        base_document=diff_base_document,
-                        scope=request_model.source.scope.model_dump(
-                            by_alias=True,
-                            exclude_none=True,
-                        ),
-                        trusted_source=True,
-                        intent=request_model.intent,
-                        ai_job_id=job_id,
-                        max_nodes=max_nodes,
-                        max_depth=max_depth,
+                        base_document=diff_base_document, **tool_options,
                     )
                     budget_source_summary = (
                         baseline_tool_service.authorized_scope_summary()
@@ -2418,6 +3501,7 @@ class MindmapAiTaskManager:
                 parameters=request_model.parameters.model_dump(by_alias=True),
                 source_document=source_projection,
                 tool_service=tool_service,
+                execution_mode=request_model.execution_mode,
                 model_id=request_model.model_id,
                 external_session_id=external_session_id,
                 metadata=cls._agent_context_metadata(
@@ -2534,6 +3618,91 @@ class MindmapAiTaskManager:
                 await cls.mark_draft_terminal(job_id, int(expected_execution_epoch or 0))
                 record_run('needs_input', usage)
                 record_mindmap_ai_event('needs_input')
+                return
+            if request_model.execution_mode == 'direct':
+                if not isinstance(result, AgentDirectResult):
+                    raise MindmapArtifactError(
+                        '直接写入 Agent 未返回 direct_completed 终态',
+                        code='AI_OUTPUT_INVALID',
+                    )
+                # Direct mode has already committed every accepted draft delta
+                # through _emit -> MindmapAiMutationGateway. The terminal turn
+                # only closes the durable task and records the latest revision;
+                # it must not create a second Artifact/Proposal apply path.
+                # Keep the same validating fence used by the artifact path so
+                # completion cannot race a cancellation or a lease takeover.
+                if not await cls._set_status(job_id, 'validating', 85):
+                    raise asyncio.CancelledError
+                usage = adapter.collect_usage(result)
+                self_summary = getattr(result, 'summary', {}) or {}
+                self_title = str(getattr(result, 'title', '') or '')[:200] or 'AI 直写任务'
+                self_revision = int(job.base_revision or 1)
+                if job.source_mindmap_id:
+                    async with AsyncSessionLocal() as db:
+                        latest_detail = await MindmapAiMutationGateway.read_document(
+                            db, int(job.source_mindmap_id), int(job.user_id),
+                        )
+                        self_revision = int(latest_detail.content_revision or self_revision)
+                cls._enforce_usage_policy(usage, max_budget_usd=max_budget_usd)
+                now = datetime.now()
+                expires = now + timedelta(days=retention_days)
+                encrypted_session_ref = (
+                    CryptoUtil.encrypt(result.external_session_id)
+                    if getattr(result, 'external_session_id', None)
+                    else None
+                )
+                attempted_encrypted_session_ref = encrypted_session_ref
+                async with AsyncSessionLocal() as db:
+                    _current_job, current_session = await cls._lock_completion_target(db, job_id)
+                    direct_undo_id = getattr(_current_job, 'proposal_id', None)
+                    direct_change_result = await _direct_job_change_result(db, _current_job)
+                    direct_change_summary = direct_change_result['changeSummary']
+                    self_summary = {
+                        **(self_summary if isinstance(self_summary, dict) else {}),
+                        'changeSummary': direct_change_summary,
+                    }
+                    await MindmapAiDao.update_job(db, job_id, {
+                        'status': 'completed_direct',
+                        'progress': 100,
+                        'title': self_title,
+                        'artifact_id': None,
+                        'proposal_id': direct_undo_id,
+                        'usage_json': _json_dumps(usage),
+                        'external_session_ref': encrypted_session_ref,
+                        'completed_time': now,
+                    })
+                    await MindmapAiDao.update_session(db, job.session_id, {
+                        'current_agent_key': job.agent_key,
+                        'status': 'active',
+                        'expires_time': max(current_session.expires_time, expires),
+                    })
+                    await MindmapAiDao.add_event(
+                        db,
+                        job_id,
+                        'direct_completed',
+                        _event_json({
+                            'status': 'completed_direct',
+                            'progress': 100,
+                            'contentRevision': self_revision,
+                            'summary': self_summary,
+                            'changeSummary': direct_change_summary,
+                            'changeSummaryVersion': direct_change_result['changeSummaryVersion'],
+                            'proposalId': direct_undo_id,
+                        }),
+                    )
+                    await MindmapAiDao.delete_draft_checkpoint(db, job_id)
+                    try:
+                        await db.commit()
+                    except BaseException:
+                        completion_commit_uncertain = True
+                        raise
+                    external_session_committed = True
+                await cls.mark_draft_terminal(
+                    job_id,
+                    int(_CURRENT_JOB_EXECUTION_EPOCH.get() or 0),
+                )
+                record_run('success', usage)
+                record_mindmap_ai_event('direct_completed')
                 return
             if discussion_job:
                 if not isinstance(result, AgentMessageResult):
@@ -2671,7 +3840,6 @@ class MindmapAiTaskManager:
                 created_count=created_count,
             )
             validation_status = artifact['manifest']['validation']['status']
-            needs_review = validation_status == 'draft'
             if diff_base_document is not None:
                 proposal_operations, impact = build_document_diff(
                     diff_base_document,
@@ -2693,6 +3861,14 @@ class MindmapAiTaskManager:
                     'highImpactReasons': [],
                     'changes': [],
                 }
+            # A structurally valid result may still have a broad or destructive
+            # diff. Keep it visible in the live canvas, but require an explicit
+            # review before it can be applied. Draft validation remains a
+            # separate, stricter reason for the existing needs_review state.
+            needs_review = (
+                validation_status == 'draft'
+                or bool(impact.get('highImpact'))
+            )
             no_change = source_document is not None and not proposal_operations
             now = datetime.now()
             expires = now + timedelta(days=retention_days)
@@ -2857,8 +4033,20 @@ class MindmapAiTaskManager:
             # user_id 配置，Codex/Claude 也可能遇到模型级权限、短时网络或限流；
             # 将这些错误持久化为全局 unhealthy 会让一个用户阻断所有用户。
             # Connector 健康状态只由管理员显式 health-check 更新。
-            await cls._fail(job_id, exc.code, str(exc))
-            outcome = 'invalid' if exc.code == 'AI_OUTPUT_INVALID' else 'error'
+            if exc.code == 'AI_DOCUMENT_CONFLICT':
+                await cls._set_status(
+                    job_id,
+                    'stale',
+                    100,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                    completed_time=datetime.now(),
+                )
+                outcome = 'conflict'
+                record_mindmap_ai_event('direct_conflict')
+            else:
+                await cls._fail(job_id, exc.code, str(exc))
+                outcome = 'invalid' if exc.code == 'AI_OUTPUT_INVALID' else 'error'
             record_run(outcome)
         except Exception:
             logger.exception(f'AI 脑图任务执行失败: job_id={job_id}')
@@ -2894,6 +4082,7 @@ class MindmapAiTaskManager:
                     pending_external_session_id,
                     job_id,
                 )
+            await cls._wake_waiting_followups(job_id)
 
     @classmethod
     async def _fail(cls, job_id: str, error_code: str, message: str) -> None:
@@ -3451,6 +4640,45 @@ class MindmapAiService:
             )
 
     @classmethod
+    async def _prepare_job_runtime(
+        cls,
+        db: AsyncSession,
+        request_model: MindmapAiJobCreateModel,
+        manifest: Any,
+        user_id: int,
+    ) -> tuple[AgentRuntimePolicy, dict[str, Any]]:
+        """Lock and validate the runtime policy, then freeze its job columns.
+
+        Callers retain concurrency admission: waiting turns validate their
+        runtime here but do not compete for an active execution slot yet.
+        """
+        connector = await cls._ensure_connector_available(
+            db, manifest, user_id, for_update=True, preflight_unknown=True,
+        )
+        policy = cls._runtime_policy(connector, manifest)
+        model_ref = cls._validate_job_policy(request_model, manifest, policy)
+        if (
+            manifest.agent_key == 'native_mindmap'
+            and not await cls._has_native_model(db, user_id, request_model.model_id)
+        ):
+            raise ServiceException(message='自研 MindMap Agent 没有可用的模型配置')
+        return policy, {
+            'agent_key': manifest.agent_key,
+            'adapter_version': manifest.adapter_version,
+            'sdk_version': manifest.sdk_version,
+            'runtime_version': manifest.runtime_version,
+            'model_ref': model_ref,
+            'max_budget_usd': policy.max_budget_usd,
+            'timeout_seconds': policy.timeout_seconds,
+            'max_nodes': request_model.parameters.max_nodes,
+            'max_depth': request_model.parameters.max_depth,
+            'retention_days': policy.retention_days,
+            'intent': request_model.intent,
+            'target': request_model.target,
+            'source_type': request_model.source.type,
+        }
+
+    @classmethod
     async def list_agents(
         cls,
         db: AsyncSession,
@@ -3778,6 +5006,8 @@ class MindmapAiService:
         db: AsyncSession,
         request_model: MindmapAiJobCreateModel,
         user_id: int,
+        *,
+        capture_editor_document: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, int | None, str | None, int | None, str | None]:
         source = request_model.source
         if source.type == 'none':
@@ -3808,20 +5038,31 @@ class MindmapAiService:
             db,
             int(source.mindmap_id),
             user_id,
-            require_edit=request_model.target == 'proposal',
+            # Direct jobs mutate the authoritative document regardless of the
+            # legacy result target. Do the edit-permission check before a paid
+            # provider run rather than allowing a read-only user to enqueue a
+            # task that can only fail on its first mutation.
+            require_edit=(
+                request_model.target == 'proposal'
+                or request_model.execution_mode == 'direct'
+            ),
         )
         detail = await MindmapService.get_mindmap_detail_services(db, mindmap.id, user_id)
-        document, _summary = normalize_ai_editable_source_document({
-            'root': detail.node_tree,
-            'layout': detail.layout,
-            'theme': detail.theme,
-            'view': detail.view_data,
-            'documentData': detail.document_data,
-        }, max_node_count=AI_MAX_NODE_COUNT)
+        editor_document = document_from_mindmap_detail(detail)
+        document, _summary = normalize_ai_editable_source_document(
+            editor_document, max_node_count=AI_MAX_NODE_COUNT,
+        )
         from module_mindmap.websocket.room_manager import room_manager  # noqa: PLC0415
 
         revision = int(mindmap.content_revision)
         room_epoch = await room_manager.get_active_lineage_epoch(mindmap.id, revision)
+        if capture_editor_document is not None and request_model.execution_mode == 'direct':
+            if len(canonical_json_bytes(editor_document)) > AI_MAX_FILE_BYTES:
+                raise MindmapArtifactError('脑图原始撤销快照超过大小上限', code='AI_INPUT_TOO_LARGE')
+            capture_editor_document.update({
+                'schemaVersion': 1, 'mindmapId': mindmap.id, 'revision': revision,
+                'documentHash': compute_document_hash(document), 'document': deepcopy(editor_document),
+            })
         return document, revision, compute_document_hash(document), mindmap.id, room_epoch
 
     @classmethod
@@ -3830,9 +5071,13 @@ class MindmapAiService:
         db: AsyncSession,
         request_model: MindmapAiJobCreateModel,
         user_id: int,
+        *,
+        capture_editor_document: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, int | None, str | None, int | None, str | None]:
         try:
-            return await cls._prepare_source(db, request_model, user_id)
+            return await cls._prepare_source(
+                db, request_model, user_id, capture_editor_document=capture_editor_document,
+            )
         except MindmapArtifactError as exc:
             raise ServiceException(
                 data={'errorCode': (
@@ -3844,7 +5089,7 @@ class MindmapAiService:
             ) from exc
 
     @classmethod
-    async def create_job(  # noqa: PLR0915
+    async def create_job(
         cls,
         db: AsyncSession,
         request_model: MindmapAiJobCreateModel,
@@ -3882,13 +5127,16 @@ class MindmapAiService:
         ):
             raise ServiceException(message='选择的 AI Agent 不支持当前任务')
 
+        undo_baseline: dict[str, Any] = {}
         (
             document,
             base_revision,
             base_hash,
             source_mindmap_id,
             base_room_epoch,
-        ) = await cls._prepare_source_for_job(db, request_model, user_id)
+        ) = await cls._prepare_source_for_job(
+            db, request_model, user_id, capture_editor_document=undo_baseline,
+        )
         payload = request_model.model_dump(by_alias=True, exclude_none=True)
         payload['source']['document'] = document
         if request_model.intent == 'discuss':
@@ -3901,22 +5149,9 @@ class MindmapAiService:
         if source_mindmap_id is not None:
             payload['source']['mindmapId'] = source_mindmap_id
         payload['source'].pop('artifact', None)
-        request_json = _json_dumps(payload)
+        request_json = _json_dumps(_request_with_undo_baseline(payload, undo_baseline))
 
-        connector = await cls._ensure_connector_available(
-            db,
-            manifest,
-            user_id,
-            for_update=True,
-            preflight_unknown=True,
-        )
-        policy = cls._runtime_policy(connector, manifest)
-        model_ref = cls._validate_job_policy(request_model, manifest, policy)
-        if (
-            manifest.agent_key == 'native_mindmap'
-            and not await cls._has_native_model(db, user_id, request_model.model_id)
-        ):
-            raise ServiceException(message='自研 MindMap Agent 没有可用的模型配置')
+        policy, runtime_values = await cls._prepare_job_runtime(db, request_model, manifest, user_id)
         await cls._ensure_concurrency_available(db, manifest.agent_key, policy)
 
         now = datetime.now()
@@ -3938,19 +5173,7 @@ class MindmapAiService:
                 'user_id': user_id,
                 'session_id': session_id,
                 'turn_index': 1,
-                'agent_key': manifest.agent_key,
-                'adapter_version': manifest.adapter_version,
-                'sdk_version': manifest.sdk_version,
-                'runtime_version': manifest.runtime_version,
-                'model_ref': model_ref,
-                'max_budget_usd': policy.max_budget_usd,
-                'timeout_seconds': policy.timeout_seconds,
-                'max_nodes': request_model.parameters.max_nodes,
-                'max_depth': request_model.parameters.max_depth,
-                'retention_days': policy.retention_days,
-                'intent': request_model.intent,
-                'target': request_model.target,
-                'source_type': request_model.source.type,
+                **runtime_values,
                 'source_mindmap_id': source_mindmap_id,
                 'base_revision': base_revision,
                 'base_hash': base_hash,
@@ -4096,13 +5319,16 @@ class MindmapAiService:
         ):
             raise ServiceException(message='选择的 AI Agent 不支持重试当前任务')
 
+        undo_baseline: dict[str, Any] = {}
         (
             document,
             base_revision,
             base_hash,
             source_mindmap_id,
             base_room_epoch,
-        ) = await cls._prepare_source_for_job(db, request_model, user_id)
+        ) = await cls._prepare_source_for_job(
+            db, request_model, user_id, capture_editor_document=undo_baseline,
+        )
         source_payload = payload['source']
         source_payload['document'] = document
         source_payload['revision'] = base_revision
@@ -4123,20 +5349,7 @@ class MindmapAiService:
         source_payload.pop('artifact', None)
         request_model = MindmapAiJobCreateModel.model_validate(payload)
 
-        connector = await cls._ensure_connector_available(
-            db,
-            manifest,
-            user_id,
-            for_update=True,
-            preflight_unknown=True,
-        )
-        policy = cls._runtime_policy(connector, manifest)
-        model_ref = cls._validate_job_policy(request_model, manifest, policy)
-        if (
-            manifest.agent_key == 'native_mindmap'
-            and not await cls._has_native_model(db, user_id, request_model.model_id)
-        ):
-            raise ServiceException(message='自研 MindMap Agent 没有可用的模型配置')
+        policy, runtime_values = await cls._prepare_job_runtime(db, request_model, manifest, user_id)
         await cls._ensure_concurrency_available(db, manifest.agent_key, policy)
 
         # Keep the same global lock order as completion/follow-up/delete:
@@ -4177,25 +5390,15 @@ class MindmapAiService:
                 'parent_job_id': None,
                 'retry_of_job_id': retry_of_job_id,
                 'turn_index': next_turn_index,
-                'agent_key': manifest.agent_key,
-                'adapter_version': manifest.adapter_version,
-                'sdk_version': manifest.sdk_version,
-                'runtime_version': manifest.runtime_version,
-                'model_ref': model_ref,
-                'max_budget_usd': policy.max_budget_usd,
-                'timeout_seconds': policy.timeout_seconds,
-                'max_nodes': request_model.parameters.max_nodes,
-                'max_depth': request_model.parameters.max_depth,
-                'retention_days': policy.retention_days,
-                'intent': request_model.intent,
-                'target': request_model.target,
-                'source_type': request_model.source.type,
+                **runtime_values,
                 'source_mindmap_id': source_mindmap_id,
                 'base_revision': base_revision,
                 'base_hash': base_hash,
                 'base_room_epoch': base_room_epoch,
                 'request_json': _json_dumps(
-                    request_model.model_dump(by_alias=True, exclude_none=True),
+                    _request_with_undo_baseline(
+                        request_model.model_dump(by_alias=True, exclude_none=True), undo_baseline,
+                    ),
                 ),
                 'request_fingerprint': fingerprint,
                 'idempotency_key': idempotency_key,
@@ -4235,6 +5438,190 @@ class MindmapAiService:
         return _job_model(job)
 
     @classmethod
+    async def _create_waiting_followup_job(  # noqa: PLR0915
+        cls,
+        db: AsyncSession,
+        parent: Any,
+        model: MindmapAiMessageModel,
+        user_id: int,
+        fingerprint: str,
+        idempotency_key: str,
+    ) -> MindmapAiJobModel:
+        """Persist a message submitted while the current turn is still running."""
+        content_request = MindmapAiJobCreateModel.model_validate(
+            _json_loads(parent.request_json, {}),
+        )
+        requested_intent = model.intent or parent.intent
+        agent_key = model.agent_key or parent.agent_key
+        payload = content_request.model_dump(by_alias=True, exclude_none=True)
+        payload['agentKey'] = agent_key
+        payload['intent'] = requested_intent
+        payload['prompt'] = model.prompt
+        if agent_key == 'native_mindmap':
+            native_model_id = model.model_id or content_request.model_id
+            if native_model_id is None:
+                raise ServiceException(message='请选择自研 MindMap Agent 使用的模型')
+            payload['modelId'] = native_model_id
+        else:
+            payload.pop('modelId', None)
+        source_type = str((payload.get('source') or {}).get('type') or 'none')
+        payload['target'] = (
+            'message'
+            if requested_intent == 'discuss'
+            else 'file'
+            if payload.get('executionMode') == 'direct'
+            else 'proposal'
+            if source_type in {'local_snapshot', 'cloud_document'}
+            else 'file'
+        )
+        request_model = MindmapAiJobCreateModel.model_validate(payload)
+        registry = get_mindmap_agent_registry()
+        try:
+            adapter = registry.get(agent_key)
+        except KeyError as exc:
+            raise ServiceException(message='选择的 AI Agent 不存在') from exc
+        manifest = adapter.get_manifest()
+        await cls._ensure_connector_available(
+            db,
+            manifest,
+            user_id,
+            preflight_unknown=False,
+        )
+        if (
+            request_model.intent not in manifest.intents
+            or request_model.source.type not in manifest.input_types
+            or not _manifest_supports_result(
+                manifest,
+                'message' if request_model.intent == 'discuss' else 'artifact',
+            )
+        ):
+            raise ServiceException(message='选择的 AI Agent 不支持继续当前任务')
+        policy, runtime_values = await cls._prepare_job_runtime(db, request_model, manifest, user_id)
+
+        session_jobs = await MindmapAiDao.lock_jobs_for_session(db, parent.session_id)
+        session = await MindmapAiDao.get_session(
+            db,
+            parent.session_id,
+            user_id,
+            for_update=True,
+        )
+        locked_parent = next(
+            (item for item in session_jobs if str(item.id) == str(parent.id)),
+            None,
+        )
+        runnable_parent_statuses = {'queued', 'preparing', 'running', 'validating'}
+        if (
+            not _session_accepts_work(session)
+            or locked_parent is None
+            or locked_parent.status not in runnable_parent_statuses
+        ):
+            raise ServiceException(
+                data={'errorCode': 'AI_FOLLOWUP_STATE_CHANGED'},
+                message='当前 AI 轮次刚刚结束，请刷新后继续输入',
+            )
+        # Keep multiple messages submitted during one running turn as a
+        # serial chain. The first child waits for the current parent; every
+        # later child waits for the previous queued child so it can consume
+        # that child's durable artifact instead of starting concurrently.
+        queue_parent_id = str(locked_parent.id)
+        queue_parent_candidates = {
+            str(item.id): item
+            for item in session_jobs
+            if item.id != locked_parent.id
+            and item.status in {
+                WAITING_TURN_STATUS,
+                'queued', 'preparing', 'running', 'validating',
+            }
+        }
+        seen_queue_parent_ids: set[str] = set()
+        while queue_parent_id not in seen_queue_parent_ids:
+            seen_queue_parent_ids.add(queue_parent_id)
+            children = [
+                item for item in queue_parent_candidates.values()
+                if str(item.parent_job_id or '') == queue_parent_id
+            ]
+            if not children:
+                break
+            tail = max(
+                children,
+                key=lambda item: (
+                    int(getattr(item, 'turn_index', 0) or 0),
+                    getattr(item, 'created_time', datetime.min),
+                    str(getattr(item, 'id', '')),
+                ),
+            )
+            queue_parent_id = str(tail.id)
+        next_turn_index = max(
+            (int(item.turn_index or 0) for item in session_jobs),
+            default=0,
+        ) + 1
+        waiting_count = sum(
+            1 for item in session_jobs if item.status == WAITING_TURN_STATUS
+        )
+        now = datetime.now()
+        job_id = str(uuid.uuid4())
+        source = request_model.source
+        source_mindmap_id = source.mindmap_id if source.type == 'cloud_document' else None
+        content_has_document_lineage = source.type in {'local_snapshot', 'cloud_document'}
+        durable_request_payload = request_model.model_dump(
+            by_alias=True,
+            exclude_none=True,
+        )
+        # Route is orchestration metadata rather than Agent input. Persist it
+        # beside the validated request so recovery workers make the same
+        # release decision after a process restart.
+        durable_request_payload['queueRoute'] = model.route
+        job = await MindmapAiDao.add_job(db, {
+            'id': job_id,
+            'user_id': user_id,
+            'session_id': parent.session_id,
+            'parent_job_id': queue_parent_id,
+            'turn_index': next_turn_index,
+            **runtime_values,
+            'source_mindmap_id': source_mindmap_id,
+            'base_revision': source.revision if content_has_document_lineage else None,
+            'base_hash': source.document_hash if content_has_document_lineage else None,
+            'base_room_epoch': source.room_epoch if source.type == 'cloud_document' else None,
+            'request_json': _json_dumps(durable_request_payload),
+            'request_fingerprint': fingerprint,
+            'idempotency_key': idempotency_key,
+            'status': WAITING_TURN_STATUS,
+            'progress': 0,
+            'expires_time': now + timedelta(days=policy.retention_days),
+            'created_time': now,
+            'update_time': now,
+        })
+        await MindmapAiDao.add_event(db, job_id, 'job_created', _event_json({
+            'status': WAITING_TURN_STATUS,
+            'progress': 0,
+            'agentKey': manifest.agent_key,
+            'parentJobId': queue_parent_id,
+            'turnIndex': job.turn_index,
+            'intent': request_model.intent,
+            'sourceType': request_model.source.type,
+            'route': model.route,
+            'queuePosition': waiting_count + 1,
+            'continuationBase': model.continuation_base,
+        }))
+        await MindmapAiDao.update_session(db, parent.session_id, {
+            'current_agent_key': manifest.agent_key,
+            'expires_time': max(
+                session.expires_time,
+                now + timedelta(days=policy.retention_days),
+            ),
+        })
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            replay = await MindmapAiDao.get_job_by_idempotency(db, user_id, idempotency_key)
+            if replay is None or replay.request_fingerprint != fingerprint:
+                raise ServiceException(message='AI 脑图排队请求创建冲突，请重试') from None
+            return _job_model(replay)
+        record_mindmap_ai_event('job_queued')
+        return _job_model(job)
+
+    @classmethod
     async def create_followup_job(  # noqa: PLR0912, PLR0915
         cls,
         db: AsyncSession,
@@ -4257,6 +5644,20 @@ class MindmapAiService:
         parent = await MindmapAiDao.get_job(db, parent_job_id, user_id)
         if parent is None:
             raise ServiceException(message='AI 脑图任务不存在')
+        if parent.status == 'needs_review':
+            raise ServiceException(
+                data={'errorCode': 'AI_FOLLOWUP_REVIEW_REQUIRED'},
+                message='请先确认或不采纳当前 AI 结果，再继续下一轮',
+            )
+        if parent.status in {'queued', 'preparing', 'running', 'validating'}:
+            return await cls._create_waiting_followup_job(
+                db,
+                parent,
+                model,
+                user_id,
+                fingerprint,
+                idempotency_key,
+            )
         observed_parent_status = parent.status
         requested_intent = model.intent or parent.intent
         current_document_followup = model.continuation_base == 'current_document'
@@ -4274,13 +5675,13 @@ class MindmapAiService:
         artifact_followup = bool(
             not current_source_followup
             and parent.status in {
-                'ready', 'completed_file', 'completed_no_change', 'needs_review',
+                'ready', 'completed_file', 'completed_no_change', 'completed_direct',
             }
             and parent.artifact_id
         )
         authoritative_document_followup = bool(
             current_document_followup
-            and parent.status in {'applied', 'undone'}
+            and parent.status in {'applied', 'undone', 'completed_direct'}
             and parent.source_type == 'cloud_document'
             and parent.source_mindmap_id
         )
@@ -4454,6 +5855,8 @@ class MindmapAiService:
         payload['target'] = (
             'message'
             if requested_intent == 'discuss'
+            else 'file'
+            if payload.get('executionMode') == 'direct'
             else (
                 'proposal'
                 if normalized_source_type in {'local_snapshot', 'cloud_document'}
@@ -4482,7 +5885,9 @@ class MindmapAiService:
             )
         ):
             raise ServiceException(message='选择的 AI Agent 不支持继续当前任务')
-        if authoritative_followup:
+        undo_baseline: dict[str, Any] = {}
+        refresh_cloud_source = authoritative_document_followup or request_model.execution_mode == 'direct'
+        if authoritative_followup or refresh_cloud_source:
             try:
                 (
                     authoritative_document,
@@ -4490,7 +5895,9 @@ class MindmapAiService:
                     authoritative_hash,
                     authoritative_mindmap_id,
                     authoritative_room_epoch,
-                ) = await cls._prepare_source_for_job(db, request_model, user_id)
+                ) = await cls._prepare_source_for_job(
+                    db, request_model, user_id, capture_editor_document=undo_baseline,
+                )
             except ServiceException as exc:
                 if not authoritative_snapshot_followup:
                     raise
@@ -4510,7 +5917,7 @@ class MindmapAiService:
             if (
                 authoritative_document is None
                 or (
-                    authoritative_document_followup
+                    refresh_cloud_source
                     and authoritative_mindmap_id != parent.source_mindmap_id
                 )
                 or (
@@ -4533,7 +5940,7 @@ class MindmapAiService:
             source_payload['document'] = authoritative_document
             source_payload['revision'] = authoritative_revision
             source_payload['documentHash'] = authoritative_hash
-            if authoritative_document_followup:
+            if refresh_cloud_source:
                 source_payload['roomEpoch'] = authoritative_room_epoch
                 source_payload['mindmapId'] = authoritative_mindmap_id
             else:
@@ -4545,20 +5952,7 @@ class MindmapAiService:
             else:
                 source_payload['baselineDocument'] = authoritative_document
             request_model = MindmapAiJobCreateModel.model_validate(payload)
-        connector = await cls._ensure_connector_available(
-            db,
-            manifest,
-            user_id,
-            for_update=True,
-            preflight_unknown=True,
-        )
-        policy = cls._runtime_policy(connector, manifest)
-        model_ref = cls._validate_job_policy(request_model, manifest, policy)
-        if (
-            manifest.agent_key == 'native_mindmap'
-            and not await cls._has_native_model(db, user_id, request_model.model_id)
-        ):
-            raise ServiceException(message='自研 MindMap Agent 没有可用的模型配置')
+        policy, runtime_values = await cls._prepare_job_runtime(db, request_model, manifest, user_id)
         await cls._ensure_concurrency_available(db, manifest.agent_key, policy)
 
         # Completion locks one job and then the session. Follow-up creation
@@ -4596,7 +5990,7 @@ class MindmapAiService:
                 )
                 or (
                     authoritative_document_followup
-                    and locked_parent.status in {'applied', 'undone'}
+                    and locked_parent.status in {'applied', 'undone', 'completed_direct'}
                     and locked_parent.status == observed_parent_status
                     and locked_parent.source_type == 'cloud_document'
                     and locked_parent.source_mindmap_id == parent.source_mindmap_id
@@ -4616,7 +6010,7 @@ class MindmapAiService:
                     and not discussion_followup
                     and not authoritative_followup
                     and locked_parent.status in {
-                        'ready', 'completed_file', 'completed_no_change', 'needs_review',
+                        'ready', 'completed_file', 'completed_no_change', 'completed_direct',
                     }
                     and bool(locked_parent.artifact_id)
                 )
@@ -4694,24 +6088,14 @@ class MindmapAiService:
                 'session_id': parent.session_id,
                 'parent_job_id': parent.id,
                 'turn_index': next_turn_index,
-                'agent_key': manifest.agent_key,
-                'adapter_version': manifest.adapter_version,
-                'sdk_version': manifest.sdk_version,
-                'runtime_version': manifest.runtime_version,
-                'model_ref': model_ref,
-                'max_budget_usd': policy.max_budget_usd,
-                'timeout_seconds': policy.timeout_seconds,
-                'max_nodes': request_model.parameters.max_nodes,
-                'max_depth': request_model.parameters.max_depth,
-                'retention_days': policy.retention_days,
-                'intent': request_model.intent,
-                'target': request_model.target,
-                'source_type': request_model.source.type,
+                **runtime_values,
                 'source_mindmap_id': source_mindmap_id,
                 'base_revision': base_revision,
                 'base_hash': base_hash,
                 'base_room_epoch': base_room_epoch,
-                'request_json': _json_dumps(request_model.model_dump(by_alias=True, exclude_none=True)),
+                'request_json': _json_dumps(_request_with_undo_baseline(
+                    request_model.model_dump(by_alias=True, exclude_none=True), undo_baseline,
+                )),
                 'request_fingerprint': fingerprint,
                 'idempotency_key': idempotency_key,
                 'status': 'queued',
@@ -4741,6 +6125,7 @@ class MindmapAiService:
                     )
                 ),
                 'continuationBase': model.continuation_base,
+                'route': model.route,
             }))
             await MindmapAiDao.update_session(db, parent.session_id, {
                 'current_agent_key': manifest.agent_key,
@@ -4805,19 +6190,63 @@ class MindmapAiService:
         session_ids = [str(session.id) for session in sessions]
         current_jobs = await MindmapAiDao.list_latest_jobs_for_sessions(db, session_ids)
         turn_counts = await MindmapAiDao.count_turns_for_sessions(db, session_ids)
+        mindmap_names: dict[int, str] = {}
+        mindmap_access: dict[int, bool] = {}
+        for current_job in current_jobs.values():
+            source_mindmap_id = getattr(current_job, 'source_mindmap_id', None)
+            if source_mindmap_id is None:
+                continue
+            try:
+                mindmap = await MindmapService.check_mindmap_access(
+                    db,
+                    int(source_mindmap_id),
+                    user_id,
+                    require_edit=False,
+                )
+            except ServiceException:
+                # A revoked document remains visible as a redacted task entry;
+                # do not leak its old title or turn details through the task center.
+                mindmap_access[int(source_mindmap_id)] = False
+                continue
+            normalized_mindmap_id = int(source_mindmap_id)
+            mindmap_access[normalized_mindmap_id] = True
+            mindmap_names[normalized_mindmap_id] = str(mindmap.name or '').strip()
         items: list[dict[str, Any]] = []
         for session in sessions:
             current_job = current_jobs.get(str(session.id))
+            source_mindmap_id = getattr(current_job, 'source_mindmap_id', None)
+            accessible = (
+                mindmap_access.get(int(source_mindmap_id), False)
+                if source_mindmap_id is not None
+                else None
+            )
+            safe_session_title = session.title
+            safe_job = (
+                _job_model(current_job).model_dump(by_alias=True)
+                if current_job is not None
+                else None
+            )
+            if source_mindmap_id is not None and not accessible:
+                # A task remains discoverable so the user can understand that
+                # work exists, but a revoked document must not leak prompt,
+                # generated title, provider error detail, or usage metadata.
+                safe_session_title = '已隐藏的脑图任务'
+                if safe_job is not None:
+                    safe_job['title'] = None
+                    safe_job['errorMessage'] = None
+                    safe_job['usage'] = None
             items.append({
                 'sessionId': session.id,
-                'title': session.title,
+                'title': safe_session_title,
                 'status': session.status,
                 'currentAgentKey': session.current_agent_key,
-                'currentJob': (
-                    _job_model(current_job).model_dump(by_alias=True)
-                    if current_job is not None
+                'mindmapName': (
+                    mindmap_names.get(int(source_mindmap_id))
+                    if source_mindmap_id is not None
                     else None
                 ),
+                'mindmapAccessible': accessible,
+                'currentJob': safe_job,
                 'turnCount': turn_counts.get(str(session.id), 0),
                 'updateTime': session.update_time,
                 'expiresTime': session.expires_time,
@@ -5161,12 +6590,206 @@ class MindmapAiService:
         }
 
     @classmethod
-    async def cancel_job(cls, db: AsyncSession, job_id: str, user_id: int) -> MindmapAiJobModel:
+    async def _promote_draft_checkpoint_for_stop(
+        cls,
+        db: AsyncSession,
+        job: Any,
+    ) -> bool:
+        """Promote a live checkpoint into a normal undoable AI result."""
+        if (
+            job is None
+            or job.status not in ACTIVE_JOB_STATUSES
+            or _json_loads(getattr(job, 'request_json', None), {}).get(
+                'executionMode', 'preview',
+            ) == 'direct'
+            or job.target != 'proposal'
+            or job.intent == 'discuss'
+            or job.source_type not in {'local_snapshot', 'cloud_document'}
+        ):
+            return False
+        checkpoint = await MindmapAiDao.get_draft_checkpoint(
+            db,
+            str(job.id),
+            for_update=True,
+        )
+        preview = MindmapAiTaskManager._draft_checkpoint_preview(checkpoint)
+        if preview is None or not isinstance(preview.get('document'), dict):
+            return False
+        request_model = MindmapAiJobCreateModel.model_validate(
+            _json_loads(getattr(job, 'request_json', None), {}),
+        )
+        baseline_document = (
+            request_model.source.baseline_document
+            or request_model.source.document
+        )
+        if not isinstance(baseline_document, dict):
+            return False
+        # For an existing map max_nodes limits this turn's additions, not the
+        # total size of the already authorized source document.
+        max_node_count = AI_MAX_NODE_COUNT
+        artifact_id = str(uuid.uuid4())
+        artifact, summary = build_smm_artifact(
+            _restore_preview_document(request_model, preview['document']),
+            title=job.title or _initial_session_title(request_model.prompt),
+            agent_key=job.agent_key,
+            adapter_version=job.adapter_version,
+            prompt_version='mindmap-ai-v2-stop-checkpoint',
+            artifact_id=artifact_id,
+            preserve_source_content=True,
+            max_node_count=max_node_count,
+        )
+        artifact, summary = _validate_job_result_artifact(
+            artifact,
+            max_node_count=max_node_count,
+            expected_artifact_id=artifact_id,
+            expected_agent_key=job.agent_key,
+            expected_adapter_version=getattr(job, 'adapter_version', None),
+        )
+        proposal_operations, impact = build_document_diff(
+            baseline_document,
+            artifact['document'],
+        )
+        if not proposal_operations:
+            return False
+        result_status = 'needs_review' if impact.get('highImpact') else 'ready'
+        local_proposal = job.source_type == 'local_snapshot' and job.source_mindmap_id is None
+        cloud_proposal = job.source_type == 'cloud_document' and job.source_mindmap_id is not None
+        if not local_proposal and not cloud_proposal:
+            return False
+        now = datetime.now()
+        expires = getattr(job, 'expires_time', None) or now + timedelta(
+            days=int(getattr(
+                job,
+                'retention_days',
+                MindmapAiConfig.mindmap_ai_artifact_retention_days,
+            )),
+        )
+        proposal_id = str(uuid.uuid4())
+        await MindmapAiDao.add_artifact(db, {
+            'id': artifact_id,
+            'job_id': job.id,
+            'user_id': job.user_id,
+            'title': artifact['manifest']['title'],
+            'content_json': _json_dumps(artifact),
+            'document_hash': artifact['manifest']['documentHash'],
+            'validation_status': 'passed',
+            'validator_version': 'mindmap-validator-2',
+            'node_count': summary['nodeCount'],
+            'tree_depth': summary['treeDepth'],
+            'byte_size': len(canonical_json_bytes(artifact)),
+            'created_time': now,
+            'expires_time': expires,
+        })
+        await MindmapAiDao.add_proposal(db, {
+            'id': proposal_id,
+            'job_id': job.id,
+            'user_id': job.user_id,
+            'proposal_type': 'patch',
+            'base_document_id': request_model.source.document_id if local_proposal else None,
+            'target_mindmap_id': job.source_mindmap_id if cloud_proposal else None,
+            'base_revision': job.base_revision,
+            'base_hash': job.base_hash,
+            'base_room_epoch': job.base_room_epoch,
+            'scope_json': _json_dumps(
+                request_model.source.scope.model_dump(by_alias=True),
+            ),
+            'operations_json': _json_dumps(proposal_operations),
+            'result_artifact_id': artifact_id,
+            'result_hash': artifact['manifest']['documentHash'],
+            'impact_json': _json_dumps(impact),
+            'warnings_json': _json_dumps([]),
+            'status': result_status,
+            'created_time': now,
+            'expires_time': expires,
+        })
+        await MindmapAiDao.update_job(db, job.id, {
+            'status': result_status,
+            'progress': 100,
+            'title': artifact['manifest']['title'],
+            'artifact_id': artifact_id,
+            'proposal_id': proposal_id,
+            'completed_time': now,
+            'error_code': None,
+            'error_message': None,
+        })
+        session = await MindmapAiDao.get_session(db, job.session_id, for_update=True)
+        if session is not None:
+            await MindmapAiDao.update_session(db, job.session_id, {
+                'current_agent_key': job.agent_key,
+                'title': artifact['manifest']['title'],
+                'latest_artifact_id': artifact_id,
+                'status': 'active',
+                'expires_time': max(session.expires_time or expires, expires),
+            })
+        await MindmapAiDao.add_event(
+            db,
+            job.id,
+            'artifact_needs_review' if result_status == 'needs_review' else 'artifact_ready',
+            _event_json({
+                'status': result_status,
+                'progress': 100,
+                'artifactId': artifact_id,
+                'proposalId': proposal_id,
+                'summary': summary,
+                'issueCount': 0,
+                'completionReason': 'stopped',
+            }),
+        )
+        await MindmapAiDao.delete_draft_checkpoint(db, str(job.id))
+        return True
+
+    @classmethod
+    async def cancel_job(  # noqa: PLR0912
+        cls,
+        db: AsyncSession,
+        job_id: str,
+        user_id: int,
+        *,
+        preserve_draft: bool = False,
+    ) -> MindmapAiJobModel:
         job = await MindmapAiDao.get_job(db, job_id, user_id, for_update=True)
         if job is None:
             raise ServiceException(message='AI 脑图任务不存在')
         if job.status in TERMINAL_JOB_STATUSES:
-            return _job_model(job)
+            # The read uses FOR UPDATE so that a concurrent cancellation
+            # cannot change the status while this endpoint decides whether to
+            # close or release queued children.  Materialize the response and
+            # end that transaction before calling either helper: both helpers
+            # open a second session and lock the same parent row.
+            terminal_status = str(job.status)
+            result = _job_model(job)
+            await db.rollback()
+            if terminal_status in {'cancelled', 'failed', 'expired', 'stale', 'rejected'}:
+                await MindmapAiTaskManager._close_waiting_followups(
+                    job_id,
+                    parent_status=terminal_status,
+                )
+            else:
+                await MindmapAiTaskManager._wake_waiting_followups(job_id)
+            return result
+        if preserve_draft:
+            try:
+                promoted = await cls._promote_draft_checkpoint_for_stop(db, job)
+            except Exception:
+                await db.rollback()
+                logger.exception(
+                    f'AI 停止时提升实时草稿失败，将回退为普通取消: job_id={job_id}'
+                )
+                job = await MindmapAiDao.get_job(db, job_id, user_id, for_update=True)
+                if job is None:
+                    raise ServiceException(message='AI 脑图任务不存在') from None
+                promoted = False
+            if promoted:
+                await db.commit()
+                execution_epoch = int(getattr(job, 'execution_epoch', 0) or 0)
+                await MindmapAiTaskManager.mark_draft_terminal(
+                    job_id,
+                    execution_epoch,
+                )
+                await MindmapAiTaskManager.cancel(job_id, job.agent_key)
+                await MindmapAiTaskManager._wake_waiting_followups(job_id)
+                refreshed = await MindmapAiDao.get_job(db, job_id, user_id)
+                return _job_model(refreshed or job)
         now = datetime.now()
         if job.status != 'cancel_requested':
             await MindmapAiDao.update_job(db, job_id, {
@@ -5208,7 +6831,21 @@ class MindmapAiService:
             )
         await MindmapAiTaskManager.cancel(job_id, job.agent_key)
         refreshed = await MindmapAiDao.get_job(db, job_id, user_id)
-        return _job_model(refreshed or job)
+        effective_job = refreshed or job
+        if effective_job.status == 'cancelled':
+            await MindmapAiTaskManager._close_waiting_followups(
+                job_id,
+                parent_status='cancelled',
+            )
+        elif effective_job.status in {
+            'ready', 'completed_file', 'completed_no_change', 'completed_direct',
+            'needs_review', 'completed_message',
+        }:
+            # A worker may have completed the parent between the cancel CAS
+            # and the local task fence. Its queued child must use that durable
+            # result rather than being closed as if cancellation had won.
+            await MindmapAiTaskManager._wake_waiting_followups(job_id)
+        return _job_model(effective_job)
 
     @classmethod
     async def get_artifact(
@@ -5239,6 +6876,84 @@ class MindmapAiService:
         return artifact, validated
 
     @classmethod
+    async def reject_proposal(
+        cls,
+        db: AsyncSession,
+        proposal_id: str,
+        user_id: int,
+    ) -> MindmapAiJobModel:
+        """Record an explicit rejection before a review proposal is applied.
+
+        The canvas preview is client-local, so rejecting it must still have a
+        durable server result.  This endpoint is intentionally separate from
+        task cancellation: a completed high-impact proposal is a user decision
+        and its queued descendants must be closed against the rejected base.
+        """
+        proposal = await MindmapAiDao.get_proposal(
+            db,
+            proposal_id,
+            user_id,
+            for_update=True,
+        )
+        if proposal is None:
+            raise ServiceException(
+                data={'errorCode': 'AI_PROPOSAL_NOT_FOUND'},
+                message='AI 脑图提案不存在或当前账号无权访问',
+            )
+        job = await MindmapAiDao.get_job(
+            db,
+            proposal.job_id,
+            user_id,
+            for_update=True,
+        )
+        if job is None or str(getattr(job, 'proposal_id', '')) != str(proposal_id):
+            raise ServiceException(
+                data={'errorCode': PROPOSAL_INTEGRITY_ERROR_CODE},
+                message='AI 提案与任务关联不一致，已阻止拒绝操作',
+            )
+        job_id = str(proposal.job_id)
+        if proposal.status == 'rejected' or job.status == 'rejected':
+            return _job_model(job)
+        if proposal.status in {'applied', 'undone'} or job.status in {'applied', 'undone'}:
+            # A late reject click must never rewrite a committed result.  The
+            # caller can reconcile the already authoritative terminal state.
+            return _job_model(job)
+        if proposal.status == 'prepared' or job.status not in {'ready', 'needs_review'}:
+            raise ServiceException(
+                data={'errorCode': 'AI_PROPOSAL_STATE_INVALID'},
+                message='AI 提案已经进入应用流程，暂不能拒绝；请刷新查看最新状态',
+            )
+        now = datetime.now()
+        await MindmapAiDao.update_proposal(db, proposal_id, {'status': 'rejected'})
+        await MindmapAiDao.update_job(db, job_id, {
+            'status': 'rejected',
+            'progress': 100,
+            'completed_time': now,
+            'error_code': None,
+            'error_message': None,
+        })
+        await MindmapAiDao.delete_draft_checkpoint(db, job_id)
+        await MindmapAiDao.add_event(
+            db,
+            job_id,
+            'proposal_rejected',
+            _event_json({
+                'status': 'rejected',
+                'progress': 100,
+                'proposalId': proposal.id,
+                'completionReason': 'user_rejected',
+            }),
+        )
+        await db.commit()
+        await MindmapAiTaskManager._close_waiting_followups(
+            job_id,
+            parent_status='rejected',
+        )
+        record_mindmap_ai_event('proposal_rejected')
+        refreshed = await MindmapAiDao.get_job(db, job_id, user_id)
+        return _job_model(refreshed or job)
+
+    @classmethod
     async def prepare_local_apply(
         cls,
         db: AsyncSession,
@@ -5254,7 +6969,9 @@ class MindmapAiService:
         ):
             raise ServiceException(message='AI 脑图提案不是本地应用提案')
         operations = _json_loads(getattr(proposal, 'operations_json', None), None)
-        if proposal.status not in {'ready', 'prepared'}:
+        if proposal.status not in {'ready', 'prepared'} and not (
+            proposal.status == 'needs_review' and _is_high_impact_proposal(proposal)
+        ):
             raise ServiceException(message='AI 脑图提案不存在或不可应用')
         if proposal.expires_time <= datetime.now():
             raise ServiceException(message='AI 脑图提案已过期')
@@ -5378,10 +7095,65 @@ class MindmapAiService:
     ) -> MindmapAiProposalModel:
         proposal = await MindmapAiDao.get_proposal(db, proposal_id, user_id)
         if proposal is None:
-            raise ServiceException(message='AI 脑图提案不存在')
+            # Direct-write rounds use the task id as a durable undo receipt
+            # rather than creating a preview Proposal.  Expose the same read
+            # shape to task-center clients so they can render the undo action
+            # without weakening the normal Proposal integrity checks.
+            direct_job = await MindmapAiDao.get_job(db, proposal_id, user_id)
+            direct_request = _json_loads(
+                getattr(direct_job, 'request_json', None),
+            ) if direct_job is not None else {}
+            if not (
+                direct_job is not None
+                and direct_job.proposal_id == proposal_id
+                and direct_request.get('executionMode') == 'direct'
+                and direct_job.source_type == 'cloud_document'
+            ):
+                raise ServiceException(message='AI 脑图提案不存在')
+            undo = await MindmapAiDao.get_undo(db, proposal_id, user_id)
+            if undo is None:
+                raise ServiceException(message='AI 脑图撤销记录不存在')
+            source = direct_request.get('source') or {}
+            change_result = await _direct_job_change_result(db, direct_job)
+            change_summary = change_result['changeSummary']
+            direct_impact = {
+                'direct': True,
+                'changeSummary': change_summary,
+                'changeSummaryVersion': change_result['changeSummaryVersion'],
+                # Keep Proposal's established impact names so existing UI
+                # components render direct rounds exactly like file results.
+                'createdCount': change_summary['added'],
+                'updatedCount': change_summary['updated'],
+                'movedCount': change_summary['moved'],
+                'deletedCount': change_summary['deleted'],
+                'operationCount': change_summary['total'],
+            }
+            return MindmapAiProposalModel(
+                id=proposal_id,
+                jobId=direct_job.id,
+                proposalType='direct',
+                baseDocumentId=None,
+                targetMindmapId=direct_job.source_mindmap_id,
+                baseRevision=direct_job.base_revision,
+                baseHash=direct_job.base_hash,
+                baseRoomEpoch=direct_job.base_room_epoch,
+                scope=source.get('scope') if isinstance(source, dict) else {},
+                operations=[],
+                resultArtifactId='',
+                resultHash=undo.applied_hash,
+                impact=direct_impact,
+                warnings=[],
+                status=(
+                    'blocked' if undo.status == 'available' and _raw_direct_undo_baseline(direct_job) is None
+                    else 'applied' if undo.status == 'available' else undo.status
+                ),
+                appliedRevision=undo.applied_revision,
+                createdTime=undo.created_time,
+                expiresTime=undo.expires_time,
+            )
         if (
             proposal.expires_time <= datetime.now()
-            and proposal.status not in {'applied', 'undone', 'expired'}
+            and proposal.status not in {'applied', 'undone', 'rejected', 'expired'}
         ):
             await MindmapAiDao.update_proposal(db, proposal_id, {'status': 'expired'})
             await db.commit()
@@ -5429,6 +7201,7 @@ class MindmapAiService:
                 data={'errorCode': 'AI_LOCAL_ACK_TARGET_INVALID'},
                 message='AI 脑图提案不是本地应用提案',
             )
+        job_id = str(proposal.job_id)
         if proposal.status == 'applied':
             if (
                 proposal.result_hash != model.result_hash
@@ -5468,7 +7241,7 @@ class MindmapAiService:
             'applied_revision': model.revision,
             'applied_time': now,
         })
-        await MindmapAiDao.update_job(db, proposal.job_id, {
+        await MindmapAiDao.update_job(db, job_id, {
             'status': 'applied',
             'progress': 100,
             'completed_time': now,
@@ -5482,11 +7255,12 @@ class MindmapAiService:
         )
         await MindmapAiDao.add_event(
             db,
-            proposal.job_id,
+            job_id,
             'local_applied',
             _event_json({'proposalId': proposal.id, 'revision': model.revision}),
         )
         await db.commit()
+        await MindmapAiTaskManager._wake_waiting_followups(job_id)
         record_mindmap_ai_event('local_applied')
         return {'proposalId': proposal.id, 'status': 'applied', 'idempotentReplay': False}
 
@@ -5567,6 +7341,10 @@ class MindmapAiService:
             _event_json({'proposalId': proposal.id, 'revision': model.revision}),
         )
         await db.commit()
+        # A queued follow-up may depend on the post-undo document.  Wake it
+        # only after the undo receipt is durable so it can freeze that exact
+        # local revision instead of the pre-undo proposal base.
+        await MindmapAiTaskManager._wake_waiting_followups(str(proposal.job_id))
         record_mindmap_ai_event('local_undone')
         return {'proposalId': proposal.id, 'status': 'undone', 'idempotentReplay': False}
 
@@ -5663,16 +7441,31 @@ class MindmapAiService:
                 data={'errorCode': 'AI_PROPOSAL_NOT_FOUND'},
                 message='AI 脑图提案不存在',
             )
+        proposal_job_id = str(proposal.job_id)
         if proposal.status == 'applied':
+            # Rollback expires ORM instances in a real AsyncSession.  Copy the
+            # response scalars before releasing the transaction; otherwise
+            # the idempotent replay path can trigger an implicit async query
+            # (MissingGreenlet) while constructing its response.
+            replay_proposal_id = str(proposal.id)
+            replay_revision = proposal.applied_revision
+            await db.rollback()
+            await MindmapAiTaskManager._wake_waiting_followups(proposal_job_id)
             return {
-                'proposalId': proposal.id,
+                'proposalId': replay_proposal_id,
                 'status': 'applied',
-                'contentRevision': proposal.applied_revision,
+                'contentRevision': replay_revision,
                 'idempotentReplay': True,
             }
         operations = _json_loads(getattr(proposal, 'operations_json', None), None)
         if (
-            proposal.status not in {'ready', 'prepared'}
+            (
+                proposal.status not in {'ready', 'prepared'}
+                and not (
+                    proposal.status == 'needs_review'
+                    and _is_high_impact_proposal(proposal)
+                )
+            )
             or proposal.expires_time <= datetime.now()
         ):
             raise ServiceException(
@@ -5685,7 +7478,6 @@ class MindmapAiService:
                 message='AI 脑图提案已过期或不可应用',
             )
         proposal_record_id = str(proposal.id)
-        proposal_job_id = str(proposal.job_id)
         if proposal.base_revision != model.content_revision or proposal.base_hash != model.base_hash:
             await cls._mark_proposal_stale(db, proposal_record_id, proposal_job_id)
             raise ServiceException(
@@ -5736,13 +7528,9 @@ class MindmapAiService:
                 mindmap_id,
                 user_id,
             )
-            latest_document, _latest_summary = normalize_ai_editable_source_document({
-                'root': latest_detail.node_tree,
-                'layout': latest_detail.layout,
-                'theme': latest_detail.theme,
-                'view': latest_detail.view_data,
-                'documentData': latest_detail.document_data,
-            }, max_node_count=AI_MAX_NODE_COUNT)
+            latest_document, _latest_summary = normalize_ai_editable_source_document(
+                document_from_mindmap_detail(latest_detail), max_node_count=AI_MAX_NODE_COUNT,
+            )
             latest_revision = int(latest_detail.content_revision)
             latest_hash = compute_document_hash(latest_document)
             latest_room_epoch = await room_manager.get_active_lineage_epoch(
@@ -5808,7 +7596,13 @@ class MindmapAiService:
             operations = _json_loads(getattr(proposal, 'operations_json', None), None)
             if (
                 proposal_job is None
-                or proposal.status not in {'ready', 'prepared'}
+                or (
+                    proposal.status not in {'ready', 'prepared'}
+                    and not (
+                        proposal.status == 'needs_review'
+                        and _is_high_impact_proposal(proposal)
+                    )
+                )
                 or proposal.expires_time <= datetime.now()
                 or proposal.base_revision != model.content_revision
                 or proposal.base_hash != model.base_hash
@@ -5829,13 +7623,7 @@ class MindmapAiService:
                 mindmap_id,
                 user_id,
             )
-            editor_document = {
-                'root': detail.node_tree,
-                'layout': detail.layout,
-                'theme': detail.theme,
-                'view': detail.view_data,
-                'documentData': detail.document_data,
-            }
+            editor_document = document_from_mindmap_detail(detail)
             current_document, _summary = normalize_ai_editable_source_document(
                 editor_document,
                 max_node_count=AI_MAX_NODE_COUNT,
@@ -6068,6 +7856,7 @@ class MindmapAiService:
             new_revision=result['contentRevision'],
             client_mutation_id=result['clientMutationId'],
         )
+        await MindmapAiTaskManager._wake_waiting_followups(proposal_job_id)
         return {
             'proposalId': proposal.id,
             'status': 'applied',
@@ -6096,24 +7885,49 @@ class MindmapAiService:
         # ACK 完成后重新锁行读取，避免与客户端最终保存形成死锁。
         undo = await MindmapAiDao.get_undo(db, proposal_id, user_id)
         proposal = await MindmapAiDao.get_proposal(db, proposal_id, user_id)
-        if (
-            undo is None
-            or proposal is None
-            or undo.mindmap_id != mindmap_id
-            or getattr(proposal, 'target_mindmap_id', None) != mindmap_id
-            or getattr(proposal, 'base_document_id', None) is not None
-        ):
+        if undo is None or undo.mindmap_id != mindmap_id:
             raise ServiceException(
                 data={'errorCode': 'AI_UNDO_NOT_FOUND'},
                 message='AI 脑图撤销记录不存在',
             )
-        proposal_job = await MindmapAiDao.get_job(db, proposal.job_id, user_id)
+        proposal_job = None
+        direct_receipt = False
+        if proposal is None:
+            proposal_job = await MindmapAiDao.get_job(db, proposal_id, user_id)
+            direct_receipt = bool(
+                proposal_job is not None
+                and _json_loads(getattr(proposal_job, 'request_json', None), {}).get(
+                    'executionMode',
+                ) == 'direct'
+                and getattr(proposal_job, 'proposal_id', None) == proposal_id
+            )
+            if not direct_receipt:
+                raise ServiceException(
+                    data={'errorCode': 'AI_UNDO_NOT_FOUND'},
+                    message='AI 脑图撤销记录不存在',
+                )
+        else:
+            if (
+                getattr(proposal, 'target_mindmap_id', None) != mindmap_id
+                or getattr(proposal, 'base_document_id', None) is not None
+            ):
+                raise ServiceException(
+                    data={'errorCode': 'AI_UNDO_NOT_FOUND'},
+                    message='AI 脑图撤销记录不存在',
+                )
+            proposal_job = await MindmapAiDao.get_job(db, proposal.job_id, user_id)
         if proposal_job is None:
             raise ServiceException(
                 data={'errorCode': 'AI_UNDO_NOT_FOUND'},
                 message='AI 脑图撤销记录不存在',
             )
+        if direct_receipt and undo.status != 'undone' and _raw_direct_undo_baseline(proposal_job) is None:
+            raise ServiceException(
+                data={'errorCode': 'AI_UNDO_CONFLICT'},
+                message='旧 AI 任务未保存精确原始快照，无法安全自动撤销',
+            )
         if undo.status == 'undone':
+            await MindmapAiTaskManager._wake_waiting_followups(str(proposal_job.id))
             return {
                 'proposalId': proposal_id,
                 'status': 'undone',
@@ -6169,25 +7983,58 @@ class MindmapAiService:
                 user_id,
                 for_update=True,
             )
+            proposal_job = (
+                await MindmapAiDao.get_job(db, proposal.job_id, user_id)
+                if proposal is not None
+                else await MindmapAiDao.get_job(db, proposal_id, user_id)
+            )
+            direct_receipt = bool(
+                proposal is None
+                and proposal_job is not None
+                and _json_loads(getattr(proposal_job, 'request_json', None), {}).get(
+                    'executionMode',
+                ) == 'direct'
+                and getattr(proposal_job, 'proposal_id', None) == proposal_id
+            )
             if (
                 undo is None
-                or proposal is None
                 or undo.mindmap_id != mindmap_id
-                or getattr(proposal, 'target_mindmap_id', None) != mindmap_id
-                or getattr(proposal, 'base_document_id', None) is not None
+                or proposal_job is None
+                or (
+                    not direct_receipt
+                    and (
+                        proposal is None
+                        or getattr(proposal, 'target_mindmap_id', None) != mindmap_id
+                        or getattr(proposal, 'base_document_id', None) is not None
+                    )
+                )
             ):
                 raise ServiceException(
                     data={'errorCode': 'AI_UNDO_NOT_FOUND'},
                     message='AI 脑图撤销记录不存在',
                 )
             if undo.status == 'undone':
-                return {
+                # ``undo`` and ``proposal_job`` are both read with row locks
+                # above.  Do not wake the successor while this transaction is
+                # still open: _wake_waiting_followups acquires the same parent
+                # job lock in a separate session and would deadlock on an
+                # idempotent retry.  Release the lock and collaboration barrier
+                # before scheduling the already-completed queue.
+                replay_result = {
                     'proposalId': proposal_id,
                     'status': 'undone',
                     'contentRevision': undo.undone_revision,
                     'idempotentReplay': True,
                 }
-            proposal_job = await MindmapAiDao.get_job(db, proposal.job_id, user_id)
+                replay_job_id = str(proposal_job.id)
+                await db.rollback()
+                await room_manager.abort_collaboration_mutation_barrier(barrier)
+                # Mark cleanup as complete so the finally block does not abort
+                # the same barrier a second time (which could publish a stale
+                # release event after another operation acquired a new token).
+                database_committed = True
+                await MindmapAiTaskManager._wake_waiting_followups(replay_job_id)
+                return replay_result
             if (
                 proposal_job is None
                 or undo.status != 'available'
@@ -6209,13 +8056,9 @@ class MindmapAiService:
                 mindmap_id,
                 user_id,
             )
-            current_document, _summary = normalize_ai_editable_source_document({
-                'root': detail.node_tree,
-                'layout': detail.layout,
-                'theme': detail.theme,
-                'view': detail.view_data,
-                'documentData': detail.document_data,
-            }, max_node_count=AI_MAX_NODE_COUNT)
+            current_document, _summary = normalize_ai_editable_source_document(
+                document_from_mindmap_detail(detail), max_node_count=AI_MAX_NODE_COUNT,
+            )
             current_epoch = await room_manager.get_active_lineage_epoch(
                 mindmap_id,
                 expected_revision,
@@ -6265,29 +8108,41 @@ class MindmapAiService:
                     data={'errorCode': 'AI_UNDO_CONFLICT'},
                     message='AI 应用后脑图已有新修改，不能自动撤销以免覆盖协作者内容',
                 ) from exc
+            deleted_comment_nodes = (
+                await MindmapCommentService.delete_ai_comments_for_job(
+                    db,
+                    mindmap_id,
+                    user_id,
+                    str(proposal_job.id),
+                )
+                if direct_receipt
+                else []
+            )
             await MindmapAiDao.update_undo(db, proposal_id, {
                 'status': 'undone',
                 'undone_revision': result['contentRevision'],
             })
-            await MindmapAiDao.update_proposal(db, proposal_id, {'status': 'undone'})
+            if proposal is not None:
+                await MindmapAiDao.update_proposal(db, proposal_id, {'status': 'undone'})
             now = datetime.now()
-            await MindmapAiDao.update_job(db, proposal.job_id, {
+            await MindmapAiDao.update_job(db, proposal_job.id, {
                 'status': 'undone',
                 'completed_time': now,
             })
-            await MindmapAiDao.extend_result_expiration(
-                db,
-                job_id=proposal.job_id,
-                artifact_id=proposal.result_artifact_id,
-                proposal_id=proposal_id,
-                expires_time=max(
-                    proposal.expires_time,
-                    cls._applied_result_expiration(now),
-                ),
-            )
+            if proposal is not None:
+                await MindmapAiDao.extend_result_expiration(
+                    db,
+                    job_id=proposal.job_id,
+                    artifact_id=proposal.result_artifact_id,
+                    proposal_id=proposal_id,
+                    expires_time=max(
+                        proposal.expires_time,
+                        cls._applied_result_expiration(now),
+                    ),
+                )
             await MindmapAiDao.add_event(
                 db,
-                proposal.job_id,
+                proposal_job.id,
                 'cloud_undone',
                 _event_json({
                     'proposalId': proposal_id,
@@ -6316,11 +8171,31 @@ class MindmapAiService:
                 )
 
         record_mindmap_ai_event('cloud_undone')
+        for deleted_comment in deleted_comment_nodes:
+            try:
+                await MindmapCommentService._broadcast_change(
+                    mindmap_id,
+                    (
+                        'thread_deleted'
+                        if deleted_comment.get('threadDeleted')
+                        else 'deleted'
+                    ),
+                    deleted_comment['threadId'],
+                    deleted_comment['nodeUid'],
+                )
+            except Exception as exc:  # noqa: PERF203
+                logger.warning(
+                    '广播 AI 直写评论撤销失败: '
+                    f"mindmap_id={mindmap_id}, thread_id={deleted_comment['threadId']}, error={exc}",
+                )
         barrier_completed = await room_manager.complete_collaboration_mutation_barrier(
             prepared_barrier,
             new_revision=result['contentRevision'],
             client_mutation_id=result['clientMutationId'],
         )
+        # The queued successor must be rebased against the post-undo revision;
+        # otherwise it remains waiting forever until a worker recovery scan.
+        await MindmapAiTaskManager._wake_waiting_followups(str(proposal_job.id))
         return {
             'proposalId': proposal_id,
             'status': 'undone',

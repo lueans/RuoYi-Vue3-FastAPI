@@ -503,7 +503,10 @@ class MindmapDocumentService:
             update(MindmapTag)
             .where(MindmapTag.id.in_(tag_ids))
             .values(
-                usage_node_count=case(node_counts, value=MindmapTag.id, else_=0),
+                usage_node_count=(
+                    case(node_counts, value=MindmapTag.id, else_=0)
+                    if node_counts else 0
+                ),
                 usage_file_count=case(file_counts, value=MindmapTag.id, else_=0),
             )
         )

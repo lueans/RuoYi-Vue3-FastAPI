@@ -79,6 +79,23 @@ test('异步渲染会话只认领运行时节点的首次可达位置', () => {
   assert.equal(session.claim({}), false)
 })
 
+test('延迟任务异常会取消同代其余任务并只报告一次，旧任务不能继续写入', () => {
+  const scheduler = createScheduler()
+  const errors = []
+  const session = createAsyncRenderSession({ ...scheduler, onError: error => errors.push(error.message) })
+  const calls = []
+  session.schedule(() => { throw new Error('layout timer failed') })
+  session.schedule(() => calls.push('stale node'))
+  const lateTask = scheduler.tasks.get(2)
+  scheduler.run(1)
+  lateTask()
+  assert.deepEqual(errors, ['layout timer failed'])
+  assert.deepEqual(calls, [])
+  assert.equal(session.pendingCount(), 0)
+  assert.equal(session.isActive(), false)
+  assert.equal(session.run(() => calls.push('stale finalizer')), false)
+})
+
 test('节流和防抖任务可在实例销毁时取消', async () => {
   let throttleCalls = 0
   let debounceCalls = 0

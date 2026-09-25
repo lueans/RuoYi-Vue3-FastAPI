@@ -6,13 +6,6 @@ from typing import Any
 from module_mindmap.ai.document import MindmapArtifactError
 from module_mindmap.service.simple_mind_document_codec import clone_json_value
 
-ALLOWED_OPERATION_TYPES = frozenset({
-    'create_node',
-    'update_node',
-    'move_node',
-    'delete_subtree',
-    'set_document_meta',
-})
 IGNORED_DATA_FIELDS = frozenset({
     'isActive',
     'inserting',
@@ -22,6 +15,10 @@ IGNORED_DATA_FIELDS = frozenset({
 })
 HIGH_IMPACT_DELETE_COUNT = 20
 HIGH_IMPACT_DELETE_RATIO = 0.1
+STRUCTURAL_UPDATE_COUNT = 20
+STRUCTURAL_UPDATE_RATIO = 0.2
+MIN_BULK_UPDATE_COUNT = 5
+HALF_UPDATE_RATIO = 0.5
 
 
 def _index_document(document: dict[str, Any]) -> tuple[
@@ -303,6 +300,30 @@ def build_document_diff(  # noqa: PLR0912, PLR0915
         high_impact_reasons.append('删除节点超过 20 个')
     if deletion_ratio >= HIGH_IMPACT_DELETE_RATIO and deleted_count > 0:
         high_impact_reasons.append('删除节点达到当前文档的 10%')
+    # Risk is derived from the semantic diff, never from model confidence or
+    # the mechanically generated moves needed to insert a new sibling.
+    risk_level = 'R0' if not operations else 'R1'
+    if moved_count:
+        high_impact_reasons.append('移动或重排已有节点，需要确认结构变化')
+        risk_level = 'R2'
+    if metadata_changes:
+        high_impact_reasons.append('修改脑图布局、主题或文档属性')
+        risk_level = 'R2'
+    if updated_count >= STRUCTURAL_UPDATE_COUNT or (
+        updated_count >= MIN_BULK_UPDATE_COUNT
+        and updated_count / before_count >= STRUCTURAL_UPDATE_RATIO
+    ):
+        high_impact_reasons.append('批量改写已有节点')
+        risk_level = 'R2'
+    if deleted_count:
+        high_impact_reasons.append('包含删除节点或子树，需确认保留内容')
+        risk_level = 'R3'
+    if _node_data(before_nodes[before_root_uid]) != _node_data(after_nodes[after_root_uid]):
+        high_impact_reasons.append('修改脑图根节点')
+        risk_level = 'R3'
+    if updated_count >= MIN_BULK_UPDATE_COUNT and updated_count / before_count >= HALF_UPDATE_RATIO:
+        high_impact_reasons.append('改写至少一半的已有节点')
+        risk_level = 'R3'
     return operations, {
         'beforeNodeCount': len(before_nodes),
         'afterNodeCount': len(after_nodes),
@@ -313,6 +334,8 @@ def build_document_diff(  # noqa: PLR0912, PLR0915
         'deletedSubtrees': deleted_subtrees,
         'metadataChanges': metadata_changes,
         'operationCount': len(operations),
+        'riskLevel': risk_level,
+        'requiresApproval': risk_level in {'R2', 'R3'},
         'highImpact': bool(high_impact_reasons),
         'highImpactReasons': high_impact_reasons,
         'changes': changes,

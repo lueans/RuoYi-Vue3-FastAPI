@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.orm import aliased
@@ -22,21 +22,34 @@ from module_mindmap.entity.do.mindmap_ai_do import (
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy import Select
     from sqlalchemy.ext.asyncio import AsyncSession
+
+_Record = TypeVar('_Record')
 
 MINDMAP_AI_EVENT_TYPE_PATTERN = re.compile(r'^[a-z][a-z0-9_]{0,63}$')
 MINDMAP_AI_INACTIVE_EVENT_STATUSES = frozenset({
     'cancel_requested', 'ready', 'applied', 'undone', 'completed_file',
-    'completed_no_change', 'needs_review', 'stale', 'cancelled', 'failed', 'expired',
-    'needs_input', 'completed_message',
+    'completed_no_change', 'completed_direct', 'needs_review', 'stale', 'cancelled', 'failed', 'expired',
+    'needs_input', 'completed_message', 'rejected',
 })
 MINDMAP_AI_POST_TRANSITION_EVENT_TYPES = frozenset({
     'status_changed', 'cancel_requested', 'artifact_ready', 'artifact_needs_review',
     'artifact_no_change', 'local_applied', 'local_undone', 'cloud_file_created',
-    'cloud_applied', 'cloud_undone', 'proposal_stale',
+    'cloud_applied', 'cloud_undone', 'proposal_stale', 'proposal_rejected',
     'needs_input',
     'message_ready',
+    'direct_completed',
 })
+
+
+async def _select_first(
+    db: AsyncSession, query: Select[tuple[_Record]], *, for_update: bool = False,
+) -> _Record | None:
+    """Execute an already-scoped single-record read, refreshing locked ORM rows."""
+    if for_update:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    return (await db.execute(query)).scalars().first()
 
 
 class MindmapAiDao:
@@ -55,9 +68,7 @@ class MindmapAiDao:
         for_update: bool = False,
     ) -> MindmapAiConnector | None:
         query = select(MindmapAiConnector).where(MindmapAiConnector.agent_key == agent_key)
-        if for_update:
-            query = query.with_for_update().execution_options(populate_existing=True)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query, for_update=for_update)
 
     @classmethod
     async def add_connector(cls, db: AsyncSession, values: dict[str, Any]) -> MindmapAiConnector:
@@ -98,9 +109,7 @@ class MindmapAiDao:
         query = select(MindmapAiSession).where(MindmapAiSession.id == session_id)
         if user_id is not None:
             query = query.where(MindmapAiSession.user_id == user_id)
-        if for_update:
-            query = query.with_for_update().execution_options(populate_existing=True)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query, for_update=for_update)
 
     @classmethod
     async def list_sessions(
@@ -145,8 +154,31 @@ class MindmapAiDao:
             )
         )).scalars())
         latest: dict[str, MindmapAiJob] = {}
+        active_statuses = {
+            'queued', 'preparing', 'running', 'validating', 'cancel_requested',
+        }
+        waiting_status = 'waiting_turn'
+        grouped: dict[str, list[MindmapAiJob]] = {}
         for job in jobs:
-            latest.setdefault(str(job.session_id), job)
+            grouped.setdefault(str(job.session_id), []).append(job)
+        for session_id, session_jobs in grouped.items():
+            # The latest turn is not always the turn currently executing: a
+            # later message can wait in the durable queue while its parent is
+            # still streaming. Surface the execution head so the task center
+            # opens on the live progress instead of a silent waiting card.
+            pending_jobs = [
+                job for job in session_jobs
+                if job.status in active_statuses or job.status == waiting_status
+            ]
+            latest[session_id] = min(
+                pending_jobs,
+                key=lambda job: (
+                    job.status == waiting_status,
+                    int(job.turn_index or 0),
+                    job.created_time,
+                    str(job.id),
+                ),
+            ) if pending_jobs else session_jobs[0]
         return latest
 
     @classmethod
@@ -180,6 +212,37 @@ class MindmapAiDao:
         if for_update:
             query = query.with_for_update().execution_options(populate_existing=True)
         return list((await db.execute(query)).scalars())
+
+    @classmethod
+    async def list_waiting_followups(
+        cls,
+        db: AsyncSession,
+        parent_job_id: str,
+        *,
+        for_update: bool = False,
+    ) -> list[MindmapAiJob]:
+        query = select(MindmapAiJob).where(
+            MindmapAiJob.parent_job_id == parent_job_id,
+            MindmapAiJob.status == 'waiting_turn',
+        ).order_by(MindmapAiJob.turn_index.asc(), MindmapAiJob.id.asc())
+        if for_update:
+            query = query.with_for_update().execution_options(populate_existing=True)
+        return list((await db.execute(query)).scalars())
+
+    @classmethod
+    async def list_waiting_jobs(
+        cls,
+        db: AsyncSession,
+        *,
+        limit: int = 2_000,
+    ) -> list[MindmapAiJob]:
+        safe_limit = min(max(int(limit), 1), 10_000)
+        return list((await db.execute(
+            select(MindmapAiJob)
+            .where(MindmapAiJob.status == 'waiting_turn')
+            .order_by(MindmapAiJob.created_time.asc(), MindmapAiJob.id.asc())
+            .limit(safe_limit)
+        )).scalars())
 
     @classmethod
     async def lock_jobs_for_session(
@@ -229,9 +292,7 @@ class MindmapAiDao:
         query = select(MindmapAiJob).where(MindmapAiJob.id == job_id)
         if user_id is not None:
             query = query.where(MindmapAiJob.user_id == user_id)
-        if for_update:
-            query = query.with_for_update().execution_options(populate_existing=True)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query, for_update=for_update)
 
     @classmethod
     async def get_job_by_idempotency(
@@ -327,6 +388,7 @@ class MindmapAiDao:
                     'running',
                     'validating',
                     'cancel_requested',
+                    'waiting_turn',
                 )),
             )
             .values(
@@ -506,9 +568,7 @@ class MindmapAiDao:
         query = select(MindmapAiDraftCheckpoint).where(
             MindmapAiDraftCheckpoint.job_id == job_id,
         )
-        if for_update:
-            query = query.with_for_update().execution_options(populate_existing=True)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query, for_update=for_update)
 
     @classmethod
     async def upsert_draft_checkpoint(
@@ -699,18 +759,7 @@ class MindmapAiDao:
             .order_by(MindmapAiJob.id.asc())
             .with_for_update()
         )).scalars())
-        proposal_ids = select(MindmapAiProposal.id).where(MindmapAiProposal.job_id.in_(job_ids))
-        undo_result = await db.execute(
-            delete(MindmapAiUndo).where(MindmapAiUndo.proposal_id.in_(proposal_ids))
-        )
-        event_result = await db.execute(
-            delete(MindmapAiJobEvent).where(MindmapAiJobEvent.job_id.in_(job_ids))
-        )
-        checkpoint_result = await db.execute(
-            delete(MindmapAiDraftCheckpoint).where(
-                MindmapAiDraftCheckpoint.job_id.in_(job_ids)
-            )
-        )
+        history_counts = await cls.delete_events_and_undos_for_jobs(db, job_ids)
         proposal_result = await db.execute(
             delete(MindmapAiProposal).where(MindmapAiProposal.job_id.in_(job_ids))
         )
@@ -722,9 +771,7 @@ class MindmapAiDao:
         )
         job_result = await db.execute(delete(MindmapAiJob).where(MindmapAiJob.id.in_(job_ids)))
         return {
-            'events': int(event_result.rowcount or 0),
-            'checkpoints': int(checkpoint_result.rowcount or 0),
-            'undos': int(undo_result.rowcount or 0),
+            **history_counts,
             'proposals': int(proposal_result.rowcount or 0),
             'artifacts': int(artifact_result.rowcount or 0),
             'responses': int(response_result.rowcount or 0),
@@ -741,7 +788,11 @@ class MindmapAiDao:
             return {'events': 0, 'checkpoints': 0, 'undos': 0}
         proposal_ids = select(MindmapAiProposal.id).where(MindmapAiProposal.job_id.in_(job_ids))
         undo_result = await db.execute(
-            delete(MindmapAiUndo).where(MindmapAiUndo.proposal_id.in_(proposal_ids))
+            delete(MindmapAiUndo).where(or_(
+                MindmapAiUndo.proposal_id.in_(proposal_ids),
+                # Direct tasks use job IDs as undo receipts without a Proposal.
+                MindmapAiUndo.proposal_id.in_(job_ids),
+            ))
         )
         event_result = await db.execute(
             delete(MindmapAiJobEvent).where(MindmapAiJobEvent.job_id.in_(job_ids))
@@ -838,7 +889,7 @@ class MindmapAiDao:
         query = select(MindmapAiResponse).where(MindmapAiResponse.id == response_id)
         if user_id is not None:
             query = query.where(MindmapAiResponse.user_id == user_id)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query)
 
     @classmethod
     async def get_responses_for_jobs(
@@ -872,7 +923,7 @@ class MindmapAiDao:
         query = select(MindmapAiArtifact).where(MindmapAiArtifact.id == artifact_id)
         if user_id is not None:
             query = query.where(MindmapAiArtifact.user_id == user_id)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query)
 
     @classmethod
     async def add_proposal(cls, db: AsyncSession, values: dict[str, Any]) -> MindmapAiProposal:
@@ -893,9 +944,7 @@ class MindmapAiDao:
         query = select(MindmapAiProposal).where(MindmapAiProposal.id == proposal_id)
         if user_id is not None:
             query = query.where(MindmapAiProposal.user_id == user_id)
-        if for_update:
-            query = query.with_for_update().execution_options(populate_existing=True)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query, for_update=for_update)
 
     @classmethod
     async def update_proposal(cls, db: AsyncSession, proposal_id: str, values: dict[str, Any]) -> None:
@@ -921,9 +970,7 @@ class MindmapAiDao:
             MindmapAiUndo.proposal_id == proposal_id,
             MindmapAiUndo.user_id == user_id,
         )
-        if for_update:
-            query = query.with_for_update().execution_options(populate_existing=True)
-        return (await db.execute(query)).scalars().first()
+        return await _select_first(db, query, for_update=for_update)
 
     @classmethod
     async def update_undo(cls, db: AsyncSession, proposal_id: str, values: dict[str, Any]) -> None:

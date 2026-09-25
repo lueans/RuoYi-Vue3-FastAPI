@@ -674,6 +674,7 @@ export class YjsMindmapSync {
     this._pendingCheckpointInvalidSources = []
     this._pendingCheckpointSourceDigests = {}
     this._authoritativeRevisionPending = null
+    this._deferredContentRevision = null
     this._pendingRemoteApply = false
     this._pendingRemoteApplyMeta = false
     this._remoteApplyFallbackTimer = null
@@ -1133,6 +1134,7 @@ export class YjsMindmapSync {
     this._pendingCheckpointReplacesSources = []
     this._pendingCheckpointInvalidSources = []
     this._pendingCheckpointSourceDigests = {}
+    this._deferredContentRevision = null
     this._clearConfirmedMutationDeliveryTimers()
     this._clearUnconfirmedMutationTimers()
     this._clearLegacyUnconfirmedMutationTimer()
@@ -2525,7 +2527,10 @@ export class YjsMindmapSync {
       !this._checkpointDirty
       || this.readonly
       || this._destroyed
-      || this._paused
+      // AI preview pauses canvas synchronization while its speculative tree
+      // is visible. A mutation barrier still needs a checkpoint from the
+      // untouched Y.Doc; ordinary background checkpoints remain paused.
+      || (this._paused && !barrierToken)
       || (
         this._collaborationBarrierToken
         && barrierToken !== this._collaborationBarrierToken
@@ -2569,6 +2574,19 @@ export class YjsMindmapSync {
     if (this._pendingRemoteApply && !this.isApplyingRemote()) {
       this._requestYjsApply()
     }
+  }
+
+  /**
+   * AI 直写实时预览期间只延后当前任务自己的 revision 广播，避免每个工具
+   * 步骤都触发全量回源并覆盖正在播放的草稿帧。任务结束后消费最新广播，
+   * 仍通过既有 stale/reload 链路校准最终权威正文。
+   */
+  flushDeferredContentRevision() {
+    const deferred = this._deferredContentRevision
+    this._deferredContentRevision = null
+    if (!deferred || this._destroyed) return false
+    this._handleContentRevisionChanged(deferred)
+    return true
   }
 
   /** 检查 Yjs 文档是否已有数据 */
@@ -3809,6 +3827,26 @@ export class YjsMindmapSync {
       return false
     }
 
+    // AI playback owns the visible canvas as a presentation surface. Continue
+    // consuming the authoritative Y.Doc so revisions and remote mutation
+    // bookkeeping remain current, but do not let the complete cloud snapshot
+    // jump ahead of the presentation timeline. The owner receives only the
+    // newest deferred document and commits it after playback reaches terminal.
+    if (this.options.shouldDeferRemoteDocumentApply?.(
+      preparedDocument.document,
+      preparedDocument.appliedMeta,
+    ) === true) {
+      this._runtimeCrossNodeState = extractCrossNodeState(preparedDocument.tree)
+      this._runtimeNodeState = captureRuntimeNodeState(preparedDocument.tree)
+      this.options.onRemoteDocumentDeferred?.(
+        preparedDocument.document,
+        preparedDocument.appliedMeta,
+      )
+      this._markPendingRemoteMutationsApplied()
+      this._notifyStructureWriteBlockedChange()
+      return true
+    }
+
     // isActive 是当前客户端的 UI 状态，不属于共享文档。activeNodeList 在
     // 点击时同步更新，awareness 的 _localActiveNodeUids 则经 0ms 事件延迟，
     // 因而必须在任何保护回调执行前冻结真实 runtime 选区，避免旧 awareness
@@ -4397,6 +4435,13 @@ export class YjsMindmapSync {
   _handleContentRevisionChanged(data) {
     const revision = Number(data?.contentRevision)
     if (!Number.isInteger(revision)) return
+    if (this.options.shouldDeferContentRevision?.(data) === true) {
+      const deferredRevision = Number(this._deferredContentRevision?.contentRevision)
+      if (!Number.isInteger(deferredRevision) || revision >= deferredRevision) {
+        this._deferredContentRevision = { ...data }
+      }
+      return
+    }
     const clientMutationId = this._normalizeClientMutationId(data?.clientMutationId)
     if (clientMutationId) this._clearUnconfirmedMutationTimer(clientMutationId)
     const isLocalMutation = clientMutationId

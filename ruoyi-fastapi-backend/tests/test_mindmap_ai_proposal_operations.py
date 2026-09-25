@@ -115,6 +115,43 @@ def test_editor_materialization_preserves_untouched_rich_text_and_view() -> None
     assert normalize_ai_editable_source_document(materialized)[0] == artifact
 
 
+def test_shared_replay_preserves_editor_data_through_every_operation() -> None:
+    source = _document([
+        _node('a', 'A', [_node('leaf', '富文本子节点')]),
+        _node('b', 'B', note='待删除备注'),
+        _node('deleted', '删除节点'),
+    ])
+    leaf_data = source['root']['children'][0]['children'][0]['data']
+    leaf_data.update({'text': '<p><strong>富文本子节点</strong></p>', 'richText': True, 'fillColor': '#123456'})
+    source['view'] = {'transform': {'scale': 1.25, 'x': 10, 'y': 20}}
+    normalized_source = normalize_ai_editable_source_document(source)[0]
+    artifact = deepcopy(normalized_source)
+    a, b, _deleted = artifact['root']['children']
+    b['children'] = a['children']
+    b['data'].update({'text': '修改 B', 'hyperlink': None})
+    b['data'].pop('note')
+    artifact['root']['children'] = [b, _node('new', '新增')]
+    artifact['layout'] = 'mindMap'
+    artifact['documentData'] = {'board': {'grid': True}}
+    artifact = normalize_ai_document(artifact, content_policy='source')[0]
+    operations, _impact = build_document_diff(normalized_source, artifact)
+    frozen_source, frozen_operations, frozen_artifact = deepcopy((source, operations, artifact))
+
+    assert strict_replay_document_operations(normalized_source, operations) == artifact
+    materialized = materialize_editor_document_from_proposal(
+        source_document=source, operations=operations, artifact_document=artifact,
+    )
+    assert normalize_ai_editable_source_document(materialized)[0] == artifact
+    assert materialized['root']['children'][0]['children'][0]['data'] == leaf_data
+    assert materialized['view'] == source['view']
+    assert {operation['type'] for operation in operations} == {
+        'create_node', 'update_node', 'move_node', 'delete_subtree', 'set_document_meta',
+    }
+    materialized['root']['children'][0]['children'][0]['data']['text'] = '独立返回值'
+    materialized['documentData']['board']['grid'] = False
+    assert (source, operations, artifact) == (frozen_source, frozen_operations, frozen_artifact)
+
+
 def test_diff_distinguishes_null_from_unset_and_replays_explicit_deletion() -> None:
     before = _document([_node('a', 'A', note='删除备注')])
     after = _document([_node('a', 'A', hyperlink=None)])
@@ -171,8 +208,9 @@ def test_diff_distinguishes_null_from_unset_and_replays_explicit_deletion() -> N
         'set': {'view': None}, 'unset': [],
     }),
 ])
-def test_strict_replay_rejects_invalid_schema_and_tree_mutations_atomically(
-    bad_operation: dict,
+@pytest.mark.parametrize('editor', [False, True])
+def test_replay_entrypoints_reject_invalid_schema_and_tree_mutations_atomically(
+    bad_operation: dict, editor: bool,
 ) -> None:
     before = _document([_node('a', 'A', [_node('a1', 'A1')])])
     frozen = deepcopy(before)
@@ -180,12 +218,19 @@ def test_strict_replay_rejects_invalid_schema_and_tree_mutations_atomically(
         _operation('update_node', 'a', {'set': {'text': '先修改'}, 'unset': []}),
         bad_operation,
     ]
+    frozen_operations = deepcopy(operations)
 
     with pytest.raises(MindmapArtifactError) as invalid:
-        strict_replay_document_operations(before, operations)
+        if editor:
+            materialize_editor_document_from_proposal(
+                source_document=before, operations=operations, artifact_document=before,
+            )
+        else:
+            strict_replay_document_operations(before, operations)
 
     assert invalid.value.code == PROPOSAL_INTEGRITY_ERROR_CODE
     assert before == frozen
+    assert operations == frozen_operations
 
 
 def test_strict_replay_rejects_duplicate_uid_in_the_baseline() -> None:

@@ -118,6 +118,30 @@ test('新增 data.uid 必须绑定 nodeUid，delete payload 必须为 null', () 
   }]), /必须为 null/)
 })
 
+test('移动复用当次索引，位置按移除后的子列表校验且失败不改输入', () => {
+  for (const [parentUid, index, expected] of [
+    ['root', 0, ['a', 'b']], ['root', 1, ['b', 'a']], ['b', 1, ['c', 'a']],
+  ]) {
+    const baseline = document()
+    const frozen = structuredClone(baseline)
+    const result = strictApplyMindmapAiProposal(baseline, [{
+      type: 'move_node', nodeUid: 'a', payload: { parentUid, index },
+    }])
+    const parent = parentUid === 'root' ? result.root : result.root.children[0]
+    assert.deepEqual(parent.children.map(child => child.data.uid), expected)
+    assert.deepEqual(baseline, frozen)
+  }
+  for (const index of [-1, 2, 0.5, '1', true]) {
+    const baseline = document()
+    const frozen = structuredClone(baseline)
+    assert.throws(() => strictApplyMindmapAiProposal(baseline, [
+      { type: 'update_node', nodeUid: 'a', payload: { set: { text: '先修改' }, unset: [] } },
+      { type: 'move_node', nodeUid: 'a', payload: { parentUid: 'root', index } },
+    ]), /位置越界/)
+    assert.deepEqual(baseline, frozen)
+  }
+})
+
 test('文档比较使用稳定键顺序', () => {
   assert.equal(mindmapAiDocumentsEqual({ b: 1, a: { d: 2, c: 3 } }, {
     a: { c: 3, d: 2 }, b: 1,

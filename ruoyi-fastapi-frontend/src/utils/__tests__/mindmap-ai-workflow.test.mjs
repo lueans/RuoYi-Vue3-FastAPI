@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { babelParse, parse } from '@vue/compiler-sfc'
 import { resolveMindmapAiAgentSelection } from '../mindmap-ai-agent-selection.js'
 
 const dialog = await readFile(
@@ -40,6 +41,36 @@ const contextmenu = await readFile(
   'utf8',
 )
 
+// Execute the actual SFC declarations for guards/computed contracts. Layout
+// assertions below only describe the current single-canvas UI, not the retired
+// second MindMapPreview surface.
+function declaration(source, name, { initializer = false } = {}) {
+  const script = parse(source).descriptor.scriptSetup.content
+  const ast = babelParse(script, { sourceType: 'module' })
+  for (const statement of ast.program.body) {
+    if (statement.type === 'FunctionDeclaration' && statement.id.name === name) {
+      return script.slice(statement.start, statement.end)
+    }
+    for (const item of statement.declarations || []) {
+      if (item.id.name === name) {
+        const node = initializer ? item.init : statement
+        return script.slice(node.start, node.end)
+      }
+    }
+  }
+  throw new Error(`Missing SFC declaration: ${name}`)
+}
+
+function executeFunction(name, bindings, source = dialog) {
+  return new Function(...Object.keys(bindings), `${declaration(source, name)}; return ${name}`)(...Object.values(bindings))
+}
+
+function computedValue(name, bindings, source = dialog) {
+  return new Function('computed', ...Object.keys(bindings), `return ${declaration(source, name, { initializer: true })}`)(getter => getter(), ...Object.values(bindings))
+}
+
+const ref = value => ({ value })
+
 test('AI Agent 能力来自服务端 manifest 且按当前意图和来源协商', () => {
   assert.match(dialog, /listMindmapAiAgents\(\)/)
   assert.match(dialog, /agentSupportsCurrentTask\(agent\)/)
@@ -65,8 +96,7 @@ test('Agent 选择明确展示连接就绪度且首次检查期间持续反馈',
 test('输出语言与目标布局可配置、可恢复，局部编辑强制保持原布局', () => {
   assert.match(dialog, /v-model="form\.language"[\s\S]*v-for="item in outputLanguageOptions"/)
   assert.match(dialog, /v-model="form\.layout"[\s\S]*v-for="item in aiLayoutOptions"/)
-  assert.match(dialog, /targetLayoutLocked[\s\S]*targetLayoutHint/)
-  assert.match(dialog, /targetLayoutHint[\s\S]*局部编辑只修改授权节点，保持当前脑图布局/)
+  assert.match(dialog, /v-if="targetLayoutLocked"[^>]*>局部编辑只修改授权节点，保持当前脑图布局。<\/div>/)
   assert.match(dialog, /function captureJobConfiguration[\s\S]*language:[\s\S]*layout:/)
   assert.match(dialog, /restorableFields = \[[\s\S]*'language', 'layout'/)
   assert.match(dialog, /parameters: \{[\s\S]*language: form\.language,[\s\S]*layout: effectiveRequestLayout\(source\)/)
@@ -124,12 +154,29 @@ test('新建脑图结果的产品内打开与云端保存动作不会落入原�
 test('只读来源只能生成独立文件而不会形成可回写 proposal', () => {
   assert.doesNotMatch(dialog, /只读脑图不能生成可应用提案/)
   assert.match(dialog, /sourceContext\.value\?\.readonly[\s\S]*\? 'file' : 'proposal'/)
-  assert.match(dialog, /:disabled="actionBusy \|\| editorReadonly \|\| !proposal \|\| !diffConfirmed"/)
+  const bindings = {
+    livePreviewActive: ref(true), canApplyCurrentProposal: ref(true), diffConfirmed: ref(true),
+    livePreviewCatchingUp: ref(false), livePreviewPreparing: ref(false),
+    actionBusy: ref(false), editorReadonly: ref(true),
+  }
+  assert.equal(computedValue('canApplyLiveCanvasDraft', bindings), false)
+  bindings.editorReadonly.value = false
+  assert.equal(computedValue('canApplyLiveCanvasDraft', bindings), true)
 })
 
 test('AI 面板由编辑器壳单一挂载且只读工作区保留权限受控入口', () => {
   assert.equal(editor.match(/<MindmapAiDialog\b/g)?.length, 1)
-  assert.match(editor, /<MindmapAiDialog :readonly="isReadonly" \/>/)
+  assert.match(editor, /<MindmapAiDialog :readonly="aiDialogReadonly" \/>/)
+  const readonlyState = {
+    props: { readonly: false, mindmapId: 1 }, serverCanEdit: ref(true),
+    aiEditingBlocked: ref(true), authoritativeRecoveryEditingBlocked: ref(false),
+    collaborationBarrierEditingBlocked: ref(false), versionTransitionEditingBlocked: ref(false),
+    importTransitionEditingBlocked: ref(false),
+  }
+  assert.equal(computedValue('isReadonly', readonlyState, editor), true)
+  assert.equal(computedValue('aiDialogReadonly', readonlyState, editor), false)
+  readonlyState.serverCanEdit.value = false
+  assert.equal(computedValue('aiDialogReadonly', readonlyState, editor), true)
   assert.doesNotMatch(toolbar, /<MindmapAiDialog\b|import MindmapAiDialog/)
   assert.match(toolbar, /v-hasPermi="\['mindmap:ai:use'\]"[\s\S]*bus\.emit\('showAiMindmap'\)/)
   assert.match(activityBar, /v-hasPermi="\['mindmap:ai:use'\]"[\s\S]*class="activityButton aiActivityButton"/)
@@ -171,13 +218,21 @@ test('节点右键 AI 快捷操作锁定当前分支并区分编辑与解释模�
   assert.match(contextmenu, /@click="openSubmenu\(item\.key\)"[\s\S]*function openSubmenu\(key\)[\s\S]*expandedSubmenu\.value = key/)
 })
 
-test('未确认差异时应用按钮保持禁用并与确认框形成同一审阅闭环', () => {
+test('手动采纳未确认差异时不会写入，并聚焦差异确认框', async () => {
   assert.match(dialog, /ref="proposalConfirmationRef"[\s\S]*?v-model="diffConfirmed"/)
-  assert.match(dialog, /:disabled="actionBusy \|\| editorReadonly \|\| !proposal \|\| !diffConfirmed"/)
-  assert.match(
-    dialog,
-    /!currentProposal \|\| !diffConfirmed\.value[\s\S]*ElMessage\.warning\('请先查看并勾选提案差异确认，再应用到当前脑图'\)[\s\S]*proposalConfirmationRef\.value\?\.\$el[\s\S]*scrollIntoView[\s\S]*input\[type="checkbox"\][\s\S]*focus/,
-  )
+  const calls = []
+  const apply = executeFunction('applyProposal', {
+    actionBusy: ref(false), sourceBaselineMismatch: ref(false),
+    livePreviewCatchingUp: ref(false), livePreviewPreparing: ref(false),
+    job: ref({ id: 'j' }), proposal: ref({ id: 'p' }), diffConfirmed: ref(false),
+    ElMessage: { warning: message => calls.push(message) }, nextTick: async () => {},
+    proposalConfirmationRef: ref({ $el: {
+      scrollIntoView: () => calls.push('scroll'),
+      querySelector: selector => { assert.equal(selector, 'input[type="checkbox"]'); return { focus: () => calls.push('focus') } },
+    } }),
+  })
+  assert.equal(await apply(), false)
+  assert.deepEqual(calls, ['请先查看并勾选提案差异确认，再应用到当前脑图', 'scroll', 'focus'])
 })
 
 test('提案应用或撤销后默认收起历史差异且不再显示覆盖确认', () => {
@@ -193,10 +248,10 @@ test('提案应用或撤销后默认收起历史差异且不再显示覆盖确�
     dialog,
     /v-if="!proposalReviewFinalized"[\s\S]*ref="proposalConfirmationRef"/,
   )
-  assert.match(
-    dialog,
-    /const proposalReviewFinalized = computed\(\(\) => Boolean\([\s\S]*\['applied', 'undone'\]\.includes\(job\.value\?\.status\)/,
-  )
+  for (const status of ['applied', 'undone', 'rejected']) {
+    assert.equal(computedValue('proposalReviewFinalized', { proposal: ref({}), job: ref({ status }) }), true)
+  }
+  assert.equal(computedValue('proposalReviewFinalized', { proposal: ref({}), job: ref({ status: 'needs_review' }) }), false)
   assert.match(dialog, /\.proposalReviewSummary[\s\S]*cursor: pointer[\s\S]*focus-visible/)
 })
 
@@ -279,7 +334,7 @@ test('云端 apply/undo 在请求前持久化 intent，按原请求精确对账�
       < settleBlock.indexOf('removeMindmapAiCloudMutationIntent(identity)'),
   )
   assert.match(settleBlock, /receipt\.contentRevision\) < revision/)
-  assert.match(dialog, /async function reconcileJobAfterSideEffect\(identity\) \{[\s\S]*await flushPendingCloudMutationIntents\(\)[\s\S]*actionIdentityMatches/)
+  assert.match(declaration(dialog, 'reconcileJobAfterSideEffect'), /await flushPendingCloudMutationIntents\(\{ allowDuringLivePreview: true \}\)[\s\S]*actionIdentityMatches/)
   assert.match(dialog, /async function showDialog[\s\S]*await flushPendingCloudMutationIntents\(\)[\s\S]*requestEditorContext\(\)/)
   assert.match(dialog, /aiCloudMutationRecoveryReady/)
   assert.match(dialog, /async function reconcileCloudMutationBeforeSource[\s\S]*hasPendingForDocument[\s\S]*await flushPendingCloudMutationIntents\(\)[\s\S]*requestEditorContext\(\)/)
@@ -368,7 +423,8 @@ test('AI 任务通过可续传 SSE 驱动交互记录并以权威草稿单调更
   assert.match(dialog, /afterSequence: latestEventSequence\.value/)
   assert.match(dialog, /previewVersion: latestPreviewVersion\.value/)
   assert.match(dialog, /appendAgentEvent\(jobId, event\)/)
-  assert.match(dialog, /version <= latestPreviewVersion\.value/)
+  assert.match(declaration(dialog, 'acceptDraftPreview'), /compareMindmapAiPreviewCoordinates\([\s\S]*epoch: latestPreviewEpoch\.value, version: latestPreviewVersion\.value/)
+  assert.match(dialog, /previewEpoch: latestPreviewEpoch\.value/)
   assert.match(dialog, /scheduleRealtimeReconnect\(jobId\)/)
   assert.match(dialog, /schedulePoll\(0\)/)
   assert.match(dialog, /defineExpose\(\{[\s\S]*agentEvents,[\s\S]*draftDocument,/)
@@ -460,7 +516,7 @@ test('云端提案把内容等价与协作冲突裁决交给服务端权威基�
 
 test('云端普通提案经差异确认后第一次请求即整图覆盖', () => {
   assert.match(dialog, /确认用 AI 完整结果覆盖当前脑图（可撤销）/)
-  assert.match(dialog, /确认后直接覆盖当前脑图，并保留撤销快照/)
+  assert.match(dialog, /保存完成后可撤销本次 AI 全部操作/)
   assert.match(dialog, /const directCloudOverwrite = Boolean\(sourceMindmapId\)/)
   assert.match(dialog, /forceOverwrite: directCloudOverwrite/)
   assert.match(dialog, /AI 完整结果已覆盖当前脑图，可随时撤销/)
@@ -486,7 +542,7 @@ test('Codex 进度只保留安全字段并映射为明确中文阶段', () => {
   assert.match(dialog, /mergeMindmapAiJobSnapshot\(job\.value, response\.data\)/)
 })
 
-test('宽屏工作台渲染安全会话记录、连接状态与只读实时脑图', () => {
+test('AI 抽屉展示安全会话与连接状态，脑图只在主编辑器流式显示', () => {
   assert.match(dialog, /class="mindmapAiDrawer"/)
   assert.match(dialog, /direction="ltr"/)
   assert.match(dialog, /size="500px"/)
@@ -500,47 +556,36 @@ test('宽屏工作台渲染安全会话记录、连接状态与只读实时脑�
   assert.match(dialog, /离线/)
   assert.match(dialog, /不展示模型隐藏思维链/)
   assert.match(dialog, /class="activityTimeline conversationTimeline"[\s\S]*aria-live="polite"/)
-  assert.match(dialog, /<MindMapPreview[\s\S]*:model-value="draftDocument\.root"[\s\S]*:readonly="true"/)
-  assert.match(dialog, /变化版本 \{\{ latestPreviewVersion \}\}/)
-  assert.match(dialog, /draftNodeCount/)
-  assert.match(dialog, /@click="fitPreview"/)
-  assert.match(dialog, /const generationElapsedSeconds = computed/)
-  assert.match(dialog, /正在理解你的要求/)
-  assert.match(dialog, /正在准备脑图结构/)
-  assert.match(dialog, /本机模型正在生成首个节点/)
-  assert.match(dialog, /首次唤醒本机模型通常需要 10–30 秒/)
-  assert.match(dialog, /任务仍在运行，请勿重复提交/)
+  assert.doesNotMatch(dialog, /<MindMapPreview\b|class="previewPanel aiDraftStage"/)
+  assert.match(dialog, /class="liveDraftNotice"/)
+  assert.match(dialog, /livePreviewNodeProgress/)
+  assert.match(dialog, /phase: 'update'/)
+  assert.match(editor, /applyMindmapAiPresentationFrame\(/)
+  assert.match(dialog, /const generationClockNow = ref\(Date\.now\(\)\)/)
+  assert.match(dialog, /首个变化出现后会立即显示在当前画布/)
+  assert.match(dialog, /正在冻结输入与生成约束，请勿重复提交/)
   assert.match(dialog, /role="status" aria-live="polite"/)
   assert.match(dialog, /clearInterval\(generationClockTimer\)/)
-  assert.match(dialog, /class="previewPanel aiDraftStage"/)
-  assert.match(dialog, /<Teleport to="body">/)
   assert.match(dialog, /今天想做点什么？/)
   assert.match(dialog, /class="aiComposer"/)
   assert.match(dialog, /问我任何问题/)
-  assert.match(dialog, /left: 500px/)
   assert.match(dialog, /@media \(max-width: 760px\)/)
   assert.match(dialog, /@media \(prefers-reduced-motion: reduce\)/)
 })
 
-test('窄屏工作台可在 AI 对话与全屏实时脑图之间切换', () => {
-  assert.match(dialog, /const mobilePreviewVisible = ref\(false\)/)
-  assert.match(
-    dialog,
-    /v-if="!messageModeActive && \(draftDocument\?\.root \|\| running\)"[\s\S]*class="mobilePreviewToggle"[\s\S]*aria-controls="mindmap-ai-realtime-preview"[\s\S]*:aria-label="mobilePreviewVisible \? '返回 AI 对话' : '查看实时脑图'"[\s\S]*:aria-pressed="mobilePreviewVisible"/,
-  )
-  assert.match(
-    dialog,
-    /id="mindmap-ai-realtime-preview"[\s\S]*:class="\{ 'is-mobile-visible': mobilePreviewVisible \}"[\s\S]*class="mobilePreviewBack"[\s\S]*aria-label="返回 AI 对话"/,
-  )
-  assert.match(dialog, /\.aiDraftStage:not\(\.is-mobile-visible\) \{ display: none; \}/)
-  assert.match(
-    dialog,
-    /\.aiDraftStage\.is-mobile-visible \{[\s\S]*z-index: 4100;[\s\S]*top: 0;[\s\S]*left: 0;[\s\S]*display: flex;/,
-  )
-  assert.match(
-    dialog,
-    /function resetNewJob[\s\S]*mobilePreviewVisible\.value = false[\s\S]*function onDialogClosed\(\)[\s\S]*mobilePreviewVisible\.value = false/,
-  )
+test('窄屏可关闭 AI 抽屉查看同一画布，关闭不会停止或重置任务', async () => {
+  assert.match(dialog, /@media \(max-width: 760px\)[\s\S]*\.mindmapAiDrawer \{ width: 100% !important; \}/)
+  assert.match(dialog, /aria-label="关闭 AI 面板" @click="requestDialogClose"/)
+  const visible = ref(true)
+  const close = executeFunction('requestDialogClose', { visible })
+  await close()
+  assert.equal(visible.value, false)
+  const sessionMenuVisible = ref(true)
+  const contextPickerVisible = ref(true)
+  executeFunction('onDialogClosed', { sessionMenuVisible, contextPickerVisible })()
+  assert.equal(sessionMenuVisible.value, false)
+  assert.equal(contextPickerVisible.value, false)
+  assert.doesNotMatch(declaration(dialog, 'onDialogClosed'), /resetNewJob|revertLiveDraftPreview|cancelJob|stopRealtime/)
 })
 
 test('讨论模式使用服务端权威 message 契约且不会展示脑图产物动作', () => {
@@ -548,7 +593,7 @@ test('讨论模式使用服务端权威 message 契约且不会展示脑图产�
   assert.match(dialog, /intent: requestedIntent/)
   assert.match(dialog, /target: discussionMode\.value \? 'message'/)
   assert.match(dialog, /const messageModeActive = computed[\s\S]*isMindmapAiMessageJob\(job\.value\)/)
-  assert.match(dialog, /v-if="visible && !messageModeActive && \(draftDocument\?\.root \|\| running\)"/)
+  assert.match(declaration(dialog, 'livePreviewEligible', { initializer: true }), /!messageModeActive\.value/)
   assert.match(dialog, /v-if="!messageModeActive && selectedArtifactJob\?\.artifactId"/)
   assert.match(dialog, /v-if="!messageModeActive && proposal"/)
   assert.match(dialog, /if \(isMindmapAiMessageJob\(job\.value\)\) return false/)
@@ -570,7 +615,15 @@ test('终态续写可选择下一轮讨论或编辑且不改变当前轮结果�
 })
 
 test('独立脑图结果续写按 uploaded_artifact 协商并更新下一轮来源基线', () => {
-  assert.match(dialog, /\['ready', 'completed_file', 'completed_no_change', 'needs_review'\]/)
+  for (const status of ['ready', 'completed_file', 'completed_no_change', 'needs_review']) {
+    const candidate = { id: 'j', artifactId: 'a', sourceType: 'none', status }
+    const actual = computedValue('followupParentJob', {
+      selectedArtifactJob: ref(candidate), viewingHistoricalArtifact: ref(false),
+      isMindmapAiMessageJob: () => false,
+    })
+    assert.equal(actual, status === 'needs_review' ? null : candidate,
+      'high-impact proposals must be resolved before continuing from their artifact')
+  }
   assert.match(dialog, /function followupSourceType[\s\S]*parentJob\?\.artifactId[\s\S]*\['none', 'uploaded_artifact'\][\s\S]*return 'uploaded_artifact'/)
   assert.match(dialog, /const requestedSourceType = followupSourceType\(parentJob\)[\s\S]*selectedAgent\.inputTypes\?\.includes\(requestedSourceType\)/)
   assert.match(dialog, /job\.value\.sourceType === 'uploaded_artifact'[\s\S]*previousDraft\?\.root[\s\S]*document: previousDraft/)
@@ -632,7 +685,7 @@ test('最近会话菜单由服务端列表驱动并用恢复代次隔离切换',
   assert.match(api, /url: '\/mindmap\/ai\/sessions'[\s\S]*params: \{ limit \}/)
   assert.match(dialog, /@show="loadRecentSessions"/)
   assert.match(dialog, /normalizeMindmapAiSessionList\(response\.data\)/)
-  assert.match(dialog, /async function switchToSession[\s\S]*resetNewJob\(\{ clearStoredJob: false[\s\S]*const generation = restoreGeneration[\s\S]*restoreActiveJob\(\{ generation/)
+  assert.match(dialog, /async function switchToSession[\s\S]*resetNewJob\(\{ clearStoredJob: false[\s\S]*generation = restoreGeneration[\s\S]*restoreActiveJob\(\{ generation/)
   assert.match(dialog, /function invalidateSessionList[\s\S]*sessionListController\?\.abort\(\)/)
 })
 
@@ -702,16 +755,18 @@ test('会话记录支持确认后删除并清理本地恢复状态', () => {
 
 test('任务生命周期可重置恢复，终态转存为可查看的最近结果而不阻塞新任务', () => {
   assert.match(dialog, /function resetNewJob\(/)
-  assert.match(dialog, /if \(isTerminalStatus\(job\.value\.status\)\) \{[\s\S]*clearMindmapAiOwnerSessionItem\(ACTIVE_JOB_STORAGE_KEY[\s\S]*writeMindmapAiOwnerSessionItem\([\s\S]*RECENT_JOB_STORAGE_KEY/)
+  assert.match(declaration(dialog, 'persistActiveJob'), /return persistJobPointer\(storedJob, job\.value\.status\)/)
+  assert.match(declaration(dialog, 'persistJobPointer'), /if \(!writeMindmapAiOwnerSessionItem[\s\S]*return false[\s\S]*clearMindmapAiOwnerSessionItem/)
   assert.match(dialog, /saved = activeUsable \? active : \(allowRecent && recentUsable \? recent : null\)/)
-  assert.match(dialog, /if \(isTerminalStatus\(job\.value\.status\)\) \{[\s\S]*await hydrateTerminalResources\(job\.value\.id/)
+  assert.match(dialog, /if \(isTerminalStatus\(job\.value\.status\)\) \{[\s\S]*await finalizeTerminalJob\(job\.value\.id/)
   assert.match(dialog, /class="newConversationButton"/)
   assert.match(dialog, /class="sessionNewAction"[\s\S]*新建对话/)
   assert.match(dialog, /@click="startNewJob"/)
   assert.match(dialog, /beginJobMonitoring\(\{ resetCursor: true \}\)/)
   assert.match(dialog, /window\.addEventListener\('offline', onNetworkOffline\)/)
   assert.match(dialog, /window\.removeEventListener\('offline', onNetworkOffline\)/)
-  assert.match(dialog, /async function cancelJob\(\)[\s\S]*assertActionIdentity\(identity\)[\s\S]*stopRealtime\('completed'\)[\s\S]*stopPolling\(\)/)
+  assert.match(declaration(dialog, 'cancelJob'), /assertActionIdentity\(identity\)[\s\S]*await finalizeTerminalJob\(jobId/)
+  assert.match(declaration(dialog, 'finalizeTerminalJob'), /stopRealtime\('completed'\)[\s\S]*stopPolling\(\)/)
 })
 
 test('恢复任务还原模型和生成参数并保留讨论切回编辑所需的意图', () => {
@@ -722,23 +777,113 @@ test('恢复任务还原模型和生成参数并保留讨论切回编辑所需�
   assert.match(dialog, /DENSITY_VALUES\.has\(stored\.density\)/)
   assert.match(dialog, /const taskConfigurationLocked = computed/)
   assert.match(dialog, /snapshot\.intent === 'discuss'[\s\S]*storedEditIntent \|\| 'create'/)
-  assert.match(dialog, /下一轮将基于当前结果进行讨论，只返回回答，不修改脑图/)
-  assert.match(dialog, /下一轮将基于当前结果继续编辑脑图/)
+  const bindings = {
+    running: ref(false), job: ref({ status: 'completed_direct' }),
+    retryAvailable: ref(false), followupAvailable: ref(true), discussionMode: ref(true),
+  }
+  assert.equal(computedValue('composerPlaceholder', bindings), '基于当前脑图继续讨论，不应用任何变更…')
+  bindings.discussionMode.value = false
+  assert.equal(computedValue('composerPlaceholder', bindings), '继续调整刚才的脑图…')
+})
+
+test('统一输入框覆盖新建、运行中排队、重试和继续，不再挂载隐藏的重复输入面板', async () => {
+  const template = parse(dialog).descriptor.template.content
+  assert.doesNotMatch(template, /class="(?:retryPanel|followupPanel)"|v-model="(?:retryPrompt|followupPrompt)"/)
+  assert.equal((template.match(/v-model="composerText"/g) || []).length, 1)
+  const bindings = {
+    form: { prompt: 'new' }, job: ref(null), running: ref(false),
+    retryAvailable: ref(false), followupAvailable: ref(false),
+    runningPrompt: ref('queued'), retryPrompt: ref('retry'), followupPrompt: ref('followup'),
+  }
+  const composer = new Function('computed', ...Object.keys(bindings),
+    `return ${declaration(dialog, 'composerText', { initializer: true })}`,
+  )(value => value, ...Object.values(bindings))
+  const calls = []
+  const composerCanSend = ref(true)
+  const send = executeFunction('sendComposerMessage', {
+    ...bindings, composerCanSend,
+    submitJob: async () => calls.push('new'), queueRunningMessage: async () => calls.push('queued'),
+    retryJob: async () => calls.push('retry'), continueJob: async () => calls.push('followup'),
+  })
+  for (const mode of ['new', 'queued', 'retry', 'followup']) {
+    bindings.job.value = mode === 'new' ? null : { id: 'job' }
+    bindings.running.value = mode === 'queued'
+    bindings.retryAvailable.value = mode === 'retry'
+    bindings.followupAvailable.value = mode === 'followup'
+    assert.equal(composer.get(), mode)
+    composer.set(`edited-${mode}`)
+    const stored = mode === 'new' ? bindings.form.prompt
+      : bindings[`${{ queued: 'running', retry: 'retry', followup: 'followup' }[mode]}Prompt`].value
+    assert.equal(stored, `edited-${mode}`)
+    await send()
+    composerCanSend.value = false
+    await send()
+    composerCanSend.value = true
+  }
+  assert.deepEqual(calls, ['new', 'queued', 'retry', 'followup'])
+})
+
+test('统一输入框仍执行人工编辑锁与操作互斥，运行中仅允许排队消息', () => {
+  for (const mode of ['new', 'running', 'retry', 'followup', 'closed']) {
+    for (const actionBusy of [false, true]) {
+      for (const blocked of [false, true]) {
+        const enabled = computedValue('composerEnabled', {
+          actionBusy: ref(actionBusy), livePreviewCanvasMutationBlocked: ref(blocked),
+          job: ref(mode === 'new' ? null : { id: 'job' }),
+          running: ref(mode === 'running'), retryAvailable: ref(mode === 'retry'),
+          followupAvailable: ref(mode === 'followup'),
+        })
+        assert.equal(enabled, !actionBusy && mode !== 'closed' && (!blocked || mode === 'running'), mode)
+      }
+    }
+  }
+})
+
+test('提案重载与编辑锁状态请求直接绑定生产处理器，卸载解除同一个回调', () => {
+  assert.match(dialog, /@click="loadProposal"/)
+  assert.match(dialog, /bus\.on\('aiEditingStateRequest', emitAiEditingState\)/)
+  assert.match(dialog, /bus\.off\('aiEditingStateRequest', emitAiEditingState\)/)
+  assert.doesNotMatch(dialog, /(?:function|@click=")\s*(?:reloadProposal|onAiEditingStateRequest)/)
+  const emitted = []
+  const bindings = {
+    job: ref({ id: 'job' }), form: { sourceMode: 'current' },
+    messageModeActive: ref(false), viewingHistoricalArtifact: ref(false), sourceContext: ref({ readonly: false }),
+    running: ref(false), livePreviewActive: ref(false), livePreviewRendering: ref(false),
+    livePreviewReverting: ref(false), livePreviewAutoAccepting: ref(false), applying: ref(false),
+    cancelling: ref(false), preparingCanvas: ref(true), directCanvasOwned: ref(false),
+    bus: { emit: (event, payload) => emitted.push({ event, payload }) },
+  }
+  const emitState = executeFunction('emitAiEditingState', bindings)
+  emitState({ ignored: 'event payload' })
+  bindings.preparingCanvas.value = false
+  bindings.directCanvasOwned.value = true
+  emitState()
+  bindings.directCanvasOwned.value = false
+  emitState()
+  assert.deepEqual(emitted, [true, true, false].map(locked => ({
+    event: 'aiEditingState', payload: { jobId: 'job', locked },
+  })))
+})
+
+test('退役面板专属样式已删除，表单使用同一组响应式网格声明', () => {
+  const { descriptor } = parse(dialog)
+  const styles = descriptor.styles.map(style => style.content).join('\n')
+  assert.doesNotMatch(styles, /\.(?:retryPanel|followupPanel|retryActions|followupActions|compactGrid)\b/)
+  assert.doesNotMatch(descriptor.template.content, /\bcompactGrid\b/)
+  assert.match(styles, /\.formGrid \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/)
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*\.formGrid \{ grid-template-columns: 1fr; \}/)
 })
 
 test('终态任务始终以复校验后的 artifact 覆盖临时草稿预览', () => {
-  const fallbackBlock = dialog.slice(
-    dialog.indexOf('async function restoreTerminalPreview'),
-    dialog.indexOf('async function pollJob'),
-  )
+  const fallbackBlock = declaration(dialog, 'restoreTerminalPreview')
   assert.match(fallbackBlock, /await refreshDraftPreview\(jobId\)/)
   assert.doesNotMatch(fallbackBlock, /restoredDraft[\s\S]*?\|\| recoveryGeneration/)
   assert.match(fallbackBlock, /!job\.value\?\.artifactId/)
   assert.match(fallbackBlock, /await loadArtifact\(\{ requirePassed: false, artifactId \}\)/)
   assert.match(fallbackBlock, /job\.value\?\.artifactId !== artifactId/)
   assert.match(fallbackBlock, /draftDocument\.value = cloneRuntimeValue\(document\)/)
-  assert.match(dialog, /await hydrateTerminalResources\(job\.value\.id, \{ recoveryGeneration: generation \}\)/)
-  assert.match(dialog, /if \(isTerminalStatus\(job\.value\.status\)\) \{[\s\S]*await hydrateTerminalResources\(jobId\)/)
+  assert.match(declaration(dialog, 'restoreActiveJob'), /await finalizeTerminalJob\(job\.value\.id, \{ recoveryGeneration: generation/)
+  assert.match(declaration(dialog, 'finalizeTerminalJob'), /await hydrateTerminalResources\(jobId, \{ recoveryGeneration \}\)/)
 })
 
 test('权威轮询和终态响应会清除已经过时的实时连接告警', () => {
@@ -786,7 +931,7 @@ test('本地 AI 整图历史禁止普通 BACK 生成旧 root 与新元数据的�
 
 test('提案差异加载失败在终态可见并支持原位重试', () => {
   assert.match(dialog, /v-if="!messageModeActive && proposalError" class="proposalLoadFailure"/)
-  assert.match(dialog, /:loading="proposalLoading"[\s\S]*@click="reloadProposal"/)
+  assert.match(dialog, /:loading="proposalLoading"[\s\S]*@click="loadProposal"/)
   assert.match(dialog, /proposalError\.value = formatMindmapAiError\(error, '无法加载 AI 提案差异'\)/)
   assert.match(dialog, /finally \{[\s\S]*proposalLoading\.value = false/)
 })
@@ -801,7 +946,7 @@ test('创建、继续和另存请求按 payload 指纹管理幂等尝试', () =>
   assert.match(dialog, /resolveDurableAttempt\('save', saveCloudAttempt, requestPayload/)
   assert.match(dialog, /function writePersistedAttempts[\s\S]*writeMindmapAiOwnerSessionItem\([\s\S]*ATTEMPTS_STORAGE_KEY,[\s\S]*ownerUserId,[\s\S]*JSON\.stringify\(attempts\)/)
   assert.match(dialog, /if \(!writePersistedAttempts\(persistedAttempts\)\)[\s\S]*已阻止发送以避免重复任务/)
-  assert.match(dialog, /const pointerPersisted = persistActiveJob\(\)[\s\S]*if \(pointerPersisted\) \{[\s\S]*clearDurableAttempt\('create', attemptKey\)/)
+  assert.match(declaration(dialog, 'activateCreatedJob'), /if \(persistActiveJob\(\)\) clearDurableAttempt\('create', attemptKey\)/)
   assert.match(dialog, /async function activateFollowupJob[\s\S]*const pointerPersisted = persistActiveJob\(\)[\s\S]*if \(pointerPersisted\) clearDurableAttempt\('followup', attemptKey\)[\s\S]*beginJobMonitoring/)
   assert.doesNotMatch(dialog, /submitIdempotencyKey|followupIdempotencyKey|saveCloudIdempotencyKey/)
 })
@@ -857,7 +1002,7 @@ test('本地 ACK 与云端对账 outbox 都按当前登录账号隔离', () => {
   assert.match(dialog, /async function resolveDurableAttempt[\s\S]*ownerUserId,/)
   assert.match(dialog, /function persistActiveJob[\s\S]*const storedJob = \{[\s\S]*ownerUserId,/)
   assert.match(dialog, /const isUsableStoredJob = candidate => Boolean\([\s\S]*candidate\.ownerUserId === ownerUserId/)
-  assert.match(dialog, /watch\(\(\) => userStore\.id,[\s\S]*resetNewJob\(\{ clearStoredJob: false, preserveForm: true \}\)/)
+  assert.match(dialog, /watch\(\(\) => userStore\.id,[\s\S]*resetNewJob\(\{ clearStoredJob: false, preserveForm: true, detach: true \}\)/)
 })
 
 test('副作用后刷新时间线', () => {
@@ -899,7 +1044,7 @@ test('显式入口 preset 优先，recent 只补非显式默认值且 active 仍
 
 test('继续生成 attempt 通过原 key、parent、session、turn 与已知 job 精确恢复', () => {
   assert.match(dialog, /const ATTEMPTS_STORAGE_KEY = 'MINDMAP_AI_REQUEST_ATTEMPTS_V1'/)
-  assert.match(dialog, /async function hashAttemptFingerprint[\s\S]*SHA-256/)
+  assert.match(dialog, /async function hashAttemptFingerprint[\s\S]*return sha256Hex\(bytes\)/)
   assert.match(dialog, /async function resolveDurableAttempt[\s\S]*fingerprintHash/)
   assert.match(dialog, /metadata: \{[\s\S]*parentJobId,[\s\S]*parentTurnIndex,[\s\S]*sessionId: parentJob\.sessionId,[\s\S]*knownMaxTurnIndex:[\s\S]*knownJobIds:[\s\S]*requestPayload/)
   assert.match(dialog, /async function replayFollowupAttempt[\s\S]*reconcileMindmapAiJob\(attempt\.key[\s\S]*isHttpNotFound\(error\)[\s\S]*attempt\.parentJobId,[\s\S]*attempt\.requestPayload,[\s\S]*attempt\.key/)
@@ -951,9 +1096,7 @@ test('失败任务通过正式 retry 新建同会话轮次并可切换 Agent', (
   assert.match(api, /export function retryMindmapAiJob\(jobId, data, idempotencyKey/)
   assert.match(api, /`\/mindmap\/ai\/jobs\/\$\{jobId\}\/retry`/)
   assert.match(dialog, /const retryableStatuses = new Set\(\['failed', 'cancelled', 'expired', 'stale'\]\)/)
-  assert.match(dialog, /v-if="retryAvailable" class="retryPanel"/)
-  assert.match(dialog, /@click="retryJob"/)
-  assert.match(dialog, /可在上方切换 Agent 或模型/)
+  assert.match(dialog, /if \(retryAvailable\.value\) return retryPrompt\.value/)
   assert.match(dialog, /@click="sendComposerMessage"/)
   assert.match(dialog, /if \(!job\.value\) await submitJob\(\)[\s\S]*else if \(retryAvailable\.value\) await retryJob\(\)[\s\S]*else if \(followupAvailable\.value\) await continueJob\(\)/)
   assert.match(dialog, /requestPayload = \{[\s\S]*agentKey: form\.agentKey,[\s\S]*modelId:[\s\S]*prompt: retryPrompt\.value\.trim\(\) \|\| undefined/)

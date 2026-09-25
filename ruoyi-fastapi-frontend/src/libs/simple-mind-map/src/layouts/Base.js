@@ -55,7 +55,7 @@ class Base {
 
   // 检查当前来源是否需要重新计算节点大小
   checkIsNeedResizeSources() {
-    return this.renderer.checkHasRenderSource(CONSTANTS.CHANGE_THEME)
+    return this.renderer.renderRecoveryRequired || this.renderer.checkHasRenderSource(CONSTANTS.CHANGE_THEME)
   }
 
   // 层级类型改变
@@ -607,6 +607,10 @@ class Base {
 
   // 设置连线样式
   setLineStyle(style, line, path, childNode) {
+    // A partially materialized streaming frame can briefly expose a child
+    // before its line pool has caught up. Ignore that transient line instead
+    // of crashing the entire renderer; the next render pass will reconcile it.
+    if (!line) return
     line.plot(this.transformPath(path))
     style && style(line, childNode, true)
   }

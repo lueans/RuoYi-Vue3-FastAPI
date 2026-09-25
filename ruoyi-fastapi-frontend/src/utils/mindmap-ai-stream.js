@@ -1,5 +1,7 @@
 import { getToken } from './auth.js'
+import { isMindmapAiAbortError as isAbortError } from './mindmap-ai-errors.js'
 import { stableJsonValue } from './mindmap-ai-shared.js'
+import { compareMindmapAiPreviewCoordinates } from './mindmap-ai-live-preview.js'
 
 export const MINDMAP_AI_MAX_SSE_EVENT_CHARS = 256 * 1024
 
@@ -12,10 +14,6 @@ const MINDMAP_AI_AGENT_PROGRESS_STAGE_LABELS = Object.freeze({
   turn_completed: '本轮完成',
 })
 
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value))
-}
-
 function normalizeBaseUrl(value) {
   return String(value || '').replace(/\/+$/, '')
 }
@@ -25,12 +23,6 @@ function createStreamError(code, message, details = {}) {
   error.code = code
   Object.assign(error, details)
   return error
-}
-
-function isAbortError(error) {
-  return error?.name === 'AbortError'
-    || error?.name === 'CanceledError'
-    || error?.code === 'ERR_CANCELED'
 }
 
 function safeTokenCount(value) {
@@ -107,9 +99,9 @@ export function resolveMindmapAiRequestAttempt(
 }
 
 const MINDMAP_AI_TERMINAL_JOB_STATUSES = new Set([
-  'ready', 'applied', 'undone', 'completed_file', 'completed_no_change',
+  'ready', 'applied', 'undone', 'completed_file', 'completed_direct', 'completed_no_change',
   'needs_review', 'stale', 'cancelled', 'failed', 'expired',
-  'needs_input',
+  'needs_input', 'rejected',
 ])
 
 const MINDMAP_AI_TERMINAL_TRANSITIONS = Object.freeze({
@@ -117,12 +109,20 @@ const MINDMAP_AI_TERMINAL_TRANSITIONS = Object.freeze({
   // tab can therefore observe ready/needs_review -> undone without ever seeing
   // the intermediate applied snapshot; accepting this transitive transition
   // is required to avoid presenting an already-undone proposal as applied.
-  ready: new Set(['applied', 'undone', 'completed_file', 'stale']),
-  needs_review: new Set(['applied', 'undone', 'stale']),
+  ready: new Set(['applied', 'undone', 'rejected', 'completed_file', 'completed_direct', 'stale']),
+  needs_review: new Set(['applied', 'undone', 'rejected', 'stale']),
   applied: new Set(['undone']),
+  // Direct-write jobs create an undo receipt before the first batch. If a
+  // later batch fails (or the task is cancelled), the server can still
+  // complete the compensating undo and move the job to `undone`.
+  completed_direct: new Set(['undone']),
+  failed: new Set(['undone']),
+  stale: new Set(['undone']),
+  cancelled: new Set(['undone']),
 })
 
 const MINDMAP_AI_ACTIVE_STATUS_ORDER = Object.freeze({
+  waiting_turn: -1,
   queued: 0,
   preparing: 1,
   running: 2,
@@ -262,98 +262,6 @@ export function mergeMindmapAiJobSnapshot(currentJob, incomingJob) {
   return merged
 }
 
-function findNode(root, uid) {
-  if (!root || !uid) return null
-  const pending = [root]
-  while (pending.length) {
-    const node = pending.pop()
-    if (String(node?.data?.uid || '') === String(uid)) return node
-    pending.push(...(Array.isArray(node?.children) ? node.children : []))
-  }
-  return null
-}
-
-function detachNode(root, uid) {
-  if (!root || !uid || String(root?.data?.uid || '') === String(uid)) return null
-  const pending = [root]
-  while (pending.length) {
-    const parent = pending.pop()
-    const children = Array.isArray(parent?.children) ? parent.children : []
-    const index = children.findIndex(child => String(child?.data?.uid || '') === String(uid))
-    if (index >= 0) return children.splice(index, 1)[0]
-    pending.push(...children)
-  }
-  return null
-}
-
-function applyOperation(document, operation) {
-  const type = operation?.type
-  const uid = operation?.nodeUid
-  const payload = operation?.payload || {}
-  if (type === 'create_node') {
-    const parent = findNode(document.root, payload.parentUid)
-    if (!parent || findNode(document.root, uid)) return
-    const children = Array.isArray(parent.children) ? parent.children : (parent.children = [])
-    const index = Number.isInteger(payload.index)
-      ? Math.max(0, Math.min(payload.index, children.length))
-      : children.length
-    children.splice(index, 0, {
-      data: clone(payload.data || { uid, text: '' }),
-      children: [],
-    })
-    return
-  }
-  if (type === 'update_node') {
-    const node = findNode(document.root, uid)
-    if (node) {
-      const set = payload.set && typeof payload.set === 'object'
-        ? payload.set
-        : payload.patch || {}
-      Object.assign(node.data, clone(set))
-      for (const field of Array.isArray(payload.unset) ? payload.unset : []) {
-        delete node.data[field]
-      }
-    }
-    return
-  }
-  if (type === 'move_node') {
-    const node = detachNode(document.root, uid)
-    const parent = findNode(document.root, payload.parentUid)
-    if (!node || !parent) return
-    const children = Array.isArray(parent.children) ? parent.children : (parent.children = [])
-    const index = Number.isInteger(payload.index)
-      ? Math.max(0, Math.min(payload.index, children.length))
-      : children.length
-    children.splice(index, 0, node)
-    return
-  }
-  if (type === 'delete_subtree') {
-    detachNode(document.root, uid)
-    return
-  }
-  if (type === 'set_document_meta') {
-    const set = payload.set && typeof payload.set === 'object' ? payload.set : payload
-    for (const field of ['layout', 'theme', 'documentData']) {
-      if (Object.prototype.hasOwnProperty.call(set, field)) document[field] = clone(set[field])
-    }
-    for (const field of Array.isArray(payload.unset) ? payload.unset : []) {
-      if (['layout', 'theme', 'documentData'].includes(field)) delete document[field]
-    }
-    // 仅用于恢复升级前已经持久化的实时预览事件；新协议中标题是根节点 update。
-    if (typeof payload.title === 'string' && document.root?.data) {
-      document.root.data.text = payload.title
-    }
-  }
-}
-
-export function applyMindmapAiDraftDelta(currentDocument, payload) {
-  const initialState = payload?.initialState
-  const document = clone(initialState || currentDocument)
-  if (!document?.root) return currentDocument || null
-  for (const operation of payload?.operations || []) applyOperation(document, operation)
-  return document
-}
-
 export function parseMindmapAiSseChunk(buffer, chunk, { flush = false } = {}) {
   let source = `${buffer || ''}${chunk || ''}`
   // CRLF 可能刚好跨网络 chunk，非 flush 时保留末尾 CR，等下一块后再判定。
@@ -481,6 +389,7 @@ export async function streamMindmapAiJobEvents(jobId, {
 export async function consumeMindmapAiRealtimeEvents(jobId, {
   afterSequence = 0,
   previewVersion = -1,
+  previewEpoch = 1,
   signal,
   onEvent,
   onDraft,
@@ -488,66 +397,114 @@ export async function consumeMindmapAiRealtimeEvents(jobId, {
   onOpen,
   streamImpl = streamMindmapAiJobEvents,
   fetchDraft,
+  fetchDraftEnabled = true,
 } = {}) {
   let latestSequence = Math.max(0, Number(afterSequence) || 0)
   let latestPreviewVersion = Number.isFinite(Number(previewVersion))
     ? Number(previewVersion)
     : -1
+  let latestPreviewEpoch = Math.max(1, Number(previewEpoch) || 1)
+  let pendingPreviewCoordinates = null
+  const latestCoordinates = () => ({ epoch: latestPreviewEpoch, version: latestPreviewVersion })
+  let draftDrain = null
+  let draftFailure = null
 
-  await streamImpl(jobId, {
-    afterSequence: latestSequence,
-    signal,
-    onOpen,
-    onEvent: async event => {
-      const sequence = Number(event?.data?.sequence ?? event?.id)
-      if (!Number.isInteger(sequence) || sequence <= latestSequence) return
-      latestSequence = sequence
-      await onEvent?.(event)
+  // Draft snapshots are fetched independently of the SSE reader. Waiting for
+  // each HTTP request in the event callback stalls every later model/tool
+  // event and can leave all visible edits until after the job has finished.
+  // Keep the first in-flight version, then fetch the newest queued version.
+  const startDraftDrain = () => {
+    if (!fetchDraftEnabled || draftDrain || pendingPreviewCoordinates === null || draftFailure) return
+    draftDrain = (async () => {
+      while (pendingPreviewCoordinates !== null) {
+        const requested = pendingPreviewCoordinates
+        const requestedVersion = requested.version
+        pendingPreviewCoordinates = null
+        if (compareMindmapAiPreviewCoordinates(requested, latestCoordinates()) <= 0) continue
+        let response
+        try {
+          response = await fetchDraft(jobId, { signal, version: requestedVersion })
+        } catch (error) {
+          if (isAbortError(error)) throw error
+          await onDraftError?.(error, {
+            requestedVersion,
+            afterSequence: latestSequence,
+          })
+          continue
+        }
 
-      const payload = event?.data?.payload
-      const requestedVersion = Number(payload?.previewVersion)
-      if (
-        event?.eventType !== 'draft_changed'
-        && event?.eventType !== 'draft_initialized'
-      ) return
-      if (
-        payload?.previewAvailable !== true
-        || !Number.isInteger(requestedVersion)
-        || requestedVersion <= latestPreviewVersion
-        || typeof fetchDraft !== 'function'
-      ) return
-
-      let response
-      try {
-        response = await fetchDraft(jobId, { signal, version: requestedVersion })
-      } catch (error) {
-        if (isAbortError(error)) throw error
-        await onDraftError?.(error, {
-          requestedVersion,
-          afterSequence: latestSequence,
-        })
-        return
+        const preview = response?.data ?? response
+        const receivedVersion = Number(preview?.operationCursor)
+        const receivedEpoch = Number(preview?.previewEpoch || 1)
+        // Never substitute an unversioned latest snapshot for an earlier
+        // request; recovery/polling will repair an evicted exact version.
+        if (
+          preview?.available !== true
+          || !preview.document?.root
+          || !Number.isSafeInteger(receivedVersion)
+          || receivedVersion !== requestedVersion
+          || receivedEpoch !== requested.epoch
+          || (pendingPreviewCoordinates && pendingPreviewCoordinates.epoch > receivedEpoch)
+          || compareMindmapAiPreviewCoordinates({ epoch: receivedEpoch, version: receivedVersion }, latestCoordinates()) <= 0
+        ) continue
+        latestPreviewVersion = receivedVersion
+        latestPreviewEpoch = receivedEpoch
+        await onDraft?.(preview)
       }
+    })().catch(error => {
+      draftFailure = error
+    }).finally(() => {
+      draftDrain = null
+      // An event may arrive just as the drain finishes. Do not strand it.
+      if (pendingPreviewCoordinates !== null && !draftFailure) startDraftDrain()
+    })
+  }
 
-      const preview = response?.data ?? response
-      const receivedVersion = Number(preview?.operationCursor)
-      // 指定版本被短期缓存淘汰时只跳过该帧，继续消费后续 SSE。此处立即
-      // 拉 latest 会让快速连续操作从首帧直接跳到终帧；常规轮询及流结束
-      // 后的强制轮询负责最终追上 latest。
-      if (
-        preview?.available !== true
-        || !preview.document?.root
-        || !Number.isSafeInteger(receivedVersion)
-        || receivedVersion !== requestedVersion
-        || receivedVersion <= latestPreviewVersion
-      ) return
-      latestPreviewVersion = receivedVersion
-      await onDraft?.(preview)
-    },
-  })
+  try {
+    await streamImpl(jobId, {
+      afterSequence: latestSequence,
+      signal,
+      onOpen,
+      onEvent: async event => {
+        const sequence = Number(event?.data?.sequence ?? event?.id)
+        if (!Number.isInteger(sequence) || sequence <= latestSequence) return
+        latestSequence = sequence
+        await onEvent?.(event)
+
+        const payload = event?.data?.payload
+        const requestedVersion = Number(payload?.previewVersion)
+        const requestedEpoch = Number(payload?.previewEpoch || 1)
+        const requested = { epoch: requestedEpoch, version: requestedVersion }
+        if (
+          event?.eventType !== 'draft_changed'
+          && event?.eventType !== 'draft_initialized'
+        ) return
+        if (
+          payload?.previewAvailable !== true
+          || !Number.isInteger(requestedVersion)
+          || !Number.isInteger(requestedEpoch)
+          || requestedEpoch < 1
+          || compareMindmapAiPreviewCoordinates(requested, latestCoordinates()) <= 0
+          || typeof fetchDraft !== 'function'
+          || !fetchDraftEnabled
+        ) return
+
+        if (!pendingPreviewCoordinates || compareMindmapAiPreviewCoordinates(requested, pendingPreviewCoordinates) > 0) {
+          pendingPreviewCoordinates = requested
+        }
+        startDraftDrain()
+      },
+    })
+  } finally {
+    // A finite stream can end immediately after the last event. Deliver the
+    // already committed preview before returning its resume cursor.
+    while (draftDrain) await draftDrain
+  }
+  if (draftFailure) throw draftFailure
 
   return {
     afterSequence: latestSequence,
     previewVersion: latestPreviewVersion,
+    previewEpoch: latestPreviewEpoch,
   }
 }

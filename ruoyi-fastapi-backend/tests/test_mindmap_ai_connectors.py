@@ -18,6 +18,8 @@ from module_mindmap.controller import mindmap_ai_controller
 from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiConnectorUpdateModel,
     MindmapAiJobCreateModel,
+    MindmapAiJobRetryModel,
+    MindmapAiMessageModel,
 )
 from module_mindmap.service.mindmap_ai_service import (
     AgentRuntimePolicy,
@@ -536,12 +538,123 @@ async def test_create_job_runs_only_one_unknown_health_preflight() -> None:
     assert preflight.kwargs == {'for_update': True, 'preflight_unknown': True}
 
 
-def test_followup_job_splits_static_check_from_single_unknown_preflight() -> None:
-    source = inspect.getsource(MindmapAiService.create_followup_job)
+@pytest.mark.asyncio
+@pytest.mark.parametrize('entry', ['create', 'retry', 'followup', 'waiting'])
+@pytest.mark.parametrize('failure', [None, 'connector', 'policy', 'native'])
+async def test_job_runtime_preserves_creation_admission_and_frozen_columns(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch, entry: str, failure: str | None,
+) -> None:
+    request = MindmapAiJobCreateModel.model_validate({
+        'agentKey': 'native_mindmap', 'modelId': 7, 'intent': 'discuss', 'prompt': '讨论测试范围',
+        'source': {'type': 'none'}, 'target': 'message', 'parameters': {'maxNodes': 40, 'maxDepth': 5},
+    })
+    parent = SimpleNamespace(
+        id='10000000-0000-4000-8000-000000000001', session_id='20000000-0000-4000-8000-000000000001',
+        status='running' if entry == 'waiting' else 'failed' if entry == 'retry' else 'completed_message',
+        request_json=request.model_dump_json(by_alias=True), intent='discuss', target='message',
+        agent_key='native_mindmap', artifact_id=None, proposal_id=None, response_id='response',
+        source_type='none', source_mindmap_id=None, parent_job_id=None, turn_index=1,
+    )
+    session = SimpleNamespace(status='active', expires_time=datetime.now() + timedelta(days=2))
+    manifest = _manifest(
+        agent_key='native_mindmap', intents=('discuss',), input_types=('none',), result_types=('message',),
+        adapter_version='adapter-test', sdk_version='sdk-test', runtime_version='runtime-test',
+    )
+    policy = AgentRuntimePolicy(
+        model_allowlist=('different-model',) if failure == 'policy' else ('7',),
+        max_budget_usd=2.5, timeout_seconds=120, max_nodes=200, max_depth=10,
+        max_concurrent_jobs=3, retention_days=20,
+    )
+    connector = SimpleNamespace()
+    events: list[str] = []
 
-    assert source.count('_ensure_connector_available(') == EXPECTED_CONNECTOR_CHECKS
-    assert source.count('preflight_unknown=False') == 1
-    assert source.count('preflight_unknown=True') == 1
+    async def ensure_connector(
+        *_args: object, for_update: bool = False, preflight_unknown: bool = True,
+    ) -> SimpleNamespace:
+        events.append('locked-preflight' if for_update else 'static-check')
+        assert preflight_unknown is for_update
+        if for_update and failure == 'connector':
+            raise ServiceException(message='选择的 AI Agent 已被管理员停用')
+        return connector
+
+    async def add_job(_db: object, values: dict) -> SimpleNamespace:
+        events.append('job-write')
+        return SimpleNamespace(**values)
+
+    ensure = AsyncMock(side_effect=ensure_connector)
+    insert = AsyncMock(side_effect=add_job)
+    concurrency = AsyncMock()
+    native = AsyncMock(return_value=failure != 'native')
+    schedule = Mock()
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    dao = 'module_mindmap.service.mindmap_ai_service.MindmapAiDao'
+    monkeypatch.setattr(f'{dao}.get_job_by_idempotency', AsyncMock(return_value=None))
+    monkeypatch.setattr(f'{dao}.get_job', AsyncMock(return_value=parent))
+    monkeypatch.setattr(f'{dao}.get_session', AsyncMock(return_value=session))
+    monkeypatch.setattr(f'{dao}.lock_jobs_for_session', AsyncMock(return_value=[parent]))
+    monkeypatch.setattr(f'{dao}.add_session', AsyncMock())
+    monkeypatch.setattr(f'{dao}.add_job', insert)
+    monkeypatch.setattr(f'{dao}.add_event', AsyncMock())
+    monkeypatch.setattr(f'{dao}.update_session', AsyncMock())
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_service.get_mindmap_agent_registry', Mock(
+        return_value=SimpleNamespace(get=Mock(return_value=SimpleNamespace(get_manifest=lambda: manifest))),
+    ))
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_service._job_model', lambda job: job)
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event', Mock())
+    monkeypatch.setattr(MindmapAiService, '_prepare_source_for_job', AsyncMock(return_value=(None,) * 5))
+    monkeypatch.setattr(MindmapAiService, '_ensure_connector_available', ensure)
+    monkeypatch.setattr(MindmapAiService, '_runtime_policy', Mock(return_value=policy))
+    monkeypatch.setattr(MindmapAiService, '_has_native_model', native)
+    monkeypatch.setattr(MindmapAiService, '_ensure_concurrency_available', concurrency)
+    monkeypatch.setattr(MindmapAiTaskManager, 'schedule', schedule)
+
+    async def create() -> object:
+        if entry == 'create':
+            return await MindmapAiService.create_job(database, request, 17, 'runtime-test')
+        if entry == 'retry':
+            return await MindmapAiService.retry_job(database, parent.id, MindmapAiJobRetryModel(), 17, 'runtime-test')
+        return await MindmapAiService.create_followup_job(
+            database, parent.id, MindmapAiMessageModel(prompt='继续讨论'), 17, 'runtime-test',
+        )
+
+    if failure:
+        with pytest.raises(ServiceException):
+            await create()
+        insert.assert_not_awaited()
+        database.commit.assert_not_awaited()
+        concurrency.assert_not_awaited()
+        schedule.assert_not_called()
+        assert events == ['static-check', 'locked-preflight']
+    else:
+        result = await create()
+        values = insert.await_args.args[1]
+        assert {key: values[key] for key in (
+            'agent_key', 'adapter_version', 'sdk_version', 'runtime_version', 'model_ref',
+            'max_budget_usd', 'timeout_seconds', 'max_nodes', 'max_depth', 'retention_days',
+            'intent', 'target', 'source_type',
+        )} == {
+            'agent_key': 'native_mindmap', 'adapter_version': manifest.adapter_version,
+            'sdk_version': manifest.sdk_version, 'runtime_version': manifest.runtime_version, 'model_ref': '7',
+            'max_budget_usd': 2.5, 'timeout_seconds': 120, 'max_nodes': 40, 'max_depth': 5, 'retention_days': 20,
+            'intent': 'discuss', 'target': 'message', 'source_type': 'none',
+        }
+        database.commit.assert_awaited_once()
+        assert events == ['static-check', 'locked-preflight', 'job-write']
+        if entry == 'waiting':
+            assert values['status'] == 'waiting_turn'
+            concurrency.assert_not_awaited()
+            schedule.assert_not_called()
+        else:
+            assert values['status'] == 'queued'
+            concurrency.assert_awaited_once_with(database, 'native_mindmap', policy)
+            schedule.assert_called_once_with(result.id)
+    assert [call.kwargs for call in ensure.await_args_list] == [
+        {'preflight_unknown': False}, {'for_update': True, 'preflight_unknown': True},
+    ]
+    if failure in {'connector', 'policy'}:
+        native.assert_not_awaited()
+    else:
+        native.assert_awaited_once_with(database, 17, 7)
 
 
 def test_connector_accepts_only_server_side_secret_references() -> None:

@@ -5,8 +5,18 @@ import {
   assertMindmapAiArtifactDownloadResponse,
   formatMindmapAiError,
   formatMindmapAiJobError,
+  isMindmapAiAbortError,
   resolveMindmapAiErrorCode,
 } from '../mindmap-ai-errors.js'
+
+test('取消识别统一支持 fetch 与 Axios，不把网络或业务失败当作取消', () => {
+  for (const error of [new DOMException('cancelled', 'AbortError'), { name: 'CanceledError' }, { code: 'ERR_CANCELED' }]) {
+    assert.equal(isMindmapAiAbortError(error), true)
+  }
+  for (const error of [null, undefined, new Error('offline'), { errorCode: 'AI_TASK_CANCELLED' }, { code: 'ERR_NETWORK' }]) {
+    assert.equal(isMindmapAiAbortError(error), false)
+  }
+})
 
 test('AI 业务错误从请求 data 与任务字段提取并映射为可操作文案', () => {
   const requestError = new Error('/private/provider/raw-error')
@@ -36,6 +46,10 @@ test('AI 业务错误从请求 data 与任务字段提取并映射为可操作�
     '输入内容或授权范围无效，请检查后重试',
   )
   assert.equal(
+    formatMindmapAiError({ errorCode: 'AI_MODEL_CONFIG_INVALID' }),
+    '所选模型配置无效，请到 AI 模型管理检查提供商、模型编码和 Base URL',
+  )
+  assert.equal(
     formatMindmapAiError({ errorCode: 'AI_PROPOSAL_INTEGRITY_INVALID' }),
     'AI 提案与生成结果不一致，已阻止应用；请保留错误详情并重新生成',
   )
@@ -50,6 +64,14 @@ test('AI 业务错误从请求 data 与任务字段提取并映射为可操作�
   assert.equal(
     formatMindmapAiError({ errorCode: 'AI_FOLLOWUP_STATE_CHANGED' }),
     '继续调整前任务状态已变化，请刷新后重试',
+  )
+  assert.equal(
+    formatMindmapAiError({ errorCode: 'AI_FOLLOWUP_REVIEW_REQUIRED' }),
+    '当前结果需要先确认或不采纳，再继续下一轮',
+  )
+  assert.equal(
+    formatMindmapAiError({ errorCode: 'AI_DOCUMENT_CONFLICT' }),
+    '脑图内容已被协作者修改，AI 直写已停止；请刷新后重试',
   )
   assert.equal(
     formatMindmapAiError({ errorCode: 'AI_APPLY_CONFLICT' }),
@@ -79,6 +101,10 @@ test('受信任任务状态优先展示精确原因并附错误码和安全行�
   assert.equal(
     formatMindmapAiJobError({ errorCode: 'AI_TIMEOUT' }),
     'AI 任务运行超时，请缩小范围或稍后重试（错误码：AI_TIMEOUT）',
+  )
+  assert.equal(
+    formatMindmapAiJobError({ errorCode: 'AI_DOCUMENT_CONFLICT' }),
+    '脑图内容已被协作者修改，AI 直写已停止；请刷新后重试（错误码：AI_DOCUMENT_CONFLICT）',
   )
   assert.equal(
     formatMindmapAiError({

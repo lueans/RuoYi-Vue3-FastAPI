@@ -85,6 +85,13 @@ function prepare(storage, overrides = {}, options = {}) {
   return prepareMindmapAiLocalJournal(input(overrides), storage, { now: NOW, ...options })
 }
 
+test('journal identity validation stays strict while UI account keys may normalize whitespace', () => {
+  for (const ownerUserId of [' 42 ', '01', 'account-name', Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => prepare(memoryStorage(), { ownerUserId }), /用户|身份|日志/)
+  }
+  assert.equal(prepare(memoryStorage(), { ownerUserId: '42' }).ownerUserId, '42')
+})
+
 test('prepared 日志按白名单持久化完整基线并执行写后读校验', () => {
   const storage = memoryStorage()
   const entry = prepare(storage, {
@@ -268,6 +275,34 @@ test('阶段机只允许 prepared -> apply pending -> confirmed -> undo pending 
     ),
     error => error?.code === 'AI_LOCAL_JOURNAL_PHASE_CONFLICT',
   )
+})
+
+test('阶段表统一后所有合法、幂等和非法迁移保持原契约', () => {
+  const allowed = {
+    prepared: ['applied_ack_pending', 'done'],
+    applied_ack_pending: ['applied_ack_confirmed', 'done'],
+    applied_ack_confirmed: ['undone_ack_pending', 'done'],
+    undone_ack_pending: ['done'],
+    done: [],
+  }
+  for (const phase of Object.keys(allowed)) {
+    for (const next of [...Object.keys(allowed), 'constructor', 'unknown']) {
+      const storage = memoryStorage()
+      prepare(storage)
+      const envelope = JSON.parse(storage.getItem(MINDMAP_AI_LOCAL_JOURNAL_STORAGE_KEY))
+      envelope.entries[0].phase = phase
+      storage.setItem(MINDMAP_AI_LOCAL_JOURNAL_STORAGE_KEY, JSON.stringify(envelope))
+      const before = storage.getItem(MINDMAP_AI_LOCAL_JOURNAL_STORAGE_KEY)
+      const advance = () => transitionMindmapAiLocalJournal(identity, next, storage, { now: NOW + 1 })
+      if (next === phase || allowed[phase].includes(next)) {
+        assert.equal(advance().phase, next)
+        if (next === phase) assert.equal(storage.getItem(MINDMAP_AI_LOCAL_JOURNAL_STORAGE_KEY), before)
+      } else {
+        assert.throws(advance, error => error.code.startsWith('AI_LOCAL_JOURNAL_PHASE_'))
+        assert.equal(storage.getItem(MINDMAP_AI_LOCAL_JOURNAL_STORAGE_KEY), before)
+      }
+    }
+  }
 })
 
 test('CAS expectedPhase 阻止旧异步回调覆盖较新的事务阶段', () => {

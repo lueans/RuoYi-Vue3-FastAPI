@@ -194,7 +194,7 @@ test('conflict recovery keeps the rejected runtime fenced until authoritative ap
 
   assert.match(
     source,
-    /const authoritativeRecoveryEditingBlocked = ref\(false\)[\s\S]*?const isReadonly = computed\([\s\S]*?authoritativeRecoveryEditingBlocked\.value/,
+    /const authoritativeRecoveryEditingBlocked = ref\(false\)[\s\S]*?const aiDialogReadonly = computed\([\s\S]*?authoritativeRecoveryEditingBlocked\.value/,
   )
   assert.match(detailGuardBlock, /authoritativeRecoveryEditingBlocked\.value/)
   assert.match(changeGuardBlock, /authoritativeRecoveryEditingBlocked\.value/)
@@ -487,12 +487,10 @@ test('editor persists drafts on page hide and background freeze boundaries', asy
     automaticConflictRecovery,
     /draftProtection\.getChangeVersion\(\) !== protectedDraftChangeVersion[\s\S]*?setPendingAutomaticConflictRecovery\(createDeferredRecoveryState\([\s\S]*?return false/,
   )
-  assert.match(source, /async function settlePendingViewSave/)
   assert.match(
     automaticConflictRecovery,
     /await retirePendingViewSaveForAuthoritativeReload\(\)/,
   )
-  assert.doesNotMatch(automaticConflictRecovery, /settlePendingViewSave\(\)/)
   assert.doesNotMatch(automaticConflictRecovery, /viewSaveInProgress\s*=\s*false/)
   assert.doesNotMatch(automaticConflictRecovery, /viewSavePromise\s*=\s*null/)
   assert.doesNotMatch(automaticConflictRecovery, /downloadConflictBackup/)
@@ -1047,7 +1045,10 @@ test('authoritative apply failures immediately fence the partial runtime and pre
   assert.ok(markReloadIndex > fenceIndex)
   assert.ok(draftIndex > markReloadIndex)
 
-  assert.match(reloadBlock, /const protectedDocumentBeforeApply = getCurrentDocument\(\)/)
+  assert.match(
+    reloadBlock,
+    /const protectedDocumentBeforeApply = getCurrentDocument\(\)/,
+  )
   assert.match(
     reloadBlock,
     /catch \(error\) \{[\s\S]*?await enterAuthoritativeApplyFailureRecovery\([\s\S]*?protectedDocumentBeforeApply[\s\S]*?throw error/,

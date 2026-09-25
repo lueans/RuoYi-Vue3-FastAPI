@@ -6,20 +6,11 @@ import {
 import {
   stringifyJsonValueIterative,
 } from '../libs/simple-mind-map/src/utils/jsonClone.js'
-import { isBoundedText, isPlainObject } from './mindmap-ai-shared.js'
+import { isBoundedText, isNumericOwnerUserId, isPlainObject } from './mindmap-ai-shared.js'
 
 export const MINDMAP_AI_LOCAL_JOURNAL_STORAGE_KEY = 'MINDMAP_AI_LOCAL_JOURNAL_V1'
 const MINDMAP_AI_LOCAL_JOURNAL_SCHEMA_VERSION = 1
 export const MINDMAP_AI_LOCAL_JOURNAL_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000
-export const MINDMAP_AI_LOCAL_JOURNAL_PHASES = Object.freeze([
-  'prepared',
-  'applied_ack_pending',
-  'applied_ack_confirmed',
-  'undone_ack_pending',
-  'done',
-])
-
-const PHASES = new Set(MINDMAP_AI_LOCAL_JOURNAL_PHASES)
 const HASH_PATTERN = /^mmf2:sha256:[a-f0-9]{64}$/
 const MAX_ENTRY_COUNT = 20
 const MAX_JOURNAL_BYTES = 3 * 1024 * 1024
@@ -32,12 +23,14 @@ const NEXT_PHASES = Object.freeze({
   undone_ack_pending: new Set(['done']),
   done: new Set(),
 })
+export const MINDMAP_AI_LOCAL_JOURNAL_PHASES = Object.freeze(Object.keys(NEXT_PHASES))
+const PHASES = new Set(MINDMAP_AI_LOCAL_JOURNAL_PHASES)
 
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
 
 function normalizeOwnerUserId(value) {
   if (Number.isSafeInteger(value) && value > 0) return String(value)
-  return typeof value === 'string' && /^[1-9]\d{0,63}$/.test(value) ? value : null
+  return isNumericOwnerUserId(value) ? value : null
 }
 
 function createJournalError(message, code, ErrorType = Error, cause) {
@@ -616,7 +609,6 @@ export function classifyMindmapAiLocalRecovery(entry, workspace, options = {}) {
     )
   if (atBase) {
     return recoveryResult('not_applied', 'workspace_at_base', normalizedEntry, {
-      actionable: false,
       recommendedPhase: normalizedEntry.phase === 'prepared' ? 'done' : null,
     })
   }
@@ -631,7 +623,6 @@ export function classifyMindmapAiLocalRecovery(entry, workspace, options = {}) {
     const needsApplyAck = ['prepared', 'applied_ack_pending'].includes(normalizedEntry.phase)
     const requiredAcks = needsApplyAck ? ['apply'] : []
     return recoveryResult('applied', 'workspace_at_result', normalizedEntry, {
-      actionable: true,
       requiredAcks,
       ackPlan: createAckPlan(normalizedEntry, requiredAcks),
       undoAvailable: normalizedEntry.phase === 'applied_ack_confirmed',
@@ -651,7 +642,6 @@ export function classifyMindmapAiLocalRecovery(entry, workspace, options = {}) {
     const needsApplyAck = ['prepared', 'applied_ack_pending'].includes(normalizedEntry.phase)
     const requiredAcks = needsApplyAck ? ['apply', 'undo'] : ['undo']
     return recoveryResult('undone', 'workspace_at_undone_base', normalizedEntry, {
-      actionable: true,
       requiredAcks,
       ackPlan: createAckPlan(normalizedEntry, requiredAcks),
       recommendedPhase: needsApplyAck ? 'applied_ack_pending' : 'undone_ack_pending',

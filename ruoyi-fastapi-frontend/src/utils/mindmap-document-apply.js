@@ -414,7 +414,12 @@ export function applyAuthoritativeMindmapDocument(
   }
 
   command.addHistory?.cancel?.()
-  const currentTree = command.getCopyData?.() || mindMap.getData?.()
+  // A transient AI draft may already be on the canvas while the server
+  // confirms its application. Rebase undo history from the captured original
+  // tree, never from uncommitted preview nodes.
+  const currentTree = options.historyCurrentTree
+    || command.getCopyData?.()
+    || mindMap.getData?.()
   const rebasedHistory = (
     Array.isArray(command.history)
     && currentTree

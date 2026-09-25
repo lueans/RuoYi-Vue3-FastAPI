@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Literal
 
 from module_mindmap.ai.document import AI_ALLOWED_LAYOUTS, MindmapArtifactError
+from module_mindmap.ai.tool_contract import AI_TAG_REFERENCE_INSTRUCTIONS
 
 if TYPE_CHECKING:
     from module_mindmap.ai.tool_contract import MindmapToolService
@@ -31,6 +32,7 @@ PROVIDER_SIDE_EFFECT_EVENT_TYPES = frozenset({
     'tool_completed',
     'tool_failed',
     'draft_changed',
+    'tag_suggestions',
     'tool_plan_received',
     'tool_plan_failed',
 })
@@ -122,11 +124,38 @@ class AgentRunContext:
     parameters: dict[str, Any]
     source_document: dict[str, Any] | None
     tool_service: MindmapToolService
+    # direct 模式的工具增量由平台网关提交到权威云端文档；preview 模式仍
+    # 使用完整 Artifact/Proposal 结果契约。
+    execution_mode: Literal['preview', 'direct'] = 'preview'
     model_id: int | None = None
     external_session_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     # Only user-visible messages, used when an SDK session cannot be resumed.
     visible_history: tuple[dict[str, str], ...] = ()
+
+
+def build_agent_draft_changed_payload(
+    tools: MindmapToolService,
+    tool_name: str,
+    before_cursor: int,
+    *,
+    mutates_draft: bool,
+) -> dict[str, Any] | None:
+    """Build a delta only for a mutation, including cursor-free root creation."""
+    if not mutates_draft or (tool_name != 'start_document' and tools.operation_cursor() <= before_cursor):
+        return None
+    return tools.build_stream_delta(after_cursor=before_cursor, tool_name=tool_name)
+
+
+def build_agent_tool_completed_payload(tools: MindmapToolService, tool_name: str) -> dict[str, Any]:
+    """Build the stage-based tool receipt used by Native and Claude."""
+    payload: dict[str, Any] = {'toolName': tool_name, 'stage': 'building'}
+    if tool_name in {
+        'read_projection', 'read_document_detail', 'get_node_tags',
+        'validate_draft', 'complete_artifact',
+    }:
+        payload['summary'] = tools.authorized_scope_summary()
+    return payload
 
 
 def agent_output_language(context: AgentRunContext) -> tuple[str, str]:
@@ -139,6 +168,70 @@ def agent_target_layout(context: AgentRunContext) -> str:
     """Return a safe target layout even for legacy in-process callers."""
     layout = str(context.parameters.get('layout') or 'logicalStructure')
     return layout if layout in AI_ALLOWED_LAYOUTS else 'logicalStructure'
+
+
+AI_GENERATION_MODES = frozenset({'dfs_stream', 'bfs_stream', 'balanced', 'complete'})
+
+
+def agent_generation_mode(context: AgentRunContext) -> str:
+    """Return a safe generation mode even for legacy in-process callers."""
+    mode = str(context.parameters.get('generationMode') or 'balanced')
+    return mode if mode in AI_GENERATION_MODES else 'balanced'
+
+
+def build_agent_generation_mode_clause(context: AgentRunContext) -> str:
+    """Build the provider-neutral live-generation contract for every adapter."""
+    mode = agent_generation_mode(context)
+    opening = (
+        '确定根节点标题后立即调用 start_document；'
+        if context.source_document is None
+        else '立即读取已授权的现有草稿，保持原有根节点；'
+    )
+    live_contract = (
+        f'实时生成要求：{opening}'
+        '得到一小组可用节点就立即调用 add_nodes 提交，已有节点的修改也应及时调用变更工具；'
+        '不要先在内部生成完整脑图再集中调用工具。'
+        '用户正在观看当前画布，只有真实提交的草稿变更才会实时显示。'
+    )
+    if mode == 'dfs_stream':
+        return live_contract + (
+            '生成节奏：流式深度（逐分支）。每次 add_nodes 只构建同一个一级分支'
+            '的一条完整链路，从该分支首节点一直延伸到目标深度，完成该分支后再'
+            '开始下一个一级分支；单批不超过 12 个节点，禁止一次调用'
+            '横跨多个一级分支。'
+        )
+    if mode == 'bfs_stream':
+        return live_contract + (
+            '生成节奏：流式广度（逐层）。每次 add_nodes 只添加同一深度的节点：'
+            '先建完根下的全部一级节点，再建完全部二级节点，依此类推逐层推进；'
+            '单批不超过 12 个节点，禁止在同一次调用中混合不同深度。'
+        )
+    if mode == 'balanced':
+        return live_contract + (
+            '生成节奏：均衡。add_nodes 分批提交，单批不超过 12 个节点，'
+            '在实时呈现与总耗时之间保持平衡。'
+        )
+    return live_contract + (
+        '生成节奏：完整。优先尽快完成，但也应在生成过程中持续提交已确定的节点，'
+        '每批不超过 20 个节点。'
+    )
+
+
+def build_agent_structure_budget_clause(context: AgentRunContext) -> str:
+    """Describe the same document/subtree budget to provider prompt builders."""
+    max_nodes = int(context.parameters.get('maxNodes') or 2_000)
+    max_depth = int(context.parameters.get('maxDepth') or 32)
+    node_count_rule = (
+        f'编辑已有脑图时，全部 add_nodes 动作累计最多新增 {max_nodes} 个节点；'
+        '已新增节点即使随后删除也不返还预算。'
+        if context.source_document is not None
+        else f'新建脑图的最终节点总数（包括根节点）最多为 {max_nodes}。'
+    )
+    return (
+        f'本次 maxNodes={max_nodes}、maxDepth={max_depth}。'
+        f'{node_count_rule}'
+        f'授权范围最终深度不得超过 {max_depth}；若来源本来更深，只能保持或降低原深度，不能继续加深。'
+    )
 
 
 def agent_can_change_document_layout(context: AgentRunContext) -> bool:
@@ -161,6 +254,8 @@ def build_agent_output_contract(
     clauses = [
         f'输出语言必须为 {language_name}（{language}）；所有新写或改写的标题、节点文本、备注和最终可见回复均遵循该语言，稳定标识和技术专有名词除外。',
     ]
+    if context.intent != 'discuss':
+        clauses.append(AI_TAG_REFERENCE_INSTRUCTIONS)
     if include_layout:
         if agent_can_change_document_layout(context):
             clauses.append(
@@ -312,6 +407,21 @@ class AgentRunResult:
 
 
 @dataclass(slots=True)
+class AgentDirectResult:
+    """Agent 已完成直写批次后的轻量终态。
+
+    direct 模式的正文已经在每个 draft_changed 事件中通过领域网关提交，
+    因此终态不再要求生成一个可应用的 SMM Artifact。
+    """
+
+    title: str
+    summary: dict[str, int]
+    usage: dict[str, Any] = field(default_factory=dict)
+    external_session_id: str | None = None
+    external_session_created: bool = False
+
+
+@dataclass(slots=True)
 class AgentMessageResult:
     """A bounded user-visible answer that can never be applied as a mind map."""
 
@@ -347,17 +457,20 @@ class AgentNeedsInputResult:
         return [question.to_dict() for question in self.questions]
 
 
-AgentRunOutcome = AgentRunResult | AgentMessageResult | AgentNeedsInputResult
+AgentRunOutcome = AgentRunResult | AgentDirectResult | AgentMessageResult | AgentNeedsInputResult
 
 
-def agent_completion_json_schema() -> dict[str, Any]:
+def agent_completion_json_schema(execution_mode: str = 'preview') -> dict[str, Any]:
     """Provider-neutral terminal signal schema used by SDK-native constraints."""
+    completion_states = ['artifact_completed', 'needs_input']
+    if execution_mode == 'direct':
+        completion_states.insert(0, 'direct_completed')
     return {
         'type': 'object',
         'properties': {
             'completionState': {
                 'type': 'string',
-                'enum': ['artifact_completed', 'needs_input'],
+                'enum': completion_states,
             },
             'title': {'type': ['string', 'null']},
             'questions': {

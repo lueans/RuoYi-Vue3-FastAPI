@@ -122,34 +122,15 @@ def _require_set_unset_payload(
     return set_values, unset_values
 
 
-def strict_replay_document_operations(  # noqa: PLR0912, PLR0915
-    base_document: dict[str, Any],
+def _replay_proposal_operations_in_place(  # noqa: PLR0912, PLR0915
+    document: dict[str, Any],
     operations: list[dict[str, Any]],
-    *,
-    max_node_count: int = AI_MAX_NODE_COUNT,
-) -> dict[str, Any]:
-    """在基线副本上原子重放冻结 Proposal 操作。
+) -> None:
+    """共用冻结协议回放；调用者提供私有副本并校验各自的结果边界。
 
-    返回值是可直接参与 SMM 哈希计算的规范文档。函数从不修改
-    ``base_document`` 或 ``operations``；失败时不会泄漏部分重放结果。
+    不规范化未修改的节点数据，从而同时适用于 AI 规范文档和需保留
+    富文本、view、扩展字段的编辑器原文。操作载荷始终复制后写入。
     """
-    if not isinstance(base_document, dict):
-        raise _invalid('Proposal 基线文档无效')
-    if not isinstance(operations, list):
-        raise _invalid('Proposal operations 必须是数组')
-
-    try:
-        # 先在原始输入上检查 UID，避免普通规范化过程为缺失 UID 自动补值。
-        _index_tree(base_document.get('root'))
-        document, _summary = normalize_ai_document(
-            base_document,
-            content_policy='source',
-            max_node_count=max_node_count,
-        )
-    except MindmapArtifactError as exc:
-        if exc.code == PROPOSAL_INTEGRITY_ERROR_CODE:
-            raise
-        raise _invalid(f'Proposal 基线文档无效: {exc}') from exc
     nodes, parents, root_uid = _index_tree(document['root'])
 
     for operation_index, raw_operation in enumerate(operations):
@@ -296,6 +277,37 @@ def strict_replay_document_operations(  # noqa: PLR0912, PLR0915
         for field in unset_values:
             document.pop(field, None)
 
+
+def strict_replay_document_operations(
+    base_document: dict[str, Any],
+    operations: list[dict[str, Any]],
+    *,
+    max_node_count: int = AI_MAX_NODE_COUNT,
+) -> dict[str, Any]:
+    """在基线副本上原子重放冻结 Proposal 操作。
+
+    返回值是可直接参与 SMM 哈希计算的规范文档。函数从不修改
+    ``base_document`` 或 ``operations``；失败时不会泄漏部分重放结果。
+    """
+    if not isinstance(base_document, dict):
+        raise _invalid('Proposal 基线文档无效')
+    if not isinstance(operations, list):
+        raise _invalid('Proposal operations 必须是数组')
+
+    try:
+        # 先在原始输入上检查 UID，避免普通规范化过程为缺失 UID 自动补值。
+        _index_tree(base_document.get('root'))
+        document, _summary = normalize_ai_document(
+            base_document,
+            content_policy='source',
+            max_node_count=max_node_count,
+        )
+    except MindmapArtifactError as exc:
+        if exc.code == PROPOSAL_INTEGRITY_ERROR_CODE:
+            raise
+        raise _invalid(f'Proposal 基线文档无效: {exc}') from exc
+    _replay_proposal_operations_in_place(document, operations)
+
     # 再次索引可捕获最终重复 UID/非法 children；规范化与精确比较阻止
     # 事件字段被静默删除、缺失元数据被静默补默认值等非规范结果。
     _index_tree(document.get('root'))
@@ -314,7 +326,7 @@ def strict_replay_document_operations(  # noqa: PLR0912, PLR0915
     return normalized
 
 
-def materialize_editor_document_from_proposal(  # noqa: PLR0912, PLR0915
+def materialize_editor_document_from_proposal(
     *,
     source_document: dict[str, Any],
     operations: list[dict[str, Any]],
@@ -346,103 +358,7 @@ def materialize_editor_document_from_proposal(  # noqa: PLR0912, PLR0915
         raise _invalid('Proposal 编辑器重放基线与 Artifact 不一致')
 
     editor_document = clone_json_value(source_document)
-    nodes, parents, root_uid = _index_tree(editor_document.get('root'))
-    for operation_index, operation in enumerate(operations):
-        label = f'Proposal editor operation[{operation_index}]'
-        if not isinstance(operation, dict):
-            raise _invalid(f'{label}必须是对象')
-        operation_type = operation.get('type')
-        node_uid = operation.get('nodeUid')
-        payload = operation.get('payload')
-
-        if operation_type == 'create_node':
-            uid = str(node_uid)
-            parent_uid = str(payload['parentUid'])
-            parent = nodes.get(parent_uid)
-            if parent is None or uid in nodes:
-                raise _invalid('Proposal 编辑器新增节点引用无效')
-            index = int(payload['index'])
-            children = parent['children']
-            if index < 0 or index > len(children):
-                raise _invalid('Proposal 编辑器新增节点位置无效')
-            new_node = {
-                'data': clone_json_value(payload['data']),
-                'children': [],
-            }
-            children.insert(index, new_node)
-            nodes[uid] = new_node
-            parents[uid] = parent_uid
-            continue
-
-        if operation_type == 'update_node':
-            uid = str(node_uid)
-            node = nodes.get(uid)
-            if node is None:
-                raise _invalid('Proposal 编辑器更新节点不存在')
-            for field, value in payload['set'].items():
-                node['data'][field] = clone_json_value(value)
-            for field in payload['unset']:
-                node['data'].pop(field, None)
-            continue
-
-        if operation_type == 'move_node':
-            uid = str(node_uid)
-            parent_uid = str(payload['parentUid'])
-            if uid == root_uid or uid not in nodes or parent_uid not in nodes:
-                raise _invalid('Proposal 编辑器移动节点引用无效')
-            ancestor_uid: str | None = parent_uid
-            while ancestor_uid is not None:
-                if ancestor_uid == uid:
-                    raise _invalid('Proposal 编辑器移动节点不能形成循环')
-                ancestor_uid = parents.get(ancestor_uid)
-            old_parent_uid = parents.get(uid)
-            if old_parent_uid is None or old_parent_uid not in nodes:
-                raise _invalid('Proposal 编辑器移动节点缺少原父节点')
-            node = nodes[uid]
-            old_children = nodes[old_parent_uid]['children']
-            try:
-                old_index = next(
-                    index for index, child in enumerate(old_children) if child is node
-                )
-            except StopIteration as exc:
-                raise _invalid('Proposal 编辑器移动节点父子关系无效') from exc
-            old_children.pop(old_index)
-            new_children = nodes[parent_uid]['children']
-            index = int(payload['index'])
-            if index < 0 or index > len(new_children):
-                raise _invalid('Proposal 编辑器移动节点位置无效')
-            new_children.insert(index, node)
-            parents[uid] = parent_uid
-            continue
-
-        if operation_type == 'delete_subtree':
-            uid = str(node_uid)
-            if uid == root_uid or uid not in nodes:
-                raise _invalid('Proposal 编辑器删除节点引用无效')
-            parent_uid = parents.get(uid)
-            if parent_uid is None or parent_uid not in nodes:
-                raise _invalid('Proposal 编辑器删除节点缺少父节点')
-            subtree_root = nodes[uid]
-            nodes[parent_uid]['children'] = [
-                child
-                for child in nodes[parent_uid]['children']
-                if child is not subtree_root
-            ]
-            pending = [subtree_root]
-            while pending:
-                removed = pending.pop()
-                removed_uid = str(removed['data']['uid'])
-                pending.extend(removed['children'])
-                nodes.pop(removed_uid, None)
-                parents.pop(removed_uid, None)
-            continue
-
-        if operation_type != 'set_document_meta':
-            raise _invalid('Proposal 编辑器操作类型无效')
-        for field, value in payload['set'].items():
-            editor_document[field] = clone_json_value(value)
-        for field in payload['unset']:
-            editor_document.pop(field, None)
+    _replay_proposal_operations_in_place(editor_document, operations)
 
     normalized_editor_result, _summary = normalize_ai_editable_source_document(
         editor_document,

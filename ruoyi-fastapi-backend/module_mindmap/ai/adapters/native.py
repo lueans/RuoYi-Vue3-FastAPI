@@ -7,7 +7,7 @@ import re
 from contextlib import aclosing
 from functools import wraps
 from importlib import metadata
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from agno.agent import Agent
 from agno.run.agent import RunEvent
@@ -22,19 +22,24 @@ from module_mindmap.ai.adapters.base import (
     MAX_NEEDS_INPUT_QUESTIONS,
     NEEDS_INPUT_QUESTION_ID_PATTERN,
     AgentAdapter,
+    AgentDirectResult,
     AgentEventDeliveryError,
     AgentEventHandler,
     AgentManifest,
     AgentMessageResult,
     AgentNeedsInputResult,
     AgentRunContext,
+    AgentRunOutcome,
     AgentRunResult,
     agent_can_change_document_layout,
     agent_message_result,
     agent_needs_input_result,
     agent_target_layout,
     build_agent_discussion_prompt,
+    build_agent_draft_changed_payload,
+    build_agent_generation_mode_clause,
     build_agent_output_contract,
+    build_agent_tool_completed_payload,
     enforce_agent_target_layout,
     is_agent_needs_input_signal,
     map_adapter_exception,
@@ -43,6 +48,7 @@ from module_mindmap.ai.document import (
     AiMindmapLayout,
     MindmapArtifactError,
 )
+from utils.log_util import logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -64,6 +70,12 @@ OLLAMA_DEFAULT_KEEP_ALIVE = '30m'
 NATIVE_TOOL_CALL_LIMIT = 32
 NATIVE_MAX_RECOVERABLE_TOOL_FAILURES = 6
 NATIVE_MAX_IDENTICAL_TOOL_FAILURES = 3
+NATIVE_COMPLETION_RECOVERY_PROMPT = (
+    '上一轮已经产生了候选脑图草稿，但没有完成终态调用。现在进入一次受限收尾回合：'
+    '禁止调用 start_document、add_nodes、update_nodes、move_nodes、remove_nodes 或 '
+    'set_document_meta，也不要输出自然语言；只按顺序调用 validate_draft，然后立即调用 '
+    'complete_artifact。若校验失败，只修复校验明确指出的问题后重新校验并完成。'
+)
 
 
 class _NativeToolInput(BaseModel):
@@ -115,18 +127,28 @@ _CLARIFICATION_LIST_PREFIX = re.compile(r'^(?:[-*•]+|\d{1,2}[.)、])\s*')
 MIN_CLARIFICATION_ALNUM_CHARS = 2
 
 
+class NativeTagReference(_NativeToolInput):
+    tag_id: int = Field(alias='tagId', strict=True, gt=0)
+
+
+class NativeTagSuggestion(_NativeToolInput):
+    name: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=500)
+    node_uids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(alias='nodeUids', max_length=200)
+
+
 class NativeNodePatchInput(_NativeToolInput):
     text: str | None = None
     note: str | None = None
     hyperlink: str | None = None
-    tag: list[str] | None = None
+    tag: list[NativeTagReference] | None = Field(default=None, max_length=50)
 
 
 class NativeAddNodeInput(NativeNodePatchInput):
     parent_uid: str = Field(
         alias='parentUid',
         description=(
-            '已有父节点的真实 UID，新建脑图一级节点可使用 @root，'
+            '已有父节点的真实 UID；可见的真实投影根节点可使用 @root，'
             '子节点可使用本轮或之前成功条目的 @clientRef；'
             '不允许未声明引用、后向引用或自引用'
         ),
@@ -475,8 +497,11 @@ def _native_plain_text_clarification_result(
 SYSTEM_PROMPT = """你是产品自研的 MindMap Agent。你只能通过提供的脑图工具构建候选脑图。
 禁止输出或执行 Shell、文件、网络、数据库和浏览器操作。只有尚未存在草稿的全新创建任务才先调用
 start_document；已恢复草稿的创建任务和编辑任务都必须先调用 read_projection，
-然后从当前草稿继续，禁止重新创建或重建整棵树。每次最多批量处理 200 个节点。完成前调用 validate_draft，
-修正全部错误，最后必须调用 complete_artifact。不要在自然语言回复中粘贴完整 JSON。
+然后从当前草稿继续，禁止重新创建或重建整棵树。工具硬上限每次 200 个节点，
+实时展示时按本轮生成节奏更早、更小批次提交。完成前调用 validate_draft，
+修正全部错误；preview 模式最后必须调用 complete_artifact，direct 模式的
+每个已验证批次已经由平台提交到权威云端脑图，不需要调用 complete_artifact。
+不要在自然语言回复中粘贴完整 JSON。
 只有缺少会实质改变脑图结构的必要信息且无法作安全合理假设时，才可在任何草稿变更前调用
 request_clarification，并传入 1 至 3 个简短问题。request_clarification 与 complete_artifact
 都是终态工具：调用其中任意一个之后禁止再调用任何工具，也不要依赖自然语言终态声明完成。
@@ -518,8 +543,16 @@ class NativeMindmapAdapter(AgentAdapter):
             f'标准意图：{context.intent}',
             f'参数：{json.dumps(context.parameters, ensure_ascii=False)}',
             build_agent_output_contract(context),
+            build_agent_generation_mode_clause(context),
             '必须使用工具完成，不得只返回说明文本。',
         ]
+        if context.execution_mode == 'direct':
+            instructions.append(
+                '当前是 direct 直写模式：每个成功的变更工具都会实时提交云端脑图；'
+                '可使用 read_document_detail、get_node_tags、edit_node_text、edit_node_tags、'
+                'add_comment 操作当前授权脑图；完成 validate_draft 后直接结束，不要调用 '
+                'complete_artifact，也不要等待页面确认。'
+            )
         if context.source_document is None and not draft_initialized:
             instructions.append(
                 '这是全新创建任务：start_document 只能调用一次；'
@@ -535,7 +568,8 @@ class NativeMindmapAdapter(AgentAdapter):
         else:
             instructions.append(
                 '这是现有脑图编辑任务：先调用 read_projection，'
-                '只使用授权投影中的真实 UID；不得调用 start_document。'
+                '可见的真实投影根节点可用 @root，其余节点使用授权投影中的真实 UID；'
+                '不得调用 start_document。'
             )
         return instructions
 
@@ -569,7 +603,7 @@ class NativeMindmapAdapter(AgentAdapter):
         self,
         context: AgentRunContext,
         emit: AgentEventHandler,
-    ) -> AgentRunResult | AgentMessageResult | AgentNeedsInputResult:
+    ) -> AgentRunOutcome:
         task = asyncio.current_task()
         cancel_event = asyncio.Event()
         if task is not None:
@@ -588,7 +622,7 @@ class NativeMindmapAdapter(AgentAdapter):
         context: AgentRunContext,
         emit: AgentEventHandler,
         cancel_event: asyncio.Event,
-    ) -> AgentRunResult | AgentMessageResult | AgentNeedsInputResult:
+    ) -> AgentRunOutcome:
         model = context.metadata.get('model')
         if model is None:
             raise MindmapArtifactError('自研 MindMap Agent 缺少可用模型', code='AI_PROVIDER_AUTH_FAILED')
@@ -610,7 +644,7 @@ class NativeMindmapAdapter(AgentAdapter):
         tool_failure_total = 0
         tool_failure_counts: dict[tuple[str, str, str], int] = {}
 
-        if context.source_document is None and initial_effect_marker[0]:
+        if initial_effect_marker[0]:
             restored_projection = tools.read_projection()
             restored_root_uid = str(
                 (restored_projection.get('root', {}).get('data') or {}).get('uid') or ''
@@ -622,17 +656,31 @@ class NativeMindmapAdapter(AgentAdapter):
             event_type: str,
             payload: dict[str, Any],
         ) -> None:
-            nonlocal event_delivery_error
+            nonlocal event_delivery_error, runtime_error
             try:
                 await emit(event_type, payload)
             except asyncio.CancelledError:
                 raise
+            except MindmapArtifactError as exc:
+                # Preserve task-manager domain errors (notably direct-write
+                # conflicts and budget failures) and stop the isolated fork.
+                # They must not be relabelled as an event persistence outage.
+                if isinstance(exc, AgentEventDeliveryError):
+                    event_delivery_error = exc
+                elif runtime_error is None:
+                    runtime_error = exc
+                context.tool_service = original_tools
+                raise exc
             except Exception as exc:
                 if event_delivery_error is None:
                     event_delivery_error = AgentEventDeliveryError('MindMap Agent')
                 # The caller keeps the pre-run service, while all mutations in
                 # this run live only in the discarded fork.
                 context.tool_service = original_tools
+                logger.exception(
+                    f'Native MindMap Agent event delivery failed: event={event_type}, '
+                    f'error_type={type(exc).__name__}',
+                )
                 raise event_delivery_error from exc
 
         def mark_runtime_error(error: MindmapArtifactError) -> None:
@@ -693,41 +741,66 @@ class NativeMindmapAdapter(AgentAdapter):
                     raise asyncio.CancelledError
                 before_cursor = tools.operation_cursor()
                 value = action()
-                draft_changed = (
-                    tools.build_stream_delta(
-                        after_cursor=before_cursor,
-                        tool_name=tool_name,
-                    )
-                    if mutates_draft
-                    and (
-                        tool_name == 'start_document'
-                        or tools.operation_cursor() > before_cursor
-                    )
-                    else None
+                draft_changed = build_agent_draft_changed_payload(
+                    tools, tool_name, before_cursor, mutates_draft=mutates_draft,
                 )
-                summary = (
-                    tools.authorized_scope_summary()
-                    if tool_name in {
-                        'read_projection', 'validate_draft', 'complete_artifact',
-                    }
-                    else None
-                )
+                completed_payload = build_agent_tool_completed_payload(tools, tool_name)
                 if cancel_event.is_set():
                     raise asyncio.CancelledError
                 if draft_changed is not None:
                     await emit_required('draft_changed', draft_changed)
-                completed_payload: dict[str, Any] = {
-                    'toolName': tool_name,
-                    'stage': 'building',
-                }
-                if summary is not None:
-                    completed_payload['summary'] = summary
+                if tool_name == 'suggest_tags':
+                    await emit_required('tag_suggestions', {'suggestions': value})
                 await emit_required('tool_completed', completed_payload)
                 return _json_tool_result(value)
 
         async def read_projection() -> str:
             """读取本任务授权的候选脑图投影。"""
             return await execute_tool('read_projection', tools.read_projection)
+
+        async def read_document_detail() -> str:
+            """读取授权脑图详情与范围摘要。"""
+            return await execute_tool('read_document_detail', tools.read_document_detail)
+
+        async def get_node_tags(node_uid: str | None = None) -> str:
+            """读取授权范围内的节点标签。"""
+            return await execute_tool(
+                'get_node_tags', lambda: tools.get_node_tags(node_uid),
+            )
+
+        async def search_tags(
+            query: Annotated[str, Field(max_length=200)] = '',
+            limit: Annotated[int, Field(strict=True, ge=1, le=50)] = 20,
+        ) -> str:
+            """检索授权标签库中可引用的已有标签，不创建标签。"""
+            return await execute_tool('search_tags', lambda: tools.search_tags(query, limit))
+
+        async def suggest_tags(suggestions: Annotated[list[NativeTagSuggestion], Field(min_length=1, max_length=10)]) -> str:
+            """找不到已有标签时建议用户手动创建；不修改或绑定节点。"""
+            return await execute_tool('suggest_tags', lambda: tools.suggest_tags([
+                _native_tool_payload(item) for item in suggestions
+            ]))
+
+        async def edit_node_text(node_uid: str, text: str) -> str:
+            """直接编辑一个授权节点的文本。"""
+            return await execute_tool(
+                'edit_node_text', lambda: tools.edit_node_text(node_uid, text),
+                mutates_draft=True,
+            )
+
+        async def edit_node_tags(node_uid: str, tags: Annotated[list[NativeTagReference], Field(max_length=50)]) -> str:
+            """直接替换一个授权节点的标签。"""
+            return await execute_tool(
+                'edit_node_tags', lambda: tools.edit_node_tags(node_uid, [_native_tool_payload(tag) for tag in tags]),
+                mutates_draft=True,
+            )
+
+        async def add_comment(node_uid: str, content: str) -> str:
+            """给授权节点添加评论。"""
+            return await execute_tool(
+                'add_comment', lambda: tools.add_comment(node_uid, content),
+                mutates_draft=True,
+            )
 
         async def start_document(title: str) -> str:
             """创建新的候选脑图，返回根节点 UID。"""
@@ -884,7 +957,17 @@ class NativeMindmapAdapter(AgentAdapter):
         needs_start_document = not initial_effect_marker[0]
         agent_tools = [
             read_projection,
+            search_tags,
+            suggest_tags,
         ]
+        if context.execution_mode == 'direct':
+            agent_tools.extend((
+                read_document_detail,
+                get_node_tags,
+                edit_node_text,
+                edit_node_tags,
+                add_comment,
+            ))
         if needs_start_document:
             agent_tools.append(start_document)
         agent_tools.extend((
@@ -894,9 +977,13 @@ class NativeMindmapAdapter(AgentAdapter):
             remove_nodes,
             set_document_meta,
             validate_draft,
-            complete_artifact,
-            request_clarification,
         ))
+        # complete_artifact belongs only to the preview contract. Direct mode
+        # commits each validated mutation through the task manager and must not
+        # expose a second, obsolete apply terminal to the model.
+        if context.execution_mode != 'direct':
+            agent_tools.append(complete_artifact)
+        agent_tools.append(request_clarification)
 
         safe_agent_tools = [
             _build_native_safe_function(
@@ -929,9 +1016,7 @@ class NativeMindmapAdapter(AgentAdapter):
         await emit_required('agent_started', {'agentKey': 'native_mindmap'})
         usage: dict[str, Any] = {}
         terminal_payload: Any = None
-        response_stream = agent.arun(context.prompt, stream=True, stream_events=True)
-
-        async def consume_response_stream() -> None:
+        async def consume_response_stream(response_stream: Any) -> None:
             nonlocal terminal_payload, usage
             async with aclosing(response_stream) as stream:
                 async for event in stream:
@@ -990,7 +1075,12 @@ class NativeMindmapAdapter(AgentAdapter):
                         terminal_payload = getattr(event, 'content', None)
 
         total_timeout = max(1.0, float(context.metadata.get('timeoutSeconds') or 900))
-        await asyncio.wait_for(consume_response_stream(), timeout=total_timeout)
+        started_at = asyncio.get_running_loop().time()
+        response_stream = agent.arun(context.prompt, stream=True, stream_events=True)
+        await asyncio.wait_for(
+            consume_response_stream(response_stream),
+            timeout=total_timeout,
+        )
         if event_delivery_error is not None:
             raise event_delivery_error
         if runtime_error is not None:
@@ -1029,6 +1119,35 @@ class NativeMindmapAdapter(AgentAdapter):
             context.tool_service = original_tools
             return plain_text_clarification
         if (
+            context.execution_mode == 'direct'
+            and not completed
+            and clarification_payload is None
+            and post_terminal_attempted is None
+            and current_effect_marker[0]
+        ):
+            # Direct mode intentionally has no Artifact terminal call. The
+            # mutations were committed by the task manager while the isolated
+            # tool fork produced draft_changed events.
+            if validated_effect_marker != current_effect_marker:
+                await validate_draft()
+            projection = tools.read_projection()
+            title = str(
+                (projection.get('root', {}).get('data') or {}).get('text')
+                or 'AI 直写任务'
+            )
+            summary = tools.authorized_scope_summary()
+            context.tool_service = original_tools
+            await emit_required(
+                'agent_completed',
+                {'summary': summary, 'executionMode': 'direct'},
+            )
+            return AgentDirectResult(
+                title=title,
+                summary=summary,
+                usage=usage,
+                external_session_id=None,
+            )
+        if (
             not completed
             and str(getattr(model, 'provider', '') or '').casefold() == 'ollama'
             and current_effect_marker[0]
@@ -1052,9 +1171,38 @@ class NativeMindmapAdapter(AgentAdapter):
                 # because that is evidence of an obsolete validation decision.
                 await validate_draft()
                 await complete_artifact()
+        if (
+            not completed
+            and clarification_payload is None
+            and post_terminal_attempted is None
+            and current_effect_marker[0]
+            and str(getattr(model, 'provider', '') or '').strip()
+            and str(getattr(model, 'provider', '') or '').casefold() != 'ollama'
+        ):
+            # OpenAI-compatible and other hosted models occasionally stop after
+            # a successful mutation because the final tool call is truncated by
+            # the provider's generation limit. Give them one continuation turn,
+            # but keep it strictly terminal: no new mutations are accepted by
+            # the prompt or by the existing tool state machine. A second
+            # provider turn is safe because the draft lives in this uncommitted
+            # fork and is discarded if completion still does not happen.
+            remaining_timeout = total_timeout - (
+                asyncio.get_running_loop().time() - started_at
+            )
+            if remaining_timeout > 0:
+                recovery_stream = agent.arun(
+                    NATIVE_COMPLETION_RECOVERY_PROMPT,
+                    stream=True,
+                    stream_events=True,
+                )
+                await asyncio.wait_for(
+                    consume_response_stream(recovery_stream),
+                    timeout=remaining_timeout,
+                )
         if not completed:
             raise MindmapArtifactError(
-                'MindMap Agent 未显式调用 complete_artifact，任务结果不完整'
+                'MindMap Agent 未显式调用 complete_artifact，任务结果不完整；'
+                '请重试或切换支持工具调用的模型',
             )
         await emit_required('agent_completed', {'summary': completed['summary']})
         return AgentRunResult(

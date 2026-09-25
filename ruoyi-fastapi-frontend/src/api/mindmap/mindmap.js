@@ -315,10 +315,11 @@ export function retryMindmapAiJob(jobId, data, idempotencyKey, { signal } = {}) 
   })
 }
 
-export function cancelMindmapAiJob(jobId) {
+export function cancelMindmapAiJob(jobId, { preserveDraft = false } = {}) {
   return request({
     url: `/mindmap/ai/jobs/${jobId}/cancel`,
     method: 'post',
+    data: { preserveDraft: Boolean(preserveDraft) },
     headers: { repeatSubmit: false },
     silentError: true,
   })
@@ -360,6 +361,15 @@ export function getMindmapAiProposal(proposalId, { signal } = {}) {
     url: `/mindmap/ai/proposals/${proposalId}`,
     method: 'get',
     signal,
+    silentError: true,
+  })
+}
+
+export function rejectMindmapAiProposal(proposalId) {
+  return request({
+    url: `/mindmap/ai/proposals/${proposalId}/reject`,
+    method: 'post',
+    headers: { repeatSubmit: false },
     silentError: true,
   })
 }

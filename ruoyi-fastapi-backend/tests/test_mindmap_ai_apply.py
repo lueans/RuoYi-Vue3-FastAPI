@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -34,6 +35,7 @@ EXPECTED_LOCAL_APPLIED_REVISION = 7
 CLOUD_SAVED_MINDMAP_ID = 42
 EXPECTED_BARRIER_ROLLBACK_COUNT = 2
 EXPECTED_TRUSTED_AI_APPLIED_REVISION = 6
+COMPLETED_PROGRESS = 100
 
 
 def _document(text: str = '根节点') -> dict:
@@ -275,6 +277,137 @@ async def test_local_apply_endpoints_reject_a_persisted_cloud_proposal() -> None
 
 
 @pytest.mark.asyncio
+async def test_reject_proposal_persists_user_decision_and_closes_waiting_followups() -> None:
+    proposal = SimpleNamespace(
+        id='proposal-review-reject',
+        job_id='job-review-reject',
+        status='needs_review',
+    )
+    job = SimpleNamespace(
+        id=proposal.job_id,
+        proposal_id=proposal.id,
+        status='needs_review',
+    )
+    database = SimpleNamespace(commit=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_proposal',
+            new=AsyncMock(return_value=proposal),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=job),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_proposal',
+            new=AsyncMock(),
+        ) as update_proposal,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
+            new=AsyncMock(),
+        ) as update_job,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.delete_draft_checkpoint',
+            new=AsyncMock(),
+        ) as delete_checkpoint,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+            new=AsyncMock(),
+        ) as add_event,
+        patch.object(
+            MindmapAiTaskManager,
+            '_close_waiting_followups',
+            new=AsyncMock(),
+        ) as close_waiting_followups,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event',
+        ) as metric,
+        patch(
+            'module_mindmap.service.mindmap_ai_service._job_model',
+            new=lambda value: value,
+        ),
+    ):
+        result = await MindmapAiService.reject_proposal(
+            database,
+            proposal.id,
+            user_id=7,
+        )
+
+    assert result is job
+    assert update_proposal.await_args.args[2] == {'status': 'rejected'}
+    assert update_job.await_args.args[2]['status'] == 'rejected'
+    assert update_job.await_args.args[2]['progress'] == COMPLETED_PROGRESS
+    delete_checkpoint.assert_awaited_once_with(database, job.id)
+    event_payload = json.loads(add_event.await_args.args[3])
+    assert add_event.await_args.args[2] == 'proposal_rejected'
+    assert event_payload == {
+        'status': 'rejected',
+        'progress': 100,
+        'proposalId': proposal.id,
+        'completionReason': 'user_rejected',
+    }
+    close_waiting_followups.assert_awaited_once_with(
+        job.id,
+        parent_status='rejected',
+    )
+    metric.assert_called_once_with('proposal_rejected')
+    database.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reject_proposal_replay_never_rewrites_an_applied_result() -> None:
+    proposal = SimpleNamespace(
+        id='proposal-reject-replay',
+        job_id='job-reject-replay',
+        status='applied',
+    )
+    job = SimpleNamespace(
+        id=proposal.job_id,
+        proposal_id=proposal.id,
+        status='applied',
+    )
+    database = SimpleNamespace(commit=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_proposal',
+            new=AsyncMock(return_value=proposal),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=job),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_proposal',
+            new=AsyncMock(),
+        ) as update_proposal,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
+            new=AsyncMock(),
+        ) as update_job,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event',
+        ) as metric,
+        patch(
+            'module_mindmap.service.mindmap_ai_service._job_model',
+            new=lambda value: value,
+        ),
+    ):
+        result = await MindmapAiService.reject_proposal(
+            database,
+            proposal.id,
+            user_id=7,
+        )
+
+    assert result is job
+    update_proposal.assert_not_awaited()
+    update_job.assert_not_awaited()
+    metric.assert_not_called()
+    database.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(('initial_status', 'initial_applied_revision'), [
     ('applied', EXPECTED_LOCAL_APPLIED_REVISION),
     # The browser may undo before a temporarily failed apply ACK reaches the
@@ -310,6 +443,10 @@ async def test_local_undo_ack_is_atomic_and_can_supersede_a_lost_apply_ack(
     update_proposal = AsyncMock()
     update_job = AsyncMock()
 
+    async def wake_after_commit(job_id: str) -> None:
+        assert job_id == proposal.job_id
+        database.commit.assert_awaited_once()
+
     with (
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_proposal',
@@ -326,6 +463,9 @@ async def test_local_undo_ack_is_atomic_and_can_supersede_a_lost_apply_ack(
         patch(
             'module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event',
         ) as metric,
+        patch.object(
+            MindmapAiTaskManager, '_wake_waiting_followups', side_effect=wake_after_commit,
+        ) as wake,
     ):
         result = await MindmapAiService.ack_local_undo(
             database,
@@ -359,6 +499,7 @@ async def test_local_undo_ack_is_atomic_and_can_supersede_a_lost_apply_ack(
     database.flush.assert_awaited_once()
     database.commit.assert_awaited_once()
     metric.assert_called_once_with('local_undone')
+    wake.assert_awaited_once_with(proposal.job_id)
 
 
 @pytest.mark.asyncio
@@ -782,6 +923,11 @@ async def test_cancel_always_closes_job_even_when_local_task_accepts_immediate_c
             'cancel',
             new=AsyncMock(side_effect=lambda *_args: operation_order.append('cancel-local') or True),
         ) as cancel,
+        patch.object(
+            MindmapAiTaskManager,
+            '_close_waiting_followups',
+            new=AsyncMock(),
+        ) as close_waiting_followups,
         patch(
             'module_mindmap.service.mindmap_ai_service._job_model',
             new=lambda value: value,
@@ -792,6 +938,10 @@ async def test_cancel_always_closes_job_even_when_local_task_accepts_immediate_c
     assert result is cancelled
     update_job.assert_awaited_once()
     cancel.assert_awaited_once_with('job-immediate', 'codex')
+    close_waiting_followups.assert_awaited_once_with(
+        'job-immediate',
+        parent_status='cancelled',
+    )
     delete_checkpoint.assert_awaited_once_with(db, 'job-immediate')
     mark_terminal.assert_awaited_once_with('job-immediate', 6)
     assert operation_order == [
@@ -806,6 +956,177 @@ async def test_cancel_always_closes_job_even_when_local_task_accepts_immediate_c
     assert [call.args[2] for call in add_event.await_args_list] == [
         'cancel_requested', 'status_changed',
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminal_parent_releases_row_lock_before_closing_queue() -> None:
+    operation_order: list[str] = []
+    terminal = SimpleNamespace(status='failed')
+    db = SimpleNamespace(
+        rollback=AsyncMock(side_effect=lambda: operation_order.append('rollback')),
+    )
+
+    async def close_waiting(*_args: object, **_kwargs: object) -> None:
+        operation_order.append('close')
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=terminal),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service._job_model',
+            new=lambda value: value,
+        ),
+        patch.object(
+            MindmapAiTaskManager,
+            '_close_waiting_followups',
+            new=AsyncMock(side_effect=close_waiting),
+        ) as close_waiting_mock,
+        patch.object(
+            MindmapAiTaskManager,
+            '_wake_waiting_followups',
+            new=AsyncMock(),
+        ) as wake,
+    ):
+        result = await MindmapAiService.cancel_job(db, 'terminal-parent', 7)
+
+    assert result is terminal
+    assert operation_order == ['rollback', 'close']
+    close_waiting_mock.assert_awaited_once_with(
+        'terminal-parent',
+        parent_status='failed',
+    )
+    wake.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_promotes_latest_checkpoint_to_ready_undoable_proposal() -> None:
+    baseline = _document('生成前')
+    current = _document('已生成的部分结果')
+    request = MindmapAiJobCreateModel.model_validate({
+        'agentKey': 'codex',
+        'prompt': '补充测试用例',
+        'intent': 'expand',
+        'parameters': {
+            'layout': 'logicalStructure',
+            'maxNodes': 100,
+            'maxDepth': 6,
+        },
+        'source': {
+            'type': 'local_snapshot',
+            'documentId': 'local:stop-checkpoint',
+            'revision': 3,
+            'documentHash': compute_document_hash(baseline),
+            'document': baseline,
+            'baselineDocument': baseline,
+        },
+        'target': 'proposal',
+    })
+    job = SimpleNamespace(
+        id='job-stop-checkpoint',
+        status='running',
+        target='proposal',
+        intent='expand',
+        source_type='local_snapshot',
+        source_mindmap_id=None,
+        request_json=json.dumps(request.model_dump(by_alias=True, exclude_none=True)),
+        title='停止前任务',
+        agent_key='codex',
+        adapter_version='codex-adapter-v1',
+        user_id=7,
+        session_id='session-stop-checkpoint',
+        base_revision=3,
+        base_hash=compute_document_hash(baseline),
+        base_room_epoch=None,
+        max_nodes=100,
+        retention_days=7,
+        expires_time=datetime.now() + timedelta(days=1),
+        execution_epoch=4,
+    )
+    ready = SimpleNamespace(
+        id=job.id,
+        status='ready',
+        artifact_id='artifact-stop-checkpoint',
+        proposal_id='proposal-stop-checkpoint',
+        agent_key='codex',
+    )
+    session = SimpleNamespace(
+        expires_time=datetime.now() + timedelta(days=2),
+    )
+    db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(side_effect=[job, ready]),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_draft_checkpoint',
+            new=AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch.object(
+            MindmapAiTaskManager,
+            '_draft_checkpoint_preview',
+            return_value={'document': current},
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_artifact',
+            new=AsyncMock(),
+        ) as add_artifact,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_proposal',
+            new=AsyncMock(),
+        ) as add_proposal,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
+            new=AsyncMock(),
+        ) as update_job,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_session',
+            new=AsyncMock(return_value=session),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_session',
+            new=AsyncMock(),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+            new=AsyncMock(),
+        ) as add_event,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.delete_draft_checkpoint',
+            new=AsyncMock(),
+        ),
+        patch.object(MindmapAiTaskManager, 'mark_draft_terminal', new=AsyncMock()) as mark_terminal,
+        patch.object(MindmapAiTaskManager, 'cancel', new=AsyncMock()) as cancel,
+        patch.object(MindmapAiTaskManager, '_wake_waiting_followups', new=AsyncMock()) as wake,
+        patch(
+            'module_mindmap.service.mindmap_ai_service._job_model',
+            new=lambda value: value,
+        ),
+    ):
+        result = await MindmapAiService.cancel_job(
+            db,
+            job.id,
+            job.user_id,
+            preserve_draft=True,
+        )
+
+    assert result is ready
+    assert update_job.await_args.args[2]['status'] == 'needs_review'
+    artifact_values = add_artifact.await_args.args[1]
+    proposal_values = add_proposal.await_args.args[1]
+    assert artifact_values['job_id'] == job.id
+    assert proposal_values['job_id'] == job.id
+    assert proposal_values['status'] == 'needs_review'
+    assert proposal_values['operations_json']
+    assert add_event.await_args.args[2] == 'artifact_needs_review'
+    assert 'completionReason' in add_event.await_args.args[3]
+    mark_terminal.assert_awaited_once_with(job.id, job.execution_epoch)
+    cancel.assert_awaited_once_with(job.id, job.agent_key)
+    wake.assert_awaited_once_with(job.id)
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -993,6 +1314,139 @@ async def test_cloud_undo_replay_after_conflict_has_stable_permanent_error_code(
         )
 
     assert blocked.value.data == {'errorCode': 'AI_UNDO_CONFLICT'}
+
+
+@pytest.mark.asyncio
+async def test_cloud_undo_idempotent_replay_wakes_waiting_followups() -> None:
+    proposal = SimpleNamespace(
+        id='proposal-undone-replay',
+        job_id='job-undone-replay',
+        target_mindmap_id=42,
+        base_document_id=None,
+    )
+    undo = SimpleNamespace(
+        mindmap_id=42,
+        status='undone',
+        undone_revision=9,
+        expires_time=datetime.now() + timedelta(hours=1),
+    )
+    wake = AsyncMock()
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_proposal',
+            new=AsyncMock(return_value=proposal),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_undo',
+            new=AsyncMock(return_value=undo),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(return_value=SimpleNamespace(id=proposal.job_id)),
+        ),
+        patch.object(MindmapAiTaskManager, '_wake_waiting_followups', new=wake),
+    ):
+        result = await MindmapAiService.undo_cloud_proposal(
+            SimpleNamespace(),
+            mindmap_id=42,
+            proposal_id=proposal.id,
+            user_id=7,
+            user_name='tester',
+            idempotency_key='undo-undone-replay',
+        )
+
+    assert result['idempotentReplay'] is True
+    wake.assert_awaited_once_with(proposal.job_id)
+
+
+@pytest.mark.asyncio
+async def test_cloud_undo_locked_replay_releases_barrier_before_waking_followups() -> None:
+    """A replay observed after barrier acquisition must not deadlock on the job lock."""
+    proposal = SimpleNamespace(
+        id='proposal-undone-after-barrier',
+        job_id='job-undone-after-barrier',
+        target_mindmap_id=42,
+        base_document_id=None,
+    )
+    available = SimpleNamespace(
+        mindmap_id=42,
+        status='available',
+        applied_revision=8,
+        expires_time=datetime.now() + timedelta(hours=1),
+    )
+    undone = SimpleNamespace(
+        mindmap_id=42,
+        status='undone',
+        applied_revision=8,
+        undone_revision=9,
+        expires_time=datetime.now() + timedelta(hours=1),
+    )
+    job = SimpleNamespace(id=proposal.job_id)
+    barrier = SimpleNamespace(token='undo-replay-barrier')
+    call_order: list[str] = []
+
+    async def rollback() -> None:
+        call_order.append('rollback')
+
+    async def abort(_barrier: object) -> bool:
+        call_order.append('abort')
+        return True
+
+    async def wake(_job_id: str) -> None:
+        call_order.append('wake')
+
+    db = SimpleNamespace(rollback=rollback)
+    with (
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_undo',
+            new=AsyncMock(side_effect=[available, undone]),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_proposal',
+            new=AsyncMock(side_effect=[proposal, proposal]),
+        ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(side_effect=[job, job]),
+        ),
+        patch.object(MindmapAiTaskManager, '_wake_waiting_followups', new=wake),
+        patch(
+            'module_mindmap.websocket.room_manager.room_manager.get_active_lineage_epoch',
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            'module_mindmap.websocket.room_manager.room_manager.acquire_collaboration_mutation_barrier',
+            new=AsyncMock(return_value=barrier),
+        ),
+        patch(
+            'module_mindmap.websocket.room_manager.room_manager.wait_for_collaboration_mutation_barrier',
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            'module_mindmap.websocket.room_manager.room_manager.abort_collaboration_mutation_barrier',
+            new=abort,
+        ),
+        patch(
+            'module_mindmap.websocket.room_manager.room_manager.complete_collaboration_mutation_barrier',
+            new=AsyncMock(),
+        ),
+    ):
+        result = await MindmapAiService.undo_cloud_proposal(
+            db,
+            mindmap_id=42,
+            proposal_id=proposal.id,
+            user_id=7,
+            user_name='tester',
+            idempotency_key='undo-locked-replay',
+        )
+
+    assert result == {
+        'proposalId': proposal.id,
+        'status': 'undone',
+        'contentRevision': 9,
+        'idempotentReplay': True,
+    }
+    assert call_order.index('abort') < call_order.index('wake')
 
 
 @pytest.mark.asyncio
@@ -1557,6 +2011,60 @@ async def test_cloud_apply_rejects_document_drift_without_writing_document() -> 
     db.commit.assert_not_awaited()
     abort_barrier.assert_awaited_once_with(barrier)
     update_content.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_direct_undo_receipt_keeps_normalized_baseline_but_blocks_undo(
+    monkeypatch: Any,
+) -> None:
+    document = _document()
+    job = SimpleNamespace(
+        id='direct-job-1',
+        user_id=9,
+        source_type='cloud_document',
+        source_mindmap_id=42,
+        base_revision=3,
+        proposal_id=None,
+        expires_time=datetime.now() + timedelta(days=1),
+        request_json=json.dumps({
+            'executionMode': 'direct',
+            'source': {
+                'type': 'cloud_document',
+                'mindmapId': 42,
+                'baselineDocument': document,
+            },
+        }),
+    )
+    add_undo = AsyncMock()
+    update_job = AsyncMock()
+    monkeypatch.setattr(
+        'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_undo',
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_undo',
+        add_undo,
+    )
+    monkeypatch.setattr(
+        'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
+        update_job,
+    )
+
+    database = object()
+    receipt_id = await MindmapAiTaskManager._ensure_direct_undo_receipt(database, job)
+
+    assert receipt_id == 'direct-job-1'
+    values = add_undo.await_args.args[1]
+    snapshot = json.loads(values['before_document_json'])
+    assert snapshot['root']['data']['uid'] == 'root'
+    assert snapshot['root']['data']['expand'] is True
+    assert values['before_hash'] == compute_document_hash(snapshot)
+    assert values['status'] == 'blocked'
+    update_job.assert_awaited_once_with(
+        database,
+        'direct-job-1',
+        {'proposal_id': 'direct-job-1'},
+    )
 
 
 @pytest.mark.asyncio

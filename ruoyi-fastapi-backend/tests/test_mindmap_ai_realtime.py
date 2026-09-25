@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from redis.cluster import key_slot
+from sqlalchemy.exc import IntegrityError
 
 from exceptions.exception import ServiceException
+from module_mindmap.ai.change_summary import summarize_committed_node_changes
 from module_mindmap.ai.document import MindmapArtifactError
 from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
 from module_mindmap.service.mindmap_ai_service import (
@@ -18,6 +20,7 @@ from module_mindmap.service.mindmap_ai_service import (
     AI_DRAFT_PREVIEW_TTL_SECONDS,
     MindmapAiService,
     MindmapAiTaskManager,
+    _direct_job_change_result,
     _event_json,
     _safe_event_payload,
 )
@@ -209,6 +212,110 @@ def test_event_payload_uses_allowlist_and_never_serializes_mindmap_content() -> 
     assert 'rawUsage' not in serialized
 
 
+def test_event_payload_preserves_direct_change_summary_without_content() -> None:
+    safe = _safe_event_payload({
+        'changeSummary': {
+            'added': 2,
+            'updated': 3,
+            'moved': 1,
+            'deleted': 4,
+            'total': 10,
+            'private': 'drop me',
+        },
+        'directCommit': {
+            'operationGroupId': 'ai:job:1',
+            'changeSummary': {'createdCount': 2, 'updatedCount': 3},
+            'affectedUids': ['node-1'],
+        },
+    })
+    assert safe['changeSummary'] == {
+        'added': 2,
+        'updated': 3,
+        'moved': 1,
+        'deleted': 4,
+        'total': 10,
+    }
+    assert safe['directCommit']['changeSummary'] == {
+        'added': 2,
+        'updated': 3,
+        'moved': 0,
+        'deleted': 0,
+        'total': 5,
+    }
+
+
+def test_canonical_change_summary_counts_moved_uids_and_deleted_subtrees() -> None:
+    assert summarize_committed_node_changes([[
+        {'type': 'node.create', 'nodeUid': 'new'},
+        {
+            'type': 'node.update',
+            'payload': {
+                'dataChanged': True,
+                'childrenChanged': False,
+            },
+        },
+        {
+            'type': 'node.update',
+            'payload': {
+                'dataChanged': False,
+                'childrenChanged': True,
+                'oldChildUids': ['a', 'b'],
+                'childUids': ['b'],
+            },
+        },
+        {
+            'type': 'node.delete',
+            'payload': {'deletedNodeUids': ['gone', 'leaf']},
+        },
+    ]]) == {
+        'added': 1,
+        'updated': 1,
+        'moved': 1,
+        'deleted': 2,
+        'total': 5,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('log_evidence', ['complete', 'incomplete', 'missing'])
+async def test_direct_job_change_result_versions_legacy_log_recovery(
+    monkeypatch: pytest.MonkeyPatch, log_evidence: str,
+) -> None:
+    job = SimpleNamespace(id='job-legacy', source_mindmap_id=9)
+    expected_summary = {'added': 1, 'updated': 0, 'moved': 0, 'deleted': 2, 'total': 3}
+    pages = [[SimpleNamespace(
+        sequence=1,
+        event_type='draft_changed',
+        payload_json=json.dumps({
+            'directCommit': {
+                'operationGroupId': 'ai:job-legacy:1',
+                'changeSummary': expected_summary,
+            },
+        }),
+    )], []]
+    monkeypatch.setattr(
+        MindmapAiDao,
+        'list_events',
+        AsyncMock(side_effect=pages),
+    )
+    operations = [
+        {'type': 'node.create', 'nodeUid': 'new'},
+        {'type': 'node.delete', 'payload': {'deletedNodeUids': ['old', 'leaf']}},
+    ]
+    if log_evidence == 'complete':
+        operations[1]['nodeUid'] = 'old'
+    monkeypatch.setattr(
+        'module_mindmap.service.mindmap_ai_service.MindmapContentDao.get_changes_by_mutations',
+        AsyncMock(return_value=[SimpleNamespace(
+            client_mutation_id='ai:job-legacy:1', operations=operations,
+        )] if log_evidence != 'missing' else []),
+    )
+    assert await _direct_job_change_result(object(), job) == {
+        'changeSummary': expected_summary,
+        'changeSummaryVersion': 2 if log_evidence == 'complete' else 1,
+    }
+
+
 def test_event_payload_rejects_invalid_token_usage_values() -> None:
     safe = _safe_event_payload({
         'usage': {
@@ -220,6 +327,68 @@ def test_event_payload_rejects_invalid_token_usage_values() -> None:
     })
 
     assert safe == {'usage': {}}
+
+
+def test_event_payload_drops_non_finite_provider_scalars() -> None:
+    safe = _safe_event_payload({
+        'progress': float('nan'),
+        'summary': {
+            'nodeCount': 3,
+            'treeDepth': float('inf'),
+        },
+    })
+
+    assert safe == {'summary': {'nodeCount': 3}}
+    # The durable serializer must never be able to emit non-standard JSON.
+    assert 'NaN' not in _event_json({
+        'progress': float('nan'),
+        'summary': {'treeDepth': float('inf')},
+    })
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('summary', 'expected'), [
+    ({'nodeCount': float('nan'), 'treeDepth': float('inf')}, {}),
+    ({'nodeCount': 3, 'status': 'running', 'prompt': 'private', 'changeSummary': {'added': 9}},
+     {'nodeCount': 3, 'status': 'running'}),
+    (None, {}),
+])
+async def test_checkpoint_and_redis_preview_share_safe_summary_projection(
+    summary: dict | None, expected: dict,
+) -> None:
+    checkpoint = MindmapAiTaskManager._draft_checkpoint_values(
+        job_id='job-nonfinite-summary',
+        document=_document(),
+        operations=[],
+        initial_state=None,
+        preview_version=1,
+        preview_epoch=1,
+        summary=summary,
+        expires_time=datetime.now() + timedelta(hours=1),
+    )
+    assert json.loads(checkpoint['summary_json']) == expected
+    recovered = MindmapAiTaskManager._draft_checkpoint_preview(
+        SimpleNamespace(**checkpoint, update_time=datetime.now()),
+    )
+    assert recovered['summary'] == expected
+
+    redis = _FakeRedis()
+    MindmapAiTaskManager.configure_redis(redis)
+    try:
+        await _publish_execution('job-nonfinite-summary')
+        assert await MindmapAiTaskManager._store_draft_preview(
+            'job-nonfinite-summary',
+            _document(),
+            operation_cursor=1,
+            expected_execution_epoch=1,
+            summary=summary,
+        ) is True
+    finally:
+        MindmapAiTaskManager._redis = None
+    preview = json.loads(
+        redis.values[MindmapAiTaskManager._draft_preview_key('job-nonfinite-summary')],
+    )
+    assert preview['summary'] == expected
 
 
 @pytest.mark.asyncio
@@ -727,6 +896,277 @@ async def test_draft_checkpoint_and_event_commit_before_redis_cache() -> None:
     MindmapAiTaskManager._redis = None
 
     assert redis.values == {}
+
+
+@pytest.mark.asyncio
+async def test_direct_mutation_broadcast_waits_for_atomic_event_commit() -> None:
+    redis = _FakeRedis()
+    trace: list[str] = []
+    committed_revision = 7
+    database = SimpleNamespace(
+        commit=AsyncMock(side_effect=lambda: trace.append('commit')),
+        rollback=AsyncMock(),
+    )
+
+    class _SessionFactory:
+        def __call__(self) -> '_SessionFactory':
+            return self
+
+        async def __aenter__(self) -> SimpleNamespace:
+            return database
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    job = SimpleNamespace(
+        status='running',
+        execution_epoch=1,
+        expires_time=datetime.now() + timedelta(days=1),
+        source_mindmap_id=42,
+    )
+    MindmapAiTaskManager.configure_redis(redis)
+    await _publish_execution('job-direct-atomic')
+    epoch_token = _CURRENT_JOB_EXECUTION_EPOCH.set(1)
+    try:
+        async def stage_direct_commit(
+            _db: object, _job: object, _operations: list[dict], _cursor: int,
+        ) -> dict:
+            trace.append('stage')
+            return {
+                'contentRevision': committed_revision,
+                'operationGroupId': 'ai:job-direct-atomic:1',
+                '_nextExpectedRevision': committed_revision,
+                '_deferredBroadcast': {},
+                '_committedDocument': _document('直写提交'),
+            }
+
+        async def publish_direct_commit(_mindmap_id: int, _result: dict) -> None:
+            trace.append('publish')
+
+        with (
+            patch(
+                'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+                new=_SessionFactory(),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+                new=AsyncMock(return_value=job),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.upsert_draft_checkpoint',
+                new=AsyncMock(side_effect=_accept_checkpoint),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+                new=AsyncMock(return_value=SimpleNamespace(sequence=1)),
+            ),
+            patch.object(
+                MindmapAiTaskManager,
+                '_commit_direct_draft',
+                new=stage_direct_commit,
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiMutationGateway.publish_direct_commit',
+                new=publish_direct_commit,
+            ),
+            patch.object(
+                MindmapAiTaskManager,
+                '_store_draft_preview',
+                new=AsyncMock(side_effect=RuntimeError('redis unavailable')),
+            ) as store_preview,
+        ):
+            await MindmapAiTaskManager._emit('job-direct-atomic', 'draft_changed', {
+                'operationCursor': 1,
+                'operations': [{'type': 'update_node'}],
+                'previewState': _document('直写提交'),
+            })
+    finally:
+        _CURRENT_JOB_EXECUTION_EPOCH.reset(epoch_token)
+        MindmapAiTaskManager._redis = None
+
+    assert trace == ['stage', 'commit', 'publish']
+    store_preview.assert_awaited_once()
+    assert MindmapAiTaskManager._direct_commit_revisions['job-direct-atomic'] == committed_revision
+    MindmapAiTaskManager._direct_commit_revisions.pop('job-direct-atomic', None)
+
+
+@pytest.mark.asyncio
+async def test_direct_mutation_rolls_back_when_event_is_suppressed() -> None:
+    redis = _FakeRedis()
+    database = SimpleNamespace(
+        commit=AsyncMock(),
+        rollback=AsyncMock(),
+    )
+
+    class _SessionFactory:
+        def __call__(self) -> '_SessionFactory':
+            return self
+
+        async def __aenter__(self) -> SimpleNamespace:
+            return database
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    job = SimpleNamespace(
+        status='running',
+        execution_epoch=1,
+        expires_time=datetime.now() + timedelta(days=1),
+        source_mindmap_id=42,
+    )
+    MindmapAiTaskManager.configure_redis(redis)
+    await _publish_execution('job-direct-suppressed')
+    epoch_token = _CURRENT_JOB_EXECUTION_EPOCH.set(1)
+    try:
+        with (
+            patch(
+                'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+                new=_SessionFactory(),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+                new=AsyncMock(return_value=job),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.upsert_draft_checkpoint',
+                new=AsyncMock(side_effect=_accept_checkpoint),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                MindmapAiTaskManager,
+                '_commit_direct_draft',
+                new=AsyncMock(return_value={
+                    'contentRevision': 7,
+                    '_nextExpectedRevision': 7,
+                    '_deferredBroadcast': {},
+                    '_committedDocument': _document('终态竞态'),
+                }),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiMutationGateway.publish_direct_commit',
+                new=AsyncMock(),
+            ) as publish,
+        ):
+            await MindmapAiTaskManager._emit('job-direct-suppressed', 'draft_changed', {
+                'operationCursor': 1,
+                'operations': [{'type': 'update_node'}],
+                'previewState': _document('终态竞态'),
+            })
+    finally:
+        _CURRENT_JOB_EXECUTION_EPOCH.reset(epoch_token)
+        MindmapAiTaskManager._redis = None
+
+    database.commit.assert_not_awaited()
+    database.rollback.assert_awaited_once()
+    publish.assert_not_awaited()
+    assert 'job-direct-suppressed' not in MindmapAiTaskManager._direct_commit_revisions
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_coordinate_conflict_is_a_domain_error_not_event_outage() -> None:
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    class _SessionFactory:
+        def __call__(self) -> '_SessionFactory':
+            return self
+
+        async def __aenter__(self) -> SimpleNamespace:
+            return database
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    token = _CURRENT_JOB_EXECUTION_EPOCH.set(1)
+    try:
+        with (
+            patch(
+                'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+                new=_SessionFactory(),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+                new=AsyncMock(return_value=SimpleNamespace(
+                    status='running',
+                    execution_epoch=1,
+                    expires_time=datetime.now() + timedelta(days=1),
+                )),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.upsert_draft_checkpoint',
+                new=AsyncMock(side_effect=ValueError('AI 草稿检查点坐标冲突')),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+                new=AsyncMock(),
+            ) as add_event,
+            pytest.raises(MindmapArtifactError) as error,
+        ):
+            await MindmapAiTaskManager._emit('job-checkpoint-conflict', 'draft_changed', {
+                'operationCursor': 1,
+                'operations': [],
+                'previewState': _document('冲突帧'),
+            })
+    finally:
+        _CURRENT_JOB_EXECUTION_EPOCH.reset(token)
+
+    assert error.value.code == 'AI_DOCUMENT_CONFLICT'
+    assert '实时事件持久化失败' not in str(error.value)
+    database.rollback.assert_awaited_once()
+    add_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_event_sequence_integrity_conflict_is_a_domain_error_not_event_outage() -> None:
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    class _SessionFactory:
+        def __call__(self) -> '_SessionFactory':
+            return self
+
+        async def __aenter__(self) -> SimpleNamespace:
+            return database
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    token = _CURRENT_JOB_EXECUTION_EPOCH.set(1)
+    try:
+        with (
+            patch(
+                'module_mindmap.service.mindmap_ai_service.AsyncSessionLocal',
+                new=_SessionFactory(),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+                new=AsyncMock(return_value=SimpleNamespace(
+                    status='running',
+                    execution_epoch=1,
+                    expires_time=datetime.now() + timedelta(days=1),
+                )),
+            ),
+            patch(
+                'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
+                new=AsyncMock(side_effect=IntegrityError(
+                    'INSERT', {}, Exception('duplicate event sequence'),
+                )),
+            ) as add_event,
+            pytest.raises(MindmapArtifactError) as error,
+        ):
+            await MindmapAiTaskManager._emit(
+                'job-event-sequence-conflict',
+                'tool_completed',
+                {'toolName': 'validate_draft'},
+            )
+    finally:
+        _CURRENT_JOB_EXECUTION_EPOCH.reset(token)
+
+    assert error.value.code == 'AI_DOCUMENT_CONFLICT'
+    assert '实时事件持久化失败' not in str(error.value)
+    database.rollback.assert_awaited_once()
+    add_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio

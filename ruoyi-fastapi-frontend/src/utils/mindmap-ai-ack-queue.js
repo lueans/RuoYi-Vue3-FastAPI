@@ -1,3 +1,5 @@
+import { isNumericOwnerUserId, normalizeNumericOwnerUserId } from './mindmap-ai-shared.js'
+
 const STORAGE_KEY = 'MINDMAP_AI_ACK_QUEUE_V1'
 const MAX_QUEUE_LENGTH = 100
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
@@ -13,8 +15,7 @@ const PERMANENT_ACK_BUSINESS_CODES = new Set([
 function isValidEntry(value) {
   const action = value?.action || 'apply'
   return value
-    && typeof value.ownerUserId === 'string'
-    && /^[1-9]\d{0,63}$/.test(value.ownerUserId)
+    && isNumericOwnerUserId(value.ownerUserId)
     && ['apply', 'undo'].includes(action)
     && typeof value.proposalId === 'string'
     && value.proposalId.length > 0
@@ -67,7 +68,7 @@ function writeQueue(entries, storage = globalThis.localStorage) {
 
 export function enqueueMindmapAiLocalAck(payload, storage = globalThis.localStorage) {
   const entry = {
-    ownerUserId: String(payload?.ownerUserId ?? '').trim(),
+    ownerUserId: normalizeNumericOwnerUserId(payload?.ownerUserId),
     action: payload?.action || 'apply',
     proposalId: payload?.proposalId,
     documentId: payload?.documentId,
@@ -90,8 +91,8 @@ export function listMindmapAiLocalAcks(
   ownerUserId,
   storage = globalThis.localStorage,
 ) {
-  const owner = String(ownerUserId ?? '').trim()
-  if (!/^[1-9]\d{0,63}$/.test(owner)) return []
+  const owner = normalizeNumericOwnerUserId(ownerUserId)
+  if (!owner) return []
   return readQueue(storage).filter(entry => entry.ownerUserId === owner)
 }
 
@@ -126,8 +127,8 @@ export function flushMindmapAiLocalAcks(
   storage = globalThis.localStorage,
 ) {
   if (typeof send !== 'function') return Promise.reject(new TypeError('AI 本地应用回执发送器无效'))
-  const owner = String(ownerUserId ?? '').trim()
-  if (!/^[1-9]\d{0,63}$/.test(owner)) {
+  const owner = normalizeNumericOwnerUserId(ownerUserId)
+  if (!owner) {
     return Promise.reject(new TypeError('AI 本地应用回执用户分区无效'))
   }
   const storageKey = storage && (typeof storage === 'object' || typeof storage === 'function')

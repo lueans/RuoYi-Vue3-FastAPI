@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from sqlalchemy.dialects import mysql
+
 from exceptions.exception import ServiceException
 from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
 from module_mindmap.dao.mindmap_dao import MindmapDao
@@ -18,6 +20,22 @@ from module_mindmap.service.simple_mind_document_codec import EncodedDocument
 
 
 class MindmapDocumentIntegrityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tag_usage_refresh_uses_valid_mysql_when_all_bindings_are_removed(self) -> None:
+        empty_bindings = MagicMock()
+        empty_bindings.all.return_value = []
+        db = SimpleNamespace(execute=AsyncMock(side_effect=[empty_bindings, MagicMock()]))
+
+        await MindmapDocumentService._refresh_tag_usage(db, {9, 1388})
+
+        statement = db.execute.await_args_list[1].args[0]
+        sql = str(statement.compile(
+            dialect=mysql.dialect(),
+            compile_kwargs={'literal_binds': True},
+        ))
+        self.assertIn('usage_node_count=0', sql)
+        self.assertIn('usage_file_count=CASE mindmap_tag.id', sql)
+        self.assertNotIn('CASE mindmap_tag.id ELSE', sql)
+
     async def test_detail_normalizes_legacy_null_theme_to_default(self) -> None:
         mindmap = Mindmap(
             id=42,

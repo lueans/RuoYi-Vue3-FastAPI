@@ -16,6 +16,50 @@ test('the single transcript scroller never caps an overflowing history section o
   assert.match(css, /\.mindmapAiDrawer \.activitySidebar\s*\{[^}]*flex:\s*0 0 auto/)
 })
 
+test('latest-message control is an accessible icon overlay inside the activity sidebar, not the footer', () => {
+  const source = readFileSync(new URL('../../components/MindMap/MindmapAiDialog.vue', import.meta.url), 'utf8')
+  const sidebar = source.match(/<aside\b[\s\S]*?class="activitySidebar"[\s\S]*?<\/aside>/)?.[0] || ''
+  const control = sidebar.match(/<div class="chatJumpLatestOverlay">([\s\S]*?)<\/div>/)?.[1] || ''
+  assert.match(control, /v-if="!chatFollowing && conversationTurns.length"/)
+  assert.match(control, /aria-label="回到最新消息"/)
+  assert.match(control, /title="回到最新消息"/)
+  assert.match(control, /@click="jumpToLatest"/)
+  assert.match(control, /<el-icon aria-hidden="true"><ArrowDown \/><\/el-icon>/)
+  assert.doesNotMatch(control, />\s*回到最新消息\s*</)
+  const footer = source.slice(source.indexOf('<template #footer>'))
+  assert.doesNotMatch(footer.split('</template>')[0], /chatJumpLatest/)
+  const descriptor = parse(source).descriptor
+  assert.deepEqual(compileTemplate({ source: descriptor.template.content, id: 'agent-chat' }).errors, [])
+})
+
+test('latest-message overlay has zero layout height and leaves non-button pointer events to the transcript', () => {
+  const css = readFileSync(new URL('../../components/MindMap/styles/agent-chat.scss', import.meta.url), 'utf8')
+  const overlay = css.match(/\.chatJumpLatestOverlay\s*\{([^}]+)\}/)?.[1] || ''
+  const button = css.match(/\.chatJumpLatest\s*\{([^}]+)\}/)?.[1] || ''
+  assert.match(overlay, /position:\s*sticky/)
+  assert.match(overlay, /bottom:\s*12px/)
+  assert.match(overlay, /height:\s*0/)
+  assert.match(overlay, /pointer-events:\s*none/)
+  assert.match(button, /pointer-events:\s*auto/)
+  assert.match(button, /position:\s*absolute/)
+  assert.match(button, /bottom:\s*0/)
+  assert.match(button, /border-radius:\s*50%/)
+  assert.match(button, /width:\s*40px/)
+  assert.match(button, /height:\s*40px/)
+})
+
+test('latest-message action follows only the existing chat viewport', () => {
+  const source = readFileSync(new URL('../../components/MindMap/MindmapAiDialog.vue', import.meta.url), 'utf8')
+  const body = source.match(/function jumpToLatest\(\) \{([\s\S]*?)\n\}/)?.[1]
+  assert.ok(body)
+  const following = { value: false }
+  const viewport = { scrollTop: 125, scrollHeight: 2600 }
+  new Function('chatFollowing', 'chatScrollRef', body)(following, { value: viewport })
+  assert.equal(following.value, true)
+  assert.equal(viewport.scrollTop, 2600)
+  assert.doesNotThrow(() => new Function('chatFollowing', 'chatScrollRef', body)(following, { value: null }))
+})
+
 test('saved width accepts only finite numbers and cannot inject CSS', () => {
   for (const value of [null, undefined, '', ' ', '440px', '440;display:none', {}, true, Infinity, NaN]) {
     assert.equal(normalizeAgentPanelWidth(value), DEFAULT_AGENT_PANEL_WIDTH)

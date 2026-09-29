@@ -278,6 +278,16 @@
           <span>提交要求后，这里会显示每轮提示词与安全审计事件。</span>
         </div>
         <details class="privacyNotice"><summary>关于过程记录</summary><p>展示可见对话、思考摘要、工具详情和任务计划；不展示模型隐藏思维链。工具结果为有界摘要。</p></details>
+        <div class="chatJumpLatestOverlay">
+          <button
+            v-if="!chatFollowing && conversationTurns.length"
+            type="button"
+            class="chatJumpLatest"
+            aria-label="回到最新消息"
+            title="回到最新消息"
+            @click="jumpToLatest"
+          ><el-icon aria-hidden="true"><ArrowDown /></el-icon></button>
+        </div>
       </aside>
 
       <main class="workspaceMain">
@@ -717,7 +727,6 @@
 
     <template #footer>
       <div class="panelFooter">
-        <button v-if="!chatFollowing && conversationTurns.length" type="button" class="chatJumpLatest" @click="jumpToLatest"><el-icon aria-hidden="true"><ArrowDown /></el-icon>回到最新消息</button>
         <div v-if="canvasSyncStatus" id="mindmap-ai-canvas-recovery" class="livePreviewRecovery composerCanvasRecovery" role="status">
           <div><strong>{{ canvasSyncStatus.label }}</strong><span>{{ canvasSyncStatus.description }}</span></div>
           <el-button v-if="canvasSyncStatus.canRetry" size="small" type="warning" plain

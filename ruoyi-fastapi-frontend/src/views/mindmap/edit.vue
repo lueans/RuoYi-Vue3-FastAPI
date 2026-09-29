@@ -858,6 +858,7 @@ watch([documentLoaded, isReadonly, isZenMode], ([loaded, readonly, zen]) => {
 })
 
 onMounted(() => {
+  document.documentElement.classList.add(MINDMAP_DETAIL_PAGE_BODY_CLASS)
   document.body.classList.add(MINDMAP_DETAIL_PAGE_BODY_CLASS)
   window.addEventListener('keydown', handleMobileCommandKeydown)
   window.addEventListener('resize', handleMobileCommandResize)
@@ -867,6 +868,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   manualSaveRequestId += 1
+  document.documentElement.classList.remove(MINDMAP_DETAIL_PAGE_BODY_CLASS)
   document.body.classList.remove(MINDMAP_DETAIL_PAGE_BODY_CLASS)
   window.removeEventListener('keydown', handleMobileCommandKeydown)
   window.removeEventListener('resize', handleMobileCommandResize)
@@ -889,6 +891,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   background: #f4f5f7;
   overflow: hidden;
+  overscroll-behavior-x: none;
   color: #1f2329;
 
   &.has-command-bar {
@@ -1771,6 +1774,12 @@ onBeforeUnmount(() => {
 </style>
 
 <style lang="scss">
+// 根视口也需禁用横向越界导航，覆盖侧栏和挂载到 body 的浮层；离开编辑页即恢复。
+html.mindmap-detail-page-active,
+body.mindmap-detail-page-active {
+  overscroll-behavior-x: none;
+}
+
 body.mindmap-detail-page-active {
   // 单一顶层 token：高于应用内全部浮层；通知仍挂在 body，避免被编辑器
   // 任意局部 stacking context 限制。

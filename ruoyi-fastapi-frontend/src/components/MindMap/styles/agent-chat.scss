@@ -103,7 +103,9 @@
   .reasoningModes { background: transparent; padding: 0; }
   .reasoningModes button { padding: 5px 6px; font-size: 10px; border-radius: 5px; }
   .reasoningModes button.is-active { box-shadow: none; background: var(--ai-card-bg); }
-  .chatJumpLatest { display: flex; align-items: center; gap: 5px; margin: 0 auto 10px; padding: 7px 12px; border: 1px solid var(--agent-border); border-radius: 20px; background: var(--ai-card-bg); color: var(--agent-ink); font: inherit; font-size: 11px; cursor: pointer; box-shadow: 0 2px 10px #0000000a; }
+  .chatJumpLatestOverlay { position: sticky; bottom: 12px; z-index: 2; height: 0; pointer-events: none; }
+  .chatJumpLatest { position: absolute; bottom: 0; left: 50%; display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border: 1px solid var(--agent-border); border-radius: 50%; background: var(--ai-card-bg); color: var(--agent-ink); font: inherit; font-size: 18px; cursor: pointer; box-shadow: 0 2px 10px #00000014; transform: translateX(-50%); pointer-events: auto; }
+  .chatJumpLatest:hover { background: var(--agent-hover); border-color: var(--agent-muted); }
   button:focus-visible { outline: 2px solid var(--agent-accent); outline-offset: 2px; }
 }
 

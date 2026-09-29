@@ -1,19 +1,23 @@
 import request from "@/utils/request";
 
 // 查询AI模型列表
-export function listModel(query) {
+export function listModel(query, { signal, silentError = false } = {}) {
   return request({
     url: "/ai/model/list",
     method: "get",
     params: query,
+    signal,
+    silentError,
   });
 }
 
 // 查询所有AI模型列表
-export function listModelAll() {
+export function listModelAll({ signal, silentError = false } = {}) {
   return request({
     url: "/ai/model/all",
     method: "get",
+    signal,
+    silentError,
   });
 }
 

@@ -24,6 +24,7 @@ function harness(hooks = {}) {
   const commits = []
   const warnings = []
   const preparationEvents = []
+  const viewSaves = []
   const create = new Function('io', `
     const mindMap = { value: io.ready() ? { renderer: {}, setMode(mode) { io.preparationEvent('rendererMode', mode); } } : null };
     const aiEditingBlocked = { value: false };
@@ -47,6 +48,20 @@ function harness(hooks = {}) {
     let authoritativeReloadInProgress = false;
     let viewSaveRequested = false;
     let viewSaveInProgress = false;
+    let viewSaveGeneration = 0;
+    let viewSaveTimer = null;
+    let viewSavePromise = null;
+    let pendingViewData;
+    let savedViewChangeVersion = 0;
+    let viewChangeVersion = 0;
+    const VIEW_SAVE_DELAY = 1200;
+    const contentRevision = 1;
+    const isReadonly = { get value() { return aiEditingBlocked.value || aiPreparationEditingBlocked.value; } };
+    const updateMindmapView = (...args) => io.saveView(...args);
+    const raiseAuthoritativeReloadMinimumRevision = () => {};
+    const markAuthoritativeReloadRequired = () => { authoritativeReloadRequired = true; };
+    const scheduleAuthoritativeReload = () => {};
+    const drainPendingRemoteDocumentReset = () => {};
     const pendingSave = { value: false };
     const pendingRemoteDocumentReset = null;
     const collaborationBarrierEditingBlocked = { value: false };
@@ -96,6 +111,8 @@ function harness(hooks = {}) {
     ${sourceBetween('function setAiEditingBlocked(', 'function setVersionTransitionEditingBlocked(')}
     ${sourceBetween('function rejectEditModeDuringEditingTransition(', 'async function enterAuthoritativeApplyFailureRecovery(')}
     ${sourceBetween('function isChangeTrackingSuspended(', 'function focusNodeByUid(')}
+    ${sourceBetween('function canFlushCloudChangesDuringEditingTransition(', 'function canUseLocalDraft(')}
+    ${sourceBetween('function scheduleViewSave(', 'function onBusViewDataChange(')}
     ${sourceBetween('function assertAiCanvasPreparation(', 'function onNodeTagClick(')}
     return {
       request: payload => new Promise((resolve, reject) => onAiDraftPreview(payload, { resolve, reject })),
@@ -119,6 +136,9 @@ function harness(hooks = {}) {
       reloadInProgress: value => { authoritativeReloadInProgress = value; },
       pendingView: value => { viewSaveRequested = value; },
       savingView: value => { viewSaveInProgress = value; },
+      queuedView: () => viewSaveRequested,
+      scheduleView: scheduleViewSave,
+      flushView: flushPendingViewSave,
     };
   `)
   const session = create({
@@ -134,6 +154,7 @@ function harness(hooks = {}) {
     clear: hooks.clear || (() => {}),
     warning: message => warnings.push(message),
     preparationEvent: (...event) => preparationEvents.push(event),
+    saveView: (...args) => { viewSaves.push(args); return hooks.saveView?.(...args); },
     commitEditors: hooks.commitEditors || (() => {}),
     dirty: hooks.dirty || (() => false),
     nextTick: hooks.nextTick || (() => {}),
@@ -145,7 +166,7 @@ function harness(hooks = {}) {
       return hooks.commit ? hooks.commit(options) : !failCommit
     },
   })
-  return { ...session, frames, commits, warnings, preparationEvents, changeDocument: value => { document = value }, failCommit: value => { failCommit = value } }
+  return { ...session, frames, commits, warnings, preparationEvents, viewSaves, changeDocument: value => { document = value }, failCommit: value => { failCommit = value } }
 }
 
 test('请求前获取画布所有权，采用任务 ID 和重复 start 都不能重新捕获基线', async () => {
@@ -167,6 +188,87 @@ test('请求前获取画布所有权，采用任务 ID 和重复 start 都不能
 
 const prepareNew = jobId => ({ phase: 'prepare', jobId, directCommitted: true, drainLocalChanges: true })
 const tick = () => new Promise(resolve => setImmediate(resolve))
+
+test('恢复已有任务先退役待保存视图，不把缩放队列锁成永久正文冲突', async () => {
+  let flushCalls = 0
+  const session = harness({ flush: async () => { flushCalls++; throw new Error('恢复任务不可普通保存') } })
+  session.scheduleView({ transform: { x: 20, y: 30 }, scale: 1.2 })
+  session.lock('restored')
+  await session.request({ phase: 'start', jobId: 'restored', directCommitted: true })
+  assert.equal(session.queuedView(), false)
+  assert.equal(flushCalls, 0)
+  assert.equal(session.viewSaves.length, 0, '尚未发送的旧视图只退役，不额外写入云端')
+  const target = await session.request({ phase: 'authoritative-target', jobId: 'restored' })
+  await session.request({ phase: 'update', jobId: 'restored', document: target.document })
+  await session.request({ phase: 'direct-committed', jobId: 'restored', targetToken: target.targetToken })
+  session.unlock('restored')
+  assert.equal(session.state(), null)
+  assert.equal(session.readonly(), false)
+})
+
+test('恢复等待旧视图请求结束后才获取画布，迟到回调不重新排队', async () => {
+  const saving = deferred()
+  const session = harness({ saveView: () => saving.promise })
+  session.scheduleView({ scale: 1.2 })
+  const oldRequest = session.flushView()
+  const restoring = session.request({ phase: 'start', jobId: 'restored', directCommitted: true })
+  await tick()
+  assert.equal(session.state(), null, '请求结束前不能捕获基线或播放 AI 前缀')
+  assert.equal(session.readonly(), true)
+  await assert.rejects(session.request({ phase: 'start', jobId: 'other', directCommitted: true }))
+  saving.resolve()
+  await restoring
+  await oldRequest
+  assert.equal(session.queuedView(), false)
+  assert.equal(session.state().jobId, 'restored')
+})
+
+test('恢复发现未保存人工正文时在播放前拒绝，不能等覆盖后收尾才报错', async () => {
+  const session = harness({ dirty: () => true })
+  session.changeDocument({ root: node('未保存的人工内容') })
+  session.pendingView(true)
+  await assert.rejects(session.request({ phase: 'start', jobId: 'restored', directCommitted: true }), /人工修改尚未保存/)
+  assert.equal(session.state(), null)
+  assert.equal(session.queuedView(), true, '未取得正文安全边界时不丢弃视图')
+  assert.equal(session.frames.length, 0)
+  assert.equal(session.commits.length, 0)
+})
+
+test('恢复等待视图结束期间会话或权限失效，不得取得迟到的画布所有权', async () => {
+  for (const reason of ['map', 'permission', 'unmount', 'aborted', 'terminal']) {
+    const saving = deferred()
+    const session = harness({ saveView: () => saving.promise })
+    session.scheduleView({ scale: 1.2 })
+    const oldRequest = session.flushView()
+    const result = session.request({ phase: 'start', jobId: 'restored', directCommitted: true })
+      .then(value => ({ value }), error => ({ error }))
+    await tick()
+    session.expire(reason)
+    session.pendingView(true)
+    saving.resolve()
+    assert.ok((await result).error, reason)
+    await oldRequest
+    assert.equal(session.state(), null)
+    assert.equal(session.queuedView(), true, '过期恢复不得清理后继视图队列')
+  }
+})
+
+test('真实视图保存的迟到网络失败或 revision 冲突都不能污染恢复会话', async () => {
+  for (const error of [new Error('offline'), Object.assign(new Error('conflict'), { data: { currentRevision: 20 } })]) {
+    const saving = deferred()
+    const session = harness({ saveView: () => saving.promise })
+    session.scheduleView({ scale: 1.1 })
+    const oldRequest = session.flushView()
+    const restoring = session.request({ phase: 'start', jobId: 'restored', directCommitted: true })
+    await tick()
+    saving.reject(error)
+    await restoring
+    await oldRequest
+    assert.equal(session.queuedView(), false)
+    assert.equal(session.viewSaves.length, 1)
+    assert.equal(session.state().jobId, 'restored')
+  }
+})
 
 test('新请求准备先冻结人工输入并允许真实保存 gate 排空，成功后才捕获基线', async () => {
   const saving = deferred()

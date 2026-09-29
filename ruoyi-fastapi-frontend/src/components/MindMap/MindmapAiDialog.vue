@@ -1,20 +1,16 @@
 <template>
-  <el-drawer
-    v-model="visible"
+  <MindmapAgentPanel
+    :model-value="visible"
+    id="mindmap-agent-panel"
     class="mindmapAiDrawer"
     :class="{ isDark: settingsStore.isDark }"
-    direction="ltr"
-    size="500px"
-    :modal="false"
-    modal-penetrable
-    modal-class="mindmapAiDrawerOverlay"
+    :width="agentPanelWidth"
     :z-index="2001"
-    :lock-scroll="false"
-    :with-header="false"
-    append-to-body
-    :close-on-click-modal="false"
+    @escape="onPanelEscape"
     @closed="onDialogClosed"
   >
+    <MindmapAgentResizeHandle v-if="agentPanelBounds.desktop" :active="visible" :width="agentPanelWidth" :bounds="agentPanelBounds"
+      @preview="agentLayout.preview" @commit="agentLayout.commit" @cancel="agentLayout.cancel" @reset="agentLayout.reset" />
     <input
       ref="sourceFileInputRef"
       class="aiSourceFileInput"
@@ -29,14 +25,16 @@
         :width="332"
         trigger="click"
         popper-class="mindmapAiSessionPopper"
-        :disabled="running || actionBusy || livePreviewCanvasMutationBlocked"
+        :disabled="running || actionBusy || livePreviewCanvasMutationBlocked || executionStopBlocked"
         @show="loadRecentSessions"
       >
         <template #reference>
           <button
+            ref="sessionTriggerRef"
             type="button"
             class="newConversationButton"
-            :disabled="running || actionBusy || livePreviewCanvasMutationBlocked"
+            :disabled="running || actionBusy || livePreviewCanvasMutationBlocked || executionStopBlocked"
+            :title="executionStopBlocked ? '请先确认旧 Agent 已退出' : undefined"
             aria-haspopup="menu"
             :aria-expanded="sessionMenuVisible"
           >
@@ -44,12 +42,12 @@
             <el-icon class="headerChevron" aria-hidden="true"><ArrowDown /></el-icon>
           </button>
         </template>
-        <div class="sessionMenu" role="menu" aria-label="AI 对话历史">
+        <div class="sessionMenu" role="menu" aria-label="AI 对话历史" @keydown.esc="closeSessionMenu">
           <button
             type="button"
             class="sessionNewAction"
             role="menuitem"
-            :disabled="livePreviewCanvasMutationBlocked"
+            :disabled="livePreviewCanvasMutationBlocked || executionStopBlocked"
             @click="startNewJob"
           >
             <el-icon aria-hidden="true"><Plus /></el-icon>
@@ -74,7 +72,7 @@
               type="button"
               role="menuitem"
               :class="{ 'is-current': session.sessionId === job?.sessionId }"
-              :disabled="Boolean(sessionUnavailableReason(session)) || livePreviewCanvasMutationBlocked"
+              :disabled="Boolean(sessionUnavailableReason(session)) || livePreviewCanvasMutationBlocked || executionStopBlocked"
               :title="livePreviewCanvasMutationBlocked
                 ? '请先采纳或不采纳当前 AI 实时预览'
                 : sessionUnavailableReason(session) || session.title"
@@ -92,17 +90,19 @@
       <div class="aiPanelHeaderActions">
         <span
           class="connectionBadge"
-          :class="`is-${realtimeConnectionState}`"
+          :class="`is-${panelStatus.tone}`"
+          :title="panelStatus.description"
+          :aria-label="[panelStatus.label, panelStatus.description].filter(Boolean).join('。')"
           role="status"
           aria-live="polite"
-        ><i aria-hidden="true"></i>{{ connectionStateLabel }}</span>
+        ><i aria-hidden="true"></i>{{ panelStatus.label }}</span>
         <el-tooltip content="任务与 Agent 设置" placement="bottom" popper-class="mindmapAiTooltipPopper">
           <el-button
             circle
             text
             aria-label="任务与 Agent 设置"
             :class="{ 'is-active': showAdvancedSettings }"
-            @click="showAdvancedSettings = !showAdvancedSettings"
+            @click="openTaskSettings"
           ><el-icon><Setting /></el-icon></el-button>
         </el-tooltip>
         <el-tooltip content="关闭 AI 面板" placement="bottom" popper-class="mindmapAiTooltipPopper">
@@ -112,7 +112,19 @@
         </el-tooltip>
       </div>
     </header>
-    <div class="aiDialogBody" v-loading="loadingAgents || restoringJob">
+    <el-alert
+      v-if="executionStopBlocked"
+      :title="job?.executionState === 'running' ? '结果已停止更新，正在等待 Agent 退出' : '尚未确认 Agent 已退出'"
+      type="warning"
+      :closable="false"
+      show-icon
+      role="status"
+    >
+      <p>已生成的结果与执行器状态分别保留。确认退出前不能发送下一轮、重试或切换 Agent。</p>
+      <p v-if="executionStop.error.value">{{ executionStop.error.value }}</p>
+      <el-button text :loading="executionStop.checking.value" @click="executionStop.refresh()">刷新停止状态</el-button>
+    </el-alert>
+    <div ref="chatScrollRef" class="aiDialogBody" v-loading="loadingAgents || restoringJob" @scroll.passive="onChatScroll">
       <aside
         v-if="job || agentEvents.length"
         class="activitySidebar"
@@ -121,8 +133,8 @@
       >
         <div class="activityHeader">
           <div>
-            <strong>会话记录</strong>
-            <small>{{ conversationTurns.length + (pendingFollowupPrompt ? 1 : 0) }} 轮对话 · 生成过程可展开</small>
+            <strong>{{ conversationTurns.length + (pendingFollowupPrompt ? 1 : 0) }} 轮对话</strong>
+            <small>正文 · 工具 · 任务计划</small>
           </div>
           <div class="activityHeaderActions">
             <el-button
@@ -176,16 +188,18 @@
             :disabled="selectedArtifactLoading || actionBusy || livePreviewCanvasMutationBlocked"
             @click="selectCurrentLiveTurn"
           >
-            <span>第 {{ job.turnIndex || 1 }} 轮 · 实时</span>
+            <span>第 {{ job.turnIndex || 1 }} 轮 · {{ running ? '实时' : '当前轮' }}</span>
             <small>{{ statusLabel }}</small>
           </button>
         </nav>
+        <p v-if="job" class="mindmapAiSrOnly" role="status" aria-live="polite" aria-atomic="true">
+          第 {{ job.turnIndex || 1 }} 轮 · {{ statusLabel }}
+        </p>
         <ol
           v-if="conversationTurns.length"
           ref="activityTimelineRef"
           class="activityTimeline conversationTimeline"
-          aria-live="polite"
-          aria-relevant="additions text"
+          aria-live="off"
         >
           <li
             v-for="turn in conversationTurns"
@@ -201,10 +215,20 @@
             </div>
             <div class="conversationMessage is-assistant">
               <div class="conversationMessageMeta">
-                <strong>AI · 第 {{ turn.job.turnIndex || 1 }} 轮</strong>
+                <strong><el-icon aria-hidden="true"><Cpu /></el-icon>{{ agentDisplayName(turn.job.agentKey) }}</strong>
                 <span>{{ displayJobStatusLabel(turn.job) }}</span>
               </div>
-              <p>{{ assistantMessageText(turn) }}</p>
+              <p v-if="isDeviceAgent(turn.job.agentKey)" class="agentExecutionLocation">{{ agentExecutionLocation(turn.job, deviceCatalog.devices) }}</p>
+              <MindmapAgentTrace
+                :events="turn.events"
+                :discussion="isMindmapAiMessageJob(turn.job)"
+                :running="turn.job.id === job?.id && running"
+                :cancelled="turn.job.status === 'cancelled'"
+                :failed="turn.job.status === 'failed'"
+                :final-content="turn.assistantMessage?.content || (turn.job.id === job?.id && running ? '' : assistantMessageText(turn))"
+                :fallback-content="assistantMessageText(turn)"
+                :node-navigation="toolNodeNavigation(turn)"
+              />
               <section v-if="turn.tagSuggestions.items.length" class="tagSuggestions" aria-label="本轮标签建议">
                 <strong>标签建议 · 未创建、未绑定</strong>
                 <p>本轮仅提出建议。请手动创建标签后，在下一轮要求 AI 引用；不会自动创建或继续执行。</p>
@@ -225,8 +249,8 @@
                   {{ turn.usage.costEstimated ? '预估' : '费用' }} ${{ formatUsageCost(turn.usage.totalCostUsd) }}
                 </span>
               </div>
-              <details v-if="turn.events.length" class="turnAudit" :open="turn.job.id === job?.id && running">
-                <summary>查看生成过程（{{ turn.events.length }}）</summary>
+              <details v-if="visibleTurnEvents(turn).length" class="turnAudit">
+                <summary>画布与状态记录（{{ turnAuditEventCount(turn) }}）</summary>
                 <ol>
                   <li v-for="event in visibleTurnEvents(turn)" :key="event.key">
                     <span>{{ eventTypeLabel(event) }}</span>
@@ -234,7 +258,7 @@
                     <time :datetime="event.createdTime">{{ formatEventTime(event.createdTime) }}</time>
                   </li>
                 </ol>
-                <small v-if="turn.events.length > 20">仅显示最近 20 条；完整记录仍保存在服务端会话中。</small>
+                <small v-if="turnAuditEventCount(turn) > 20">仅显示最近 20 条；完整记录仍保存在服务端会话中。</small>
               </details>
             </div>
           </li>
@@ -253,7 +277,7 @@
           <strong>还没有会话记录</strong>
           <span>提交要求后，这里会显示每轮提示词与安全审计事件。</span>
         </div>
-        <p class="privacyNotice">仅展示用户输入和经过清洗的运行审计，不展示模型隐藏思维链。</p>
+        <details class="privacyNotice"><summary>关于过程记录</summary><p>展示可见对话、思考摘要、工具详情和任务计划；不展示模型隐藏思维链。工具结果为有界摘要。</p></details>
       </aside>
 
       <main class="workspaceMain">
@@ -300,7 +324,7 @@
               >已人工核对，清除记录</el-button>
             </div>
           </div>
-          <div v-if="restoreError" class="restoreFailure">
+          <div v-if="restoreError && !canvasSyncStatus" class="restoreFailure">
             <el-alert
               :title="restoreError"
               type="warning"
@@ -356,22 +380,8 @@
               class="livePreviewPlaybackButton"
               size="small"
               text
-              :disabled="livePreviewRendering"
               @click="toggleLivePreviewPlayback()"
             >{{ livePreviewPaused ? '继续显示' : '暂停显示' }}</el-button>
-          </div>
-          <div
-            v-if="directExecutionNoticeVisible"
-            class="liveDraftNotice is-direct"
-            :class="{ 'is-complete': !running }"
-            role="status"
-            aria-live="polite"
-          >
-            <i aria-hidden="true"></i>
-            <div>
-              <strong>{{ directExecutionNoticeTitle }}</strong>
-              <span>{{ directExecutionNoticeDescription }}</span>
-            </div>
           </div>
           <p
             v-if="livePreviewAccessibleAnnouncement"
@@ -381,7 +391,7 @@
             aria-atomic="true"
           >{{ livePreviewAccessibleAnnouncement }}</p>
           <el-alert
-            v-if="livePreviewError"
+            v-if="livePreviewError && !canvasSyncStatus"
             :title="livePreviewError"
             type="warning"
             show-icon
@@ -396,22 +406,13 @@
             @click="reconcilePendingCanvasCreation"
           >确认创建结果并恢复</el-button>
           <el-button
-            v-if="livePreviewError && directCanvasOwned && !uncertainCanvasCreation"
+            v-if="livePreviewError && directCanvasOwned && !uncertainCanvasCreation && !canvasSyncStatus"
             size="small"
             type="warning"
             plain
             :loading="livePreviewRecovering"
             @click="retryLivePreviewSync"
           >{{ isTerminalStatus(job?.status) ? '重新同步云端结果' : '重试流式显示' }}</el-button>
-          <el-button
-            v-if="job?.status === 'ready' && livePreviewAutoAcceptFailedJobId === String(job.id)"
-            size="small"
-            type="warning"
-            plain
-            :loading="applying"
-            :disabled="actionBusy"
-            @click="acceptCompletedLivePreviewByDefault(job.id, { retry: true })"
-          >重试保存 AI 结果</el-button>
           <el-alert
             v-if="realtimeError"
             :title="realtimeError"
@@ -419,7 +420,7 @@
             show-icon
             :closable="false"
           />
-          <div v-if="livePreviewRecoveryAvailable" class="livePreviewRecovery" role="status">
+          <div v-if="livePreviewRecoveryAvailable && !canvasSyncStatus" class="livePreviewRecovery" role="status">
             <span>已保留当前画布内容，可以立即尝试恢复实时草稿同步。</span>
             <el-button
               size="small"
@@ -448,7 +449,7 @@
           </div>
           <el-alert
             v-if="viewingHistoricalArtifact"
-            :title="`正在查看第 ${selectedArtifactJob?.turnIndex || 1} 轮历史结果；应用与撤销仍锁定当前轮次。`"
+            :title="`正在查看第 ${selectedArtifactJob?.turnIndex || 1} 轮历史结果；仅供查看与下载，请返回当前轮次处理修改。`"
             type="info"
             show-icon
             :closable="false"
@@ -466,7 +467,8 @@
             <div class="aiWelcomeMark" aria-hidden="true">
               <el-icon><MagicStick /></el-icon>
             </div>
-            <h2>今天想做点什么？</h2>
+            <h2>一起把想法变成脑图</h2>
+            <p class="aiWelcomeDescription">描述你的想法，或选中一个分支继续完善。<br>在对话中查看执行过程，在画布上查看实时变化。</p>
             <div class="starterGrid">
               <button
                 v-for="starter in starterItems"
@@ -480,250 +482,9 @@
             </div>
           </section>
 
-          <section v-show="showAdvancedSettings" class="advancedSettings">
-            <div class="advancedSettingsHeader">
-              <div>
-                <strong>任务与 Agent 设置</strong>
-                <small>Codex、Claude、自研 Agent 与后续适配器共用此入口</small>
-              </div>
-              <el-button text aria-label="收起设置" @click="showAdvancedSettings = false">
-                <el-icon><Close /></el-icon>
-              </el-button>
-            </div>
-          <el-form label-position="top" :model="form" @submit.prevent>
-        <div class="formGrid">
-          <el-form-item label="AI Agent">
-            <el-select
-              v-model="form.agentKey"
-              placeholder="选择 Agent"
-              class="fullWidth"
-              popper-class="mindmapAiSelectPopper"
-              :disabled="agentSelectionLocked"
-              @change="onAgentChange"
-            >
-              <el-option
-                v-if="form.agentKey && !selectedAgent && !loadingAgents"
-                :label="`${form.agentKey}（已不可用）`"
-                :value="form.agentKey"
-                disabled
-              >
-                <div class="agentOption is-unavailable">
-                  <span>{{ form.agentKey }}</span>
-                  <small>已不可用</small>
-                </div>
-              </el-option>
-              <el-option
-                v-for="agent in agents"
-                :key="agent.agentKey"
-                :label="agent.displayName"
-                :value="agent.agentKey"
-                :disabled="agent.status !== 'enabled' || !agentSupportsCurrentTask(agent)"
-              >
-                <div class="agentOption">
-                  <span>{{ agent.displayName }}</span>
-                  <small>{{ agentStatusText(agent) }}</small>
-                </div>
-              </el-option>
-            </el-select>
-            <div v-if="agentSelectionIssue" class="agentSelectionIssue" role="status">
-              <el-icon aria-hidden="true"><WarningFilled /></el-icon>
-              <span>{{ agentSelectionIssue }}</span>
-            </div>
-            <div
-              v-if="selectedAgent"
-              class="agentReadiness"
-              :class="`is-${selectedAgentReadinessTone}`"
-              role="status"
-            >
-              <i aria-hidden="true"></i>
-              <div>
-                <strong>{{ selectedAgentReadinessLabel }}</strong>
-                <small>{{ selectedAgentReadinessDescription }}</small>
-              </div>
-            </div>
-            <details v-if="selectedAgent" class="agentDisclosureDetails">
-              <summary>连接与使用范围</summary>
-              <div class="agentDisclosure">
-                <span>{{ selectedAgent.sdkName }}<template v-if="selectedAgent.sdkVersion"> {{ selectedAgent.sdkVersion }}</template></span>
-                <span v-if="selectedAgent.runtimeVersion">运行时 {{ selectedAgent.runtimeVersion }}</span>
-                <span>{{ selectedAgent.authType || '平台认证' }}</span>
-                <span>{{ selectedAgent.dataRegion || '区域由供应商连接决定' }}</span>
-                <span>{{ selectedAgent.retentionPolicy || '结果按平台保留策略处理' }}</span>
-                <span>{{ selectedAgent.networkAllowed ? '需要访问所选 AI 供应商' : 'Agent 本身无外部工具网络权限' }}</span>
-                <span>单任务 {{ selectedAgent.timeoutSeconds }} 秒 / ${{ selectedAgent.maxBudgetUsd }}</span>
-                <span>最多 {{ selectedAgent.maxNodes }} 节点、{{ selectedAgent.maxDepth }} 层</span>
-              </div>
-            </details>
-          </el-form-item>
 
-          <el-form-item v-if="form.agentKey === 'native_mindmap'" label="模型">
-            <el-select
-              v-model="form.modelId"
-              placeholder="选择平台模型"
-              class="fullWidth"
-              popper-class="mindmapAiSelectPopper"
-              :disabled="agentSelectionLocked"
-            >
-              <el-option
-                v-for="model in availableModels"
-                :key="model.modelId"
-                :label="`${model.modelName || model.modelCode} · ${model.provider}/${model.modelCode}`"
-                :value="model.modelId"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item v-if="!discussionMode" label="任务">
-            <el-select
-              v-model="form.intent"
-              class="fullWidth"
-              popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked"
-              @change="onIntentChange"
-            >
-              <el-option
-                v-for="item in intentOptions"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="处理对象">
-            <el-radio-group v-model="form.sourceMode" :disabled="taskConfigurationLocked">
-              <el-radio value="current">当前脑图</el-radio>
-              <el-radio value="new">新建脑图</el-radio>
-              <el-radio value="file">本地文件</el-radio>
-            </el-radio-group>
-          </el-form-item>
-        </div>
-
-        <el-form-item v-if="form.sourceMode === 'file'" label="输入文件" required>
-          <div class="sourceFileRow">
-            <el-button :loading="parsingFile" :disabled="taskConfigurationLocked" @click="selectSourceFile">
-              选择 XMind / SMM / JSON / Markdown / TXT
-            </el-button>
-            <span>{{ uploadedFileName || '尚未选择文件' }}</span>
-          </div>
-          <div class="fieldHint">文件只在浏览器解析；通过安全封装与校验后才作为 Agent 输入。</div>
-        </el-form-item>
-
-        <el-form-item v-if="form.sourceMode === 'current'" label="授权范围">
-          <el-radio-group v-model="form.scopeType" :disabled="taskConfigurationLocked">
-            <el-radio value="document">整份脑图</el-radio>
-            <el-radio value="branch" :disabled="selectedNodeUids.length !== 1">当前分支</el-radio>
-            <el-radio value="selectedNodes" :disabled="selectedNodeUids.length === 0">
-              已选节点（{{ selectedNodeUids.length }}）
-            </el-radio>
-          </el-radio-group>
-          <div class="fieldHint">局部范围只会向 Agent 暴露被授权的节点及其子树。</div>
-        </el-form-item>
-
-        <el-form-item label="你的要求" required>
-          <el-input
-            v-model="form.prompt"
-            type="textarea"
-            :rows="5"
-            maxlength="20000"
-            show-word-limit
-            resize="vertical"
-            :disabled="taskConfigurationLocked"
-            placeholder="例如：为支付系统梳理核心流程与关键模块的脑图"
-          />
-        </el-form-item>
-
-        <div class="formGrid">
-          <el-form-item label="输出语言">
-            <el-select
-              v-model="form.language"
-              class="fullWidth"
-              popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked"
-            >
-              <el-option
-                v-for="item in outputLanguageOptions"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item v-if="!discussionMode" label="目标布局">
-            <el-select
-              v-model="form.layout"
-              class="fullWidth"
-              popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked || targetLayoutLocked"
-            >
-              <el-option
-                v-for="item in aiLayoutOptions"
-                :key="item.value"
-                :label="item.name"
-                :value="item.value"
-              />
-            </el-select>
-            <div v-if="targetLayoutLocked" class="fieldHint">局部编辑只修改授权节点，保持当前脑图布局。</div>
-            <div v-else class="fieldHint">生成过程和最终结果都会使用所选布局。</div>
-          </el-form-item>
-          <el-form-item label="内容密度">
-            <el-select
-              v-model="form.density"
-              class="fullWidth"
-              popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked"
-            >
-              <el-option label="精简" value="concise" />
-              <el-option label="标准" value="standard" />
-              <el-option label="详细" value="detailed" />
-            </el-select>
-          </el-form-item>
-          <el-form-item v-if="!discussionMode" label="生成方式">
-            <el-select
-              v-model="form.generationMode"
-              class="fullWidth"
-              popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked"
-            >
-              <el-option
-                v-for="item in generationModeOptions"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-            <div class="fieldHint">{{ generationModeHint }}</div>
-          </el-form-item>
-          <el-form-item label="最多节点">
-            <el-input-number
-              v-model="form.maxNodes"
-              :min="5"
-              :max="maxNodesCap"
-              :step="10"
-              :disabled="taskConfigurationLocked"
-            />
-            <div class="fieldHint">编辑现有脑图时表示本次最多新增节点，不包含范围外历史节点。</div>
-          </el-form-item>
-          <el-form-item label="最大层级">
-            <el-input-number
-              v-model="form.maxDepth"
-              :min="2"
-              :max="maxDepthCap"
-              :disabled="taskConfigurationLocked"
-            />
-          </el-form-item>
-        </div>
-          </el-form>
-          </section>
-
-          <section v-if="job" class="jobPanel" aria-live="polite">
-        <div class="jobHeader">
-          <div>
-            <strong>{{ statusLabel }}</strong>
-            <small>{{ job.agentKey }} · {{ job.id }}</small>
-          </div>
-          <span class="jobActivitySummary">{{ jobActivitySummary }}</span>
-        </div>
+          <section v-if="job" class="jobPanel" aria-live="off">
+        <p v-if="running" class="jobActivitySummary">{{ jobActivitySummary }}</p>
         <el-alert
           v-if="job.errorMessage || job.errorCode"
           :title="job.errorCode ? `${job.errorCode}：${jobErrorMessage}` : jobErrorMessage"
@@ -740,10 +501,6 @@
           </ol>
           <span v-else class="fieldHint">正在从安全审计记录恢复补充问题……</span>
           <span class="fieldHint">在下方填写答案后会创建新的任务轮次；当前轮次保持终态，不会被重新启动。</span>
-        </div>
-        <div v-if="!messageModeActive && job.artifactId" class="resultSummary">
-          <span>{{ isDraftArtifact(job.artifactId) ? '结果为安全草稿' : '已生成并通过 SMM v2 校验' }}</span>
-          <span v-if="job.title">{{ job.title }}</span>
         </div>
         <div v-if="!messageModeActive && proposalError" class="proposalLoadFailure">
           <el-alert
@@ -777,37 +534,37 @@
             @click="retryTerminalHydration"
           >重新同步完成结果</el-button>
         </div>
+        <MindmapAgentResultCard
+          v-if="resultCardVisible"
+          :state="resultCardState"
+          :counts="viewingHistoricalArtifact ? null : resultChangeCounts"
+          :turn-index="Number(selectedArtifactJob?.turnIndex || 1)"
+          :historical="viewingHistoricalArtifact"
+          :has-more="Boolean(selectedArtifactJob?.artifactId)"
+        >
+        <div v-if="selectedArtifactJob?.artifactId" class="resultSummary">
+          <span>{{ isDraftArtifact(selectedArtifactJob.artifactId) ? '结果为安全草稿' : '已生成并通过 SMM v2 校验' }}</span>
+          <span v-if="selectedArtifactJob.title">{{ selectedArtifactJob.title }}</span>
+        </div>
         <details
-          v-if="!messageModeActive && proposal"
+          v-if="!messageModeActive && proposal && !viewingHistoricalArtifact"
           ref="proposalReviewRef"
           class="proposalPreview"
           :open="!proposalReviewFinalized"
           aria-label="AI 提案差异预览"
           tabindex="-1"
         >
-          <summary v-if="proposalReviewFinalized" class="proposalReviewSummary">
+          <summary class="proposalReviewSummary">
             <span>
               <strong>{{ job.status === 'undone'
                 ? '已撤销提案差异'
-                : job.status === 'rejected' ? '已拒绝提案差异' : '已应用提案差异' }}</strong>
-              <small v-if="resultImpactSummaryAvailable">
-                新增 {{ resultImpactForDisplay.createdCount }} ·
-                修改 {{ resultImpactForDisplay.updatedCount }} ·
-                移动 {{ resultImpactForDisplay.movedCount }} ·
-                删除 {{ resultImpactForDisplay.deletedCount }}
-              </small>
-              <small v-else>变更统计暂不可用，已完成的云端直写仍可在脑图正文中查看</small>
+                : job.status === 'rejected' ? '已拒绝提案差异'
+                  : proposalReviewFinalized ? '已应用提案差异' : '查看本轮变更' }}</strong>
             </span>
             <el-icon aria-hidden="true"><ArrowDown /></el-icon>
           </summary>
           <div class="proposalReviewBody">
-            <div v-if="resultImpactSummaryAvailable" class="diffCounts">
-              <span>新增 {{ resultImpactForDisplay.createdCount }}</span>
-              <span>修改 {{ resultImpactForDisplay.updatedCount }}</span>
-              <span>移动 {{ resultImpactForDisplay.movedCount }}</span>
-              <span>删除 {{ resultImpactForDisplay.deletedCount }}</span>
-            </div>
-            <div v-else class="diffCounts is-unavailable">变更统计暂不可用</div>
+            <div v-if="!resultImpactSummaryAvailable" class="diffCounts is-unavailable">变更统计暂不可用</div>
             <el-alert
               v-if="resultImpactForDisplay?.highImpact"
               :title="resultImpactForDisplay.highImpactReasons?.join('；') || '这是高影响提案'"
@@ -828,7 +585,7 @@
               另有 {{ resultImpactForDisplay.changes.length - 12 }} 项变化未展开。
             </div>
             <el-checkbox
-              v-if="!proposalReviewFinalized"
+              v-if="!proposalReviewFinalized && canApplyCurrentProposal"
               ref="proposalConfirmationRef"
               v-model="diffConfirmed"
               :disabled="actionBusy"
@@ -839,14 +596,7 @@
             </el-checkbox>
           </div>
         </details>
-          </section>
-        </section>
-
-      </main>
-    </div>
-
-    <template #footer>
-      <div class="panelFooter">
+        <template #more>
         <div v-if="!messageModeActive && selectedArtifactJob?.artifactId" class="resultQuickActions">
           <el-button size="small" plain :disabled="actionBusy" :loading="downloading" @click="downloadArtifact">
             下载 .smm
@@ -888,14 +638,18 @@
             @click="saveCloud"
           >保存为云端脑图</el-button>
         </div>
-
+        </template>
+        <template #actions>
+        <el-button
+          v-if="!viewingHistoricalArtifact && job?.status === 'ready' && livePreviewAutoAcceptFailedJobId === String(job.id)"
+          size="small"
+          type="warning"
+          plain
+          :loading="applying"
+          :disabled="actionBusy"
+          @click="acceptCompletedLivePreviewByDefault(job.id, { retry: true })"
+        >重试保存 AI 结果</el-button>
         <div v-if="canRejectLiveDraft" class="primaryResultAction liveDraftAction">
-          <div>
-            <strong>{{ job?.status === 'ready' ? 'AI 结果已完成 · 已保留在当前脑图' : 'AI 正在实时编辑' }}</strong>
-            <span>{{ job?.status === 'ready'
-              ? '当前结果已经保存；撤销可恢复生成前版本。'
-              : '停止任务会保留已生成修改；如果不需要，可撤销本轮。' }}</span>
-          </div>
           <el-button
             type="warning"
             plain
@@ -909,12 +663,6 @@
           v-if="highImpactReviewRequired"
           class="primaryResultAction liveDraftAction is-review-required"
         >
-          <div>
-            <strong>AI 结果需要你确认</strong>
-            <span>{{ livePreviewActive
-              ? '结果已经实时展示在当前画布；请查看差异后明确采纳，或不采纳本轮修改。'
-              : '本轮结果等待你的决定；可以查看差异并采纳，也可以不采纳本轮修改。' }}</span>
-          </div>
           <el-button
             type="warning"
             plain
@@ -934,10 +682,6 @@
           v-if="job?.status === 'rejected' && !viewingHistoricalArtifact"
           class="primaryResultAction liveDraftAction is-rejected"
         >
-          <div>
-            <strong>本轮变更未采纳 · 当前脑图保持原内容</strong>
-            <span>可以修改要求，基于当前脑图重新开始一轮；这会创建新的确认边界。</span>
-          </div>
           <el-button
             type="primary"
             plain
@@ -946,15 +690,7 @@
           >修改要求重新生成</el-button>
         </div>
 
-        <div v-if="(canApplyCurrentProposal && !livePreviewActive) || canUndoCurrentProposal" class="primaryResultAction">
-          <div v-if="canApplyCurrentProposal && !livePreviewActive">
-            <strong>{{ livePreviewAutoAcceptFailedJobId === String(job?.id) ? 'AI 结果保存未完成' : 'AI 结果已完成，正在保存' }}</strong>
-            <span>保存完成后可撤销本次 AI 全部操作</span>
-          </div>
-          <div v-else>
-            <strong>AI 结果已保存</strong>
-            <span>当前画布保持生成结果，如需恢复可撤销本次 AI 全部操作</span>
-          </div>
+        <div v-if="canUndoCurrentProposal" class="primaryResultAction">
           <el-button
             v-if="canUndoCurrentProposal"
             type="warning"
@@ -964,7 +700,31 @@
             @click="undoProposal"
           >撤销 AI 结果</el-button>
         </div>
+        </template>
+        </MindmapAgentResultCard>
+        <details class="jobDetails">
+          <summary>当前轮任务详情</summary>
+          <dl>
+            <div><dt>Agent</dt><dd>{{ agentDisplayName(job.agentKey) }}</dd></div>
+            <div><dt>任务 ID</dt><dd>{{ job.id }}</dd></div>
+            <div><dt>任务状态</dt><dd>{{ statusLabel }}</dd></div>
+          </dl>
+        </details>
+          </section>
+        </section>
+      </main>
+    </div>
 
+    <template #footer>
+      <div class="panelFooter">
+        <button v-if="!chatFollowing && conversationTurns.length" type="button" class="chatJumpLatest" @click="jumpToLatest"><el-icon aria-hidden="true"><ArrowDown /></el-icon>回到最新消息</button>
+        <div v-if="canvasSyncStatus" id="mindmap-ai-canvas-recovery" class="livePreviewRecovery composerCanvasRecovery" role="status">
+          <div><strong>{{ canvasSyncStatus.label }}</strong><span>{{ canvasSyncStatus.description }}</span></div>
+          <el-button v-if="canvasSyncStatus.canRetry" size="small" type="warning" plain
+            :loading="livePreviewRecovering" :disabled="actionBusy || restoringJob"
+            @click="retryLivePreviewSync">重试同步</el-button>
+        </div>
+        <MindmapAgentExecutionPicker ref="agentExecutionPickerRef" :agent-key="form.agentKey" :device-id="form.deviceId" :agents="personalAgents" :can-use-agent="agentSupportsCurrentTask" :disabled="actionBusy || restoringJob || agentSwitchPending || executionStopBlocked" :running="running" :current-job="job" :catalog="deviceCatalog" :issue="selectedDeviceIssue" @select="requestAgentSwitch" @refresh="refreshDeviceCatalog" @manage="agentManagerVisible = true" />
         <div class="aiComposer" :class="{ 'is-discussion': discussionMode }">
           <div class="composerContextRow">
             <el-popover
@@ -977,6 +737,7 @@
             >
               <template #reference>
                 <button
+                  ref="contextTriggerRef"
                   type="button"
                   class="contextChip"
                   :disabled="taskConfigurationLocked || actionBusy"
@@ -987,7 +748,7 @@
                   <el-icon aria-hidden="true"><ArrowUp /></el-icon>
                 </button>
               </template>
-              <div class="contextMenu" role="menu" aria-label="选择 AI 上下文">
+              <div class="contextMenu" role="menu" aria-label="选择 AI 上下文" @keydown.esc="closeContextPicker">
                 <button
                   type="button"
                   role="menuitemradio"
@@ -1025,17 +786,13 @@
                 ><strong>本地文件</strong><small>XMind、SMM、JSON、Markdown 或 TXT</small></button>
               </div>
             </el-popover>
-            <span v-if="discussionMode" class="discussionChip">讨论模式 · 只返回回答</span>
+            <MindmapAgentWritePolicy :label="composerWriteModeLabel" :description="composerPreflightText" :discussion="discussionMode" :dark="settingsStore.isDark" :active="visible" />
           </div>
-          <div
-            v-if="agentSelectionIssue && composerEnabled && !showAdvancedSettings"
-            class="composerAgentIssue"
-            role="status"
-          >
-            <el-icon aria-hidden="true"><WarningFilled /></el-icon>
-            <span>{{ agentSelectionIssue }}</span>
-            <button type="button" @click="showAdvancedSettings = true">选择 Agent</button>
-          </div>
+          <MindmapAgentComposerIssue
+            v-if="agentSelectionIssue && composerEnabled && !showAdvancedSettings && agentSelectionIssue !== selectedDeviceIssue"
+            :description="agentSelectionIssue"
+            @configure="openTaskSettings"
+          />
           <div v-if="submitting" class="submissionStatus" role="status" aria-live="polite">
             <i aria-hidden="true"></i>
             <div>
@@ -1050,13 +807,19 @@
             :autosize="{ minRows: 2, maxRows: 5 }"
             maxlength="20000"
             resize="none"
-            :disabled="!composerEnabled"
+            :disabled="!composerEditable"
+            aria-label="给 Agent 的要求"
+            :aria-describedby="composerInputDescription"
             :placeholder="composerPlaceholder"
             @keydown="onComposerKeydown"
           />
-          <div v-if="composerPreflightText" class="composerPreflight" role="status">
-            <span class="composerPreflightLabel">发送前确认</span>
-            <span>{{ composerPreflightText }}</span>
+          <p v-if="composerDraftOnlyHint" id="mindmap-ai-composer-draft-hint" class="composerInputHint" role="status">{{ composerDraftOnlyHint }}</p>
+          <div v-if="composerText || composerDraftNotice" class="composerDraftNotice" role="status">
+            <span>{{ composerDraftNotice || (composerDraftPersisted
+              ? '未发送文字已保存在此浏览器，7 天内可恢复。'
+              : '未发送文字仅在当前页面保留。') }}</span>
+            <el-button v-if="composerText" text size="small" :disabled="!composerEditable"
+              @click="composerText = ''">清除草稿</el-button>
           </div>
           <div v-if="running" class="composerRoutePicker" role="group" aria-label="运行中消息去向">
             <span class="composerRouteLabel">这条要求：</span>
@@ -1095,54 +858,28 @@
                   @click="selectSourceFile"
                 ><el-icon><Paperclip /></el-icon></el-button>
               </el-tooltip>
-              <el-tooltip
-                content="展开任务与 Agent 设置"
-                placement="top"
-                popper-class="mindmapAiTooltipPopper"
-              >
-                <el-button circle text aria-label="展开设置" @click="showAdvancedSettings = true">
-                  <el-icon><MoreFilled /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-switch
+              <MindmapAgentModeSwitch
                 v-model="discussionMode"
-                inline-prompt
-                active-text="讨论"
-                inactive-text="编辑"
                 :disabled="Boolean(job) && !canSwitchInteractionMode"
-                aria-label="讨论模式"
               />
             </div>
+            <span class="composerShortcut" title="Ctrl / ⌘ + Enter 发送 · Enter 换行">⌘ / Ctrl + Enter</span>
             <div class="composerSubmitGroup">
-              <div class="reasoningModes" aria-label="AI 生成深度">
-                <button
-                  v-for="mode in reasoningModes"
-                  :key="mode.value"
-                  type="button"
-                  :class="{ 'is-active': reasoningMode === mode.value }"
-                  :disabled="taskConfigurationLocked"
-                  :title="mode.description"
-                  @click="setReasoningMode(mode.value)"
-                >{{ mode.label }}</button>
-              </div>
               <el-button
                 v-if="running"
                 circle
                 type="primary"
-                aria-label="排到下一轮"
+                :aria-label="runningMessageRoute === 'current' ? '加入当前任务' : '排到下一轮'"
                 :loading="composerSending"
                 :disabled="!composerCanSend"
                 @click="sendComposerMessage"
               ><el-icon v-if="!composerSending"><Promotion /></el-icon></el-button>
-              <el-button
+              <MindmapAgentStopButton
                 v-if="running"
-                circle
-                aria-label="停止任务并保留已生成结果"
-                title="停止任务并保留已生成结果"
-                :loading="cancelling"
+                :stopping="cancelling"
                 :disabled="actionBusy && !cancelling"
-                @click="cancelJob"
-              ><el-icon v-if="!cancelling"><Close /></el-icon></el-button>
+                @stop="cancelJob"
+              />
               <el-button
                 v-else
                 circle
@@ -1157,10 +894,201 @@
         </div>
       </div>
     </template>
-  </el-drawer>
+  </MindmapAgentPanel>
+  <el-dialog
+    v-model="showAdvancedSettings"
+    title="任务与 Agent 设置"
+    width="min(560px, calc(100vw - 24px))"
+    :z-index="4200"
+    append-to-body
+    class="mindmapTaskSettings"
+    :class="{ isDark: settingsStore.isDark }"
+    @opened="focusTaskSettings"
+    @closed="finishTaskSettings"
+  >
+    <section ref="advancedSettingsRef" tabindex="-1" aria-label="任务与 Agent 设置">
+      <p class="settingsIntro">{{ taskConfigurationLocked ? '编辑范围与内容设置沿用当前任务，追加要求请在对话框中输入。' : '调整模型与生成偏好，修改要求统一在对话框中输入。' }}</p>
+      <div class="settingsContextSummary"><span>{{ currentContextLabel }}</span><span>{{ composerWriteModeLabel }}</span></div>
+      <el-form label-position="top" :model="form" @submit.prevent>
+        <div class="formGrid">
+          <el-form-item label="当前 Agent" class="settingsAgentSummary">
+            <strong class="settingsAgentName">{{ selectedAgent?.displayName || form.agentKey }}</strong>
+            <div v-if="agentSelectionIssue && !selectedAgent" class="agentSelectionIssue" role="status">
+              <el-icon aria-hidden="true"><WarningFilled /></el-icon>
+              <span>{{ agentSelectionIssue }}</span>
+            </div>
+            <div
+              v-if="selectedAgent"
+              class="agentReadiness"
+              :class="`is-${selectedAgentReadinessTone}`"
+              role="status"
+            >
+              <i aria-hidden="true"></i>
+              <div>
+                <strong>{{ selectedAgentReadinessLabel }}</strong>
+                <small>{{ selectedAgentReadinessDescription }}</small>
+              </div>
+            </div>
+            <details v-if="selectedAgent" class="agentDisclosureDetails">
+              <summary>连接与使用范围</summary>
+              <div class="agentDisclosure">
+                <span>{{ selectedAgent.sdkName }}<template v-if="selectedAgent.sdkVersion"> {{ selectedAgent.sdkVersion }}</template></span>
+                <span v-if="selectedAgent.runtimeVersion">运行时 {{ selectedAgent.runtimeVersion }}</span>
+                <span>{{ selectedAgent.authType || '平台认证' }}</span>
+                <span>{{ selectedAgent.dataRegion || '区域由供应商连接决定' }}</span>
+                <span>{{ selectedAgent.retentionPolicy || '结果按平台保留策略处理' }}</span>
+                <span>{{ selectedAgent.networkAllowed ? '需要访问所选 AI 供应商' : 'Agent 本身无外部工具网络权限' }}</span>
+                <span>单任务 {{ selectedAgent.timeoutSeconds }} 秒 / ${{ selectedAgent.maxBudgetUsd }}</span>
+                <span>最多 {{ selectedAgent.maxNodes }} 节点、{{ selectedAgent.maxDepth }} 层</span>
+              </div>
+            </details>
+          </el-form-item>
+
+          <el-form-item v-if="form.agentKey === 'native_mindmap'" label="模型">
+            <el-select
+              v-model="form.modelId"
+              placeholder="选择平台模型"
+              class="fullWidth"
+              popper-class="mindmapAiSelectPopper"
+              :disabled="agentSelectionLocked || executionStopBlocked || modelRecovery.loading.value"
+            >
+              <el-option
+                v-for="model in availableModels"
+                :key="model.modelId"
+                :label="`${model.modelName || model.modelCode} · ${model.provider}/${model.modelCode}`"
+                :value="model.modelId"
+              />
+            </el-select>
+            <div class="modelRecoveryActions">
+              <el-link
+                v-if="modelRepairHref"
+                :href="modelRepairHref"
+                target="_blank"
+                rel="noopener noreferrer"
+                type="primary"
+              >{{ form.modelId ? '定位此模型配置（新标签页）' : '打开模型管理（新标签页）' }}</el-link>
+              <span v-else class="fieldHint">当前账号没有可用的模型配置入口；可手动选择其他模型，或联系管理员检查。</span>
+              <el-button
+                size="small"
+                :loading="modelRecovery.loading.value"
+                :disabled="agentSelectionLocked || executionStopBlocked || loadingAgents"
+                @click="modelRecovery.refresh()"
+              >重新检查配置</el-button>
+              <span class="fieldHint">配置页不会关闭当前脑图。修改保存后返回此处重新检查，模型选择和未发送内容会保留。</span>
+              <span v-if="modelRecovery.error.value || modelRecovery.notice.value" class="fieldHint" role="status">{{ modelRecovery.error.value || modelRecovery.notice.value }}</span>
+            </div>
+          </el-form-item>
+
+          <el-form-item v-if="!discussionMode" label="任务">
+            <el-select
+              v-model="form.intent"
+              class="fullWidth"
+              popper-class="mindmapAiSelectPopper"
+              :disabled="taskConfigurationLocked"
+              @change="onIntentChange"
+            >
+              <el-option
+                v-for="item in intentOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+
+        </div>
+
+        <div class="formGrid">
+          <el-form-item label="输出语言">
+            <el-select
+              v-model="form.language"
+              class="fullWidth"
+              popper-class="mindmapAiSelectPopper"
+              :disabled="taskConfigurationLocked"
+            >
+              <el-option
+                v-for="item in outputLanguageOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="!discussionMode" label="目标布局">
+            <el-select
+              v-model="form.layout"
+              class="fullWidth"
+              popper-class="mindmapAiSelectPopper"
+              :disabled="taskConfigurationLocked || targetLayoutLocked"
+            >
+              <el-option
+                v-for="item in aiLayoutOptions"
+                :key="item.value"
+                :label="item.name"
+                :value="item.value"
+              />
+            </el-select>
+            <div v-if="targetLayoutLocked" class="fieldHint">局部编辑只修改授权节点，保持当前脑图布局。</div>
+            <div v-else class="fieldHint">生成过程和最终结果都会使用所选布局。</div>
+          </el-form-item>
+          <el-form-item v-if="!discussionMode" label="内容规模">
+            <div class="reasoningModes" role="group" aria-label="脑图内容规模">
+              <button
+                v-for="mode in reasoningModes"
+                :key="mode.value"
+                type="button"
+                :class="{ 'is-active': reasoningMode === mode.value }"
+                :aria-pressed="reasoningMode === mode.value"
+                :disabled="taskConfigurationLocked"
+                :title="mode.description"
+                @click="setReasoningMode(mode.value)"
+              >{{ mode.label }}</button>
+            </div>
+          </el-form-item>
+          <el-form-item v-if="!discussionMode" label="生成方式">
+            <el-select
+              v-model="form.generationMode"
+              class="fullWidth"
+              popper-class="mindmapAiSelectPopper"
+              :disabled="taskConfigurationLocked"
+            >
+              <el-option
+                v-for="item in generationModeOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+            <div class="fieldHint">{{ generationModeHint }}</div>
+          </el-form-item>
+          <el-form-item v-if="!discussionMode" :label="form.sourceMode === 'current' ? '最多新增节点' : '最多节点'">
+            <el-input-number
+              v-model="form.maxNodes"
+              :min="5"
+              :max="maxNodesCap"
+              :step="10"
+              :disabled="taskConfigurationLocked"
+            />
+            <div class="fieldHint">编辑现有脑图时表示本次最多新增节点，不包含范围外历史节点。</div>
+          </el-form-item>
+          <el-form-item v-if="!discussionMode" label="最大层级">
+            <el-input-number
+              v-model="form.maxDepth"
+              :min="2"
+              :max="maxDepthCap"
+              :disabled="taskConfigurationLocked"
+            />
+          </el-form-item>
+        </div>
+      </el-form>
+    </section>
+    <template #footer><el-button type="primary" @click="showAdvancedSettings = false">返回对话</el-button></template>
+  </el-dialog>
+  <MindmapAgentManager v-model="agentManagerVisible" :owner-id="userStore.id" :agents="agents" :preferences="agentPreferences" :selected-agent-key="form.agentKey" :selection-issue="agentSelectionIssue" @preferences="updateAgentPreferences" @scanned="loadCapabilities()" @select="requestAgentSwitch" @configure="openTaskSettings" />
 </template>
 
 <script setup>
+import { h } from 'vue'
 import { saveAs } from 'file-saver'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
@@ -1168,8 +1096,8 @@ import {
   ArrowDown,
   ArrowUp,
   Close,
+  Cpu,
   MagicStick,
-  MoreFilled,
   Paperclip,
   Plus,
   Promotion,
@@ -1194,6 +1122,7 @@ import {
   getMindmapAiSessionTimeline,
   listMindmapAiSessions,
   listMindmapAiAgents,
+  listMindmapAiDevices,
   prepareMindmapAiLocalApply,
   rejectMindmapAiProposal,
   reconcileMindmapAiJob,
@@ -1277,6 +1206,32 @@ import {
   resolveMindmapAiSessionTitle,
 } from '@/utils/mindmap-ai-conversation'
 import { resolveMindmapAiAgentSelection } from '@/utils/mindmap-ai-agent-selection'
+import MindmapAgentTrace from './MindmapAgentTrace.vue'
+import MindmapAgentResultCard from './MindmapAgentResultCard.vue'
+import { mindmapAgentResultState, mindmapResultChangeCounts } from '@/utils/mindmap-agent-result'
+import { isAgentChatNearBottom } from '@/utils/mindmap-agent-presentation'
+import { agentToolNodeTargets, resolveAgentToolDocumentScope } from '@/utils/mindmap-agent-node-links'
+import { projectRuntimeEvents } from '@/utils/mindmap-ai-runtime'
+import MindmapAgentManager from './MindmapAgentManager.vue'
+import MindmapAgentExecutionPicker from './MindmapAgentExecutionPicker.vue'
+import MindmapAgentHandoffSummary from './MindmapAgentHandoffSummary.vue'
+import { projectAgentHandoff } from '@/utils/mindmap-agent-handoff'
+import MindmapAgentComposerIssue from './MindmapAgentComposerIssue.vue'
+import MindmapAgentWritePolicy from './MindmapAgentWritePolicy.vue'
+import MindmapAgentStopButton from './MindmapAgentStopButton.vue'
+import MindmapAgentResizeHandle from './MindmapAgentResizeHandle.vue'
+import MindmapAgentPanel from './MindmapAgentPanel.vue'
+import MindmapAgentModeSwitch from './MindmapAgentModeSwitch.vue'
+import { useMindmapAgentLayout } from '@/utils/use-mindmap-agent-layout'
+import { agentExecutionLocation, deviceExecutionIssue, isDeviceAgent, deviceAgentName, deviceBudgetNotice } from '@/utils/mindmap-agent-devices'
+import { useMindmapAgentDevices } from '@/utils/use-mindmap-agent-devices'
+import { isMindmapExecutionBlocked } from '@/utils/mindmap-execution-state'
+import { useMindmapExecutionStop } from '@/utils/use-mindmap-execution-stop'
+import { modelRepairLocation } from '@/utils/mindmap-model-recovery'
+import { useMindmapModelRecovery } from '@/utils/use-mindmap-model-recovery'
+import { resolveMindmapComposerDraftScope } from '@/utils/mindmap-agent-composer-storage'
+import { useMindmapComposerDraft } from '@/utils/use-mindmap-composer-draft'
+import { readAgentPreferences, saveAgentPreferences } from '@/utils/mindmap-ai-runtime'
 import { layoutList } from './config'
 import bus from './useEventBus'
 import { actions, store } from './useStore'
@@ -1288,6 +1243,8 @@ const route = useRoute()
 const router = useRouter()
 const settingsStore = useSettingsStore()
 const userStore = useUserStore()
+const agentLayout = useMindmapAgentLayout()
+const { width: agentPanelWidth, bounds: agentPanelBounds } = agentLayout
 
 const intentOptions = [
   { value: 'create', label: '创建 / 完善脑图' },
@@ -1318,6 +1275,16 @@ const aiLayoutOptions = Object.freeze(
 
 const visible = ref(false)
 const agents = ref([])
+const agentManagerVisible = ref(false)
+const agentSwitchPending = ref(false)
+const agentSwitchPhase = ref('')
+const agentExecutionPickerRef = ref(null)
+const handoffTimelineReceipt = ref(null)
+let agentSwitchGeneration = 0
+const agentPreferences = ref(readAgentPreferences(userStore.id))
+const personalAgents = computed(() => agents.value.filter(agent => (
+  !agentPreferences.value.hidden.includes(agent.agentKey) || agent.agentKey === form.agentKey
+)))
 const models = ref([])
 const loadingAgents = ref(false)
 const agentError = ref('')
@@ -1338,7 +1305,9 @@ const uncertainCanvasCreation = shallowRef(null)
 let pendingHandoffCanvasJobId = ''
 let directTerminalTargetJobId = ''
 const submissionStartedAt = ref(0)
-const runningPrompt = ref('')
+// The unsent continuation belongs to this conversation, not to a run status.
+// Completion/cancellation may change the send route, never the user's text.
+const continuationPrompt = ref('')
 const runningMessageRoute = ref('current')
 const cancelling = ref(false)
 const cancelConfirming = ref(false)
@@ -1356,12 +1325,23 @@ const undoing = ref(false)
 const deletingSession = ref(false)
 const restoringJob = ref(false)
 const job = ref(null)
+const executionStop = useMindmapExecutionStop({
+  job,
+  ownerId: currentAiOwnerUserId,
+  loadJob: getMindmapAiJob,
+  onUpdated: snapshot => {
+    persistActiveJob()
+    upsertSessionTurn(snapshot)
+    if (!isMindmapExecutionBlocked(snapshot) && isTerminalStatus(snapshot.status)) {
+      void finalizeTerminalJob(snapshot.id, { retry: true, refresh: false })
+    }
+  },
+})
+const executionStopBlocked = executionStop.blocked
 const jobConfiguration = ref(null)
 const proposal = ref(null)
 const diffConfirmed = ref(false)
-const followupPrompt = ref('')
 const pendingFollowupPrompt = ref('')
-const retryPrompt = ref('')
 const composerInputRef = ref(null)
 const selectedNodeUids = ref([])
 const sourceContext = ref(null)
@@ -1370,6 +1350,9 @@ const sourceFingerprint = ref('')
 const sourceBaselineMismatch = ref(false)
 const sourceFileInputRef = ref(null)
 const activityTimelineRef = ref(null)
+const chatScrollRef = ref(null)
+const chatFollowing = ref(true)
+let chatResizeObserver = null
 const proposalConfirmationRef = ref(null)
 const proposalReviewRef = ref(null)
 const livePreviewNoticeRef = ref(null)
@@ -1398,6 +1381,8 @@ let terminalHydrationGeneration = 0
 let terminalFinalizationState = null
 const selectedArtifactLoading = ref(false)
 const showAdvancedSettings = ref(false)
+const advancedSettingsRef = ref(null)
+let taskSettingsOwnerId = null
 const discussionMode = ref(false)
 const livePreviewActive = ref(false)
 const livePreviewPaused = ref(false)
@@ -1407,6 +1392,8 @@ const livePreviewAutoAccepting = ref(false)
 const livePreviewError = ref('')
 const contextPickerVisible = ref(false)
 const sessionMenuVisible = ref(false)
+const contextTriggerRef = ref(null)
+const sessionTriggerRef = ref(null)
 const recentSessions = ref([])
 const sessionListLoading = ref(false)
 const sessionListError = ref('')
@@ -1522,9 +1509,9 @@ const generationModeOptions = Object.freeze([
 ])
 const GENERATION_MODE_VALUES = new Set(generationModeOptions.map(item => item.value))
 const reasoningModes = Object.freeze([
-  { value: 'quick', label: '快速', description: '适合简单问题，生成更精简' },
-  { value: 'balanced', label: '均衡', description: '适合日常脑图生成与优化' },
-  { value: 'deep', label: '深度', description: '适合复杂主题，允许更多节点与层级' },
+  { value: 'quick', label: '简洁', description: '内容规模：较少节点与层级，不调整模型思考强度' },
+  { value: 'balanced', label: '标准', description: '内容规模：标准节点数量与层级，不调整模型思考强度' },
+  { value: 'deep', label: '详细', description: '内容规模：更多节点与层级，不调整模型思考强度' },
 ])
 const SOURCE_MODE_VALUES = new Set(['current', 'new', 'file'])
 const SCOPE_TYPE_VALUES = new Set(['document', 'branch', 'selectedNodes'])
@@ -1532,7 +1519,8 @@ const localAckRecoveryWarnings = new Set()
 const localAckRecoveryCompleted = new Set()
 
 const form = reactive({
-  agentKey: 'native_mindmap',
+  agentKey: readAgentPreferences(userStore.id).defaultAgent,
+  deviceId: '',
   modelId: null,
   intent: 'create',
   sourceMode: 'current',
@@ -1545,6 +1533,18 @@ const form = reactive({
   maxNodes: 100,
   maxDepth: 6,
 })
+
+const { state: deviceCatalog, refresh: refreshDeviceCatalog } = useMindmapAgentDevices(
+  () => agentManagerVisible.value || (visible.value && (isDeviceAgent(form.agentKey) || isDeviceAgent(job.value?.agentKey))),
+  () => userStore.id, listMindmapAiDevices,
+)
+const selectedDeviceIssue = computed(() => !isDeviceAgent(form.agentKey) ? '' : deviceExecutionIssue(
+  form.deviceId, deviceCatalog, {
+    now: deviceCatalog.now,
+    agentKey: form.agentKey,
+    allowBusy: running.value && job.value?.agentKey === form.agentKey && job.value?.deviceId === form.deviceId,
+  },
+))
 
 const terminalStatuses = new Set([
   'ready', 'applied', 'undone', 'completed_file', 'completed_direct', 'completed_no_change',
@@ -1601,7 +1601,15 @@ const currentContextLabel = computed(() => {
   if (form.sourceMode === 'new') return '新建脑图'
   if (form.scopeType === 'selectedNodes') return `已选节点 · ${selectedNodeUids.value.length}`
   if (form.scopeType === 'branch') return '当前分支'
-  return editorContext.value?.title || editorContext.value?.name || '当前脑图'
+  return '整份当前脑图'
+})
+const composerWriteModeLabel = computed(() => {
+  if (discussionMode.value) return '讨论 · 不改图'
+  if (form.sourceMode !== 'current') return '生成独立脑图'
+  if ((sourceContext.value?.mindmapId || editorContext.value?.mindmapId) && !editorReadonly.value) {
+    return '编辑 · 实时保存到云端'
+  }
+  return '编辑 · 完成后保留'
 })
 const starterItems = computed(() => {
   const hasEditor = Boolean(editorContext.value?.document?.root)
@@ -1628,29 +1636,66 @@ const starterItems = computed(() => {
 })
 const composerText = computed({
   get() {
-    if (!job.value) return form.prompt
-    if (running.value) return runningPrompt.value
-    if (retryAvailable.value) return retryPrompt.value
-    if (followupAvailable.value) return followupPrompt.value
-    return ''
+    return job.value ? continuationPrompt.value : form.prompt
   },
   set(value) {
     if (!job.value) form.prompt = value
-    else if (running.value) runningPrompt.value = value
-    else if (retryAvailable.value) retryPrompt.value = value
-    else if (followupAvailable.value) followupPrompt.value = value
+    else continuationPrompt.value = value
+    composerDraftPersistence.update(value)
   },
 })
+const composerDraftPersistence = useMindmapComposerDraft({
+  scope: () => userStore.token && userStore.roles.length ? resolveMindmapComposerDraftScope({
+    ownerId: currentAiOwnerUserId(), context: editorContext.value,
+    sessionId: job.value?.sessionId || null, routeMindmapId: route.query?.id, job: job.value,
+  }) : null,
+  ready: () => visible.value && !restoringJob.value && !sessionSwitching.value
+    && !loadingAgents.value && !submitting.value && !continuing.value && !retrying.value,
+  readText: () => composerText.value,
+  writeText: value => {
+    if (job.value) continuationPrompt.value = value
+    else form.prompt = value
+  },
+})
+const composerDraftNotice = composerDraftPersistence.notice
+const composerDraftPersisted = composerDraftPersistence.persisted
+
+function consumeSubmittedComposerDraft(prompt, type, attemptKey) {
+  const attempt = readPersistedAttempts()[type]
+  if (attempt?.key === attemptKey && attempt?.composerDraft) {
+    composerDraftPersistence.consume(attempt.composerDraft)
+    return
+  }
+  // No revision receipt means no authority to clear: a user may have typed
+  // identical text again while the old request was pending (including when
+  // browser storage failed). Legacy replies leave the draft for manual review.
+}
+const composerEditable = computed(() => Boolean(
+  !restoringJob.value && !sessionSwitching.value && !deletingSession.value && !submitting.value
+  && !openingLocal.value
+))
 const composerEnabled = computed(() => Boolean(
   !actionBusy.value
   && (running.value || !livePreviewCanvasMutationBlocked.value)
   && (!job.value || running.value || retryAvailable.value || followupAvailable.value)
 ))
+const composerDraftOnlyHint = computed(() => {
+  if (!composerEditable.value) return ''
+  if (agentSwitchPending.value) return `${agentSwitchPhase.value || '正在切换 Agent'}。可继续写草稿，切换完成后再发送；不会自动发送。`
+  if (executionStopBlocked.value) return '旧 Agent 尚未确认停止。可继续写草稿，确认停止后再发送；不会自动发送。'
+  if (!composerEnabled.value) return '当前暂不能发送，但可以继续编写或清除草稿。待操作完成、脑图同步或处理结果后，再确认发送。'
+  return ''
+})
+const composerInputDescription = computed(() => [
+  canvasSyncStatus.value ? 'mindmap-ai-canvas-recovery' : '',
+  composerDraftOnlyHint.value ? 'mindmap-ai-composer-draft-hint' : '',
+].filter(Boolean).join(' ') || undefined)
 const composerPlaceholder = computed(() => {
   if (running.value) {
+    const route = runningMessageRoute.value === 'current' ? '补充当前任务' : '排到下一轮'
     return messageModeActive.value
-      ? '继续输入，按 ⌘/Ctrl + Enter 排到下一轮…'
-      : '继续告诉 AI 要怎么改，按 ⌘/Ctrl + Enter 排到下一轮…'
+      ? `继续输入，按 ⌘/Ctrl + Enter ${route}…`
+      : `继续告诉 AI 要怎么改，按 ⌘/Ctrl + Enter ${route}…`
   }
   if (job.value?.status === 'needs_input') return '补充 Agent 需要的信息…'
   if (retryAvailable.value) return '修改要求并重试这一轮…'
@@ -1659,8 +1704,13 @@ const composerPlaceholder = computed(() => {
       ? '基于当前脑图继续讨论，不应用任何变更…'
       : '继续调整刚才的脑图…'
   }
-  if (job.value) return '新建对话后继续向 AI 提问'
-  return discussionMode.value ? '和 AI 讨论当前脑图，不应用任何变更…' : '问我任何问题…'
+  if (job.value) return '可先写下下一步要求，当前仅保存为草稿…'
+  if (discussionMode.value) return '描述你想讨论的问题，不会修改脑图…'
+  if (form.sourceMode === 'new') return '输入主题，或描述想创建的脑图…'
+  if (form.sourceMode === 'file') return '描述你想怎样整理这份文件…'
+  if (form.scopeType === 'branch') return '描述你想怎样修改当前分支…'
+  if (form.scopeType === 'selectedNodes') return '描述你想怎样修改已选节点…'
+  return '描述你想怎样修改当前脑图…'
 })
 const composerSending = computed(() => Boolean(
   submitting.value || continuing.value || retrying.value
@@ -1682,7 +1732,7 @@ const submissionStageDescription = computed(() => {
 })
 const composerPreflightText = computed(() => {
   if (running.value) return ''
-  if (messageModeActive.value || discussionMode.value) {
+  if (discussionMode.value) {
     return form.sourceMode === 'current'
       ? '只讨论当前脑图，不会修改画布。'
       : '只返回文字回答，不会修改当前画布。'
@@ -1696,8 +1746,8 @@ const composerPreflightText = computed(() => {
     && !editorReadonly.value
   ) {
     return form.scopeType === 'document'
-      ? 'AI 会通过受控工具直接写入云端正文，并实时同步到协作者；离开页面后任务仍会继续。'
-      : 'AI 只会通过受控工具直接写入授权范围，并实时同步到协作者；离开页面后任务仍会继续。'
+      ? '修改会实时保存并同步给协作者。关闭面板后任务仍会继续，停止后保留已完成的修改。'
+      : '只修改授权范围，实时保存并同步给协作者。关闭面板后任务仍会继续。'
   }
   if (form.scopeType === 'branch') return '只读取并编辑当前分支；结果会实时显示在当前画布。'
   if (form.scopeType === 'selectedNodes') {
@@ -1707,6 +1757,8 @@ const composerPreflightText = computed(() => {
 })
 const composerCanSend = computed(() => Boolean(
   composerEnabled.value
+  && !executionStopBlocked.value
+  && !agentSwitchPending.value
   && composerText.value.trim()
   && !restoreError.value
   && selectedAgentReady.value
@@ -1758,7 +1810,8 @@ const livePreviewNoticeTitle = computed(() => {
   if (realtimeConnectionState.value === 'offline') return '实时连接已中断，已保留当前预览'
   if (realtimeConnectionState.value === 'reconnecting') return '正在恢复实时预览'
   if (livePreviewPausedVisible.value) return '已暂停 AI 实时显示'
-  if (livePreviewRendering.value) return '正在绘制 AI 实时结果'
+  // Renderer busy/idle changes on every frame, not on a task phase boundary.
+  // Exposing it here changes wrapped text/height and forces live announcements.
   if (running.value) return 'AI 正在当前画布实时预览'
   if (highImpactReviewRequired.value) return 'AI 结果等待确认'
   return livePreviewCatchingUp.value ? '正在完成 AI 画布预览' : 'AI 结果已在当前画布预览'
@@ -1796,9 +1849,6 @@ const livePreviewNoticeDescription = computed(() => {
   if (livePreviewPausedVisible.value) {
     return `${renderedStep}${changeSummary}${nodeProgress}当前画面保持不变，AI 仍在后台生成；点击“继续显示”后会平滑补齐。`
   }
-  if (livePreviewRendering.value) {
-    return `${renderedStep}${changeSummary}${nodeProgress}正在把当前帧绘制到画布，完成后继续接收下一帧。`
-  }
   if (!running.value && livePreviewCatchingUp.value) {
     return `${renderedStep}${changeSummary}${nodeProgress}${catchup}任务已完成，画布正在显示最后的变更。`
   }
@@ -1806,8 +1856,8 @@ const livePreviewNoticeDescription = computed(() => {
     return `${renderedStep}${changeSummary}${nodeProgress}本次包含较大结构变更，请查看差异后明确采纳；也可以撤销本轮修改。`
   }
   return running.value
-    ? `${renderedStep}${changeSummary}${nodeProgress}${catchup}画布会随生成过程继续更新，完成后会自动保存当前结果。`
-    : `${renderedStep}${changeSummary}${nodeProgress}结果已完成并保存到当前脑图；如需恢复上一版本，可撤销本次 AI 全部操作。`
+    ? `${renderedStep}${changeSummary}${nodeProgress}画布会随生成过程继续更新，完成后会自动保存当前结果。`
+    : `${renderedStep}${changeSummary}${nodeProgress}${currentResultState.value.description}`
 })
 const selectedTurn = computed(() => (
   sessionTurns.value.find(turn => String(turn?.job?.id || '') === selectedTurnJobId.value)
@@ -1869,11 +1919,13 @@ const canSwitchInteractionMode = computed(() => Boolean(
   && followupParentJob.value?.status !== 'needs_input'
   && !running.value
   && !actionBusy.value
+  && !agentSwitchPending.value
   && !livePreviewCanvasMutationBlocked.value
 ))
 const taskConfigurationLocked = computed(() => restoringJob.value || Boolean(job.value))
 const agentSelectionLocked = computed(() => (
   restoringJob.value
+  || agentSwitchPending.value
   || submitting.value
   || continuing.value
   || retrying.value
@@ -1895,30 +1947,6 @@ const livePreviewEligible = computed(() => Boolean(
   && livePreviewSuppressedJobId !== String(job.value?.id || '')
   && !['applied', 'undone', 'cancelled', 'failed', 'expired', 'stale'].includes(job.value?.status)
 ))
-const directExecutionNoticeVisible = computed(() => Boolean(
-  isDirectExecutionJob()
-  && !messageModeActive.value
-  && job.value?.id
-  && (
-    running.value
-    || job.value.status === 'completed_direct'
-    || job.value.status === 'completed_no_change'
-  )
-))
-const directExecutionNoticeTitle = computed(() => {
-  if (job.value?.status === 'completed_direct') return 'AI 已直接更新云端脑图'
-  if (job.value?.status === 'completed_no_change') return 'AI 已完成检查，脑图没有变化'
-  return 'AI 正在后台编辑云端脑图'
-})
-const directExecutionNoticeDescription = computed(() => {
-  if (job.value?.status === 'completed_direct') {
-    return '修改已经写入云端正文并通过协作通道同步；即使关闭当前页面，任务也不会中断。'
-  }
-  if (job.value?.status === 'completed_no_change') {
-    return '本轮没有需要写入的内容；任务已结束，当前脑图保持不变。'
-  }
-  return 'Agent 正在通过受控脑图工具直接写入云端正文；你可以离开页面，任务会在服务端继续执行。'
-})
 const livePreviewNoticeVisible = computed(() => Boolean(
   livePreviewActive.value
   || (
@@ -2066,9 +2094,9 @@ const selectedAgent = computed(() => (
 const nativeModelConfigurationIssue = computed(() => {
   if (form.agentKey !== 'native_mindmap') return ''
   const model = models.value.find(item => String(item.modelId) === String(form.modelId))
-  if (!model) return ''
+  if (!model) return form.modelId ? '此前选择的模型已不可用；请手动选择其他模型，系统不会自动替换。' : ''
   if (
-    model.provider === 'Anthropic'
+    String(model.provider || '').trim().toLowerCase() === 'anthropic'
     && /\/compatible-mode\//i.test(String(model.baseUrl || ''))
   ) {
     return '当前模型使用兼容模式接口，但提供商选了 Anthropic。请在 AI 模型管理中改为 DashScope 或 OpenAI，并填写实际模型编码；也可改选 Ollama 模型。'
@@ -2077,6 +2105,7 @@ const nativeModelConfigurationIssue = computed(() => {
 })
 const agentSelectionIssue = computed(() => {
   if (loadingAgents.value || agentError.value) return ''
+  if (agentPreferences.value.hidden.includes(form.agentKey)) return '此 Agent 已从你的使用列表关闭，请在管理中开启或选择其他 Agent。'
   if (!form.agentKey) return agents.value.length
     ? '请选择一个支持当前任务的 AI Agent。'
     : '当前没有可用的 AI Agent，请联系管理员检查 Connector。'
@@ -2093,27 +2122,45 @@ const agentSelectionIssue = computed(() => {
   if (form.agentKey === 'native_mindmap' && !form.modelId) {
     return 'MindMap Agent 没有可用模型，请选择模型或改用其他 Agent。'
   }
+  if (form.agentKey === 'native_mindmap' && modelRecovery.error.value) return modelRecovery.error.value
   if (nativeModelConfigurationIssue.value) return nativeModelConfigurationIssue.value
+  if (isDeviceAgent(form.agentKey)) return selectedDeviceIssue.value
   return ''
 })
 const selectedAgentReady = computed(() => Boolean(
   !loadingAgents.value
+  && !(form.agentKey === 'native_mindmap' && modelRecovery.loading.value)
   && !agentError.value
   && selectedAgent.value
   && !agentSelectionIssue.value
 ))
 const selectedAgentReadinessTone = computed(() => {
+  if (loadingAgents.value || (form.agentKey === 'native_mindmap' && modelRecovery.loading.value)) return 'pending'
+  if (agentError.value || agentSelectionIssue.value) return 'unavailable'
   if (selectedAgent.value?.status !== 'enabled') return 'unavailable'
-  if (selectedAgent.value?.healthStatus === 'healthy') return 'ready'
+  if (isDeviceAgent(form.agentKey)) return selectedDeviceIssue.value ? 'unavailable' : 'pending'
   if (selectedAgent.value?.healthStatus === 'unhealthy') return 'unavailable'
+  // Connector health is shared, but the native model can be user-specific.
+  // A healthy platform runtime is not proof of this model's authentication.
+  if (form.agentKey === 'native_mindmap') return 'pending'
+  if (selectedAgent.value?.healthStatus === 'healthy') return 'ready'
   return 'pending'
 })
-const selectedAgentReadinessLabel = computed(() => ({
-  ready: `${selectedAgent.value?.displayName || 'Agent'} 连接已就绪`,
+const selectedAgentReadinessLabel = computed(() => {
+  if (loadingAgents.value) return '正在检查 Agent 配置'
+  if (form.agentKey === 'native_mindmap' && modelRecovery.loading.value) return '正在重新读取模型配置'
+  return ({
+  ready: `${selectedAgent.value?.displayName || 'Agent'} 运行环境已检查`,
   unavailable: `${selectedAgent.value?.displayName || 'Agent'} 当前不可用`,
   pending: `${selectedAgent.value?.displayName || 'Agent'} 将在首次运行前检查连接`,
-})[selectedAgentReadinessTone.value])
+  })[selectedAgentReadinessTone.value]
+})
 const selectedAgentReadinessDescription = computed(() => {
+  if (loadingAgents.value) return '正在读取 Agent 能力与模型配置'
+  if (agentError.value) return agentError.value
+  if (form.agentKey === 'native_mindmap' && modelRecovery.loading.value) return '当前模型选择和未发送内容保持不变，不会自动发送任务。'
+  if (agentSelectionIssue.value) return agentSelectionIssue.value
+  if (isDeviceAgent(form.agentKey)) return selectedDeviceIssue.value || `本机执行通道已连接；${deviceAgentName(form.agentKey)} 登录将在执行时校验，登录凭据不上传。${deviceBudgetNotice(form.agentKey)}`
   if (selectedAgentReadinessTone.value === 'ready') {
     return selectedAgent.value?.lastHealthTime
       ? `最近检查 ${formatEventTime(selectedAgent.value.lastHealthTime)}`
@@ -2122,6 +2169,7 @@ const selectedAgentReadinessDescription = computed(() => {
   if (selectedAgentReadinessTone.value === 'unavailable') {
     return selectedAgent.value?.healthReason || selectedAgent.value?.statusReason || '请联系管理员检查 Connector'
   }
+  if (form.agentKey === 'native_mindmap') return '平台运行环境与个人模型配置分别检查；当前模型的认证和可用性将在运行前校验'
   return '提交后会自动校验认证和 SDK 状态，通过后立即开始生成'
 })
 const maxNodesCap = computed(() => Number(selectedAgent.value?.maxNodes || 2000))
@@ -2135,6 +2183,19 @@ const availableModels = computed(() => {
     : []
   if (!allowlist.length) return models.value
   return models.value.filter(model => allowlist.includes(String(model.modelId)))
+})
+const modelRecovery = useMindmapModelRecovery({
+  models, loadModels: listModelAll, ownerId: currentAiOwnerUserId,
+  epoch: () => restoreGeneration, agentKey: () => form.agentKey,
+  canRefresh: () => componentAlive && visible.value && form.agentKey === 'native_mindmap'
+    && !agentSelectionLocked.value && !executionStopBlocked.value && !loadingAgents.value,
+})
+const modelRepairHref = computed(() => {
+  if (form.agentKey !== 'native_mindmap') return ''
+  const location = modelRepairLocation({ permissions: userStore.permissions, modelId: form.modelId,
+    routeAvailable: router.getRoutes().some(record => record.path === '/ai/model'),
+  })
+  return location ? router.resolve(location).href : ''
 })
 const canReplaceLocal = computed(() => !editorContext.value?.mindmapId && !editorReadonly.value)
 const canInsertLocal = computed(() => (
@@ -2162,14 +2223,30 @@ const resultImpactForDisplay = computed(() => {
     jobId: job.value?.id,
   }))
 })
-const resultImpactSummaryAvailable = computed(() => {
-  const impact = resultImpactForDisplay.value
-  if (!impact) return false
-  return ['createdCount', 'updatedCount', 'movedCount', 'deletedCount'].every(key => {
-    const count = Number(impact[key])
-    return Number.isSafeInteger(count) && count >= 0
-  })
-})
+const resultChangeCounts = computed(() => mindmapResultChangeCounts(resultImpactForDisplay.value))
+const resultImpactSummaryAvailable = computed(() => Boolean(resultChangeCounts.value))
+const currentResultState = computed(() => mindmapAgentResultState({
+  job: job.value,
+  sourceIsCloud: job.value?.sourceType === 'cloud_document' || Boolean(sourceContext.value?.mindmapId),
+  direct: isDirectExecutionJob(),
+  saving: applying.value || livePreviewAutoAccepting.value || savingCloud.value,
+  saveFailed: Boolean(job.value?.id && livePreviewAutoAcceptFailedJobId.value === String(job.value.id)),
+  undoing: undoing.value,
+  reverting: livePreviewReverting.value,
+  livePreviewActive: livePreviewActive.value,
+  catchingUp: livePreviewCatchingUp.value,
+}))
+const resultCardState = computed(() => viewingHistoricalArtifact.value
+  ? mindmapAgentResultState({ job: selectedArtifactJob.value, historical: true })
+  : currentResultState.value)
+const resultCardVisible = computed(() => Boolean(
+  !messageModeActive.value && job.value && (
+    viewingHistoricalArtifact.value ? selectedArtifactJob.value?.artifactId : (
+      isDirectExecutionJob() || proposal.value || job.value.artifactId || livePreviewActive.value
+      || ['ready', 'needs_review', 'applied', 'completed_direct', 'completed_no_change', 'completed_file', 'undone', 'rejected'].includes(job.value.status)
+    )
+  )
+))
 const canApplyCurrentProposal = computed(() => Boolean(
   !viewingHistoricalArtifact.value
   && !messageModeActive.value
@@ -2192,7 +2269,7 @@ const highImpactReviewRequired = computed(() => Boolean(
 ))
 const proposalReviewFinalized = computed(() => Boolean(
   proposal.value
-  && ['applied', 'undone', 'rejected'].includes(job.value?.status)
+  && ['applied', 'completed_direct', 'undone', 'rejected'].includes(job.value?.status)
 ))
 const jobStatusLabels = {
   queued: '任务已排队',
@@ -2256,6 +2333,43 @@ const connectionStateLabel = computed(() => {
     idle: '待命',
   })[realtimeConnectionState.value] || '待命'
 })
+// A successful run/commit is not proof that this browser has reconciled its
+// canvas. Keep the blocking fact and recovery action near the composer, even
+// when the user is reading older messages. This projection never changes IO.
+const canvasSyncStatus = computed(() => {
+  if (!job.value || directCanvasOwnerId.value !== String(job.value.id)
+    || executionStopBlocked.value || cancelling.value || job.value.status === 'cancel_requested') return null
+  const error = livePreviewError.value || restoreError.value
+  if (error) return { label: '画布待恢复', tone: 'warning', description: error, canRetry: true }
+  if (isTerminalStatus(job.value.status)) return {
+    label: '同步画布中', tone: 'connecting', canRetry: false,
+    description: '本轮执行已结束，正在显示并核对最新脑图；完成后可继续编辑。',
+  }
+  return null
+})
+// Current task facts always take precedence over the next turn's settings.
+// This is presentation only; readiness, send and exit gates remain unchanged.
+const panelStatus = computed(() => {
+  if (restoringJob.value) return { label: '恢复中', tone: 'connecting', description: '正在读取已有任务与会话，尚未确认当前状态。' }
+  if (submitting.value) return { label: '准备中', tone: 'connecting', description: submissionStageTitle.value }
+  if (job.value) {
+    if (executionStopBlocked.value) return { label: '退出待确认', tone: 'warning', description: '尚未确认旧 Agent 已退出，暂时不能发送下一轮或切换。' }
+    if (cancelling.value || job.value.status === 'cancel_requested') return { label: '停止中', tone: 'connecting', description: '已请求停止，等待执行器退出；不会自动撤销已提交修改。' }
+    if (canvasSyncStatus.value) {
+      const { label, tone, description } = canvasSyncStatus.value
+      return { label, tone, description }
+    }
+    return { label: connectionStateLabel.value, tone: realtimeConnectionState.value, description: '' }
+  }
+  if (loadingAgents.value || (form.agentKey === 'native_mindmap' && modelRecovery.loading.value)) {
+    return { label: '检查中', tone: 'connecting', description: selectedAgentReadinessDescription.value }
+  }
+  if (agentError.value) return { label: '读取失败', tone: 'warning', description: agentError.value }
+  if (selectedAgentReadinessTone.value === 'unavailable' || !selectedAgentReady.value) {
+    return { label: nativeModelConfigurationIssue.value || (form.agentKey === 'native_mindmap' && !form.modelId) ? '需配置' : '暂不可用', tone: 'warning', description: selectedAgentReadinessDescription.value }
+  }
+  return { label: selectedAgentReadinessTone.value === 'ready' ? '待命' : '运行前检查', tone: 'idle', description: selectedAgentReadinessDescription.value }
+})
 const jobActivitySummary = computed(() => {
   if (job.value?.status === 'waiting_turn') {
     const queueEvent = [...agentEvents.value].reverse().find(event => (
@@ -2281,11 +2395,6 @@ const jobActivitySummary = computed(() => {
     }
     return `${statusLabel.value}${elapsed}`
   }
-  if (livePreviewChangeSummaryText.value) return `本轮${livePreviewChangeSummaryText.value}`
-  if (job.value?.status === 'rejected') return '高影响变更未采纳，当前脑图保持原内容'
-  if (['ready', 'applied', 'completed_file'].includes(job.value?.status)) return '结果已保存，可撤销本轮 AI 修改'
-  if (job.value?.status === 'completed_direct') return 'AI 已完成后台直写，当前页面会自动同步最新内容'
-  if (job.value?.status === 'completed_message') return '回答已完成'
   return statusLabel.value
 })
 
@@ -2458,9 +2567,13 @@ async function hashAttemptFingerprint(fingerprint) {
 async function resolveDurableAttempt(type, currentAttempt, payload, {
   createKey,
   metadata = {},
+  draftReceipt = undefined,
 } = {}) {
   const ownerUserId = currentAiOwnerUserId()
   if (!ownerUserId) throw new Error('当前登录用户身份尚未就绪，无法保存 AI 请求恢复标识')
+  const composerDraft = draftReceipt !== undefined ? draftReceipt
+    : ['create', 'queue', 'followup', 'retry'].includes(type)
+      ? composerDraftPersistence.capture(payload?.requestPayload?.prompt ?? payload?.prompt) : null
   const fingerprint = fingerprintMindmapAiRequest(payload)
   const fingerprintHash = await hashAttemptFingerprint(fingerprint)
   const persistedAttempts = readPersistedAttempts()
@@ -2472,6 +2585,7 @@ async function resolveDurableAttempt(type, currentAttempt, payload, {
   persistedAttempts[type] = {
     ...(reusingPersistedAttempt ? cloneRuntimeValue(persisted) : {}),
     ...(!reusingPersistedAttempt ? cloneRuntimeValue(metadata) : {}),
+    ...(!reusingPersistedAttempt && composerDraft ? { composerDraft } : {}),
     ownerUserId,
     key: candidate.key,
     fingerprintHash,
@@ -2497,12 +2611,12 @@ function restoreDurableAttemptNotice() {
     ? '检测到结果尚未确认的请求；再次提交相同内容会复用原请求号，并优先恢复服务端已创建的最新轮次。'
     : ''
   const followup = attempts.followup
-  if (followup?.requestPayload?.prompt && !followupPrompt.value) {
-    followupPrompt.value = String(followup.requestPayload.prompt)
+  if (followup?.requestPayload?.prompt && !continuationPrompt.value) {
+    continuationPrompt.value = String(followup.requestPayload.prompt)
   }
   const retry = attempts.retry
-  if (retry?.requestPayload?.prompt && !retryPrompt.value) {
-    retryPrompt.value = String(retry.requestPayload.prompt)
+  if (retry?.requestPayload?.prompt && !continuationPrompt.value) {
+    continuationPrompt.value = String(retry.requestPayload.prompt)
   }
 }
 
@@ -2529,6 +2643,7 @@ function invalidateRestoreOperations({ clearError = true } = {}) {
 function captureJobConfiguration(overrides = {}) {
   return {
     agentKey: overrides.agentKey ?? form.agentKey,
+    deviceId: isDeviceAgent(overrides.agentKey ?? form.agentKey) ? (overrides.deviceId ?? form.deviceId ?? '') : '',
     modelId: overrides.modelId ?? form.modelId ?? null,
     intent: overrides.intent ?? form.intent,
     sourceMode: overrides.sourceMode ?? form.sourceMode,
@@ -2595,7 +2710,7 @@ function applyRecentJobDefaults(preset) {
   if (!configuration || typeof configuration !== 'object') return false
   const explicitFields = new Set(Object.keys(preset))
   const restorableFields = [
-    'agentKey', 'modelId', 'intent', 'sourceMode', 'scopeType',
+    'agentKey', 'deviceId', 'modelId', 'intent', 'sourceMode', 'scopeType',
     'language', 'layout', 'density', 'generationMode', 'maxNodes', 'maxDepth',
   ]
   for (const field of restorableFields) {
@@ -2657,6 +2772,7 @@ function restoreJobConfiguration(snapshot, saved = {}) {
   discussionMode.value = restoredDiscussionMode
   if (agents.value.some(item => item.agentKey === snapshot.agentKey)) {
     form.agentKey = snapshot.agentKey
+    form.deviceId = isDeviceAgent(snapshot.agentKey) ? (snapshot.deviceId || '') : ''
     onAgentChange()
   }
   if (form.agentKey === 'native_mindmap') {
@@ -2765,7 +2881,182 @@ function formatUsageCost(value) {
 }
 
 function visibleTurnEvents(turn) {
-  return Array.isArray(turn?.events) ? turn.events.slice(-20) : []
+  return Array.isArray(turn?.events) ? turn.events.filter(event => !['assistant_delta', 'thinking_summary', 'thinking_state', 'todo_updated', 'tool_started', 'tool_completed', 'tool_failed'].includes(event.eventType)).slice(-20) : []
+}
+
+function turnAuditEventCount(turn) {
+  return (turn?.events || []).filter(event => !['assistant_delta', 'thinking_summary', 'thinking_state', 'todo_updated', 'tool_started', 'tool_completed', 'tool_failed'].includes(event.eventType)).length
+}
+
+function agentDisplayName(key) {
+  return agents.value.find(agent => agent.agentKey === key)?.displayName || key || 'AI'
+}
+
+async function openTaskSettings() {
+  const ownerId = currentAiOwnerUserId()
+  taskSettingsOwnerId = ownerId
+  showAdvancedSettings.value = true
+  await nextTick()
+  if (!componentAlive || !visible.value || !showAdvancedSettings.value
+    || ownerId !== currentAiOwnerUserId()) return
+  focusTaskSettings()
+}
+
+function focusTaskSettings() {
+  if (!componentAlive || !visible.value || !showAdvancedSettings.value
+    || taskSettingsOwnerId !== currentAiOwnerUserId()) return
+  advancedSettingsRef.value?.focus({ preventScroll: true })
+}
+
+async function finishTaskSettings() {
+  const ownerId = taskSettingsOwnerId
+  // Element Plus emits `closed` before updating v-model on Escape/backdrop
+  // dismissal. Wait for that update and the released focus trap in every path.
+  await nextTick()
+  if (showAdvancedSettings.value || ownerId !== taskSettingsOwnerId) return
+  taskSettingsOwnerId = null
+  if (componentAlive && visible.value && ownerId === currentAiOwnerUserId()) {
+    composerInputRef.value?.focus?.()
+  }
+}
+
+function updateAgentPreferences(value) {
+  agentPreferences.value = value
+  if (!saveAgentPreferences(userStore.id, value)) ElMessage.warning('浏览器未能保存 Agent 偏好，本次会话内仍有效。')
+}
+
+function agentHandoffSummary(target) {
+  return projectAgentHandoff({
+    job: job.value, target, ownerId: currentAiOwnerUserId(), agents: agents.value,
+    devices: deviceCatalog.devices, events: agentEvents.value, turns: sessionTurns.value,
+    timelineReceipt: handoffTimelineReceipt.value, timelineLoading: timelineLoading.value,
+    timelineError: timelineError.value, resultState: currentResultState.value,
+    // Restored form defaults are not evidence of the original authorization.
+    scopeType: proposal.value?.id === job.value?.proposalId ? proposal.value?.scope?.type : undefined,
+  })
+}
+
+async function requestAgentSwitch(selection) {
+  if (isMindmapExecutionBlocked(job.value)) {
+    ElMessage.info('旧 Agent 尚未确认退出，请先刷新停止状态。')
+    return false
+  }
+  const agentKey = typeof selection === 'string' ? selection : selection?.agentKey
+  const deviceId = isDeviceAgent(agentKey)
+    ? (typeof selection === 'object' ? selection.deviceId || '' : isDeviceAgent(form.agentKey) ? form.deviceId || '' : '')
+    : ''
+  if ((agentKey === form.agentKey && deviceId === (form.deviceId || '')) || actionBusy.value || restoringJob.value || agentSwitchPending.value) return false
+  const agent = agents.value.find(item => item.agentKey === agentKey)
+  function targetAvailable(allowCurrentRunBusy = false) {
+    const currentAgent = agents.value.find(item => item.agentKey === agentKey)
+    if (!currentAgent || currentAgent.status !== 'enabled' || !agentSupportsCurrentTask(currentAgent)
+      || agentPreferences.value.hidden.includes(agentKey)) {
+      ElMessage.info('目标 Agent 的可用状态已变化，本次切换未生效，请重新选择。')
+      return false
+    }
+    if (!isDeviceAgent(agentKey)) return true
+    // Idle selection may expose the computer picker. A running task must not
+    // be stopped before the user has actually chosen a destination computer.
+    if (!deviceId) {
+      if (!running.value) return true
+      ElMessage.info('请先在“管理 Agents”中选择执行电脑，再停止并切换。')
+      return false
+    }
+    const issue = deviceExecutionIssue(deviceId, deviceCatalog, {
+      agentKey,
+      // Only the executing run may explain why its own device is busy.
+      // After exit, availability must be checked again without this exception.
+      allowBusy: allowCurrentRunBusy && running.value && job.value?.executionState === 'running'
+        && isDeviceAgent(job.value?.agentKey) && job.value?.deviceId === deviceId,
+    })
+    if (issue) ElMessage.info(issue)
+    return !issue
+  }
+  if (!targetAvailable(true)) return false
+  const previousJobId = job.value?.id
+  const previousSessionId = job.value?.sessionId
+  const previousEpoch = job.value?.executionEpoch
+  const ownerId = currentAiOwnerUserId()
+  const generation = ++agentSwitchGeneration
+  const returnToPicker = !agentManagerVisible.value
+  let stopRequested = false
+  const sameExecution = () => componentAlive && generation === agentSwitchGeneration
+    && ownerId === currentAiOwnerUserId() && job.value?.id === previousJobId
+    && job.value?.sessionId === previousSessionId && job.value?.executionEpoch === previousEpoch
+  const stillCurrent = () => agentSwitchPending.value && sameExecution()
+  async function refreshTargetDevice() {
+    const refreshed = await refreshDeviceCatalog({ afterPending: true })
+    if (!stillCurrent() || actionBusy.value) return false
+    if (!refreshed) ElMessage.info('未能确认目标电脑的最新状态，本次切换未生效，请刷新设备后重试。')
+    return refreshed
+  }
+  agentSwitchPending.value = true
+  try {
+    if (running.value) {
+      const target = { agentKey, deviceId }
+      const consentKey = agentHandoffSummary(target).consentKey
+      const consentUnchanged = () => {
+        if (agentHandoffSummary(target).consentKey === consentKey) return true
+        ElMessage.info('任务、执行位置或排队请求已变化，本次切换未生效，请核对后重新选择。')
+        return false
+      }
+      agentSwitchPhase.value = '等待切换确认'
+      try {
+        await ElMessageBox.confirm(
+          () => sameExecution()
+            ? h(MindmapAgentHandoffSummary, { summary: agentHandoffSummary(target) })
+            : h('p', '当前任务或账号已变化，请关闭后重新选择 Agent。本次确认不会停止其他任务。'),
+          '停止当前轮并切换 Agent', { confirmButtonText: '停止并切换', cancelButtonText: '继续当前 Agent',
+            customClass: 'mindmapAgentHandoffBox', closeOnClickModal: false },
+        )
+      } catch { return false }
+      if (!stillCurrent() || actionBusy.value) return false
+      if (deviceId && !(await refreshTargetDevice())) return false
+      // Confirmation and device refresh are asynchronous. Recheck both the
+      // owner and destination before sending an irreversible stop request.
+      if (!stillCurrent() || actionBusy.value || !targetAvailable(true) || !consentUnchanged()) return false
+      agentSwitchPhase.value = '等待旧 Agent 退出'
+      stopRequested = true
+      const cancelled = await cancelJob()
+      if (!stillCurrent()) return false
+      // cancelJob also returns false when result hydration has not settled.
+      // The server's cancellation receipt still permits waiting for exit.
+      if (!cancelled && !job.value?.cancelRequestedTime) return false
+      if (!(await executionStop.waitForStopped({ stillCurrent, isRunning: () => running.value }))
+        || running.value || isMindmapExecutionBlocked(job.value) || !stillCurrent()) {
+        if (stillCurrent()) ElMessage.info('未能确认当前轮已退出，本次切换未生效；确认停止后请重新选择 Agent。')
+        return false
+      }
+      // Exit evidence and canvas settlement are separate. Join the existing
+      // finalizer, and never rewrite a queued successor's execution settings.
+      agentSwitchPhase.value = '同步脑图结果'
+      if (!(await finalizeTerminalJob(previousJobId, { retry: true, refresh: false })) || !stillCurrent()) {
+        if (stillCurrent()) ElMessage.info('Agent 已退出，但脑图结果尚未同步；请先重试同步，再切换 Agent。')
+        return false
+      }
+    }
+    if (!stillCurrent()) return false
+    if (deviceId && !(await refreshTargetDevice())) return false
+    if (!stillCurrent() || actionBusy.value || !targetAvailable()) return false
+    form.agentKey = agentKey
+    form.deviceId = deviceId
+    onAgentChange()
+    agentManagerVisible.value = false
+    ElMessage.success(`下一轮已选择 ${agent.displayName}；尚未发送任务。`)
+    return true
+  } finally {
+    if (generation === agentSwitchGeneration) {
+      if (stopRequested && componentAlive && ownerId === currentAiOwnerUserId()
+        && previousSessionId === job.value?.sessionId && previousJobId !== job.value?.id) {
+        ElMessage.info('同一会话的另一轮已接管，本次切换未生效；没有中断或改绑该任务，请核对当前 Agent。')
+      }
+      agentSwitchPending.value = false
+      agentSwitchPhase.value = ''
+      await nextTick()
+      if (returnToPicker && componentAlive && generation === agentSwitchGeneration
+        && ownerId === currentAiOwnerUserId()) agentExecutionPickerRef.value?.focus()
+    }
+  }
 }
 
 function assistantMessageText(turn) {
@@ -2802,15 +3093,17 @@ function assistantMessageText(turn) {
   }
   if (turnJob.status === 'completed_no_change') return '已完成分析，当前脑图不需要应用新的结构变化。'
   if (turnJob.status === 'completed_direct') return 'AI 已完成后台直写，当前脑图会自动同步最新内容。'
-  if (['ready', 'applied', 'undone', 'completed_file'].includes(turnJob.status)) {
+  if (turnJob.status === 'undone') return '本轮 AI 修改已撤销，撤销结果已确认。'
+  if (turnJob.status === 'completed_file') return '本轮结果已另存为云端脑图，不表示覆盖了当前脑图。'
+  if (turnJob.status === 'applied') return '本轮修改已应用，应用结果已确认。'
+  if (turnJob.status === 'ready') {
     const completedEvent = [...(turn?.events || [])].reverse().find(event => (
       event?.eventType === 'agent_completed'
     ))
-    const nodeCount = Number(completedEvent?.payload?.summary?.nodeCount)
+    const nodeCount = completedEvent?.payload?.summary?.nodeCount
     const title = String(turnJob.title || '脑图结果').trim()
-    return Number.isFinite(nodeCount)
-      ? `${title}已生成，共 ${nodeCount} 个节点。`
-      : `${title}已生成，当前画布已展示最新结果，可以检查差异。`
+    const count = Number.isSafeInteger(nodeCount) && nodeCount >= 0 ? `，共 ${nodeCount} 个节点` : ''
+    return `${title}已生成${count}；应用与保存状态请查看本轮结果。`
   }
   const latestEvent = [...(turn?.events || [])].reverse()[0]
   return latestEvent ? eventDescription(latestEvent, turnJob) : 'AI 正在准备本轮任务…'
@@ -2829,6 +3122,36 @@ function sessionUnavailableReason(session) {
     && Number(sessionJob.sourceMindmapId) !== Number(editorContext.value?.mindmapId)
   ) return '该对话属于另一份云端脑图，请在原脑图中打开'
   return ''
+}
+
+function toolNodeNavigation(turn) {
+  const ownerUserId = currentAiOwnerUserId()
+  const generation = restoreGeneration
+  const scopeFor = candidate => resolveAgentToolDocumentScope(candidate, {
+    currentJob: job.value, editorContext: editorContext.value, sourceContext: sourceContext.value, ownerUserId,
+  })
+  const scope = scopeFor(turn.job)
+  return {
+    identity: `${ownerUserId}:${generation}:${scope.documentId}:${scope.jobId}`,
+    reason: scope.reason || (actionBusy.value || restoringJob.value ? '正在处理当前任务，请稍后重试定位。' : ''),
+    locate(entry, nodeUid) {
+      if (!componentAlive || !visible.value || generation !== restoreGeneration
+        || ownerUserId !== currentAiOwnerUserId() || actionBusy.value || restoringJob.value) {
+        return { ok: false, message: '会话正在变化，请稍后重新打开记录。' }
+      }
+      const currentTurn = conversationTurns.value.find(item => item.job.id === turn.job.id)
+      const currentScope = scopeFor(currentTurn?.job)
+      if (currentScope.reason) return { ok: false, message: currentScope.reason }
+      // Reproject current receipts at click time, not the old displayed row.
+      const currentEntry = projectRuntimeEvents(currentTurn.events).entries.find(item => item.key === entry.key && item.kind === 'tool')
+      if (!agentToolNodeTargets(currentEntry).includes(nodeUid)) return { ok: false, message: '工具回执已变化，请重新展开记录。' }
+      let result = { ok: false, message: '脑图编辑器尚未就绪，请稍后重试。' }
+      bus.emit('requestAiToolNodeFocus', { ...currentScope, nodeUid, editor: store.mindMap }, {
+        resolve: receipt => { result = receipt },
+      })
+      return result
+    },
+  }
 }
 
 function eventTypeLabel(event) {
@@ -3065,6 +3388,7 @@ function stopPolling() {
 }
 
 function resetNewJob({ clearStoredJob = true, preserveForm = true, detach = false } = {}) {
+  if (!detach && isMindmapExecutionBlocked(job.value)) return false
   if (!detach && (running.value || preparingCanvas.value || directCanvasOwned.value
     || livePreviewActive.value || livePreviewReverting.value)) return false
   if (detach) {
@@ -3107,10 +3431,8 @@ function resetNewJob({ clearStoredJob = true, preserveForm = true, detach = fals
   proposalLoadGeneration += 1
   proposalLoading.value = false
   diffConfirmed.value = false
-  runningPrompt.value = ''
-  followupPrompt.value = ''
+  continuationPrompt.value = ''
   pendingFollowupPrompt.value = ''
-  retryPrompt.value = ''
   sourceContext.value = null
   sourceFingerprint.value = ''
   submitAttempt = null
@@ -3976,6 +4298,7 @@ function onIntentChange(intent) {
 }
 
 function onAgentChange() {
+  if (!isDeviceAgent(form.agentKey)) form.deviceId = ''
   form.maxNodes = Math.min(form.maxNodes, maxNodesCap.value)
   form.maxDepth = Math.min(form.maxDepth, maxDepthCap.value)
   if (form.agentKey !== 'native_mindmap') return
@@ -4022,8 +4345,10 @@ function setReasoningMode(mode) {
 
 async function queueRunningMessage() {
   const parentJob = job.value
-  const prompt = runningPrompt.value.trim()
+  const prompt = continuationPrompt.value.trim()
   if (!parentJob?.id || !prompt || continuing.value) return false
+  if (agentSwitchPending.value) return false
+  if (isDeviceAgent(form.agentKey) && selectedDeviceIssue.value) return ElMessage.warning(selectedDeviceIssue.value)
   const selectedAgent = agents.value.find(item => item.agentKey === form.agentKey)
   if (!selectedAgent || selectedAgent.status !== 'enabled') {
     ElMessage.warning('当前 Agent 暂时不可用，请稍后重试或切换 Agent')
@@ -4034,9 +4359,13 @@ async function queueRunningMessage() {
     prompt,
     route: runningMessageRoute.value === 'next' ? 'next' : 'current',
     agentKey: form.agentKey,
+    deviceId: isDeviceAgent(form.agentKey) ? form.deviceId : undefined,
     modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
     intent: effectiveFormIntent.value,
   }
+  // Reconciliation may await the network while the composer stays editable.
+  // Only this clicked revision belongs to the send, even if later text matches.
+  const draftReceipt = composerDraftPersistence.capture(prompt)
   const identity = beginActionIdentity('queue', { jobId: parentJobId })
   continuing.value = true
   let requestStarted = false
@@ -4054,6 +4383,7 @@ async function queueRunningMessage() {
       { parentJobId, requestPayload },
       {
         createKey: () => createMindmapAiIdempotencyKey('mindmap-ai-queue'),
+        draftReceipt,
         metadata: {
           parentJobId,
           parentTurnIndex: parentJob.turnIndex,
@@ -4087,7 +4417,7 @@ async function queueRunningMessage() {
     )
     upsertSessionTurn(childJob, prompt)
     appendClientPrompt(childJob.id, prompt, childJob.turnIndex)
-    runningPrompt.value = ''
+    consumeSubmittedComposerDraft(prompt, 'queue', queueAttempt.key)
     clearDurableAttempt('queue', queueAttempt.key)
     queueAttempt = null
     restoreDurableAttemptNotice()
@@ -4113,7 +4443,6 @@ async function queueRunningMessage() {
       const recoveredChild = await reconcileQueuedCanvasRequest(parentJobId)
       assertActionIdentity(identity)
       if (recoveredChild) {
-        runningPrompt.value = ''
         ElMessage.success('已恢复上一条排队请求，当前生成完成后会自动继续')
         return true
       }
@@ -4327,6 +4656,8 @@ async function restoreSessionTimeline(sessionId, {
       || job.value?.sessionId !== sessionId
     ) return false
     const turns = Array.isArray(response.data?.turns) ? response.data.turns : []
+    handoffTimelineReceipt.value = Array.isArray(response.data?.turns)
+      ? { ownerId: currentAiOwnerUserId(), sessionId } : null
     currentSessionTitle.value = resolveMindmapAiSessionTitle(response.data?.title, turns)
     sessionTurns.value = turns
       .filter(turn => turn?.job?.id)
@@ -4678,6 +5009,7 @@ function sessionPointer(session) {
     sourceFingerprint: sessionJob.baseHash || '',
     configuration: {
       agentKey: sessionJob.agentKey,
+      deviceId: sessionJob.deviceId || '',
       modelId: sessionJob.modelRef || null,
       intent: sessionJob.intent === 'discuss' ? 'create' : sessionJob.intent,
       sourceMode: sourceType === 'none'
@@ -4898,6 +5230,7 @@ async function restoreActiveJob({
       // 水合暂时失败，下一次打开也能从 jobId 恢复，而不会重复创建。
       restoreJobSourceState(job.value, saved)
       if (!persistActiveJob()) throw new Error('浏览器无法保存 AI 任务恢复指针，请重试')
+      consumeSubmittedComposerDraft(createAttempt.requestPayload?.prompt, 'create', createAttempt.key)
       clearDurableAttempt('create', createAttempt.key)
       restoreDurableAttemptNotice()
     }
@@ -4994,10 +5327,12 @@ async function restoreActiveJob({
       throw new Error('浏览器无法保存新轮次任务恢复指针，请重试')
     }
     if (reconciledFollowupAttemptKey) {
+      consumeSubmittedComposerDraft(readPersistedAttempts().followup?.requestPayload?.prompt, 'followup', reconciledFollowupAttemptKey)
       clearDurableAttempt('followup', reconciledFollowupAttemptKey)
       restoreDurableAttemptNotice()
     }
     if (reconciledRetryAttemptKey) {
+      consumeSubmittedComposerDraft(readPersistedAttempts().retry?.requestPayload?.prompt, 'retry', reconciledRetryAttemptKey)
       clearDurableAttempt('retry', reconciledRetryAttemptKey)
       restoreDurableAttemptNotice()
     }
@@ -5073,6 +5408,31 @@ function requestDialogClose() {
   visible.value = false
 }
 
+function closeContextPicker(event) {
+  if (!contextPickerVisible.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  contextPickerVisible.value = false
+  contextTriggerRef.value?.focus({ preventScroll: true })
+}
+
+function closeSessionMenu(event) {
+  if (!sessionMenuVisible.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  sessionMenuVisible.value = false
+  sessionTriggerRef.value?.focus({ preventScroll: true })
+}
+
+function onPanelEscape(event) {
+  if (event.defaultPrevented || event.isComposing) return
+  if (contextPickerVisible.value) return closeContextPicker(event)
+  if (sessionMenuVisible.value) return closeSessionMenu(event)
+  event.preventDefault()
+  event.stopPropagation()
+  requestDialogClose()
+}
+
 function onDialogClosed() {
   // Closing only hides the panel. The task and canvas remain mounted; only an
   // explicit undo/reject may restore the pre-AI document.
@@ -5103,6 +5463,9 @@ function startNewJob() {
     return false
   }
   if (!resetNewJob({ clearStoredJob: true, preserveForm: true })) return false
+  const preferred = agents.value.find(agent => agent.agentKey === agentPreferences.value.defaultAgent
+    && agent.status === 'enabled' && !agentPreferences.value.hidden.includes(agent.agentKey))
+  if (preferred) form.agentKey = preferred.agentKey
   form.prompt = ''
   discussionMode.value = false
   showAdvancedSettings.value = false
@@ -5124,6 +5487,7 @@ function startRevisionFromRejected() {
 }
 
 async function loadCapabilities({ recoveryGeneration = restoreGeneration } = {}) {
+  modelRecovery.invalidate()
   loadingAgents.value = true
   agentError.value = ''
   try {
@@ -5422,6 +5786,7 @@ async function reconcileQueuedCanvasRequest(parentJobId) {
   const prompt = attempt.requestPayload?.prompt || ''
   upsertSessionTurn(child, prompt)
   appendClientPrompt(child.id, prompt, child.turnIndex)
+  consumeSubmittedComposerDraft(prompt, 'queue', attempt.key)
   clearDurableAttempt('queue', attempt.key)
   if (queueAttempt?.key === attempt.key) queueAttempt = null
   restoreDurableAttemptNotice()
@@ -5491,6 +5856,7 @@ async function activateQueuedFollowupTurn(parentJobId) {
     requestPayload: {
       prompt,
       agentKey: childJob.agentKey || form.agentKey,
+      deviceId: childJob.deviceId || '',
       modelId: childJob.agentKey === 'native_mindmap' ? form.modelId : undefined,
     },
     attemptKey: queueAttempt?.key || '',
@@ -5783,7 +6149,8 @@ async function hydrateTerminalResources(jobId, {
 }
 
 function terminalJobResourceKey(candidate = job.value) {
-  return JSON.stringify([candidate?.status, candidate?.artifactId || '', candidate?.proposalId || ''])
+  return JSON.stringify([candidate?.status, candidate?.artifactId || '', candidate?.proposalId || '',
+    candidate?.executionEpoch, candidate?.executionState])
 }
 
 function finalizeTerminalJob(jobId = job.value?.id, {
@@ -5971,12 +6338,16 @@ function connectRealtime(jobId) {
     fetchDraftEnabled: true,
     onOpen: () => {
       if (generation !== realtimeGeneration || job.value?.id !== jobId) return
-      realtimeReconnectAttempt = 0
       realtimeConnectionState.value = 'connected'
       realtimeError.value = ''
     },
     onEvent: event => {
       if (generation !== realtimeGeneration || job.value?.id !== jobId) return
+      // Headers, an empty EOF, or replaying the same cursor are not recovery.
+      // Reset backoff only when this connection delivers a new valid event.
+      const sequence = Number(event?.data?.sequence ?? event?.id)
+      if (event?.eventType !== 'stream_error' && Number.isSafeInteger(sequence)
+        && sequence > latestEventSequence.value) realtimeReconnectAttempt = 0
       if (event?.eventType === 'stream_error') {
         realtimeError.value = formatMindmapAiError(event?.data, '收到无效的 AI 实时事件')
       }
@@ -6169,6 +6540,7 @@ async function activateCreatedJob(nextJob, { identity, requestPayload, requestCo
   proposal.value = null
   proposalError.value = ''
   diffConfirmed.value = false
+  consumeSubmittedComposerDraft(requestPayload.prompt, 'create', attemptKey)
   if (persistActiveJob()) clearDurableAttempt('create', attemptKey)
   else {
     restoreDurableAttemptNotice()
@@ -6181,6 +6553,8 @@ async function activateCreatedJob(nextJob, { identity, requestPayload, requestCo
 }
 
 async function submitJob() {
+  if (agentSwitchPending.value) return false
+  if (isDeviceAgent(form.agentKey) && selectedDeviceIssue.value) return ElMessage.warning(selectedDeviceIssue.value)
   if (actionBusy.value || livePreviewCanvasMutationBlocked.value) return
   if (!form.prompt.trim()) return ElMessage.warning(messageModeActive.value ? '请输入想讨论的问题' : '请输入脑图生成要求')
   const requestedIntent = effectiveFormIntent.value
@@ -6214,6 +6588,7 @@ async function submitJob() {
     )
     const requestPayload = {
       agentKey: form.agentKey,
+      deviceId: isDeviceAgent(form.agentKey) ? form.deviceId : undefined,
       modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
       intent: requestedIntent,
       prompt: form.prompt.trim(),
@@ -6236,6 +6611,7 @@ async function submitJob() {
     }
     const requestConfiguration = captureJobConfiguration({
       agentKey: requestPayload.agentKey,
+      deviceId: requestPayload.deviceId || '',
       modelId: requestPayload.modelId,
       // Preserve the selected editor intent while discussionMode controls the
       // actual request intent. This makes discussion -> edit deterministic.
@@ -6345,6 +6721,7 @@ async function activateFollowupJob(nextJob, {
   jobConfiguration.value = captureJobConfiguration({
     ...(jobConfiguration.value || {}),
     agentKey: requestPayload.agentKey,
+    deviceId: requestPayload.deviceId || '',
     modelId: requestPayload.modelId,
     intent: nextDiscussionMode ? configuredEditIntent : form.intent,
     sourceMode: nextSourceMode,
@@ -6373,7 +6750,9 @@ async function activateFollowupJob(nextJob, {
   appendClientPrompt(job.value.id, requestPayload.prompt, job.value.turnIndex)
   upsertSessionTurn(job.value, requestPayload.prompt)
   selectedTurnJobId.value = String(job.value.id)
-  followupPrompt.value = ''
+  // Automatic queue handoff consumes an already accepted message, not the
+  // still-unsent composer draft (even when its text happens to be identical).
+  if (identity.type !== 'queue-activate') consumeSubmittedComposerDraft(requestPayload.prompt, 'followup', attemptKey)
   pendingFollowupPrompt.value = ''
   proposal.value = null
   proposalError.value = ''
@@ -6434,6 +6813,7 @@ async function activateRetryJob(nextJob, {
   const nextConfiguration = captureJobConfiguration({
     ...(jobConfiguration.value || {}),
     agentKey: requestPayload.agentKey,
+    deviceId: requestPayload.deviceId || '',
     modelId: requestPayload.modelId,
     maxNodes: nextJob.maxNodes ?? jobConfiguration.value?.maxNodes,
     maxDepth: nextJob.maxDepth ?? jobConfiguration.value?.maxDepth,
@@ -6458,7 +6838,7 @@ async function activateRetryJob(nextJob, {
   appendClientPrompt(job.value.id, visiblePrompt, job.value.turnIndex)
   upsertSessionTurn(job.value, visiblePrompt)
   selectedTurnJobId.value = String(job.value.id)
-  retryPrompt.value = ''
+  consumeSubmittedComposerDraft(requestPayload.prompt, 'retry', attemptKey)
   proposal.value = null
   proposalError.value = ''
   diffConfirmed.value = false
@@ -6487,6 +6867,12 @@ async function activateRetryJob(nextJob, {
 }
 
 async function retryJob() {
+  if (isMindmapExecutionBlocked(job.value)) {
+    ElMessage.info('旧 Agent 尚未确认退出，请先刷新停止状态。')
+    return false
+  }
+  if (agentSwitchPending.value) return false
+  if (isDeviceAgent(form.agentKey) && selectedDeviceIssue.value) return ElMessage.warning(selectedDeviceIssue.value)
   const retriedJob = job.value
   if (actionBusy.value || livePreviewCanvasMutationBlocked.value || !retryAvailable.value || !retriedJob?.id) {
     if (livePreviewCanvasMutationBlocked.value) {
@@ -6516,8 +6902,9 @@ async function retryJob() {
   try {
     const requestPayload = {
       agentKey: form.agentKey,
+      deviceId: isDeviceAgent(form.agentKey) ? form.deviceId : undefined,
       modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
-      prompt: retryPrompt.value.trim() || undefined,
+      prompt: continuationPrompt.value.trim() || undefined,
       parameters: {
         language: jobConfiguration.value?.language || form.language,
         layout: jobConfiguration.value?.layout || form.layout,
@@ -6553,6 +6940,7 @@ async function retryJob() {
           configuration: captureJobConfiguration({
             ...(jobConfiguration.value || {}),
             agentKey: requestPayload.agentKey,
+            deviceId: requestPayload.deviceId || '',
             modelId: requestPayload.modelId,
           }),
         },
@@ -6641,6 +7029,12 @@ async function retryJob() {
 }
 
 async function continueJob() {
+  if (isMindmapExecutionBlocked(job.value)) {
+    ElMessage.info('旧 Agent 尚未确认退出，请先刷新停止状态。')
+    return false
+  }
+  if (agentSwitchPending.value) return false
+  if (isDeviceAgent(form.agentKey) && selectedDeviceIssue.value) return ElMessage.warning(selectedDeviceIssue.value)
   const parentJob = followupParentJob.value
   if (
     actionBusy.value
@@ -6652,7 +7046,7 @@ async function continueJob() {
       && !(isMindmapAiMessageJob(parentJob) && parentJob.status === 'completed_message')
       && parentJob.status !== 'completed_direct'
     )
-    || !followupPrompt.value.trim()
+    || !continuationPrompt.value.trim()
   ) {
     if (livePreviewCanvasMutationBlocked.value) {
       ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再继续生成')
@@ -6674,11 +7068,15 @@ async function continueJob() {
     return ElMessage.warning('请选择自研 MindMap Agent 使用的模型')
   }
   if (nativeModelConfigurationIssue.value) return ElMessage.warning(nativeModelConfigurationIssue.value)
+  // Freeze this send before reading/reconciling the canvas. The input remains
+  // editable during those awaits; later edits belong to the next draft.
+  const submittedPrompt = continuationPrompt.value.trim()
+  const draftReceipt = composerDraftPersistence.capture(submittedPrompt)
   continuing.value = true
   const identity = beginActionIdentity('followup', { jobId: job.value?.id })
   let preparationId = null
   const parentTurnIndex = Number(parentJob.turnIndex || 0)
-  pendingFollowupPrompt.value = followupPrompt.value.trim()
+  pendingFollowupPrompt.value = submittedPrompt
   const monitoredJobId = String(job.value?.id || '')
   // Freeze the currently monitored turn as soon as the user submits another.
   // A delayed poll or draft response must not repaint its old result.
@@ -6803,11 +7201,12 @@ async function continueJob() {
       }
     }
     const requestPayload = {
-      prompt: followupPrompt.value.trim(),
+      prompt: submittedPrompt,
       artifactId: continuationBase === 'artifact'
         ? (parentJob.artifactId || undefined)
         : undefined,
       agentKey: form.agentKey,
+      deviceId: isDeviceAgent(form.agentKey) ? form.deviceId : undefined,
       modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
       intent: requestedIntent,
       continuationBase,
@@ -6826,6 +7225,7 @@ async function continueJob() {
       { parentJobId, requestPayload },
       {
         createKey: () => createMindmapAiIdempotencyKey('mindmap-ai-followup'),
+        draftReceipt,
         metadata: {
           parentJobId,
           parentTurnIndex,
@@ -7929,6 +8329,7 @@ async function applyProposal({ automatic = false } = {}) {
   if (!currentProposal || (!automatic && !diffConfirmed.value)) {
     if (!automatic) ElMessage.warning('请先查看并勾选提案差异确认，再应用到当前脑图')
     if (currentProposal && !automatic) {
+      if (proposalReviewRef.value) proposalReviewRef.value.open = true
       await nextTick()
       const confirmationElement = proposalConfirmationRef.value?.$el
       confirmationElement?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
@@ -8140,7 +8541,7 @@ async function cancelJob({ previewAlreadyReverted = false, initiatedByReject = f
       // drain timer, nor attempt to revert/hydrate the child's state.
       if (!componentAlive || job.value?.id !== jobId) return true
       await refreshTimelineAfterSideEffect(identity)
-      return true
+      return !isMindmapExecutionBlocked(job.value)
     }
     schedulePoll(200)
     return true
@@ -8174,6 +8575,7 @@ async function deleteSessionRecord() {
     assertActionIdentity(identity)
     await deleteMindmapAiSession(sessionId)
     assertActionIdentity(identity)
+    composerDraftPersistence.update('')
     recentSessions.value = recentSessions.value.filter(item => item.sessionId !== sessionId)
     // This exact session is durably deleted; no SSE terminal event is required
     // to detach its local callbacks. Ordinary running-task resets stay blocked.
@@ -8221,11 +8623,17 @@ watch(() => props.readonly, async () => {
 
 watch(() => userStore.id, (nextUserId, previousUserId) => {
   if (String(nextUserId || '') === String(previousUserId || '')) return
+  showAdvancedSettings.value = false
+  agentPreferences.value = readAgentPreferences(nextUserId)
   invalidateSessionList()
   recentSessions.value = []
   sessionListError.value = ''
   clearLocalAckRetryTimer()
-  resetNewJob({ clearStoredJob: false, preserveForm: true, detach: true })
+  resetNewJob({ clearStoredJob: false, preserveForm: false, detach: true })
+  form.agentKey = agentPreferences.value.defaultAgent
+  form.deviceId = ''
+  agentSwitchGeneration += 1
+  agentSwitchPending.value = false
   localAckRecoveryWarnings.clear()
   localAckRecoveryCompleted.clear()
   updateCloudMutationRecoveryNotice()
@@ -8235,25 +8643,43 @@ watch(() => userStore.id, (nextUserId, previousUserId) => {
   }
 })
 
-watch(() => agentEvents.value.length, async (_nextLength, previousLength) => {
-  const currentTimeline = activityTimelineRef.value
-  const shouldFollowLatest = !currentTimeline
-    || previousLength === 0
-    || currentTimeline.scrollHeight - currentTimeline.scrollTop - currentTimeline.clientHeight <= 48
+function onChatScroll() {
+  chatFollowing.value = isAgentChatNearBottom(chatScrollRef.value)
+}
+
+function jumpToLatest() {
+  chatFollowing.value = true
+  const viewport = chatScrollRef.value
+  if (viewport) viewport.scrollTop = viewport.scrollHeight
+}
+
+function followAgentOutput() {
+  if (chatFollowing.value) jumpToLatest()
+}
+
+watch(() => agentEvents.value.length, async () => {
   await nextTick()
-  const timeline = activityTimelineRef.value
-  if (timeline && shouldFollowLatest) timeline.scrollTop = timeline.scrollHeight
+  followAgentOutput()
 })
 
-watch(pendingFollowupPrompt, async (prompt) => {
+watch(pendingFollowupPrompt, async prompt => {
   if (!prompt) return
-  const currentTimeline = activityTimelineRef.value
-  const shouldFollowLatest = !currentTimeline
-    || currentTimeline.scrollHeight - currentTimeline.scrollTop - currentTimeline.clientHeight <= 48
   await nextTick()
-  const timeline = activityTimelineRef.value
-  if (timeline && shouldFollowLatest) timeline.scrollTop = timeline.scrollHeight
+  followAgentOutput()
 })
+
+// Observe the message content, but scroll the actual drawer viewport. Markdown
+// rendering and tool expansion can change height after the SSE batch has landed.
+watch(activityTimelineRef, element => {
+  chatResizeObserver?.disconnect()
+  chatResizeObserver = null
+  if (!element || typeof ResizeObserver === 'undefined') return
+  chatResizeObserver = new ResizeObserver(followAgentOutput)
+  chatResizeObserver.observe(element)
+})
+
+watch(() => job.value?.sessionId, () => { chatFollowing.value = true })
+onBeforeUnmount(() => chatResizeObserver?.disconnect())
 
 watch(() => running.value || submitting.value, (active) => {
   if (!active) {
@@ -8315,6 +8741,9 @@ watch(livePreviewCanvasMutationBlocked, (blocked, wasBlocked) => {
 })
 
 watch(visible, value => {
+  if (!value) showAdvancedSettings.value = false
+  agentSwitchGeneration += 1
+  agentSwitchPending.value = false
   bus.emit('aiPanelVisibilityChange', value === true)
 }, { immediate: true })
 
@@ -8451,7 +8880,6 @@ onBeforeUnmount(() => {
 .activityHeader,
 .activityHeaderActions,
 .agentOption,
-.jobHeader,
 .resultSummary {
   display: flex;
   align-items: center;
@@ -8637,7 +9065,6 @@ onBeforeUnmount(() => {
 }
 
 .agentOption small,
-.jobHeader small,
 .fieldHint {
   color: var(--el-text-color-secondary);
   font-size: 12px;
@@ -8665,8 +9092,7 @@ onBeforeUnmount(() => {
   &.is-unavailable { color: var(--el-text-color-placeholder); }
 }
 
-.agentSelectionIssue,
-.composerAgentIssue {
+.agentSelectionIssue {
   display: flex;
   min-width: 0;
   align-items: flex-start;
@@ -8802,11 +9228,6 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 
-.jobHeader > div {
-  display: grid;
-  gap: 3px;
-}
-
 .resultSummary {
   color: var(--el-color-success);
   font-size: 13px;
@@ -8915,6 +9336,10 @@ onBeforeUnmount(() => {
   .controlPane { overflow: visible; }
 }
 
+.composerAgentBar { display:flex; align-items:center; gap:8px; margin:4px 0 10px; }
+.composerAgentBar .el-select { width:145px; flex-shrink:0; }
+.composerAgentBar > small { flex:1; color:var(--el-text-color-secondary); font-size:10px; }
+
 @media (prefers-reduced-motion: reduce) {
   .connectionBadge i { animation: none !important; }
 }
@@ -8924,8 +9349,6 @@ onBeforeUnmount(() => {
     height: auto;
     grid-template-columns: 1fr;
   }
-
-  .activitySidebar { max-height: 250px; }
 
   .workspaceMain { overflow: visible; }
 
@@ -9005,7 +9428,7 @@ onBeforeUnmount(() => {
   right: auto !important;
   bottom: 30px !important;
   left: 44px !important;
-  width: 500px !important;
+  width: calc(100% - 44px) !important;
   height: auto !important;
   pointer-events: none;
 
@@ -9318,43 +9741,31 @@ onBeforeUnmount(() => {
   }
 }
 
-.advancedSettings {
-  margin-bottom: 14px;
-  padding: 14px;
-  border: 1px solid var(--ai-border);
-  border-radius: 14px;
-  background: var(--ai-card-bg);
-}
-
-.advancedSettingsHeader {
-  display: flex;
-  margin-bottom: 14px;
-  align-items: flex-start;
-  justify-content: space-between;
-
-  > div { display: grid; gap: 3px; }
-  strong { color: var(--ai-ink); font-size: 14px; }
-  small { color: var(--ai-muted); font-size: 11px; line-height: 1.4; }
-}
-
-.mindmapAiDrawer .formGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.mindmapAiDrawer .agentDisclosure { margin-top: 6px; }
-
 .mindmapAiDrawer .jobPanel {
   margin: 0;
-  padding: 14px;
-  border-color: var(--ai-border);
-  border-radius: 14px;
-  background: var(--ai-card-bg);
-  box-shadow: 0 1px 3px rgba(20, 24, 20, 0.04);
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
-.mindmapAiDrawer .jobHeader small {
-  display: block;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.jobActivitySummary {
+  margin: 0;
+  color: var(--agent-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.jobDetails {
+  color: var(--agent-muted);
+  font-size: 12px;
+  line-height: 1.7;
+
+  summary { padding: 6px 0; cursor: pointer; }
+  summary:focus-visible { outline: 2px solid var(--agent-accent); outline-offset: 2px; }
+  dl { display: grid; gap: 6px; margin: 6px 0 0; }
+  dl > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; }
+  dt { color: var(--agent-muted); }
+  dd { margin: 0; color: var(--agent-ink); overflow-wrap: anywhere; }
 }
 
 .mindmapAiDrawer .proposalPreview {
@@ -9386,6 +9797,9 @@ onBeforeUnmount(() => {
 
 .panelFooter { display: grid; gap: 9px; }
 
+.modelRecoveryActions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; align-items: center; }
+.modelRecoveryActions .fieldHint { width: 100%; overflow-wrap: anywhere; }
+
 .resultQuickActions {
   display: flex;
   min-height: 30px;
@@ -9415,6 +9829,18 @@ onBeforeUnmount(() => {
   span { color: var(--el-text-color-secondary); font-size: 11px; }
 }
 
+.mindmapAiDrawer .agentResultCard .primaryResultAction {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+
+  .el-button { margin-left: 0; white-space: normal; height: auto; min-height: 32px; }
+}
+
 .liveDraftNotice {
   display: flex;
   margin-bottom: 12px;
@@ -9434,7 +9860,7 @@ onBeforeUnmount(() => {
     flex: 0 0 auto;
     border-radius: 50%;
     background: var(--ai-live-dot);
-    animation: aiPulse 1.2s ease-in-out infinite;
+    animation: none;
   }
 
   > div {
@@ -9464,10 +9890,6 @@ onBeforeUnmount(() => {
     }
   }
 
-  &.is-direct {
-    border-color: color-mix(in srgb, var(--el-color-primary) 28%, transparent);
-    background: color-mix(in srgb, var(--el-color-primary) 8%, var(--el-bg-color));
-  }
 }
 
 .livePreviewRecovery {
@@ -9485,6 +9907,34 @@ onBeforeUnmount(() => {
   gap: 10px;
 
   span { min-width: 0; }
+  .el-button { flex: 0 0 auto; }
+}
+
+.composerCanvasRecovery {
+  margin-bottom: 4px;
+  font-size: 12px;
+  > div { min-width: 0; overflow-wrap: anywhere; }
+  strong, span { display: block; }
+  strong { color: var(--el-text-color-primary); }
+}
+
+.composerInputHint {
+  margin: 0;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+}
+
+.composerDraftNotice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  span { min-width: 0; overflow-wrap: anywhere; }
   .el-button { flex: 0 0 auto; }
 }
 
@@ -9533,41 +9983,6 @@ onBeforeUnmount(() => {
     font-size: 14px;
     line-height: 1.55;
   }
-}
-
-.composerAgentIssue {
-  margin: 5px 0 4px;
-  padding: 6px 8px;
-  align-items: center;
-
-  span { flex: 1 1 auto; }
-
-  button {
-    flex: 0 0 auto;
-    padding: 2px 0;
-    border: 0;
-    color: var(--el-color-primary);
-    background: transparent;
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-}
-
-.composerPreflight {
-  display: flex;
-  margin: 2px 2px 4px;
-  align-items: baseline;
-  color: var(--ai-muted);
-  font-size: 11px;
-  line-height: 1.45;
-  gap: 6px;
-}
-
-.composerPreflightLabel {
-  flex: 0 0 auto;
-  color: var(--el-color-primary);
-  font-weight: 600;
 }
 
 .composerRoutePicker {
@@ -9623,8 +10038,7 @@ onBeforeUnmount(() => {
 .composerTools,
 .composerSubmitGroup { gap: 4px; }
 
-.contextChip,
-.discussionChip {
+.contextChip {
   display: inline-flex;
   max-width: 270px;
   padding: 4px 8px;
@@ -9647,11 +10061,6 @@ button.contextChip {
 
   &:hover:not(:disabled) { color: var(--ai-ink); background: var(--ai-soft-hover); }
   &:disabled { cursor: default; opacity: 0.72; }
-}
-
-.discussionChip {
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
 }
 
 .reasoningModes {
@@ -9793,8 +10202,8 @@ button.contextChip {
   }
 
   .mindmapAiDrawer { width: 100% !important; }
-  .starterGrid,
-  .mindmapAiDrawer .formGrid { grid-template-columns: 1fr; }
+  .starterGrid { grid-template-columns: 1fr; }
   .reasoningModes button { padding-inline: 6px; }
 }
 </style>
+<style lang="scss" src="./styles/agent-chat.scss"></style>

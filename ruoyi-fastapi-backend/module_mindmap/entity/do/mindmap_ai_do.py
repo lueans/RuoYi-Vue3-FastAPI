@@ -1,8 +1,9 @@
 """AI 脑图任务、Artifact、Proposal 与事件表。"""
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, Numeric, String, Text, select
 from sqlalchemy.dialects import mysql
+from sqlalchemy.orm import column_property
 
 from config.database import Base
 from config.env import DataBaseConfig
@@ -201,6 +202,22 @@ class MindmapAiJobEvent(Base):
     event_type = Column(String(64), nullable=False)
     payload_json = Column(Text, nullable=False)
     created_time = Column(DateTime, nullable=False, default=datetime.now)
+
+
+# A read-only projection over the existing durable event log: no schema change,
+# request-JSON mutation, or process-local cache is required for stop evidence.
+MindmapAiJob.execution_state_json = column_property(
+    select(MindmapAiJobEvent.payload_json)
+    .where(
+        MindmapAiJobEvent.job_id == MindmapAiJob.id,
+        MindmapAiJobEvent.event_type == 'execution_state',
+    )
+    .order_by(MindmapAiJobEvent.sequence.desc())
+    .limit(1)
+    .correlate_except(MindmapAiJobEvent)
+    .scalar_subquery(),
+    expire_on_flush=False,
+)
 
 
 class MindmapAiDraftCheckpoint(Base):

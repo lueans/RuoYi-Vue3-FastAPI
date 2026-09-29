@@ -19,7 +19,7 @@ test('字数估算按共同前缀和完整字素计算，并覆盖多个节点�
     node('old', '👨‍👩‍👧‍👦e\u0301👍🏽'), node('unchanged', '保留'), node('empty', ''),
     node('new', '新增'),
   ]) }
-  assert.equal(getMindmapAiPendingCharacterCount(current, target), 6)
+  assert.equal(getMindmapAiPendingCharacterCount(current, target), 4)
   assert.equal(getMindmapAiPendingCharacterCount(target, target), 0)
   assert.equal(getMindmapAiPendingCharacterCount(null, { root: node('root', '甲乙丙') }), 3)
 })

@@ -23,10 +23,13 @@ from exceptions.exception import ServiceException, ServiceWarning
 from module_ai.dao.ai_model_dao import AiModelDao
 from module_ai.entity.do.ai_model_do import AiModels
 from module_mindmap.ai.adapters.base import (
+    MAX_AGENT_MESSAGE_LENGTH,
     AgentDirectResult,
+    AgentEventHandler,
     AgentMessageResult,
     AgentNeedsInputResult,
     AgentRunContext,
+    AgentRunOutcome,
     map_adapter_exception,
     normalize_agent_input_questions,
     normalize_agent_message,
@@ -41,6 +44,7 @@ from module_mindmap.ai.change_summary import (
 )
 from module_mindmap.ai.checkpoint_crypto import MindmapAiCheckpointCrypto
 from module_mindmap.ai.credentials import resolve_connector_credential
+from module_mindmap.ai.device_runtime import DEVICE_AGENT_KEYS
 from module_mindmap.ai.diff import build_document_diff
 from module_mindmap.ai.document import (
     AI_MAX_FILE_BYTES,
@@ -53,14 +57,16 @@ from module_mindmap.ai.document import (
     normalize_ai_editable_source_document,
     validate_smm_artifact,
 )
+from module_mindmap.ai.execution_state import EXECUTION_STATES, execution_blocks_continuation, job_execution_state
 from module_mindmap.ai.proposal_operations import (
     PROPOSAL_INTEGRITY_ERROR_CODE,
     materialize_editor_document_from_proposal,
     normalize_proposal_operations_for_apply,
     verify_proposal_document_integrity,
 )
+from module_mindmap.ai.runtime_trace import normalize_todos, public_text
 from module_mindmap.ai.tool_contract import MindmapToolService, normalize_tag_suggestions
-from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
+from module_mindmap.dao.mindmap_ai_dao import MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT, MindmapAiDao
 from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
 from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiCloudApplyModel,
@@ -77,6 +83,11 @@ from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiResponseModel,
 )
 from module_mindmap.entity.vo.mindmap_vo import MindmapContentBatchModel, MindmapModel
+from module_mindmap.service.mindmap_ai_device_execution import (
+    execute_device_job,
+    merge_device_selection,
+    validate_device_selection,
+)
 from module_mindmap.service.mindmap_ai_metrics import (
     record_mindmap_ai_event,
     record_mindmap_ai_run,
@@ -143,6 +154,7 @@ AI_DRAFT_PREVIEW_MAX_LATEST_BYTES = 2 * 1024 * 1024
 AI_DRAFT_CHECKPOINT_MAX_PLAINTEXT_BYTES = AI_DRAFT_PREVIEW_MAX_TOTAL_BYTES
 AI_DRAFT_CHECKPOINT_MAX_CIPHERTEXT_BYTES = 12 * 1024 * 1024
 AI_EVENT_SAFE_FIELDS = frozenset({
+    'messageId', 'text', 'visibility', 'todos', 'origin', 'callId', 'toolInput', 'toolOutput', 'durationMs',
     'status', 'progress', 'agentKey', 'stage', 'toolName', 'step', 'totalSteps',
     'actionCount', 'tools', 'errorCode', 'errorMessage',
     'hasResponse', 'summary', 'parentJobId', 'retryOfJobId', 'turnIndex', 'artifactId', 'proposalId',
@@ -154,6 +166,7 @@ AI_EVENT_SAFE_FIELDS = frozenset({
     'changeSummary', 'changeSummaryVersion',
     'questions', 'route', 'queuePosition',
     'completionReason',
+    'executionState', 'executionEpoch',
     'suggestions',
 })
 AI_EVENT_SUMMARY_FIELDS = frozenset({
@@ -164,6 +177,8 @@ AI_TIMELINE_EVENT_PAGE_SIZE = 1_000
 AI_PROMPT_MAX_LENGTH = 20_000
 AI_DISCUSSION_HISTORY_MAX_MESSAGES = 20
 AI_DISCUSSION_HISTORY_MAX_CHARS = 40_000
+AI_CONTINUATION_HISTORY_MAX_TURNS = 4
+AI_CONTINUATION_JOB_ID_MAX_LENGTH = 36
 AI_SESSION_INITIAL_TITLE_MAX_LENGTH = 36
 _SESSION_TITLE_CONTROL_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
 AI_JOB_LEASE_KEY_PREFIX = 'mindmap:ai:job-lease:'
@@ -657,10 +672,16 @@ async def _direct_job_change_result(db: AsyncSession, job: Any) -> dict[str, Any
 
 
 def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
-    """把供应商事件收敛为不含 prompt、节点正文和完整文档的审计摘要。"""
+    """Persist bounded visible conversation and audit projections, never raw envelopes."""
     output: dict[str, Any] = {}
     for key, value in payload.items():
         if key not in AI_EVENT_SAFE_FIELDS or value is None:
+            continue
+        if key == 'todos':
+            output[key] = normalize_todos(value)
+            continue
+        if key in {'text', 'toolInput', 'toolOutput'}:
+            output[key] = public_text(value, 6000 if key != 'text' else 4000)
             continue
         if key == 'summary':
             if isinstance(value, dict):
@@ -815,6 +836,7 @@ def _job_model(job: Any) -> MindmapAiJobModel:
         retryOfJobId=job.retry_of_job_id,
         turnIndex=job.turn_index,
         agentKey=job.agent_key,
+        deviceId=request_payload.get('deviceId') if job.agent_key in DEVICE_AGENT_KEYS else None,
         adapterVersion=job.adapter_version,
         sdkVersion=job.sdk_version,
         runtimeVersion=job.runtime_version,
@@ -829,6 +851,9 @@ def _job_model(job: Any) -> MindmapAiJobModel:
         intent=job.intent,
         target=job.target,
         executionMode=execution_mode,
+        executionState=job_execution_state(job),
+        executionEpoch=int(getattr(job, 'execution_epoch', 0) or 0),
+        cancelRequestedTime=getattr(job, 'cancel_requested_time', None),
         sourceType=job.source_type,
         sourceMindmapId=job.source_mindmap_id,
         baseRevision=job.base_revision,
@@ -866,6 +891,46 @@ class MindmapAiTaskManager:
     _detached_adapter_tasks: set[asyncio.Task[Any]] = set()
     _shutting_down = False
     _redis: Any | None = None
+
+    @classmethod
+    async def _record_execution_state(cls, job_id: str, state: str) -> bool:
+        """Only the owned executor publishes exit evidence, including after a result is terminal."""
+        if state not in EXECUTION_STATES:
+            raise ValueError('Invalid executor receipt state')
+        epoch = _CURRENT_JOB_EXECUTION_EPOCH.get()
+        if epoch is None:
+            return False
+        async with AsyncSessionLocal() as db:
+            job = await MindmapAiDao.get_job(db, job_id, for_update=True)
+            if job is None or int(getattr(job, 'execution_epoch', -1)) != epoch:
+                await db.rollback()
+                if state == 'running':
+                    raise asyncio.CancelledError
+                return False
+            if state == 'running' and (
+                job.status not in {'queued', 'preparing', 'running', 'validating'}
+                or not await cls._owns_current_job_lease(job_id)
+            ):
+                await db.rollback()
+                raise asyncio.CancelledError
+            previous = job_execution_state(job)
+            if state == 'running' and previous in {'stopped', 'unconfirmed'}:
+                await db.rollback()
+                raise asyncio.CancelledError
+            if previous == state or previous == 'stopped':
+                await db.rollback()
+                return previous == state
+            event = await MindmapAiDao.add_event(db, job_id, 'execution_state', _event_json({
+                'executionState': state, 'executionEpoch': epoch,
+            }))
+            if event is None:
+                await db.rollback()
+                raise MindmapArtifactError('执行状态无法持久化', code='AI_AGENT_CLEANUP_FAILED')
+            # The DAO adds update_time itself; passing it twice aborts the
+            # transaction and would discard this receipt on every real run.
+            await MindmapAiDao.update_job(db, job_id, {})
+            await db.commit()
+            return True
 
     @classmethod
     def configure_redis(cls, redis: Any) -> None:
@@ -1716,6 +1781,28 @@ class MindmapAiTaskManager:
                     )
                 return None
             claimed_status = str(job.status)
+            if job_execution_state(job) in {'running', 'unconfirmed'}:
+                # A lease expiry proves loss of ownership, not process exit.
+                # Do not launch a replacement paid invocation over a ghost run.
+                await MindmapAiDao.update_job(db, job_id, {
+                    'status': 'failed', 'progress': 100,
+                    'error_code': 'AI_AGENT_CLEANUP_FAILED',
+                    'error_message': '执行租约已失效，但旧执行器尚未确认退出，请检查运行主机。',
+                    'completed_time': datetime.now(),
+                })
+                await MindmapAiDao.delete_draft_checkpoint(db, job_id)
+                await MindmapAiDao.add_event(db, job_id, 'status_changed', _event_json({
+                    'status': 'failed', 'progress': 100,
+                    'errorCode': 'AI_AGENT_CLEANUP_FAILED',
+                    'errorMessage': '执行租约已失效，但旧执行器尚未确认退出，请检查运行主机。',
+                }))
+                await MindmapAiDao.add_event(db, job_id, 'execution_state', _event_json({
+                    'executionState': 'unconfirmed',
+                    'executionEpoch': int(getattr(job, 'execution_epoch', 0) or 0),
+                }))
+                await db.commit()
+                await cls.mark_draft_terminal(job_id, int(getattr(job, 'execution_epoch', 0) or 0))
+                return None
             if claimed_status == 'cancel_requested':
                 changed = await MindmapAiDao.transition_job_status(
                     db,
@@ -2192,6 +2279,10 @@ class MindmapAiTaskManager:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
+        if event_type == 'execution_state':
+            raise MindmapArtifactError(
+                'Agent 不能自行声明执行器已退出', code='AI_OUTPUT_INVALID',
+            )
         if not await cls._owns_current_job_lease(job_id):
             return
         async with AsyncSessionLocal() as db:
@@ -2424,6 +2515,11 @@ class MindmapAiTaskManager:
         predecessors = JOB_STATUS_PREDECESSORS.get(status)
         if predecessors is None:
             raise RuntimeError(f'未声明的 AI 任务状态迁移: {status}')
+        if status == 'failed' and values.get('error_code') == 'AI_AGENT_CLEANUP_FAILED':
+            # Ordinary provider failures must not overwrite accepted cancel.
+            # A failed stop itself is the exception: keeping cancel_requested
+            # would let recovery falsely turn it into confirmed cancellation.
+            predecessors = predecessors | {'cancel_requested'}
         async with AsyncSessionLocal() as db:
             if lease_token is not None:
                 job = await MindmapAiDao.get_job(db, job_id, for_update=True)
@@ -2501,6 +2597,10 @@ class MindmapAiTaskManager:
                 # consume that unconfirmed artifact.  The explicit apply or
                 # reject path wakes/closes children after its own commit.
                 if parent.status == 'needs_review':
+                    return
+                if execution_blocks_continuation(parent):
+                    # A retained artifact is usable, but never permission to
+                    # start its queued successor before the old executor exits.
                     return
                 waiting_jobs = await MindmapAiDao.list_waiting_followups(
                     db,
@@ -2748,6 +2848,9 @@ class MindmapAiTaskManager:
                     values['source_type'] = request_payload['source']['type']
                     if 'base_hash' not in values:
                         values['base_hash'] = waiting_job.base_hash
+                released_request = _json_loads(values.get('request_json') or waiting_job.request_json, {})
+                released_request['contextParentJobId'] = str(parent.id)
+                values['request_json'] = _json_dumps(released_request)
                 await MindmapAiDao.update_job(db, waiting_job.id, values)
                 await MindmapAiDao.add_event(
                     db,
@@ -2946,6 +3049,36 @@ class MindmapAiTaskManager:
         """等待 Adapter，并跨 worker 观察持久化取消状态。"""
         task = asyncio.create_task(runner_call, name=f'mindmap-ai-adapter:{job_id}')
         cleanup_attempted = False
+        expected_execution_epoch = _CURRENT_JOB_EXECUTION_EPOCH.get()
+
+        def execution_fenced(job: Any) -> bool:
+            # A stop retaining a checkpoint closes the job as ready/needs_review,
+            # not cancelled. Another worker must still stop its paid invocation.
+            # The same applies after a newer worker claims this job's execution.
+            return (
+                job is None
+                or job.status == 'cancel_requested'
+                or job.status in TERMINAL_JOB_STATUSES
+                or (
+                    expected_execution_epoch is not None
+                    and getattr(job, 'execution_epoch', None) != expected_execution_epoch
+                )
+            )
+
+        async def stop_adapter() -> None:
+            nonlocal cleanup_attempted
+            # Mark before awaiting: a failed/slow stop must not be cancelled a
+            # second time by finally while the adapter is cleaning up children.
+            cleanup_attempted = True
+            stopped = await cls._cancel_adapter_task(
+                task, job_id, grace_seconds=cancel_grace_seconds,
+            )
+            if not stopped:
+                raise MindmapArtifactError(
+                    'Agent 未在停止宽限期内退出，请检查运行主机后再继续。',
+                    code='AI_AGENT_CLEANUP_FAILED',
+                )
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (
             timeout_seconds or MindmapAiConfig.mindmap_ai_job_timeout_seconds
@@ -2954,12 +3087,7 @@ class MindmapAiTaskManager:
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    await cls._cancel_adapter_task(
-                        task,
-                        job_id,
-                        grace_seconds=cancel_grace_seconds,
-                    )
-                    cleanup_attempted = True
+                    await stop_adapter()
                     raise TimeoutError
                 done, _pending = await asyncio.wait({task}, timeout=min(0.5, remaining))
                 if task in done:
@@ -2967,7 +3095,7 @@ class MindmapAiTaskManager:
                     try:
                         async with AsyncSessionLocal() as db:
                             job = await MindmapAiDao.get_job(db, job_id)
-                        if job is None or job.status in {'cancel_requested', 'cancelled'}:
+                        if execution_fenced(job):
                             raise asyncio.CancelledError
                     except BaseException:
                         if discard_result is not None:
@@ -2982,21 +3110,47 @@ class MindmapAiTaskManager:
                     return result
                 async with AsyncSessionLocal() as db:
                     job = await MindmapAiDao.get_job(db, job_id)
-                if job is None or job.status in {'cancel_requested', 'cancelled'}:
-                    await cls._cancel_adapter_task(
-                        task,
-                        job_id,
-                        grace_seconds=cancel_grace_seconds,
-                    )
-                    cleanup_attempted = True
+                if execution_fenced(job):
+                    await stop_adapter()
                     raise asyncio.CancelledError
         finally:
-            if not task.done() and not cleanup_attempted:
-                await cls._cancel_adapter_task(
-                    task,
-                    job_id,
-                    grace_seconds=cancel_grace_seconds,
-                )
+            try:
+                if not task.done() and not cleanup_attempted:
+                    await stop_adapter()
+            finally:
+                if task.done():
+                    # A second outer cancellation can arrive just as the
+                    # cleanup task fails. Its failure still wins over cancel.
+                    cls._consume_task_exception(task, propagate_cleanup=True)
+                else:
+                    # Even a second outer cancellation must not turn an
+                    # interrupted cleanup wait into a stopped receipt.
+                    cls._track_detached_adapter_task(task)
+                    cls._observe_late_adapter_exit(task, job_id)
+                    raise MindmapArtifactError(
+                        'Agent 清理尚未结束，无法确认退出。', code='AI_AGENT_CLEANUP_FAILED',
+                    )
+
+    @classmethod
+    def _observe_late_adapter_exit(cls, task: asyncio.Task[Any], job_id: str) -> None:
+        if _CURRENT_JOB_EXECUTION_EPOCH.get() is None:
+            return
+
+        async def record_exit() -> None:
+            try:
+                cls._consume_task_exception(task, propagate_cleanup=True)
+                if await cls._record_execution_state(job_id, 'stopped'):
+                    await cls._wake_waiting_followups(job_id)
+            except Exception:
+                logger.warning(f'迟到的 Agent 退出未能确认: job_id={job_id}')
+
+        def on_done(_task: asyncio.Task[Any]) -> None:
+            # add_done_callback retains the owning epoch context; a new epoch
+            # cannot borrow this receipt. Cleanup failures never become proof.
+            receipt = asyncio.create_task(record_exit(), name=f'mindmap-ai-exit-receipt:{job_id}')
+            cls._track_detached_adapter_task(receipt)
+
+        task.add_done_callback(on_done)
 
     @classmethod
     async def _cancel_adapter_task(
@@ -3008,7 +3162,7 @@ class MindmapAiTaskManager:
     ) -> bool:
         """有界等待 Adapter 响应取消，防止第三方实现吞掉 CancelledError。"""
         if task.done():
-            cls._consume_task_exception(task)
+            cls._consume_task_exception(task, propagate_cleanup=True)
             return True
         task.cancel()
         grace = (
@@ -3018,12 +3172,19 @@ class MindmapAiTaskManager:
         )
         done, _pending = await asyncio.wait({task}, timeout=max(0.0, grace))
         if task in done:
-            cls._consume_task_exception(task)
+            cls._consume_task_exception(task, propagate_cleanup=True)
             return True
 
         logger.error(
             f'AI 脑图 Adapter 在取消宽限期内未退出，已隔离迟到结果: job_id={job_id}'
         )
+        cls._track_detached_adapter_task(task)
+        return False
+
+    @classmethod
+    def _track_detached_adapter_task(cls, task: asyncio.Task[Any]) -> None:
+        if task in cls._detached_adapter_tasks:
+            return
         cls._detached_adapter_tasks.add(task)
 
         def forget_detached(done_task: asyncio.Task[Any]) -> None:
@@ -3031,14 +3192,22 @@ class MindmapAiTaskManager:
             cls._consume_task_exception(done_task)
 
         task.add_done_callback(forget_detached)
-        return False
 
     @staticmethod
-    def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    def _consume_task_exception(task: asyncio.Task[Any], *, propagate_cleanup: bool = False) -> None:
         try:
-            task.exception()
+            error = task.exception()
         except BaseException:
-            pass
+            return
+        if (
+            propagate_cleanup
+            and isinstance(error, MindmapArtifactError)
+            and error.code == 'AI_AGENT_CLEANUP_FAILED'
+        ):
+            # A failed shutdown is not a confirmed cancellation, and must not
+            # trigger transparent provider retry or a successful result.
+            # Device wire errors carry the code without the local subclass.
+            raise error
 
     @staticmethod
     def _owned_external_session_id(
@@ -3123,6 +3292,139 @@ class MindmapAiTaskManager:
             and parent_job.intent == job.intent
             and parent_job.target == job.target
         )
+
+    @classmethod
+    async def _editing_continuation_history(
+        cls,
+        db: AsyncSession,
+        job: Any,
+        request: MindmapAiJobCreateModel,
+    ) -> tuple[dict[str, Any], ...]:
+        """Read at most four owned content ancestors, never the whole session.
+
+        contextParentJobId is added only by follow-up creation/queue release,
+        after the selected artifact is authorized. A server-owned retry link
+        also carries the failed attempt's goal, not its provider session or
+        uncommitted document. Never infer either link from client chat text.
+        """
+        payload = _json_loads(job.request_json, {})
+        retry_parent = getattr(job, 'retry_of_job_id', None)
+        cursor = retry_parent or (payload.get('contextParentJobId') if isinstance(payload, dict) else None)
+        history: list[dict[str, Any]] = []
+        seen = {str(job.id)}
+        for _ in range(AI_CONTINUATION_HISTORY_MAX_TURNS):
+            if (
+                not isinstance(cursor, str) or not cursor
+                or len(cursor) > AI_CONTINUATION_JOB_ID_MAX_LENGTH or cursor in seen
+            ):
+                break
+            seen.add(cursor)
+            parent = await MindmapAiDao.get_job(db, cursor, job.user_id)
+            if (
+                parent is None or str(parent.id) != cursor
+                or parent.user_id != job.user_id or parent.session_id != job.session_id
+                or (
+                    parent.status not in {
+                        'ready', 'applied', 'undone', 'completed_file', 'completed_no_change',
+                        'completed_direct', 'completed_message', 'needs_input',
+                    }
+                    and not (cursor == retry_parent and parent.status in RETRYABLE_JOB_STATUSES)
+                )
+                or (parent.expires_time is not None and parent.expires_time <= datetime.now())
+            ):
+                break
+            parent_payload = _json_loads(parent.request_json, {})
+            try:
+                parent_request = MindmapAiJobCreateModel.model_validate(parent_payload)
+            except ValueError:
+                break
+            if not cls._same_continuation_scope(parent_request, request):
+                break
+            entry: dict[str, Any] = {
+                'agentKey': str(parent.agent_key)[:80],
+                'intent': parent_request.intent,
+                'status': str(parent.status),
+                'request': public_text(parent_request.prompt, 3000),
+            }
+            if parent.status == 'completed_message':
+                # Changing mode/runtime starts a fresh provider session. Carry
+                # the actual visible advice, not only the question that elicited
+                # it. Never read provider state or hidden reasoning as context.
+                response_id = getattr(parent, 'response_id', None)
+                response = await MindmapAiDao.get_response(db, response_id, job.user_id) if response_id else None
+                reply = public_text(getattr(response, 'content_text', None), MAX_AGENT_MESSAGE_LENGTH + 1)
+                if (
+                    parent_request.intent != 'discuss' or parent_request.target != 'message'
+                    or response is None or response.id != response_id
+                    or str(response.job_id) != str(parent.id) or response.user_id != job.user_id
+                    or response.expires_time is None or response.expires_time <= datetime.now()
+                    or not reply.strip()
+                ):
+                    raise MindmapArtifactError(
+                        '前序讨论正文已过期或无法恢复，请重新提供需要执行的建议',
+                        code='AI_SESSION_UNAVAILABLE',
+                    )
+                entry['assistantReply'] = reply[:MAX_AGENT_MESSAGE_LENGTH]
+                entry['assistantReplyState'] = 'truncated' if len(reply) > MAX_AGENT_MESSAGE_LENGTH else 'complete'
+            elif parent_request.intent != 'discuss':
+                # Provider sessions cannot be shared across runtimes. Carry
+                # only persisted public text, never tools or hidden reasoning.
+                replies = await MindmapAiDao.list_visible_reply_payloads(db, str(parent.id), job.user_id)
+                if replies:
+                    parts: list[str] = []
+                    previous_message = None
+                    truncated = len(replies) > MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT
+                    for raw in reversed(replies[:MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT]):
+                        try:
+                            reply = _json_loads(raw, {}) if isinstance(raw, str) and len(raw) <= 65_536 else {}
+                        except (ValueError, RecursionError):
+                            reply = {}
+                        text = reply.get('text') if isinstance(reply, dict) else None
+                        if (
+                            not isinstance(text, str) or len(text) > 4000
+                            or reply.get('visibility', 'visible') != 'visible'
+                        ):
+                            truncated = True
+                            previous_message = None  # Never stitch text across an unreadable gap.
+                            continue
+                        message = reply.get('messageId', '')
+                        if parts and message != previous_message:
+                            parts.append('\n\n')
+                        parts.append(text)
+                        previous_message = message
+                    # Join before redacting/cropping: credentials can span delta
+                    # boundaries. Retain the latest advice when the tail is long.
+                    reply_text = public_text(''.join(parts), MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT * 4002)
+                    entry['assistantReply'] = reply_text[-MAX_AGENT_MESSAGE_LENGTH:]
+                    entry['assistantReplyKind'] = 'editing_transcript'
+                    entry['assistantReplyState'] = (
+                        'truncated' if truncated or len(reply_text) > MAX_AGENT_MESSAGE_LENGTH else 'recorded'
+                    )
+                # Only after content-lineage ownership/scope checks. Read one
+                # latest snapshot, never resurrect an older cleared plan or
+                # import raw tools/thinking as instructions for the new Agent.
+                plan = _json_loads(await MindmapAiDao.get_latest_plan_payload(db, str(parent.id), job.user_id), {})
+                if isinstance(plan, dict) and plan.get('origin') == 'agent' and isinstance(plan.get('todos'), list):
+                    entry['agentPlan'] = normalize_todos(plan['todos'])
+                    if len(plan['todos']) > len(entry['agentPlan']):
+                        entry['agentPlanState'] = 'truncated'
+            history.append(entry)
+            retry_parent = getattr(parent, 'retry_of_job_id', None)
+            cursor = retry_parent or parent_payload.get('contextParentJobId')
+        return tuple(reversed(history))
+
+    @staticmethod
+    def _same_continuation_scope(parent: MindmapAiJobCreateModel, current: MindmapAiJobCreateModel) -> bool:
+        def scope_key(request: MindmapAiJobCreateModel) -> tuple:
+            source = request.source
+            scope = source.scope
+            identity = (
+                ('standalone',) if source.type in {'none', 'uploaded_artifact'} else
+                (source.type, source.document_id, source.mindmap_id, source.room_epoch)
+            )
+            return (*identity, scope.type, scope.root_uid, tuple(sorted(scope.node_uids or [])))
+
+        return scope_key(parent) == scope_key(current)
 
     @classmethod
     async def _visible_discussion_history(
@@ -3307,6 +3609,7 @@ class MindmapAiTaskManager:
         external_session_committed = False
         completion_commit_uncertain = False
         attempted_encrypted_session_ref: str | None = None
+        execution_cleanup_failed = False
 
         def record_run(outcome: str, usage: dict[str, Any] | None = None) -> None:
             record_mindmap_ai_run(
@@ -3322,6 +3625,7 @@ class MindmapAiTaskManager:
         try:
             if not await cls._set_status(job_id, 'preparing', 10):
                 return
+            await cls._record_execution_state(job_id, 'running')
             recovered_preview: dict[str, Any] | None = None
             async with AsyncSessionLocal() as db:
                 preliminary_job = await MindmapAiDao.get_job(db, job_id)
@@ -3444,6 +3748,11 @@ class MindmapAiTaskManager:
                     if discussion_job and external_session_id is None
                     else ()
                 )
+                continuation_history = (
+                    await cls._editing_continuation_history(db, job, request_model)
+                    if not discussion_job and external_session_id is None
+                    else ()
+                )
                 model = None
                 if job.agent_key == 'native_mindmap':
                     model = await cls._resolve_native_model(db, job.user_id, request_model.model_id)
@@ -3521,7 +3830,21 @@ class MindmapAiTaskManager:
                     credential_env=credential_env,
                 ),
                 visible_history=visible_history,
+                continuation_history=continuation_history,
             )
+            if agent_key in DEVICE_AGENT_KEYS:
+                async def owns_device_lease() -> bool:
+                    return (_CURRENT_JOB_LEASE_TOKEN.get() is not None
+                            and await cls._owns_current_job_lease(job_id))
+
+                async def execute_bound_device(run_context: AgentRunContext, run_emit: AgentEventHandler) -> AgentRunOutcome:
+                    return await execute_device_job(
+                        run_context, run_emit, redis=cls._redis, device_id=request_model.device_id,
+                        epoch=_CURRENT_JOB_EXECUTION_EPOCH.get(), owns_lease=owns_device_lease,
+                        adapter_agent_key=agent_key,
+                    )
+
+                context.metadata['_executeDevice'] = execute_bound_device
             if not await cls._set_status(job_id, 'running', 25):
                 raise asyncio.CancelledError
             try:
@@ -3541,13 +3864,16 @@ class MindmapAiTaskManager:
 
                 result = await cls._await_adapter_result(
                     job_id,
-                    run_adapter_with_transient_retries(
+                    runner(context, lambda event, payload: cls._emit(job_id, event, payload))
+                    if agent_key in DEVICE_AGENT_KEYS else run_adapter_with_transient_retries(
                         runner,
                         context,
                         lambda event, payload: cls._emit(job_id, event, payload),
                     ),
                     timeout_seconds,
                     discard_result=discard_adapter_result,
+                    cancel_grace_seconds=max(8, MindmapAiConfig.mindmap_ai_adapter_cancel_grace_seconds)
+                    if agent_key in DEVICE_AGENT_KEYS else None,
                 )
             except (asyncio.CancelledError, TimeoutError, MindmapArtifactError):
                 raise
@@ -4041,6 +4367,7 @@ class MindmapAiTaskManager:
             # user_id 配置，Codex/Claude 也可能遇到模型级权限、短时网络或限流；
             # 将这些错误持久化为全局 unhealthy 会让一个用户阻断所有用户。
             # Connector 健康状态只由管理员显式 health-check 更新。
+            execution_cleanup_failed = exc.code == 'AI_AGENT_CLEANUP_FAILED'
             if exc.code == 'AI_DOCUMENT_CONFLICT':
                 await cls._set_status(
                     job_id,
@@ -4090,6 +4417,9 @@ class MindmapAiTaskManager:
                     pending_external_session_id,
                     job_id,
                 )
+            await cls._record_execution_state(
+                job_id, 'unconfirmed' if execution_cleanup_failed else 'stopped',
+            )
             await cls._wake_waiting_followups(job_id)
 
     @classmethod
@@ -4133,6 +4463,10 @@ class MindmapAiTaskManager:
             logger.warning(
                 f'取消 AI 脑图 Adapter 失败，任务结果仍将由持久化状态拒绝: job_id={job_id}'
             )
+        if task_cancelled:
+            # Request dispatch is not exit evidence. Give this worker's owned
+            # runner time to persist its independent stopped/unconfirmed frame.
+            await asyncio.wait({task}, timeout=float(MindmapAiConfig.mindmap_ai_adapter_cancel_grace_seconds))
         return task_cancelled or adapter_cancelled
 
 
@@ -4663,6 +4997,7 @@ class MindmapAiService:
         connector = await cls._ensure_connector_available(
             db, manifest, user_id, for_update=True, preflight_unknown=True,
         )
+        await validate_device_selection(db, request_model, user_id, MindmapAiTaskManager._redis)
         policy = cls._runtime_policy(connector, manifest)
         model_ref = cls._validate_job_policy(request_model, manifest, policy)
         if (
@@ -5257,6 +5592,11 @@ class MindmapAiService:
                 data={'errorCode': 'AI_JOB_NOT_RETRYABLE'},
                 message='只有失败、取消、过期或基线失效且无可用结果的终态任务才能重试',
             )
+        if execution_blocks_continuation(retried_job):
+            raise ServiceException(
+                data={'errorCode': 'AI_EXECUTION_STOP_UNCONFIRMED'},
+                message='旧 Agent 尚未确认退出，不能启动重试。请先检查运行主机并刷新停止状态。',
+            )
         session = await MindmapAiDao.get_session(db, retried_job.session_id, user_id)
         if not _session_accepts_work(session):
             raise ServiceException(
@@ -5276,6 +5616,7 @@ class MindmapAiService:
         payload = original_request.model_dump(by_alias=True, exclude_none=True)
         requested_agent_key = model.agent_key or original_request.agent_key
         payload['agentKey'] = requested_agent_key
+        merge_device_selection(payload, model, requested_agent_key, previous=original_request)
         if model.prompt is not None:
             payload['prompt'] = model.prompt
         if model.parameters is not None:
@@ -5388,6 +5729,12 @@ class MindmapAiService:
 
         now = datetime.now()
         job_id = str(uuid.uuid4())
+        retry_request_payload = request_model.model_dump(by_alias=True, exclude_none=True)
+        context_parent_id = _json_loads(retried_job.request_json, {}).get('contextParentJobId')
+        if isinstance(context_parent_id, str) and context_parent_id:
+            # Retain only server-owned content ancestry, never the failed
+            # provider session. The runner rechecks ownership/scope/expiry.
+            retry_request_payload['contextParentJobId'] = context_parent_id
         try:
             job = await MindmapAiDao.add_job(db, {
                 'id': job_id,
@@ -5405,7 +5752,7 @@ class MindmapAiService:
                 'base_room_epoch': base_room_epoch,
                 'request_json': _json_dumps(
                     _request_with_undo_baseline(
-                        request_model.model_dump(by_alias=True, exclude_none=True), undo_baseline,
+                        retry_request_payload, undo_baseline,
                     ),
                 ),
                 'request_fingerprint': fingerprint,
@@ -5463,6 +5810,7 @@ class MindmapAiService:
         agent_key = model.agent_key or parent.agent_key
         payload = content_request.model_dump(by_alias=True, exclude_none=True)
         payload['agentKey'] = agent_key
+        merge_device_selection(payload, model, agent_key, previous=content_request)
         payload['intent'] = requested_intent
         payload['prompt'] = model.prompt
         if agent_key == 'native_mindmap':
@@ -5652,6 +6000,11 @@ class MindmapAiService:
         parent = await MindmapAiDao.get_job(db, parent_job_id, user_id)
         if parent is None:
             raise ServiceException(message='AI 脑图任务不存在')
+        if parent.status in TERMINAL_JOB_STATUSES and execution_blocks_continuation(parent):
+            raise ServiceException(
+                data={'errorCode': 'AI_EXECUTION_STOP_UNCONFIRMED'},
+                message='旧 Agent 尚未确认退出，不能启动下一轮或切换执行器。',
+            )
         if parent.status == 'needs_review':
             raise ServiceException(
                 data={'errorCode': 'AI_FOLLOWUP_REVIEW_REQUIRED'},
@@ -5779,6 +6132,7 @@ class MindmapAiService:
 
         payload = content_request.model_dump(by_alias=True, exclude_none=True)
         payload['agentKey'] = agent_key
+        merge_device_selection(payload, model, agent_key, previous=parent_request)
         payload['intent'] = requested_intent
         if needs_input_followup:
             supplemented_prompt = (
@@ -6102,7 +6456,10 @@ class MindmapAiService:
                 'base_hash': base_hash,
                 'base_room_epoch': base_room_epoch,
                 'request_json': _json_dumps(_request_with_undo_baseline(
-                    request_model.model_dump(by_alias=True, exclude_none=True), undo_baseline,
+                    {
+                        **request_model.model_dump(by_alias=True, exclude_none=True),
+                        'contextParentJobId': str(content_parent.id),
+                    }, undo_baseline,
                 )),
                 'request_fingerprint': fingerprint,
                 'idempotency_key': idempotency_key,
@@ -6777,6 +7134,9 @@ class MindmapAiService:
             return result
         if preserve_draft:
             try:
+                await MindmapAiDao.update_job(db, job_id, {
+                    'cancel_requested_time': datetime.now(),
+                })
                 promoted = await cls._promote_draft_checkpoint_for_stop(db, job)
             except Exception:
                 await db.rollback()

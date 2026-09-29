@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { isDeviceAgent } from '../mindmap-agent-devices.js'
+import { isMindmapExecutionBlocked } from '../mindmap-execution-state.js'
 
 const source = readFileSync(new URL('../../components/MindMap/MindmapAiDialog.vue', import.meta.url), 'utf8')
 const ref = value => ({ value })
@@ -14,6 +16,9 @@ function functionSource(name) {
   return rest.slice(0, end + 1)
 }
 function compile(scope, names) {
+  scope.agentSwitchPending ??= ref(false)
+  scope.isDeviceAgent = isDeviceAgent
+  scope.isMindmapExecutionBlocked = isMindmapExecutionBlocked
   return new Function('scope', `with(scope) { ${names.map(functionSource).join('\n')} return { ${names.join(', ')} }; }`)(scope)
 }
 
@@ -35,7 +40,8 @@ for (const [method, attemptType] of [['submitJob', 'create'], ['retryJob', 'retr
         submitting: ref(false), retrying: ref(false), continuing: ref(false), submissionStartedAt: ref(0),
         sourceContext: ref(context), editorContext: ref(context), sourceFingerprint: ref('hash'),
         submitAttempt: null, retryAttempt: null, followupAttempt: null, jobConfiguration: ref({}),
-        retryAvailable: ref(true), retryPrompt: ref(''), followupPrompt: ref('继续完善'), pendingFollowupPrompt: ref(''),
+        retryAvailable: ref(true), continuationPrompt: ref('继续完善'), pendingFollowupPrompt: ref(''),
+        composerDraftPersistence: { capture: () => null },
         sessionTurns: ref([]), monitoringSuspendedJobId: '', terminalHydrationRetryTimer: null,
         beginActionIdentity: () => ({}), assertActionIdentity: noop, invalidateRestoreOperations: noop,
         stopPolling: noop, stopRealtime: noop, schedulePoll: noop,

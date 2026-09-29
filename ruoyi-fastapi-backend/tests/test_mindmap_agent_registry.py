@@ -27,9 +27,9 @@ EXPECTED_NEEDS_INPUT_QUESTIONS = 1
 SMM_V2 = 2
 
 
-def test_default_registry_exposes_three_product_agents() -> None:
+def test_default_registry_exposes_product_agents_and_opt_in_acp() -> None:
     manifests = get_mindmap_agent_registry().manifests(intent='create', input_type='none')
-    assert {manifest.agent_key for manifest in manifests} == {'native_mindmap', 'codex', 'claude'}
+    assert {manifest.agent_key for manifest in manifests} == {'native_mindmap', 'codex', 'claude', 'kimi', 'device_claude', 'device_codex', 'device_kimi'}
 
 
 def test_default_registry_exposes_all_three_tool_free_discussion_agents() -> None:
@@ -40,7 +40,7 @@ def test_default_registry_exposes_all_three_tool_free_discussion_agents() -> Non
     )
 
     assert {manifest.agent_key for manifest in manifests} == {
-        'native_mindmap', 'codex', 'claude',
+        'native_mindmap', 'codex', 'claude', 'device_claude', 'device_codex', 'device_kimi',
     }
     assert all('message' in manifest.result_types for manifest in manifests)
 

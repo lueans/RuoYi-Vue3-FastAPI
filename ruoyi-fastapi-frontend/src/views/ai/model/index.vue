@@ -1,5 +1,22 @@
 <template>
   <div class="app-container">
+    <el-alert
+      v-if="hasModelFilter || fromMindmap"
+      class="modelRecoveryBanner"
+      :title="invalidModelFilter ? '模型定位链接无效' : repairModelId ? `正在定位模型 #${repairModelId}` : '从 AI 脑图打开的模型管理'"
+      :type="invalidModelFilter ? 'warning' : 'info'"
+      :closable="false"
+      show-icon
+      role="status"
+    >
+      <span v-if="invalidModelFilter" class="modelRecoveryLine">链接中的模型编号无效，未查询其他模型。请返回原对话重新打开，或查看全部模型。</span>
+      <span v-else-if="repairModelId" class="modelRecoveryLine">当前列表仅显示此模型，操作仍受当前账号权限限制。</span>
+      <span v-if="fromMindmap" class="modelRecoveryLine">脑图对话仍在原标签页。保存配置后返回对话，点击“重新检查配置”；不会自动切换模型或发送任务。</span>
+      <el-button v-if="hasModelFilter" text type="primary" @click="clearModelFilter">查看全部模型</el-button>
+    </el-alert>
+    <el-alert v-if="listError" :title="listError" type="error" :closable="false" show-icon class="modelRecoveryBanner" role="status">
+      <el-button text type="primary" :loading="loading" @click="getList">重新加载模型</el-button>
+    </el-alert>
     <el-form
       :model="queryParams"
       ref="queryRef"
@@ -96,6 +113,7 @@
     <el-table
       v-loading="loading"
       :data="modelList"
+      :empty-text="invalidModelFilter ? '模型编号无效，请重新选择' : listError ? '模型列表未加载，请重试' : repairModelId ? '未找到该模型或没有查看权限，也可清除其他筛选后重试' : '暂无模型'"
       @selection-change="handleSelectionChange"
     >
       <el-table-column type="selection" width="55" align="center" />
@@ -310,6 +328,10 @@
 </template>
 
 <script setup name="AiModel">
+import { computed, getCurrentInstance, onBeforeUnmount, reactive, ref, toRefs, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import useUserStore from '@/store/modules/user';
+import { normalizeModelRecoveryId } from '@/utils/mindmap-model-recovery';
 import {
   listModel,
   addModel,
@@ -319,6 +341,16 @@ import {
 } from "@/api/ai/model";
 
 const { proxy } = getCurrentInstance();
+const route = useRoute();
+const router = useRouter();
+// The admin menu may mount this component at a customized path. Bind requests
+// to this page instance, not to the default menu URL.
+const modelPagePath = route.path;
+const userStore = useUserStore();
+const hasModelFilter = computed(() => route.query.modelId !== undefined);
+const repairModelId = computed(() => normalizeModelRecoveryId(route.query.modelId));
+const invalidModelFilter = computed(() => hasModelFilter.value && repairModelId.value === null);
+const fromMindmap = computed(() => route.query.from === 'mindmap-agent');
 const { ai_provider_type, sys_normal_disable, sys_yes_no } = proxy.useDict(
   "ai_provider_type",
   "sys_normal_disable",
@@ -334,12 +366,17 @@ const single = ref(true);
 const multiple = ref(true);
 const total = ref(0);
 const title = ref("");
+const listError = ref("");
+let listGeneration = 0;
+let listController = null;
+let modelPageAlive = true;
 
 const data = reactive({
   form: {},
   queryParams: {
     pageNum: 1,
     pageSize: 10,
+    modelId: undefined,
     modelCode: undefined,
     provider: undefined,
     status: undefined,
@@ -360,13 +397,61 @@ const data = reactive({
 const { queryParams, form, rules } = toRefs(data);
 
 /** 查询列表 */
-function getList() {
+function invalidateModelList() {
+  listGeneration++;
+  listController?.abort();
+  listController = null;
+  loading.value = false;
+}
+
+async function getList() {
+  invalidateModelList();
+  modelList.value = [];
+  total.value = 0;
+  handleSelectionChange([]);
+  listError.value = "";
+  if (!modelPageAlive || route.path !== modelPagePath || !userStore.id || invalidModelFilter.value) return false;
+  const generation = listGeneration;
+  const owner = userStore.id;
+  const targetId = repairModelId.value;
+  const controller = new AbortController();
+  listController = controller;
+  const current = () => modelPageAlive && listGeneration === generation
+    && userStore.id === owner && route.path === modelPagePath
+    && repairModelId.value === targetId && !invalidModelFilter.value;
   loading.value = true;
-  listModel(queryParams.value).then((response) => {
+  try {
+    // Freeze the submitted filters: typing or following another repair link
+    // must not relabel an in-flight response as a different model's results.
+    const response = await listModel({ ...queryParams.value, modelId: targetId ?? undefined }, {
+      signal: controller.signal, silentError: true,
+    });
+    if (!current()) return false;
+    if (!Array.isArray(response?.rows) || !Number.isSafeInteger(response.total) || response.total < 0) {
+      throw new Error('Invalid model list');
+    }
     modelList.value = response.rows;
     total.value = response.total;
-    loading.value = false;
-  });
+    return true;
+  } catch {
+    if (current() && !controller.signal.aborted) listError.value = '模型列表加载失败，请检查连接或权限后重试。';
+    return false;
+  } finally {
+    if (generation === listGeneration) {
+      loading.value = false;
+      if (listController === controller) listController = null;
+    }
+  }
+}
+
+async function clearModelFilter() {
+  const query = { ...route.query };
+  delete query.modelId;
+  try {
+    await router.replace({ path: modelPagePath, query });
+  } catch {
+    listError.value = '无法清除模型定位，请重试。';
+  }
 }
 
 /** 取消按钮 */
@@ -469,5 +554,23 @@ function handleDelete(row) {
     .catch(() => {});
 }
 
-getList();
+watch([() => route.path, () => route.query.modelId, () => userStore.id], () => {
+  invalidateModelList();
+  modelList.value = [];
+  total.value = 0;
+  handleSelectionChange([]);
+  listError.value = '';
+  if (!modelPageAlive || route.path !== modelPagePath || !userStore.id) return;
+  // A new repair target must not inherit unrelated search filters, including
+  // when this page is reused from the application's keep-alive cache.
+  Object.assign(queryParams.value, { pageNum: 1, modelId: repairModelId.value ?? undefined,
+    modelCode: undefined, provider: undefined, status: undefined });
+  void getList();
+}, { immediate: true });
+onBeforeUnmount(() => { modelPageAlive = false; invalidateModelList(); });
 </script>
+
+<style scoped>
+.modelRecoveryBanner { margin-bottom: 16px; }
+.modelRecoveryLine { display: block; margin: 6px 0; overflow-wrap: anywhere; }
+</style>

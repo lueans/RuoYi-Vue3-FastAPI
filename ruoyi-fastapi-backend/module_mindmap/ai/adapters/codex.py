@@ -39,6 +39,7 @@ from module_mindmap.ai.adapters.base import (
     agent_message_result,
     agent_needs_input_result,
     agent_target_layout,
+    build_agent_continuation_clause,
     build_agent_discussion_prompt,
     build_agent_generation_mode_clause,
     build_agent_output_contract,
@@ -46,12 +47,15 @@ from module_mindmap.ai.adapters.base import (
     enforce_agent_target_layout,
 )
 from module_mindmap.ai.document import MindmapArtifactError
+from module_mindmap.ai.runtime_paths import resolve_cli
+from module_mindmap.ai.runtime_trace import TRACE_TYPES, detail_text, normalize_todos
 from utils.log_util import logger
 
 from ._fs_utils import (
     ensure_private_directory,
     read_bounded_regular_file,
     session_retention_days,
+    spawn_owned_process,
     terminate_process,
     unlink_snapshot_file,
 )
@@ -828,8 +832,14 @@ class _CodexToolExecutionBridge:
         allowed_tools: tuple[str, ...],
         capability_token: str | None = None,
         max_tool_calls: int = _MAX_CODEX_TOOL_CALLS,
+        agent_key: str = 'codex',
+        adapter_version: str = ADAPTER_VERSION,
+        prompt_version: str = PROMPT_VERSION,
     ) -> None:
         self._context = context
+        self._agent_key = agent_key
+        self._adapter_version = adapter_version
+        self._prompt_version = prompt_version
         self._emit = emit
         self._allowed_tools = frozenset(allowed_tools).intersection(
             _codex_worker.tools_for_execution_mode(context.execution_mode),
@@ -873,6 +883,10 @@ class _CodexToolExecutionBridge:
             self._references,
         )
         tools = self._tool_service
+        if tool_name == 'update_plan':
+            todos = normalize_todos(normalized.get('todos'))
+            await self._emit_required('todo_updated', {'todos': todos, 'origin': 'agent'})
+            return {'todos': todos}
         if tool_name == 'read_projection':
             return tools.read_projection()
         if tool_name == 'read_document_detail':
@@ -940,9 +954,9 @@ class _CodexToolExecutionBridge:
             title = str(projection['root']['data'].get('text') or 'AI 脑图')
             artifact, summary, operations = tools.complete_artifact(
                 title=title,
-                agent_key='codex',
-                adapter_version=ADAPTER_VERSION,
-                prompt_version=PROMPT_VERSION,
+                agent_key=self._agent_key,
+                adapter_version=self._adapter_version,
+                prompt_version=self._prompt_version,
                 artifact_id=self._context.job_id,
             )
             self.completed = {
@@ -972,6 +986,8 @@ class _CodexToolExecutionBridge:
         payload: dict[str, Any],
     ) -> None:
         try:
+            if event_type in {'tool_started', 'tool_completed', 'tool_failed'} and 'step' in payload:
+                payload = {'callId': f"{self._context.job_id}:{payload['step']}", **payload}
             await self._emit(event_type, payload)
         except asyncio.CancelledError:
             raise
@@ -1058,7 +1074,11 @@ class _CodexToolExecutionBridge:
                     'ok': False,
                     'error': {'code': 'AI_OUTPUT_INVALID', 'message': message},
                 }
-            await self._emit_required('tool_started', {'toolName': tool_name, 'step': step})
+            started_at = time.monotonic()
+            await self._emit_required('tool_started', {
+                'toolName': tool_name, 'step': step, 'callId': f'{self._context.job_id}:{step}',
+                'toolInput': detail_text(arguments),
+            })
             before_cursor = self._tool_service.operation_cursor()
             try:
                 result = await self._execute(tool_name, arguments)
@@ -1116,7 +1136,10 @@ class _CodexToolExecutionBridge:
             if tool_name == 'suggest_tags':
                 await self._emit_required('tag_suggestions', {'suggestions': result})
             await self._emit_required(
-                'tool_completed', {'toolName': tool_name, 'step': step},
+                'tool_completed', {'toolName': tool_name, 'step': step,
+                                   'callId': f'{self._context.job_id}:{step}',
+                                   'toolOutput': detail_text(result),
+                                   'durationMs': round((time.monotonic() - started_at) * 1000)},
             )
             self.successful_tools.append(tool_name)
             return {'ok': True, 'result': result}
@@ -1320,7 +1343,7 @@ class CodexMindmapAdapter(AgentAdapter):
 
     _terminate_worker = staticmethod(terminate_process)
 
-    async def _invoke_worker(  # noqa: PLR0915
+    async def _invoke_worker(  # noqa: PLR0912, PLR0915
         self,
         request: dict[str, Any],
         *,
@@ -1330,6 +1353,20 @@ class CodexMindmapAdapter(AgentAdapter):
         timeout: float | None = None,
         on_progress: AgentEventHandler | None = None,
     ) -> dict[str, Any]:
+        # Resolve against the runtime account before HOME/PATH are isolated.
+        # Always overwrite this internal field; request metadata cannot select
+        # an executable on the runtime host.
+        cli_path = resolve_cli('codex')
+        request = {**request, 'codexBin': cli_path}
+        # npm launchers use /usr/bin/env node, which is often installed
+        # outside os.defpath (for example by nvm). Retain only that runtime
+        # directory, never the account's whole PATH.
+        if (cli_path and Path(cli_path).suffix.lower() in {'.js', '.mjs', '.cjs'}
+                and (node_path := resolve_cli('node'))):
+            environment = {
+                **environment,
+                'PATH': str(Path(node_path).parent) + os.pathsep + environment.get('PATH', os.defpath),
+            }
         try:
             serialized_request = json.dumps(
                 request,
@@ -1355,7 +1392,7 @@ class CodexMindmapAdapter(AgentAdapter):
             # app-server 是 helper 的子进程；独立进程组确保取消时不会遗留它。
             subprocess_options['start_new_session'] = True
         try:
-            process = await asyncio.create_subprocess_exec(
+            process = await spawn_owned_process(
                 sys.executable,
                 str(_CODEX_WORKER_PATH),
                 **subprocess_options,
@@ -1396,6 +1433,15 @@ class CodexMindmapAdapter(AgentAdapter):
                         break
                     for raw_message in decoder.feed(chunk):
                         decoded = json.loads(raw_message.decode('utf-8'))
+                        if isinstance(decoded, dict) and decoded.get('type') == 'trace':
+                            if (terminal_message is not None
+                                or decoded.get('protocolVersion') != WORKER_PROTOCOL_VERSION
+                                or decoded.get('eventType') not in TRACE_TYPES
+                                or not isinstance(decoded.get('payload'), dict)):
+                                raise MindmapArtifactError('Codex 实时事件协议无效', code='AI_AGENT_UNAVAILABLE')
+                            if on_progress is not None:
+                                await on_progress(decoded['eventType'], decoded['payload'])
+                            continue
                         if isinstance(decoded, dict) and decoded.get('type') == 'event':
                             if terminal_message is not None:
                                 raise MindmapArtifactError(
@@ -1451,8 +1497,11 @@ class CodexMindmapAdapter(AgentAdapter):
             await self._terminate_worker(process)
             raise
         finally:
-            if job_id is not None and self._processes.get(job_id) is process:
-                self._processes.pop(job_id, None)
+            try:
+                await self._terminate_worker(process)
+            finally:
+                if job_id is not None and self._processes.get(job_id) is process:
+                    self._processes.pop(job_id, None)
 
     async def healthcheck(
         self,
@@ -1503,12 +1552,15 @@ class CodexMindmapAdapter(AgentAdapter):
             'direct_completed' if context.execution_mode == 'direct'
             else 'artifact_completed'
         )
-        return f"""你是受限的脑图生成 Agent。{action}，意图为 {context.intent}。
+        return f"""{build_agent_continuation_clause(context)}你是受限的脑图生成 Agent。{action}，意图为 {context.intent}。
 用户要求（JSON 字符串）：{json.dumps(context.prompt, ensure_ascii=False)}
 参数：{json.dumps(context.parameters, ensure_ascii=False)}
 输出契约：{output_contract}
 {generation_mode_clause}
 任务结构预算：{build_agent_structure_budget_clause(context)}
+
+开始时使用 update_plan 发布简短计划，执行过程中更新状态；在最终 validate_draft/complete_artifact 之前更新完成状态。
+工具调用之间可以向用户提供简短的进度说明，不要披露隐藏推理。
 
 你只能调用已配置的 mindmap MCP 工具；没有文件、Shell、网页、图片、其他 MCP、插件、技能或项目工具。
 你必须在生成过程中真实调用这些工具来构建草稿，不能只在最终 JSON 中描述调用。

@@ -16,6 +16,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+# The helper also runs as a script inside an isolated cwd.
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from module_mindmap.ai.runtime_trace import RuntimeTrace
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -56,6 +61,7 @@ WORKER_PROGRESS_STAGES = frozenset({
 })
 
 ALLOWED_TOOL_NAMES = (
+    'update_plan',
     'read_projection',
     'read_document_detail',
     'get_node_tags',
@@ -694,6 +700,7 @@ def _completed_agent_text(item: Any) -> tuple[str | None, bool]:
 async def run_request(  # noqa: PLR0912, PLR0915
     request: Any,
     progress_callback: Callable[[str, int, dict[str, int] | None], None] | None = None,
+    trace_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """在已经清理过的 helper 环境中执行一次官方 Codex SDK 调用。"""
     request = _validated_request(request)
@@ -707,6 +714,7 @@ async def run_request(  # noqa: PLR0912, PLR0915
         )
 
         sdk_config = CodexConfig(
+            codex_bin=request.get('codexBin'),
             cwd=os.getcwd(),
             config_overrides=_mcp_config_overrides(request),
             # AsyncCodex internally copies os.environ. main() has already
@@ -792,9 +800,13 @@ async def run_request(  # noqa: PLR0912, PLR0915
             usage: dict[str, int] | None = None
             completed_turn: Any = None
             processing_emitted = False
+            trace = RuntimeTrace(structured_message=request['operation'] == 'discuss')
             async for notification in turn.stream():
                 method = getattr(notification, 'method', None)
                 payload = getattr(notification, 'payload', None)
+                if trace_callback is not None:
+                    for event_type, event_payload in trace.codex(method, payload):
+                        trace_callback(event_type, event_payload)
                 if not processing_emitted and method != 'turn/completed':
                     processing_emitted = True
                     _emit_progress(progress_callback, 'model_processing', 35)
@@ -822,6 +834,9 @@ async def run_request(  # noqa: PLR0912, PLR0915
                     if getattr(candidate_turn, 'id', None) == turn.id:
                         completed_turn = candidate_turn
 
+            if trace_callback is not None:
+                for event_type, event_payload in trace.finish():
+                    trace_callback(event_type, event_payload)
             if completed_turn is None:
                 raise WorkerFailure('AI_AGENT_UNAVAILABLE')
             turn_status = getattr(getattr(completed_turn, 'status', None), 'value', None)
@@ -898,11 +913,15 @@ def main() -> int:
             'event': event,
         })
 
+    def write_trace(kind: str, payload: dict[str, Any]) -> None:
+        write_message({'protocolVersion': WORKER_PROTOCOL_VERSION, 'type': 'trace',
+                       'eventType': kind, 'payload': payload})
+
     try:
         raw_request = sys.stdin.buffer.read(MAX_WORKER_REQUEST_BYTES + 1)
         request = _decode_worker_request(raw_request)
         _scrub_process_environment()
-        response = asyncio.run(run_request(request, write_progress))
+        response = asyncio.run(run_request(request, write_progress, write_trace))
     except WorkerFailure as exc:
         response = _error_envelope(exc)
     except Exception:

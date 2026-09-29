@@ -8,7 +8,7 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import claude_agent_sdk
 import openai_codex
@@ -240,7 +240,7 @@ async def test_all_agent_tag_tools_use_catalog_and_emit_non_mutating_suggestions
             )
 
         monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-        monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+        monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
         monkeypatch.setattr(claude_adapter_module, '_read_local_claude_profile_environment', dict)
         context.metadata.update({'modelRef': 'claude-policy-snapshot', 'maxBudgetUsd': EXPECTED_POLICY_BUDGET})
         await ClaudeMindmapAdapter(session_storage_root=tmp_path.joinpath('sessions')).run(context, collect)
@@ -511,7 +511,7 @@ async def test_claude_discussion_accepts_only_sdk_structured_output(
             terminal_reason='completed',
         )
 
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.intent = 'discuss'
     context.metadata.update({
@@ -525,6 +525,7 @@ async def test_claude_discussion_accepts_only_sdk_structured_output(
 
     assert result.title == '覆盖摘要'
     assert result.content == '当前脑图覆盖购物车核心添加流程。'
+    assert captured['options'].include_partial_messages is True
     assert captured['options'].tools == []
     assert captured['options'].mcp_servers == {}
     assert captured['options'].allowed_tools == []
@@ -553,7 +554,7 @@ async def test_claude_discussion_does_not_fallback_from_empty_structured_output(
             terminal_reason='completed',
         )
 
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.intent = 'discuss'
     context.metadata.update({
@@ -602,7 +603,7 @@ async def test_claude_discussion_rejects_cancelled_or_tool_tainted_results(
             deferred_tool_use=deferred_tool_use,
         )
 
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.intent = 'discuss'
     context.metadata.update({
@@ -815,10 +816,11 @@ async def test_native_adapter_uses_terminal_clarification_tool_with_plain_text_e
     assert result.usage['total_tokens'] == EXPECTED_FALLBACK_TOTAL_TOKENS
     assert context.tool_service is original_tools
     assert [event_type for event_type, _payload in events] == [
-        'agent_started', 'tool_started', 'tool_completed',
+        'agent_started', 'tool_started', 'tool_completed', 'assistant_delta',
     ]
     assert events[1][1]['toolName'] == 'request_clarification'
     assert events[2][1]['toolName'] == 'request_clarification'
+    assert events[-1][1]['text'] == '请先回答上面的问题。'
 
 
 @pytest.mark.asyncio
@@ -968,7 +970,7 @@ async def test_native_ollama_auto_finalizes_exactly_the_last_validated_draft(
 
     assert result.summary['nodeCount'] == EXPECTED_NODE_COUNT
     assert result.artifact['document']['layout'] == 'fishbone'
-    assert NativeMindmapAdapter().get_manifest().adapter_version == '1.12.0'
+    assert NativeMindmapAdapter().get_manifest().adapter_version == '1.13.0'
     assert [
         payload['toolName']
         for event_type, payload in events
@@ -1214,7 +1216,7 @@ async def test_claude_adapter_returns_common_needs_input_before_tool_mutation(
         )
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     original_tools = context.tool_service
     context.metadata['modelRef'] = 'claude-policy-snapshot'
@@ -1276,7 +1278,7 @@ async def test_native_mindmap_agent_uses_only_domain_tools_and_collects_usage(
     assert 'structured_outputs' not in observed
     tool_by_name = {tool.__name__: tool for tool in observed['tools']}
     assert set(tool_by_name) == {
-        'read_projection', 'search_tags', 'suggest_tags', 'start_document', 'add_nodes', 'update_nodes', 'move_nodes',
+        'read_projection', 'update_plan', 'search_tags', 'suggest_tags', 'start_document', 'add_nodes', 'update_nodes', 'move_nodes',
         'remove_nodes', 'set_document_meta', 'validate_draft', 'complete_artifact',
         'request_clarification',
     }
@@ -3519,7 +3521,7 @@ async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(  # noqa: PLR
         )
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.execution_mode = execution_mode
     context.parameters['layout'] = 'fishbone'
@@ -3542,6 +3544,7 @@ async def test_claude_adapter_disables_builtins_and_uses_mcp_tools(  # noqa: PLR
     assert captured['options'].strict_mcp_config is True
     assert captured['options'].model == 'claude-policy-snapshot'
     assert captured['options'].max_budget_usd == EXPECTED_POLICY_BUDGET
+    assert captured['options'].include_partial_messages is True
     assert captured['options'].setting_sources == []
     assert captured['options'].skills == []
     assert captured['options'].plugins == []
@@ -3599,7 +3602,7 @@ async def test_claude_adapter_coalesces_repeated_sdk_message_envelopes(
             'parentUid': root_uid, 'text': '可见节点',
         }]})
         await tools['complete_artifact'].handler({})
-        hidden = '不得进入审计的模型正文和隐藏推理'
+        hidden = '不得进入审计的隐藏推理和系统数据'
         for _index in range(300):
             yield claude_agent_sdk.SystemMessage(
                 subtype='status',
@@ -3607,7 +3610,8 @@ async def test_claude_adapter_coalesces_repeated_sdk_message_envelopes(
             )
         for _index in range(30):
             yield claude_agent_sdk.AssistantMessage(
-                content=[claude_agent_sdk.TextBlock(text=hidden)],
+                content=[claude_agent_sdk.TextBlock(text='允许展示的进度说明'),
+                         claude_agent_sdk.ThinkingBlock(thinking=hidden, signature='private')],
                 model='test-model',
             )
         for _index in range(20):
@@ -3621,7 +3625,7 @@ async def test_claude_adapter_coalesces_repeated_sdk_message_envelopes(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
 
     await ClaudeMindmapAdapter().run(_context(), collect_event)
 
@@ -3632,7 +3636,8 @@ async def test_claude_adapter_coalesces_repeated_sdk_message_envelopes(
         {'stage': 'building', 'messageType': 'UserMessage'},
     ]
     serialized = json.dumps(events, ensure_ascii=False)
-    assert '不得进入审计的模型正文和隐藏推理' not in serialized
+    assert '不得进入审计的隐藏推理和系统数据' not in serialized
+    assert [payload['text'] for kind, payload in events if kind == 'assistant_delta'] == ['允许展示的进度说明']
 
 
 @pytest.mark.asyncio
@@ -3674,7 +3679,7 @@ async def test_claude_parallel_tools_are_serialized_without_duplicate_deltas(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.metadata['modelRef'] = 'claude-policy-snapshot'
 
@@ -3741,7 +3746,7 @@ async def test_claude_complete_waits_for_inflight_mutation(
             await release_add.wait()
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.metadata['modelRef'] = 'claude-policy-snapshot'
 
@@ -3783,7 +3788,7 @@ async def test_claude_requires_explicit_complete_artifact(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.metadata['modelRef'] = 'claude-policy-snapshot'
 
@@ -3826,7 +3831,7 @@ async def test_claude_rejects_any_tool_after_completion_and_fails_the_run(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
 
     with pytest.raises(MindmapArtifactError, match='complete_artifact 后继续调用工具'):
         await ClaudeMindmapAdapter().run(_context(), collect_event)
@@ -3853,7 +3858,7 @@ async def test_claude_fallback_without_a_draft_still_fails(
         )
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.metadata['modelRef'] = 'claude-policy-snapshot'
 
@@ -3882,7 +3887,7 @@ async def test_claude_adapter_uses_explicit_credential_without_user_settings(
         )
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     monkeypatch.setattr(
         claude_adapter_module,
         '_read_local_claude_profile_environment',
@@ -4151,7 +4156,7 @@ async def test_claude_healthcheck_uses_the_same_isolated_connector_environment(
         'create_subprocess_exec',
         fake_subprocess,
     )
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
 
     healthy, reason = await ClaudeMindmapAdapter().healthcheck({
         'ANTHROPIC_AUTH_TOKEN': 'connector-secret',
@@ -4240,7 +4245,7 @@ async def test_claude_bedrock_healthcheck_probes_provider_without_claude_login(
         'create_subprocess_exec',
         fail_subprocess,
     )
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
 
     healthy, reason = await ClaudeMindmapAdapter().healthcheck({
         'CLAUDE_CODE_USE_BEDROCK': '1',
@@ -4290,7 +4295,7 @@ async def test_claude_healthcheck_sanitizes_real_provider_failure(
         'create_subprocess_exec',
         fake_subprocess,
     )
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
 
     healthy, reason = await ClaudeMindmapAdapter().healthcheck(model_ref='sonnet')
 
@@ -4309,7 +4314,7 @@ async def test_claude_healthcheck_rejects_unsafe_model_without_provider_call(
         lambda: {'ANTHROPIC_API_KEY': 'profile-secret'},
     )
     provider_query = AsyncMock()
-    monkeypatch.setattr(claude_agent_sdk, 'query', provider_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', provider_query)
 
     healthy, reason = await ClaudeMindmapAdapter().healthcheck(model_ref='--dangerous')
 
@@ -4339,7 +4344,7 @@ async def test_claude_unknown_provider_error_never_exposes_raw_result_or_errors(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
 
     with pytest.raises(MindmapArtifactError) as error:
         await ClaudeMindmapAdapter().run(_context(), collect_event)
@@ -4374,7 +4379,7 @@ async def test_claude_bedrock_sdk_exception_maps_to_sanitized_auth_error(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.metadata.update({
         'modelRef': 'us.anthropic.claude-sonnet-4-6',
@@ -4409,7 +4414,7 @@ async def test_claude_adapter_maps_not_logged_in_result_to_auth_error(
         )
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
 
     with pytest.raises(MindmapArtifactError) as error:
         await ClaudeMindmapAdapter().run(_context(), _ignore_event)
@@ -4459,7 +4464,7 @@ async def test_claude_adapter_passes_only_the_explicit_resume_session(
         )
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _resume_context()
     context.metadata['credentialEnv'] = {'ANTHROPIC_API_KEY': 'connector-secret'}
     result = await ClaudeMindmapAdapter(
@@ -4513,7 +4518,7 @@ async def test_claude_cancel_stops_a_tool_before_mutation_and_cleans_runtime_sta
             await asyncio.Event().wait()
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.metadata['modelRef'] = 'claude-policy-snapshot'
     adapter = ClaudeMindmapAdapter()
@@ -4744,7 +4749,7 @@ async def test_claude_failed_branch_discards_child_but_preserves_parent(
         yield  # pragma: no cover
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _resume_context()
     context.metadata['credentialEnv'] = {'ANTHROPIC_API_KEY': 'connector-secret'}
     adapter = ClaudeMindmapAdapter(session_storage_root=storage_root)
@@ -4841,7 +4846,7 @@ async def test_claude_completed_event_failure_discards_child_but_preserves_paren
             raise RuntimeError('database event write failed')
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _resume_context()
     context.metadata['credentialEnv'] = {'ANTHROPIC_API_KEY': 'connector-secret'}
     adapter = ClaudeMindmapAdapter(session_storage_root=storage_root)
@@ -4882,7 +4887,7 @@ async def test_claude_mirror_failure_is_sanitized_and_fails_the_job(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     context.metadata['credentialEnv'] = {'ANTHROPIC_API_KEY': 'connector-secret'}
 
@@ -5027,6 +5032,7 @@ async def test_codex_unexpected_tool_runtime_failure_is_not_output_invalid(
     }
     assert private_detail not in json.dumps(events, ensure_ascii=False)
     assert events[-1] == ('tool_failed', {
+        'callId': f'{context.job_id}:1',
         'toolName': 'start_document',
         'step': 1,
         'errorCode': 'AI_AGENT_UNAVAILABLE',
@@ -5183,7 +5189,7 @@ async def test_claude_tool_event_failure_is_terminal_and_discards_the_run_draft(
             raise RuntimeError('database event write failed')
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     context = _context()
     original_tools = context.tool_service
     context.metadata['credentialEnv'] = {'ANTHROPIC_API_KEY': 'connector-secret'}
@@ -5241,7 +5247,11 @@ async def test_native_unexpected_tool_runtime_failure_is_not_output_invalid(
         'errorCode': 'AI_AGENT_UNAVAILABLE',
         'errorMessage': 'MindMap Agent 脑图工具执行失败',
         'retryable': False,
+        'callId': ANY,
+        'durationMs': ANY,
     })
+    assert events[-1][1]['callId'] == events[-2][1]['callId']
+    assert events[-1][1]['durationMs'] >= 0
     assert context.tool_service is original_tools
 
 
@@ -5272,7 +5282,7 @@ async def test_claude_unexpected_tool_runtime_failure_is_not_output_invalid(
         events.append((event_type, payload))
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', fake_query)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
     monkeypatch.setattr(MindmapToolService, 'start_document', fail_tool)
     context = _context()
     original_tools = context.tool_service
@@ -5288,6 +5298,8 @@ async def test_claude_unexpected_tool_runtime_failure_is_not_output_invalid(
         'toolName': 'start_document',
         'errorCode': 'AI_AGENT_UNAVAILABLE',
         'message': 'Claude 脑图工具执行失败',
+        'callId': f'{context.job_id}:1',
+        'step': 1,
         'retryable': False,
     })
     assert context.tool_service is original_tools
@@ -5324,7 +5336,7 @@ async def test_claude_generation_explicitly_closes_stream_on_body_error(
         return {'type': 'sdk', 'name': 'mindmap', 'instance': object()}
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', lambda **_kwargs: TrackingStream())
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', lambda **_kwargs: TrackingStream())
     context = _context()
     context.metadata['credentialEnv'] = {'ANTHROPIC_API_KEY': 'connector-secret'}
 
@@ -5357,7 +5369,7 @@ async def test_claude_generation_explicitly_closes_stream_on_cancel(
         return {'type': 'sdk', 'name': 'mindmap', 'instance': object()}
 
     monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
-    monkeypatch.setattr(claude_agent_sdk, 'query', lambda **_kwargs: BlockingStream())
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', lambda **_kwargs: BlockingStream())
     context = _context()
     context.metadata['credentialEnv'] = {'ANTHROPIC_API_KEY': 'connector-secret'}
     adapter = ClaudeMindmapAdapter()

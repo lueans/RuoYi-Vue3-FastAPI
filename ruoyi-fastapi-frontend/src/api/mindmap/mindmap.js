@@ -197,6 +197,26 @@ export function listMindmapAiAgents(params = {}) {
   })
 }
 
+export function listMindmapAiRuntimes(params = {}) {
+  return request({ url: '/mindmap/ai/runtimes', method: 'get', params, timeout: 20000 })
+}
+
+export function listMindmapAiDevices() {
+  return request({ url: '/mindmap/ai/devices', method: 'get', silentError: true })
+}
+
+export function createMindmapAiDevicePairing(name) {
+  return request({ url: '/mindmap/ai/devices/pairing', method: 'post', data: { name }, silentError: true })
+}
+
+export function scanMindmapAiDevice(deviceId) {
+  return request({ url: `/mindmap/ai/devices/${encodeURIComponent(deviceId)}/scan`, method: 'post', silentError: true })
+}
+
+export function revokeMindmapAiDevice(deviceId) {
+  return request({ url: `/mindmap/ai/devices/${encodeURIComponent(deviceId)}`, method: 'delete', silentError: true })
+}
+
 // 管理端：查询和维护 Agent Connector。密钥只允许传服务端引用，不返回引用内容。
 export function listMindmapAiConnectors() {
   return request({

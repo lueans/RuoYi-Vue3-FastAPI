@@ -53,6 +53,28 @@ function renderImage(node, context, definition = node) {
   return `<img src="${escapeMindmapMarkdownHtml(src)}" alt="${alt}"${title} loading="lazy" decoding="async" referrerpolicy="no-referrer">`
 }
 
+function renderTable(node, context) {
+  const rows = (node.children || []).filter(row => row.type === 'tableRow')
+  const originalColumns = rows[0]?.children?.length || 0
+  const columns = Math.min(originalColumns, 50)
+  if (!columns) return ''
+  // GFM permits sparse rows. Padding every row to a huge header could amplify
+  // a short model response into millions of DOM cells despite the input limit.
+  const visibleRows = rows.slice(0, Math.floor(5000 / columns))
+  const notice = columns < originalColumns || visibleRows.length < rows.length
+    ? `<p>表格内容较多，仅显示前 ${columns} 列、${visibleRows.length - 1} 行正文。</p>`
+    : ''
+  const rowHtml = (row, header) => `<tr>${Array.from({ length: columns }, (_, index) => {
+    const tag = header ? 'th' : 'td'
+    const alignment = node.align?.[index]
+    const align = ['left', 'right', 'center'].includes(alignment) ? ` align="${alignment}"` : ''
+    const cell = row.children?.[index]
+    return `<${tag}${header ? ' scope="col"' : ''}${align}>${cell?.type === 'tableCell' ? renderChildren(cell, context) : ''}</${tag}>`
+  }).join('')}</tr>`
+  // A table can scroll independently without forcing the transcript sideways.
+  return `<div class="mindmapMarkdownTable" tabindex="0" role="region" aria-label="表格，可横向滚动"><table><thead>${rowHtml(visibleRows[0], true)}</thead><tbody>${visibleRows.slice(1).map(row => rowHtml(row, false)).join('')}</tbody></table></div>${notice}`
+}
+
 function renderNode(node, context) {
   if (!node || typeof node !== 'object') return ''
   if (VOID_NODES.has(node.type)) return ''
@@ -66,6 +88,8 @@ function renderNode(node, context) {
       return escapeMindmapMarkdownHtml(node.value)
     case 'paragraph':
       return `<p>${renderChildren(node, context)}</p>`
+    case 'table':
+      return renderTable(node, context)
     case 'heading': {
       const depth = Math.min(6, Math.max(1, Number(node.depth) || 1))
       return `<h${depth}>${renderChildren(node, context)}</h${depth}>`

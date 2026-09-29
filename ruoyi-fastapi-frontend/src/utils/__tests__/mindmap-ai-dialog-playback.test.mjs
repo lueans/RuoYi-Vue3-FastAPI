@@ -43,6 +43,7 @@ function harness(options = {}) {
     livePreviewGeneration: 1, livePreviewJobId: '', livePreviewEditorStarted: false,
     livePreviewRenderedDocument: null, livePreviewBaselineDocument: null,
     livePreviewActive: ref(false), livePreviewPaused: ref(false), livePreviewRendering: ref(false),
+    livePreviewPlaybackAvailable: ref(true),
     livePreviewEligible: ref(true), livePreviewError: ref(''), livePreviewFramesPending: ref(false),
     livePreviewRenderedVersion: ref(-1), latestPreviewEpoch: ref(1),
     livePreviewRenderedNodeCount: ref(0), livePreviewTargetNodeCount: ref(0), livePreviewChangeSummary: ref(null),
@@ -54,6 +55,7 @@ function harness(options = {}) {
       timers.set(id, { callback, delay })
       return id
     },
+    clearTimeout: id => timers.delete(id),
     isTerminalStatus: status => ['cancelled', 'failed', 'completed_direct'].includes(status),
     isDirectExecutionJob: () => true,
     readLivePreviewSuppression: () => false,
@@ -73,7 +75,7 @@ function harness(options = {}) {
       return { rendered: true }
     },
   }
-  const names = ['livePreviewFrameDelay', 'scheduleLivePreviewFlush', 'flushLiveDraftPreview', 'queueLiveDraftPreview',
+  const names = ['livePreviewFrameDelay', 'scheduleLivePreviewFlush', 'toggleLivePreviewPlayback', 'flushLiveDraftPreview', 'queueLiveDraftPreview',
     'resumeRestoredDirectJob', 'beginJobMonitoring', 'acceptDraftPreview']
   const api = new Function('scope', `with (scope) { ${names.map(functionSource).join('\n')} return { ${names.join(', ')} }; }`)(s)
   const nextTimer = () => timers.values().next().value
@@ -224,6 +226,38 @@ test('旧字符帧等待ACK时新目标入队，旧帧完成不得覆盖最新pe
     [1, '甲'], [2, '甲乙'], [2, '甲乙新'], [2, '甲乙新目'], [2, '甲乙新目标'], [2, '随'], [2, '随后'],
   ])
   assert.equal(h.s.livePreviewOldestPendingAt, null)
+})
+
+test('绘制在途仍能暂停：当前帧正常完成，后续帧等待继续且不回退', async () => {
+  const ack = deferred()
+  let requests = 0
+  const h = harness({ update: () => ++requests === 1 ? ack.promise : undefined })
+  const target = { root: node('root', '根', [node('first', '逐字显示')]) }
+  h.queueLiveDraftPreview(target, 1)
+  await h.fireNext()
+  await h.fireNext()
+  assert.equal(h.s.livePreviewRendering.value, true)
+  assert.equal(h.toggleLivePreviewPlayback(true), true)
+  ack.resolve()
+  await tick()
+  assert.equal(h.updates().length, 1)
+  assert.equal(h.s.livePreviewRenderedDocument.root.children[0].data.text, '逐')
+  assert.equal(h.timers.size, 0)
+  assert.equal(h.s.livePreviewPendingFrame.document, target)
+  assert.equal(h.toggleLivePreviewPlayback(false), true)
+  await h.drain()
+  assert.deepEqual(h.updates().map(event => event.change.text), ['逐', '逐字', '逐字显', '逐字显示'])
+  assert.deepEqual(h.s.livePreviewRenderedDocument, target)
+})
+
+test('移除逐帧按钮禁用不绕过终态同步与操作权限保护', () => {
+  const h = harness()
+  h.s.livePreviewPlaybackAvailable.value = false
+  assert.equal(h.toggleLivePreviewPlayback(true), false)
+  h.s.livePreviewPlaybackAvailable.value = true
+  h.s.directTerminalTargetJobId = 'job1'
+  assert.equal(h.toggleLivePreviewPlayback(true), false)
+  assert.equal(h.s.livePreviewPaused.value, false)
 })
 
 test('旧目标最后一字ACK与同游标新目标交错，不能误报播放已追平', async () => {

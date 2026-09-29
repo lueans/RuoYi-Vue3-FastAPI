@@ -1,5 +1,7 @@
 const MINDMAP_AI_ERROR_MESSAGES = Object.freeze({
   AI_AGENT_UNAVAILABLE: 'AI Agent 暂不可用，请切换 Agent 或稍后重试',
+  AI_AGENT_CLEANUP_FAILED: '尚未确认 Agent 进程停止；请先检查运行主机上的 CLI，再重试或切换 Agent',
+  AI_EXECUTION_STOP_UNCONFIRMED: '旧 Agent 尚未确认退出；请先检查运行主机并刷新停止状态，再继续下一轮',
   AI_CAPABILITY_UNSUPPORTED: '所选 Agent 不支持当前任务或输入来源，请调整选择',
   AI_INPUT_INVALID: '输入内容或授权范围无效，请检查后重试',
   AI_INPUT_TOO_LARGE: '输入内容超过任务上限，请缩小范围或降低节点上限',
@@ -36,6 +38,7 @@ const MINDMAP_AI_ERROR_MESSAGES = Object.freeze({
   AI_EVENT_INVALID: '收到无效的实时事件，正在通过状态同步恢复',
   AI_EVENT_TOO_LARGE: '实时事件超过安全大小限制，已中断本次连接',
   AI_STREAM_CONNECTION_FAILED: 'AI 实时连接暂时不可用，正在通过轮询同步',
+  AI_STREAM_TIMEOUT: 'AI 实时连接长时间没有响应，正在恢复原任务的实时记录；不会重新执行任务',
   AI_AUTH_REQUIRED: '登录状态已失效，请重新登录后继续',
 })
 

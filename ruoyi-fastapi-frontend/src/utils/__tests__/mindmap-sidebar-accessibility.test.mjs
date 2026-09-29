@@ -134,7 +134,7 @@ test('AI 脑图像搜索面板一样占用左侧工作区而不覆盖画布', as
 
   assert.match(source, /'has-ai-panel': aiPanelOpen/)
   assert.match(source, /bus\.on\('aiPanelVisibilityChange', handleAiPanelVisibilityChange\)/)
-  assert.match(source, /&\.has-ai-panel \{[\s\S]*?--mindmap-workspace-left: calc\(var\(--mindmap-activity-width\) \+ 500px\)/)
+  assert.match(source, /&\.has-ai-panel \{[\s\S]*?--mindmap-workspace-left: calc\(var\(--mindmap-activity-width\) \+ var\(--mindmap-ai-panel-width, 440px\)\)/)
 })
 
 test('节点大纲和快捷键停靠左侧并与左侧搜索面板互斥', async () => {
@@ -278,11 +278,11 @@ test('统一属性检查器提供语义化页签、停靠布局和可撤销的�
   assert.match(editor, /left: calc\(var\(--mindmap-workspace-left/)
   assert.match(editor, /right: calc\(var\(--mindmap-workspace-right/)
   assert.match(editor, /watch\(\[activeSidebar, hasSearchPanel\]/)
-  assert.match(editor, /mindMap\.value\?\.resize\?\.\(\)/)
+  assert.match(editor, /canvasResize\.schedule\(\)/)
   assert.match(editor, /@transitionend="onMindMapContainerTransitionEnd"/)
   assert.match(transitionEndHandler, /event\.target !== mindMapContainerRef\.value/)
   assert.match(transitionEndHandler, /\['left', 'right'\]\.includes\(event\.propertyName\)/)
-  assert.match(transitionEndHandler, /mindMap\.value\?\.resize\?\.\(\)/)
+  assert.match(transitionEndHandler, /handleResize\(\)/)
   assert.match(trigger, /isPropertyInspectorActive/)
 })
 

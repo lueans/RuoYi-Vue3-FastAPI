@@ -16,6 +16,19 @@ import {
   streamMindmapAiJobEvents,
 } from '../mindmap-ai-stream.js'
 
+test('completed discussion is terminal across stale polls and historical event replay', () => {
+  const completed = { id: 'discussion', status: 'completed_message', target: 'message',
+    intent: 'discuss', progress: 100, updateTime: '2026-09-26T13:23:00.000Z' }
+  for (const status of ['queued', 'preparing', 'running', 'validating', 'ready', 'failed']) {
+    const replay = { status, updateTime: '2026-09-26T13:22:00.000Z' }
+    assert.equal(mergeMindmapAiJobSnapshot(completed, replay).status, 'completed_message')
+    assert.equal(mergeMindmapAiJobEventSnapshot(completed, {
+      eventType: 'status_changed', payload: replay, createdTime: replay.updateTime,
+    }).status, 'completed_message')
+  }
+  assert.equal(mergeMindmapAiJobSnapshot({ ...completed, status: 'running' }, completed).status, 'completed_message')
+})
+
 test('tool failures stay in the timeline and only terminal status events update the job error', () => {
   assert.deepEqual(mindmapAiTerminalErrorUpdate('tool_failed', {
     status: 'running',

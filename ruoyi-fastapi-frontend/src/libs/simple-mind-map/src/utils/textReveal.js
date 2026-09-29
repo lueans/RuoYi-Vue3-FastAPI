@@ -27,6 +27,10 @@ export function nextRevealedText(currentText, targetText, richText = false, curr
   const target = textGraphemes(plainRevealText(targetText, richText))
   let common = 0
   while (common < current.length && current[common] === target[common]) common += 1
+  // Editing an existing sentence is not a new generation: never erase its
+  // visible suffix and replay from the first differing character. New nodes
+  // and append-only output still reveal one complete grapheme per frame.
+  if (common < current.length) return targetText
   const prefix = target.slice(0, common + 1).join('')
   if (common + 1 >= target.length) return targetText
   if (!richText) return prefix

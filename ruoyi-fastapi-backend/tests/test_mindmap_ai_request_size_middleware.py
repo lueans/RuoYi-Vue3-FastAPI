@@ -28,6 +28,29 @@ DUPLICATE_HEADER_STATUS = 400
 TEST_AES_KEY = b'x' * 32
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('encrypted', [False, True])
+async def test_device_enrollment_has_small_wire_and_plaintext_limits(encrypted):
+    observed = {}
+    async def downstream(scope, receive, send):
+        observed['limit'] = scope['state'][size_guard.MINDMAP_AI_PLAINTEXT_BODY_LIMIT_STATE_KEY]
+        observed['body'] = (await receive())['body']
+        await send({'type': 'http.response.start', 'status': 204, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'', 'more_body': False})
+    headers = [(b'x-transport-encrypt', b'1')] if encrypted else []
+    scope = _scope(path='/mindmap/ai/device-bridge/enroll', headers=headers)
+    await _invoke(MindmapAiRequestSizeMiddleware(downstream), scope,
+                  [{'type': 'http.request', 'body': b'{}', 'more_body': False}])
+    assert observed == {'limit': 16384, 'body': b'{}'}
+    observed.clear()
+    limit = (size_guard.MINDMAP_DEVICE_ENROLL_ENCRYPTED_WIRE_MAX_BYTES if encrypted
+             else size_guard.MINDMAP_DEVICE_ENROLL_PLAINTEXT_MAX_BYTES)
+    messages = await _invoke(MindmapAiRequestSizeMiddleware(downstream), scope,
+                             [{'type': 'http.request', 'body': b'x' * (limit + 1), 'more_body': False}])
+    assert _response_payload(messages)[0] == 413
+    assert not observed
+
+
 def test_size_guard_is_registered_outside_transport_crypto() -> None:
     app = FastAPI()
 

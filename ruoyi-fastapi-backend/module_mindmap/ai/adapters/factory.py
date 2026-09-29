@@ -5,6 +5,8 @@ from typing import Any
 
 from module_mindmap.ai.adapters.claude import ClaudeMindmapAdapter
 from module_mindmap.ai.adapters.codex import CodexMindmapAdapter
+from module_mindmap.ai.adapters.device import DeviceClaudeAdapter, DeviceCodexAdapter, DeviceKimiAdapter
+from module_mindmap.ai.adapters.kimi import KimiMindmapAdapter
 from module_mindmap.ai.adapters.native import NativeMindmapAdapter
 from module_mindmap.ai.adapters.registry import MindmapAgentRegistry
 from utils.log_util import logger
@@ -24,6 +26,10 @@ def build_mindmap_agent_registry() -> MindmapAgentRegistry:
     registry.register(NativeMindmapAdapter())
     registry.register(CodexMindmapAdapter())
     registry.register(ClaudeMindmapAdapter())
+    registry.register(KimiMindmapAdapter())
+    registry.register(DeviceClaudeAdapter())
+    registry.register(DeviceCodexAdapter())
+    registry.register(DeviceKimiAdapter())
     for entry_point in _entry_points():
         try:
             loaded = entry_point.load()

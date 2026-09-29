@@ -79,6 +79,13 @@ test('AI 业务错误从请求 data 与任务字段提取并映射为可操作�
   )
 })
 
+test('进程清理未确认时不提示取消成功或直接重试', () => {
+  const message = formatMindmapAiError({ errorCode: 'AI_AGENT_CLEANUP_FAILED', message: '/private/raw/process/error' })
+  assert.equal(message, '尚未确认 Agent 进程停止；请先检查运行主机上的 CLI，再重试或切换 Agent')
+  assert.equal(message.includes('/private'), false)
+  assert.equal(message.includes('取消成功'), false)
+})
+
 test('未知本地错误保留明确消息，无消息时使用调用方兜底', () => {
   assert.equal(formatMindmapAiError(new Error('文件解析失败'), '兜底'), '文件解析失败')
   assert.equal(

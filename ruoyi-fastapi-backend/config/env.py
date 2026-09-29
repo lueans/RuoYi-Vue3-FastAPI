@@ -158,10 +158,18 @@ class MindmapAiSettings(BaseSettings):
     """AI 脑图 Agent 运行配置。"""
 
     mindmap_ai_native_enabled: bool = True
+    mindmap_ai_device_bridge_enabled: bool = False
+    mindmap_ai_device_execution_enabled: bool = False
+    # Separate opt-in: Codex uses reported-usage estimates, not a dollar hard cap.
+    mindmap_ai_device_codex_enabled: bool = False
+    # Kimi has no monetary meter/cap; separate local and administrator consent.
+    mindmap_ai_device_kimi_enabled: bool = False
+    mindmap_ai_kimi_model: str = 'kimi-for-coding'
     mindmap_ai_codex_enabled: bool = True
     mindmap_ai_codex_model: str = 'gpt-5.6-terra'
     mindmap_ai_claude_enabled: bool = True
     mindmap_ai_claude_model: str = 'sonnet'
+    mindmap_ai_kimi_enabled: bool = False
     mindmap_ai_job_timeout_seconds: int = Field(default=900, ge=30, le=900)
     mindmap_ai_artifact_retention_days: int = Field(default=30, ge=1, le=365)
     mindmap_ai_applied_retention_days: int = Field(default=90, ge=1, le=365)

@@ -1,10 +1,12 @@
 <template>
   <div
     class="mindmap-edit-page"
+    :style="{ '--mindmap-ai-panel-width': `${agentPanelWidth}px` }"
     :class="{
       'has-command-bar': documentLoaded && !isZenMode && !isReadonly,
       'has-search-panel': searchPanelOpen,
       'has-ai-panel': aiPanelOpen,
+      'is-ai-resizing': agentPanelResizing,
       'has-left-panel': isLeftSidebarActive,
       'has-right-panel': Boolean(activeSidebar && !isLeftSidebarActive),
       'is-dark': isDark,
@@ -243,15 +245,17 @@
           </div>
         </div>
       </div>
+      <!-- Both layers must share the header's stacking context. A root-level
+           backdrop covers this header and all its children, including the sheet. -->
+      <button
+        v-if="mobileCommandOpen"
+        class="mobile-command-backdrop"
+        type="button"
+        aria-label="关闭编辑命令"
+        tabindex="-1"
+        @click="closeMobileCommands"
+      />
     </div>
-    <button
-      v-if="mobileCommandOpen"
-      class="mobile-command-backdrop"
-      type="button"
-      aria-label="关闭编辑命令"
-      tabindex="-1"
-      @click="closeMobileCommands"
-    />
     <el-alert
       v-if="documentStatus === 1"
       class="content-state-alert"
@@ -371,6 +375,7 @@ import {
   parseMindmapRouteId,
 } from '@/utils/mindmap-route'
 import { getMindmapSaveRecoveryAction } from '@/utils/mindmap-save-lifecycle'
+import { useMindmapAgentLayout } from '@/utils/use-mindmap-agent-layout'
 import {
   getMindmapContentStatePresentation,
   isMindmapContentWritable,
@@ -389,6 +394,7 @@ const mobileCommandCloseRef = ref(null)
 const mobileCommandOpen = ref(false)
 const searchPanelOpen = ref(false)
 const aiPanelOpen = ref(false)
+const { width: agentPanelWidth, resizing: agentPanelResizing } = useMindmapAgentLayout()
 const mindmapId = computed(() => parseMindmapRouteId(route.query.id))
 const hasValidMindmapId = computed(() => mindmapId.value !== null)
 const requestedReadonly = computed(() => route.query.readonly === '1')
@@ -610,6 +616,7 @@ function handleSearchPanelVisibilityChange(visible) {
 
 function handleAiPanelVisibilityChange(visible) {
   aiPanelOpen.value = visible === true
+  if (aiPanelOpen.value) closeMobileCommands({ restoreFocus: false })
 }
 
 function toggleSidebar(sidebarName) {
@@ -893,7 +900,11 @@ onBeforeUnmount(() => {
   }
 
   &.has-ai-panel {
-    --mindmap-workspace-left: calc(var(--mindmap-activity-width) + 500px);
+    --mindmap-workspace-left: calc(var(--mindmap-activity-width) + var(--mindmap-ai-panel-width, 440px));
+  }
+
+  &.is-ai-resizing :deep(.mindMapContainer) {
+    transition: none;
   }
 
   &.has-left-panel {

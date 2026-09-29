@@ -1,4 +1,4 @@
-"""Bound local-snapshot AI job bodies before FastAPI parses JSON."""
+"""Bound AI job and companion enrollment bodies before JSON/decryption."""
 
 from __future__ import annotations
 
@@ -24,6 +24,10 @@ MINDMAP_AI_REQUEST_ENCRYPTED_WIRE_MAX_BYTES = (
     4 * ((MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES + 2) // 3)
 ) + (64 * 1024)
 MINDMAP_AI_PLAINTEXT_BODY_LIMIT_STATE_KEY = 'mindmap_ai_plaintext_body_limit'
+MINDMAP_DEVICE_ENROLL_PLAINTEXT_MAX_BYTES = 16 * 1024
+MINDMAP_DEVICE_ENROLL_ENCRYPTED_WIRE_MAX_BYTES = (
+    4 * ((MINDMAP_DEVICE_ENROLL_PLAINTEXT_MAX_BYTES + 2) // 3)
+) + 4096
 MINDMAP_AI_INPUT_TOO_LARGE_STATUS = 413
 MINDMAP_AI_INPUT_TOO_LARGE_ERROR_CODE = 'AI_INPUT_TOO_LARGE'
 MINDMAP_AI_INPUT_TOO_LARGE_MESSAGE = 'AI 输入内容超过任务上限，请缩小脑图后重试'
@@ -38,6 +42,7 @@ TRANSPORT_ENCRYPT_HEADER_DUPLICATE_RESPONSE_HEADERS = {
 
 _CREATE_PATH_PATTERN = re.compile(r'^/mindmap/ai/jobs/?$')
 _FOLLOWUP_PATH_PATTERN = re.compile(r'^/mindmap/ai/jobs/[^/]{36}/messages/?$')
+_DEVICE_ENROLL_PATH_PATTERN = re.compile(r'^/mindmap/ai/device-bridge/enroll/?$')
 _TOO_LARGE_CONTENT = {
     'code': MINDMAP_AI_INPUT_TOO_LARGE_STATUS,
     'msg': MINDMAP_AI_INPUT_TOO_LARGE_MESSAGE,
@@ -67,11 +72,10 @@ class MindmapAiRequestSizeMiddleware:
             await self._send_duplicate_transport_header(scope, receive, send)
             return
         encrypted = bool(encrypt_header_values and encrypt_header_values[0] == b'1')
-        wire_limit = (
-            MINDMAP_AI_REQUEST_ENCRYPTED_WIRE_MAX_BYTES
-            if encrypted
-            else MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES
-        )
+        enrollment = bool(_DEVICE_ENROLL_PATH_PATTERN.fullmatch(self._normalize_path(str(scope.get('path', '')))))
+        plaintext_limit = MINDMAP_DEVICE_ENROLL_PLAINTEXT_MAX_BYTES if enrollment else MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES
+        encrypted_limit = MINDMAP_DEVICE_ENROLL_ENCRYPTED_WIRE_MAX_BYTES if enrollment else MINDMAP_AI_REQUEST_ENCRYPTED_WIRE_MAX_BYTES
+        wire_limit = encrypted_limit if encrypted else plaintext_limit
         content_length = self._content_length(scope)
         if content_length is not None and content_length > wire_limit:
             await self._send_too_large(scope, receive, send)
@@ -95,7 +99,7 @@ class MindmapAiRequestSizeMiddleware:
         limited_scope = dict(scope)
         limited_scope['state'] = dict(scope.get('state') or {})
         limited_scope['state'][MINDMAP_AI_PLAINTEXT_BODY_LIMIT_STATE_KEY] = (
-            MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES
+            plaintext_limit
         )
         await self.app(limited_scope, self._build_receive(bytes(body)), send)
 
@@ -140,6 +144,7 @@ class MindmapAiRequestSizeMiddleware:
             and (
                 _CREATE_PATH_PATTERN.fullmatch(path)
                 or _FOLLOWUP_PATH_PATTERN.fullmatch(path)
+                or _DEVICE_ENROLL_PATH_PATTERN.fullmatch(path)
             )
         )
 

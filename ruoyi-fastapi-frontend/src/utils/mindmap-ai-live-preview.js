@@ -263,8 +263,9 @@ export function nextMindmapAiDraftFrame(currentDocument, targetDocument) {
       nodeCount: changes.before.size,
     }
   }
-  // One node, one grapheme per acknowledged frame. There is no batch/full-tree
-  // playback mode: terminal and retargeted snapshots follow the same contract.
+  // One node per acknowledged frame. New/append-only text reveals a grapheme;
+  // a rewrite replaces the complete existing text without a destructive rewind.
+  // Terminal and retargeted snapshots follow the same contract.
   const selected = pending[0]
   const currentNode = changes.before.get(selected?.uid)?.node
   const selectedText = textOf(selected?.node)

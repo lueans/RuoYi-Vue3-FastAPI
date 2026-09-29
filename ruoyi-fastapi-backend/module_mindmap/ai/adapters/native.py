@@ -4,10 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from contextlib import aclosing
+from contextvars import ContextVar
 from functools import wraps
 from importlib import metadata
+from inspect import signature
 from typing import TYPE_CHECKING, Annotated, Any, Literal
+from uuid import uuid4
 
 from agno.agent import Agent
 from agno.models.metrics import Metrics
@@ -36,6 +40,7 @@ from module_mindmap.ai.adapters.base import (
     agent_message_result,
     agent_needs_input_result,
     agent_target_layout,
+    build_agent_continuation_clause,
     build_agent_discussion_prompt,
     build_agent_draft_changed_payload,
     build_agent_generation_mode_clause,
@@ -49,6 +54,7 @@ from module_mindmap.ai.document import (
     AiMindmapLayout,
     MindmapArtifactError,
 )
+from module_mindmap.ai.runtime_trace import RuntimeTrace, detail_text, normalize_todos
 from utils.log_util import logger
 
 if TYPE_CHECKING:
@@ -63,14 +69,15 @@ SUPPORTED_INTENTS = (
     'discuss',
 )
 SUPPORTED_INPUT_TYPES = ('none', 'local_snapshot', 'cloud_document', 'uploaded_artifact')
-PROMPT_VERSION = 'mindmap-agent-12'
-ADAPTER_VERSION = '1.12.0'
+PROMPT_VERSION = 'mindmap-agent-13'
+ADAPTER_VERSION = '1.13.0'
 OLLAMA_TOOL_RESPONSE_MAX_TOKENS = 1_024
 OLLAMA_MIN_CONTEXT_WINDOW_TOKENS = 16_384
 OLLAMA_DEFAULT_KEEP_ALIVE = '30m'
 NATIVE_TOOL_CALL_LIMIT = 32
 NATIVE_MAX_RECOVERABLE_TOOL_FAILURES = 6
 NATIVE_MAX_IDENTICAL_TOOL_FAILURES = 3
+_NATIVE_TOOL_CALL: ContextVar[dict[str, Any] | None] = ContextVar('native_tool_call', default=None)
 NATIVE_COMPLETION_RECOVERY_PROMPT = (
     '上一轮已经产生了候选脑图草稿，但没有完成终态调用。现在进入一次受限收尾回合：'
     '禁止调用 start_document、add_nodes、update_nodes、move_nodes、remove_nodes 或 '
@@ -130,6 +137,16 @@ MIN_CLARIFICATION_ALNUM_CHARS = 2
 
 class NativeTagReference(_NativeToolInput):
     tag_id: int = Field(alias='tagId', strict=True, gt=0)
+
+
+class NativeTodoItem(_NativeToolInput):
+    id: str | None = Field(default=None, max_length=80)
+    content: str = Field(min_length=1, max_length=500)
+    status: Literal['pending', 'in_progress', 'completed', 'cancelled'] = 'pending'
+
+
+class NativeTodoList(RootModel[list[NativeTodoItem]]):
+    root: list[NativeTodoItem] = Field(max_length=40)
 
 
 class NativeTagSuggestion(_NativeToolInput):
@@ -206,11 +223,13 @@ def _safe_tool_failure_payload(
     error_code: str,
     error_message: str,
 ) -> dict[str, Any]:
+    call = _NATIVE_TOOL_CALL.get()
     return {
         'toolName': tool_name,
         'errorCode': error_code,
         'errorMessage': error_message,
         'retryable': True,
+        **({'callId': call['id'], 'durationMs': max(0, round((time.monotonic() - call['started']) * 1000))} if call else {}),
     }
 
 
@@ -269,8 +288,7 @@ def _build_native_safe_function(
         ),
     )
 
-    @wraps(entrypoint)
-    async def safe_entrypoint(*args: Any, **kwargs: Any) -> Any:
+    async def validated_entrypoint(*args: Any, **kwargs: Any) -> Any:
         try:
             return await validated(*args, **kwargs)
         except ValidationError:
@@ -337,6 +355,20 @@ def _build_native_safe_function(
             'retryable': payload['retryable'],
         })
 
+    @wraps(entrypoint)
+    async def safe_entrypoint(*args: Any, **kwargs: Any) -> Any:
+        # Correlation belongs to the invocation, not its tool name. ContextVar
+        # preserves it through parallel Agno calls without sharing arguments.
+        try:
+            arguments = dict(signature(entrypoint).bind(*args, **kwargs).arguments)
+        except TypeError:
+            arguments = {}
+        token = _NATIVE_TOOL_CALL.set({'id': uuid4().hex, 'started': time.monotonic(), 'arguments': arguments})
+        try:
+            return await validated_entrypoint(*args, **kwargs)
+        finally:
+            _NATIVE_TOOL_CALL.reset(token)
+
     # skip_entrypoint_processing 防止 Agno 再套一层默认 validate_call；默认层会把
     # input_value 写入异常和日志。所有失败都在 safe_entrypoint 内转换为固定文案。
     safe_entrypoint._wrapped_for_validation = True  # type: ignore[attr-defined]
@@ -353,6 +385,10 @@ def _native_tool_payload(value: Any) -> Any:
     """兼容 Agno 直接传 dict 与测试/扩展传 Pydantic 对象。"""
     if isinstance(value, BaseModel):
         return value.model_dump(by_alias=True, exclude_unset=True)
+    if isinstance(value, dict):
+        return {key: _native_tool_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_native_tool_payload(item) for item in value]
     return value
 
 
@@ -503,6 +539,8 @@ start_document；已恢复草稿的创建任务和编辑任务都必须先调用
 修正全部错误；preview 模式最后必须调用 complete_artifact，direct 模式的
 每个已验证批次已经由平台提交到权威云端脑图，不需要调用 complete_artifact。
 不要在自然语言回复中粘贴完整 JSON。
+可以在工具之间简短说明进度；不要披露隐藏推理。任务较复杂时用 update_plan 发布并更新真实计划，
+在最终 validate_draft/complete_artifact 之前更新计划，不要把计划当作已完成的脑图修改。
 只有缺少会实质改变脑图结构的必要信息且无法作安全合理假设时，才可在任何草稿变更前调用
 request_clarification，并传入 1 至 3 个简短问题。request_clarification 与 complete_artifact
 都是终态工具：调用其中任意一个之后禁止再调用任何工具，也不要依赖自然语言终态声明完成。
@@ -547,6 +585,8 @@ class NativeMindmapAdapter(AgentAdapter):
             build_agent_generation_mode_clause(context),
             '必须使用工具完成，不得只返回说明文本。',
         ]
+        if context.continuation_history:
+            instructions.append(build_agent_continuation_clause(context))
         if context.execution_mode == 'direct':
             instructions.append(
                 '当前是 direct 直写模式：每个成功的变更工具都会实时提交云端脑图；'
@@ -645,6 +685,7 @@ class NativeMindmapAdapter(AgentAdapter):
         node_references: dict[str, str] = {}
         tool_failure_total = 0
         tool_failure_counts: dict[tuple[str, str, str], int] = {}
+        trace = RuntimeTrace()
 
         if initial_effect_marker[0]:
             restored_projection = tools.read_projection()
@@ -710,7 +751,7 @@ class NativeMindmapAdapter(AgentAdapter):
                 )
             return None
 
-        async def execute_tool(
+        async def execute_tool(  # noqa: PLR0912 - keep terminal/cancel guards inside the serialized tool boundary
             tool_name: str,
             action: Any,
             *,
@@ -743,8 +784,11 @@ class NativeMindmapAdapter(AgentAdapter):
                     error = MindmapArtifactError('自动收尾仅允许依次校验和完成，不能继续修改草稿')
                     mark_runtime_error(error)
                     raise error
+                for event_type, payload in trace.next_message():
+                    await emit_required(event_type, payload)
+                call = _NATIVE_TOOL_CALL.get() or {'id': uuid4().hex, 'started': time.monotonic(), 'arguments': {}}
                 await emit_required(
-                    'tool_started', {'toolName': tool_name, 'stage': 'building'},
+                    'tool_started', {'toolName': tool_name, 'stage': 'building', 'callId': call['id']},
                 )
                 if cancel_event.is_set():
                     raise asyncio.CancelledError
@@ -754,18 +798,32 @@ class NativeMindmapAdapter(AgentAdapter):
                     tools, tool_name, before_cursor, mutates_draft=mutates_draft,
                 )
                 completed_payload = build_agent_tool_completed_payload(tools, tool_name)
+                # Only successful domain-validated arguments are displayable.
+                # Invalid node references and schema failures never echo inputs.
+                completed_payload.update(
+                    callId=call['id'], toolInput=detail_text(_native_tool_payload(call['arguments'])),
+                    toolOutput=detail_text(value), durationMs=max(0, round((time.monotonic() - call['started']) * 1000)),
+                )
                 if cancel_event.is_set():
                     raise asyncio.CancelledError
                 if draft_changed is not None:
                     await emit_required('draft_changed', draft_changed)
                 if tool_name == 'suggest_tags':
                     await emit_required('tag_suggestions', {'suggestions': value})
+                if tool_name == 'update_plan':
+                    await emit_required('todo_updated', {'todos': value['todos'], 'origin': 'agent'})
                 await emit_required('tool_completed', completed_payload)
                 return _json_tool_result(value)
 
         async def read_projection() -> str:
             """读取本任务授权的候选脑图投影。"""
             return await execute_tool('read_projection', tools.read_projection)
+
+        async def update_plan(todos: NativeTodoList) -> str:
+            """发布或更新真实任务计划；不修改脑图，不代表草稿已完成。"""
+            return await execute_tool('update_plan', lambda: {
+                'todos': normalize_todos([_native_tool_payload(item) for item in todos.root]),
+            })
 
         async def read_document_detail() -> str:
             """读取授权脑图详情与范围摘要。"""
@@ -966,6 +1024,7 @@ class NativeMindmapAdapter(AgentAdapter):
         needs_start_document = not initial_effect_marker[0]
         agent_tools = [
             read_projection,
+            update_plan,
             search_tags,
             suggest_tags,
         ]
@@ -1043,8 +1102,11 @@ class NativeMindmapAdapter(AgentAdapter):
             run_metrics = None
             async with aclosing(response_stream) as stream:
                 async for event in stream:
-                    if runtime_error is not None:
-                        raise runtime_error
+                    check_run_state()
+                    if cancel_event.is_set():
+                        raise asyncio.CancelledError
+                    for event_type, payload in trace.native(event):
+                        await emit_required(event_type, payload)
                     # 工具事件由上面的异步包装器在同一个串行临界区内发送。
                     # 这样事件与实际草稿操作直接绑定，不依赖 Agno 并行调用的
                     # started/completed 回放顺序。
@@ -1101,6 +1163,8 @@ class NativeMindmapAdapter(AgentAdapter):
             if run_metrics is not None:
                 total_metrics = total_metrics + run_metrics
                 usage = total_metrics.to_dict()
+            for event_type, payload in trace.finish():
+                await emit_required(event_type, payload)
             check_run_state()
 
         total_timeout = max(1.0, float(context.metadata.get('timeoutSeconds') or 900))

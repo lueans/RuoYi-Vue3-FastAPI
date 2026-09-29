@@ -24,6 +24,7 @@ from config.database import AsyncSessionLocal
 from exceptions.exception import ServiceException
 from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_mindmap.ai.document import MindmapArtifactError, validate_smm_artifact
+from module_mindmap.ai.runtime_catalog import discover_runtimes
 from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
 from module_mindmap.entity.do.mindmap_ai_do import MINDMAP_AI_EVENT_SEQUENCE_MAX
 from module_mindmap.entity.vo.mindmap_ai_vo import (
@@ -165,6 +166,14 @@ async def list_mindmap_agents(
         intent,
         input_type,
     ))
+
+
+@mindmap_ai_controller.get('/runtimes', summary='扫描运行主机上的本地 Agent CLI')
+async def list_mindmap_runtimes(
+    request: Request,
+    refresh: Annotated[bool, Query()] = False,
+) -> Response:
+    return ResponseUtil.success(data=await discover_runtimes(refresh=refresh))
 
 
 @mindmap_ai_admin_controller.get(

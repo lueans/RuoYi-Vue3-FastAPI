@@ -2,8 +2,12 @@ import { getToken } from './auth.js'
 import { isMindmapAiAbortError as isAbortError } from './mindmap-ai-errors.js'
 import { stableJsonValue } from './mindmap-ai-shared.js'
 import { compareMindmapAiPreviewCoordinates } from './mindmap-ai-live-preview.js'
+import { mergeMindmapExecutionEvidence } from './mindmap-execution-state.js'
 
 export const MINDMAP_AI_MAX_SSE_EVENT_CHARS = 256 * 1024
+// The server emits a keepalive every ~15 seconds, even while the model is quiet.
+// Bound transport silence, not total run time or time spent rendering a frame.
+const MINDMAP_AI_STREAM_IDLE_MS = 45_000
 
 const MINDMAP_AI_AGENT_PROGRESS_STAGE_LABELS = Object.freeze({
   sdk_ready: 'SDK 就绪',
@@ -99,7 +103,7 @@ export function resolveMindmapAiRequestAttempt(
 }
 
 const MINDMAP_AI_TERMINAL_JOB_STATUSES = new Set([
-  'ready', 'applied', 'undone', 'completed_file', 'completed_direct', 'completed_no_change',
+  'ready', 'applied', 'undone', 'completed_file', 'completed_direct', 'completed_no_change', 'completed_message',
   'needs_review', 'stale', 'cancelled', 'failed', 'expired',
   'needs_input', 'rejected',
 ])
@@ -149,6 +153,9 @@ export function mergeMindmapAiJobEventSnapshot(currentJob, event) {
   const payload = event?.payload ?? event?.data?.payload
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return currentJob
   const updates = {}
+  if (eventType === 'execution_state') {
+    Object.assign(updates, mergeMindmapExecutionEvidence(currentJob, payload))
+  }
   if (typeof payload.status === 'string') {
     updates.status = payload.status
     const createdTime = event?.createdTime ?? event?.data?.createdTime
@@ -192,9 +199,13 @@ export function mergeMindmapAiJobSnapshot(currentJob, incomingJob) {
     || typeof currentJob !== 'object'
     || (incomingJob.id != null && currentJob.id !== incomingJob.id)
   ) {
-    return { ...incomingJob }
+    return { ...incomingJob, ...mergeMindmapExecutionEvidence(null, incomingJob) }
   }
+  if (Number.isSafeInteger(currentJob.executionEpoch)
+    && Number.isSafeInteger(incomingJob.executionEpoch)
+    && incomingJob.executionEpoch < currentJob.executionEpoch) return currentJob
   const currentProgress = Number(currentJob.progress)
+  const executionEvidence = mergeMindmapExecutionEvidence(currentJob, incomingJob)
   const incomingProgress = Number(incomingJob.progress)
   let progress = Math.max(
     Number.isFinite(currentProgress) ? currentProgress : 0,
@@ -221,7 +232,7 @@ export function mergeMindmapAiJobSnapshot(currentJob, incomingJob) {
     MINDMAP_AI_TERMINAL_JOB_STATUSES.has(currentJob.status)
     && typeof incomingJob.status === 'string'
     && !MINDMAP_AI_TERMINAL_JOB_STATUSES.has(incomingJob.status)
-  ) return { ...currentJob, progress }
+  ) return { ...currentJob, progress, ...executionEvidence }
   if (
     MINDMAP_AI_TERMINAL_JOB_STATUSES.has(currentJob.status)
     && MINDMAP_AI_TERMINAL_JOB_STATUSES.has(incomingJob.status)
@@ -231,7 +242,7 @@ export function mergeMindmapAiJobSnapshot(currentJob, incomingJob) {
     // older terminal snapshot. Only server-supported terminal side effects may
     // replace an already observed terminal state.
     const allowed = MINDMAP_AI_TERMINAL_TRANSITIONS[currentJob.status]
-    if (!allowed?.has(incomingJob.status)) return { ...currentJob, progress }
+    if (!allowed?.has(incomingJob.status)) return { ...currentJob, progress, ...executionEvidence }
   }
   // The same race exists between a cancel response and an older active poll.
   // A later terminal response is still authoritative and is accepted normally.
@@ -247,6 +258,7 @@ export function mergeMindmapAiJobSnapshot(currentJob, incomingJob) {
     ...incomingJob,
     ...(typeof status === 'string' ? { status } : {}),
     progress,
+    ...executionEvidence,
   }
   // A rejected active snapshot must not advance or rewind the semantic clock
   // used to judge later worker-recovery transitions. Otherwise two replayed
@@ -342,47 +354,80 @@ export async function streamMindmapAiJobEvents(jobId, {
   const headers = { Accept: 'text/event-stream' }
   if (token) headers.Authorization = `Bearer ${token}`
   if (Number(afterSequence) > 0) headers['Last-Event-ID'] = String(afterSequence)
-  const response = await fetchImpl(
-    `${normalizeBaseUrl(baseUrl)}/mindmap/ai/jobs/${encodeURIComponent(jobId)}/events`,
-    { headers, signal, cache: 'no-store' },
-  )
-  if (!response.ok) {
-    throw await readStreamResponseError(
-      response,
-      `AI 事件流连接失败（HTTP ${response.status}）`,
-    )
+  // Own only this GET's transport. A stale SSE must not abort a concurrent
+  // draft fetch, cancel the Agent, or mutate the caller's monitoring signal.
+  const transport = new AbortController()
+  const forwardAbort = () => transport.abort(signal.reason)
+  if (signal?.aborted) forwardAbort()
+  else signal?.addEventListener('abort', forwardAbort, { once: true })
+  const readTransport = async read => {
+    transport.signal.throwIfAborted()
+    let onAbort
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(transport.signal.reason)
+      transport.signal.addEventListener('abort', onAbort, { once: true })
+    })
+    const timer = setTimeout(() => transport.abort(createStreamError(
+      'AI_STREAM_TIMEOUT', 'AI 实时连接长时间没有响应，正在恢复原任务的实时记录',
+    )), MINDMAP_AI_STREAM_IDLE_MS)
+    try { return await Promise.race([read(), aborted]) }
+    catch (error) {
+      // Fetch body readers can reject with AbortError first. Preserve our
+      // timeout reason so the monitor does not mistake it for user cleanup.
+      throw transport.signal.aborted ? transport.signal.reason : error
+    }
+    finally {
+      clearTimeout(timer)
+      transport.signal.removeEventListener('abort', onAbort)
+    }
   }
-  const contentType = response.headers?.get?.('content-type') || ''
-  if (!/\btext\/event-stream\b/i.test(contentType)) {
-    throw await readStreamResponseError(response, 'AI 事件流返回了无效响应')
-  }
-  if (!response.body?.getReader) throw new Error('当前浏览器不支持 AI 实时事件流')
-
-  const reader = response.body.getReader()
+  let reader
   const decoder = new TextDecoder()
   let buffer = ''
   let completed = false
   try {
+    const response = await readTransport(() => fetchImpl(
+      `${normalizeBaseUrl(baseUrl)}/mindmap/ai/jobs/${encodeURIComponent(jobId)}/events`,
+      { headers, signal: transport.signal, cache: 'no-store' },
+    ))
+    if (!response.ok) {
+      throw await readTransport(() => readStreamResponseError(
+        response, `AI 事件流连接失败（HTTP ${response.status}）`,
+      ))
+    }
+    const contentType = response.headers?.get?.('content-type') || ''
+    if (!/\btext\/event-stream\b/i.test(contentType)) {
+      throw await readTransport(() => readStreamResponseError(response, 'AI 事件流返回了无效响应'))
+    }
+    if (!response.body?.getReader) throw new Error('当前浏览器不支持 AI 实时事件流')
+    reader = response.body.getReader()
     await onOpen?.()
     while (true) {
-      const { done, value } = await reader.read()
+      const { done, value } = await readTransport(() => reader.read())
       const parsed = parseMindmapAiSseChunk(
         buffer,
         decoder.decode(value || new Uint8Array(), { stream: !done }),
         { flush: done },
       )
       buffer = parsed.remainder
-      for (const event of parsed.events) await onEvent?.(event)
+      for (const event of parsed.events) {
+        transport.signal.throwIfAborted()
+        await onEvent?.(event)
+      }
       if (done) {
         completed = true
         return
       }
     }
   } finally {
+    signal?.removeEventListener('abort', forwardAbort)
     if (!completed) {
-      try { await reader.cancel() } catch {}
+      transport.abort()
+      // A broken underlying stream may never acknowledge cancel. Do not let
+      // cleanup prevent the existing monitor from reconnecting to this job.
+      try { Promise.resolve(reader?.cancel()).catch(() => {}) } catch {}
     }
-    reader.releaseLock?.()
+    try { reader?.releaseLock?.() } catch {}
   }
 }
 

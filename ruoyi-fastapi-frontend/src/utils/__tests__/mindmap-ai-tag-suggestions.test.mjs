@@ -126,6 +126,7 @@ test('actual historical restoration shares the one sanitizer boundary with SSE b
     job: { value: { id: 'current', sessionId: 'session' } }, latestEventSequence: { value: 0 },
     agentEvents: { value: [] }, timelineLoadGeneration: 0, restoreGeneration: 1, timelineController: null,
     timelineLoading: { value: false }, timelineError: { value: '' }, currentSessionTitle: { value: '' },
+    handoffTimelineReceipt: { value: null }, currentAiOwnerUserId: () => '7',
     sessionTurns: { value: [] }, selectedTurnJobId: { value: '' }, restoringJob: { value: true },
     getMindmapAiSessionTimeline: async () => ({ data: { turns: [
       { job: { id: 'old', turnIndex: 1 }, events: [rawEvent, rawEvent] },

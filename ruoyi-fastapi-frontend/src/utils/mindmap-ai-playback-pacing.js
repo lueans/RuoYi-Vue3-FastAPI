@@ -43,16 +43,17 @@ export function getMindmapAiPendingCharacterCount(currentDocument, targetDocumen
     const to = textGraphemes(plainRevealText(targetText, targetRich))
     let common = 0
     while (common < from.length && from[common] === to[common]) common += 1
-    count += Math.max(1, to.length - common)
+    count += common < from.length ? 1 : Math.max(1, to.length - common)
   }
   return count
 }
 
 /**
  * Playback changes speed, never ordering or completeness. The planner still
- * advances exactly one grapheme of one node per acknowledged frame, including
+ * reveals new/append-only text one grapheme per acknowledged frame, including
  * when the job has completed/cancelled. A scheduler must yield between frames;
  * zero delay is a request to keep up, not a synchronous whole-document loop.
+ * Replacements of already visible text consume one atomic node frame.
  *
  * Callers may provide an exact character estimate obtained when a new target
  * arrives. The pending-node fallback avoids a full text scan on every tick.

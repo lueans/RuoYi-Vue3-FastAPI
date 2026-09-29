@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { parse } from '@vue/compiler-sfc'
 
 const toolbarSourceUrl = new URL('../../components/MindMap/Toolbar.vue', import.meta.url)
 const editorPageSourceUrl = new URL('../../views/mindmap/edit.vue', import.meta.url)
@@ -8,6 +9,19 @@ const editorSourceUrl = new URL('../../components/MindMap/Edit.vue', import.meta
 const scaleSourceUrl = new URL('../../components/MindMap/Scale.vue', import.meta.url)
 const fullscreenSourceUrl = new URL('../../components/MindMap/Fullscreen.vue', import.meta.url)
 const demonstrateSourceUrl = new URL('../../components/MindMap/Demonstrate.vue', import.meta.url)
+
+test('窄屏命令遮罩与命令面板共享页头层叠上下文，不能盖住 AI 入口', async () => {
+  const source = await readFile(editorPageSourceUrl, 'utf8')
+  const root = parse(source).descriptor.template.ast
+  const hasClass = (node, name) => node.props?.some(prop => prop.name === 'class'
+    && prop.value?.content.split(/\s+/).includes(name))
+  const page = root.children.find(node => hasClass(node, 'mindmap-edit-page'))
+  const header = page.children.find(node => hasClass(node, 'mindmap-edit-header'))
+  assert.ok(header.children.some(node => hasClass(node, 'header-command-center')))
+  assert.ok(header.children.some(node => hasClass(node, 'mobile-command-backdrop')),
+    '遮罩不能放在 z-index:2100 的页头之外，否则其 2200 会覆盖页头内的 2201 命令面板')
+  assert.equal(page.children.some(node => hasClass(node, 'mobile-command-backdrop')), false)
+})
 
 test('编辑器工具栏操作使用可聚焦按钮而不是点击 div', async () => {
   const source = await readFile(toolbarSourceUrl, 'utf8')

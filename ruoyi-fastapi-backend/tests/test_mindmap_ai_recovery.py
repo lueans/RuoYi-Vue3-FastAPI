@@ -7,7 +7,7 @@ import json
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -243,8 +243,13 @@ async def test_wake_waiting_followups_releases_only_the_oldest_queued_turn() -> 
             'progress': 0,
             'error_code': None,
             'error_message': None,
+            'request_json': ANY,
         },
     )
+    released = next(item.args[2] for item in update_job.await_args_list if item.args[1] == first_child.id)
+    assert json.loads(released['request_json']) == {
+        'source': {'type': 'none'}, 'contextParentJobId': parent.id,
+    }
     update_job.assert_any_await(
         database,
         second_child.id,
@@ -497,7 +502,7 @@ async def test_recoverable_query_requires_staleness_for_inflight_statuses() -> N
     assert 'mindmap_ai_job.update_time <=' in statement_text
     assert 'mindmap_ai_job.created_time >' in statement_text
     assert 'mindmap_ai_job.id >' in statement_text
-    assert statement.compile().params['param_1'] == MAX_RECOVERY_PAGE_SIZE
+    assert statement._limit_clause.value == MAX_RECOVERY_PAGE_SIZE
 
 
 @pytest.mark.asyncio
@@ -538,9 +543,10 @@ async def test_adapter_cancel_has_second_deadline_when_cancel_is_swallowed() -> 
     await started.wait()
     started_at = time.monotonic()
     waiter.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(MindmapArtifactError) as error:
         await waiter
 
+    assert error.value.code == 'AI_AGENT_CLEANUP_FAILED'
     assert time.monotonic() - started_at < MAX_CANCEL_WAIT_SECONDS
     assert len(MindmapAiTaskManager._detached_adapter_tasks) == 1
     release.set()
@@ -549,6 +555,37 @@ async def test_adapter_cancel_has_second_deadline_when_cancel_is_swallowed() -> 
             break
         await asyncio.sleep(0)
     assert MindmapAiTaskManager._detached_adapter_tasks == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('prior,error_code,changed_expected', [
+    ('cancel_requested', 'AI_AGENT_CLEANUP_FAILED', True),
+    ('cancel_requested', 'AI_AGENT_UNAVAILABLE', False),
+    ('cancelled', 'AI_AGENT_CLEANUP_FAILED', False),
+])
+async def test_failed_stop_status_is_distinct_from_ordinary_cancel_races(prior, error_code, changed_expected):
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    async def transition(_db, _job_id, predecessors, values):
+        assert values['status'] == 'failed'
+        return prior in predecessors
+    events = AsyncMock()
+    with (
+        patch('module_mindmap.service.mindmap_ai_service.AsyncSessionLocal', new=_SessionFactory(database)),
+        patch.object(MindmapAiDao, 'transition_job_status', side_effect=transition),
+        patch.object(MindmapAiDao, 'add_event', new=events),
+        patch.object(MindmapAiDao, 'delete_draft_checkpoint', new=AsyncMock()),
+        patch.object(MindmapAiTaskManager, 'mark_draft_terminal', new=AsyncMock()),
+    ):
+        changed = await MindmapAiTaskManager._set_status(
+            'cleanup-race', 'failed', 100, error_code=error_code, error_message='停止未确认',
+        )
+    assert changed is changed_expected
+    if changed_expected:
+        assert json.loads(events.await_args.args[3])['errorCode'] == 'AI_AGENT_CLEANUP_FAILED'
+        database.commit.assert_awaited_once()
+    else:
+        events.assert_not_awaited()
+        database.rollback.assert_awaited_once()
 
 
 @pytest.mark.asyncio

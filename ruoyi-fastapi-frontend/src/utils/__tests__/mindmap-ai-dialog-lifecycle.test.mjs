@@ -5,6 +5,8 @@ import { babelParse, parse } from '@vue/compiler-sfc'
 import { compareMindmapAiPreviewCoordinates, countMindmapAiDraftNodes } from '../mindmap-ai-live-preview.js'
 import { directImpactForMindmapAiResult, resolveMindmapAiDirectChangeSummary } from '../mindmap-ai-result-summary.js'
 import { mergeMindmapAiJobSnapshot } from '../mindmap-ai-stream.js'
+import { isDeviceAgent } from '../mindmap-agent-devices.js'
+import { isMindmapExecutionBlocked } from '../mindmap-execution-state.js'
 
 // Execute the production lifecycle functions rather than matching source text.
 // Editor IO is controlled so races can be delivered in either order.
@@ -19,6 +21,12 @@ function functionSource(name) {
   return script.slice(declaration.start, declaration.end)
 }
 function compile(scope, names) {
+  scope.isDeviceAgent = isDeviceAgent
+  scope.isMindmapExecutionBlocked = isMindmapExecutionBlocked
+  scope.agentSwitchPending ??= ref(false)
+  scope.readPersistedAttempts ??= () => ({})
+  scope.continuationPrompt ??= ref('')
+  names = [...new Set([...names, 'consumeSubmittedComposerDraft'])]
   return new Function('scope', `with(scope) { ${names.map(functionSource).join('\n')} return { ${names.join(', ')} }; }`)(scope)
 }
 function harness() {
@@ -254,7 +262,7 @@ test('retry preparation failure cannot start or replay a backend request', async
   const requests = []
   let attemptPersisted = false
   Object.assign(h.s, {
-    actionBusy: ref(false), retryAvailable: ref(true), retrying: ref(false), retryPrompt: ref(''),
+    actionBusy: ref(false), retryAvailable: ref(true), retrying: ref(false), continuationPrompt: ref(''),
     form: { agentKey: 'codex' }, agents: ref([{ agentKey: 'codex', status: 'enabled', intents: ['expand'], inputTypes: ['cloud_document'] }]),
     nativeModelConfigurationIssue: ref(''), jobConfiguration: ref({}), sourceContext: ref({}), sourceFingerprint: ref(''), sessionTurns: ref([]),
     retryAttempt: null, beginActionIdentity: () => ({}), assertActionIdentity: noop,
@@ -386,7 +394,7 @@ test('child activation establishes its latest epoch/cursor before monitoring and
     isMindmapAiMessageJob: () => false, intentOptions: [{ value: 'expand' }], form: { intent: 'expand' },
     jobConfiguration: ref({ intent: 'expand' }), discussionMode: ref(false), captureJobConfiguration: value => value,
     sourceContext: ref(null), sourceFingerprint: ref(''), selectedTurnJobId: ref(''),
-    followupPrompt: ref(''), pendingFollowupPrompt: ref(''), proposal: ref(null), proposalError: ref(''), diffConfirmed: ref(false),
+    continuationPrompt: ref(''), pendingFollowupPrompt: ref(''), proposal: ref(null), proposalError: ref(''), diffConfirmed: ref(false),
     followupAttempt: null, appendClientPrompt: noop, upsertSessionTurn: noop, persistActiveJob: () => true,
     clearDurableAttempt: noop, restoreDurableAttemptNotice: noop, resetCurrentJobCursor: noop,
     latestPreviewVersion: ref(99), latestPreviewEpoch: ref(1), livePreviewRenderedVersion: ref(-1),
@@ -414,7 +422,7 @@ test('cancelling a parent preserves its terminal queued child polling and canvas
   h.s.job.value = { id: 'job1', sessionId: 'session1', status: 'running', executionMode: 'direct' }
   Object.assign(h.s, {
     actionBusy: ref(false), cancelling: ref(false), realtimeError: ref(''), pollTimer: null,
-    beginActionIdentity: (_type, identity) => ({ ...identity }), assertActionIdentity: noop,
+    beginActionIdentity: (type, identity) => ({ type, ...identity }), assertActionIdentity: noop,
     cancelMindmapAiJob: async (jobId, { preserveDraft }) => {
       assert.equal(jobId, 'job1')
       assert.equal(preserveDraft, true)
@@ -442,7 +450,7 @@ test('cancelling a parent preserves its terminal queued child polling and canvas
     monitoringSuspendedJobId: '', isMindmapAiMessageJob: () => false, intentOptions: [{ value: 'expand' }],
     jobConfiguration: ref({ intent: 'expand' }), discussionMode: ref(false), captureJobConfiguration: value => value,
     sourceContext: ref({ revision: 1 }), sourceFingerprint: ref(''), appendClientPrompt: noop, upsertSessionTurn: noop,
-    selectedTurnJobId: ref('job1'), followupPrompt: ref(''), pendingFollowupPrompt: ref(''),
+    selectedTurnJobId: ref('job1'), continuationPrompt: ref('下一轮'), pendingFollowupPrompt: ref(''),
     proposal: ref(null), proposalError: ref(''), diffConfirmed: ref(false),
     clearDurableAttempt: noop, followupAttempt: null, restoreDurableAttemptNotice: noop,
     restoreSessionTimeline: async () => true, restoreGeneration: 1,
@@ -451,6 +459,7 @@ test('cancelling a parent preserves its terminal queued child polling and canvas
     'activateQueuedFollowupTurn', 'activateFollowupJob', 'finalizeTerminalJob', 'terminalJobResourceKey'])
   assert.equal(await api.cancelJob(), true)
   assert.equal(h.s.job.value.id, 'child1')
+  assert.equal(h.s.continuationPrompt.value, '下一轮', 'even identical unsent text must survive the automatic queued-child activation')
   assert.equal(h.s.directCanvasOwnerId.value, 'child1')
   assert.notEqual(h.s.pollTimer, null, 'the child must retain its terminal drain timer')
   assert(h.events.every(event => event.phase !== 'status'), 'cancellation must only send actionable canvas events')
@@ -694,8 +703,8 @@ for (const activationName of ['activateCreatedJob', 'activateRetryJob', 'activat
         sourceContext: ref(null), sourceFingerprint: ref(''), proposal: ref(null),
         proposalError: ref(''), diffConfirmed: ref(false), restoreDurableAttemptNotice: noop,
         resetCurrentJobCursor: noop, captureJobConfiguration: value => value,
-        form: { intent: 'expand' }, intentOptions: [{ value: 'expand' }], sessionTurns: ref([]),
-        followupPrompt: ref(''), pendingFollowupPrompt: ref(''), retryPrompt: ref(''),
+        form: { intent: 'expand', prompt: '' }, intentOptions: [{ value: 'expand' }], sessionTurns: ref([]),
+        continuationPrompt: ref(''), pendingFollowupPrompt: ref(''),
         clearAgentRuntimeState: () => { h.s.latestPreviewVersion.value = -1; h.s.latestPreviewEpoch.value = 1 },
         resumeRestoredDirectJob: h.resumeRestoredDirectJob, beginJobMonitoring: h.beginJobMonitoring,
       })
@@ -720,7 +729,8 @@ function directReceiptHarness() {
   const events = []
   const proposalReads = []
   const retries = []
-  const snapshot = () => ({ id, status: server.status, executionMode: 'direct', proposalId: id })
+  const snapshot = () => ({ id, status: server.status, executionMode: 'direct', proposalId: id,
+    executionEpoch: 1, executionState: server.status === 'running' ? 'running' : 'stopped' })
   const receipt = () => ({ id, jobId: id, appliedRevision: server.revision,
     resultHash: `hash:${server.revision}`, status: 'applied',
     impact: { direct: true, changeSummaryVersion: 2,

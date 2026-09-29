@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from exceptions.exception import ServiceException
-from module_mindmap.entity.vo.mindmap_ai_vo import MindmapAiJobRetryModel
+from module_mindmap.ai.adapters.base import AgentRunContext
+from module_mindmap.ai.adapters.claude import ClaudeMindmapAdapter
+from module_mindmap.ai.tool_contract import MindmapToolService
+from module_mindmap.entity.vo.mindmap_ai_vo import MindmapAiJobCreateModel, MindmapAiJobRetryModel
 from module_mindmap.service.mindmap_ai_service import (
     MindmapAiService,
     MindmapAiTaskManager,
@@ -218,8 +221,12 @@ async def test_retry_idempotency_key_cannot_be_reused_for_other_overrides() -> N
 
 
 @pytest.mark.asyncio
-async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_session() -> None:
+@pytest.mark.parametrize('context_parent', [None, 'owned-content-ancestor'])
+@pytest.mark.parametrize('room_epoch', ['old-epoch', 'latest-epoch'])
+async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_session(context_parent: str | None, room_epoch: str) -> None:
     original = _failed_job()
+    if context_parent:
+        original.request_json = json.dumps({**json.loads(original.request_json), 'contextParentJobId': context_parent})
     existing_later_turn = SimpleNamespace(id='later', turn_index=4)
     session = _session()
     latest_document = _document('最新权威文档')
@@ -281,7 +288,7 @@ async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_ses
                 LATEST_CLOUD_REVISION,
                 'latest-hash',
                 42,
-                'latest-epoch',
+                room_epoch,
             )),
         ) as prepare_source,
         patch.object(MindmapAiService, '_runtime_policy', return_value=policy),
@@ -330,9 +337,10 @@ async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_ses
     assert created['agent_key'] == 'claude'
     assert created['base_revision'] == LATEST_CLOUD_REVISION
     assert created['base_hash'] == 'latest-hash'
-    assert created['base_room_epoch'] == 'latest-epoch'
+    assert created['base_room_epoch'] == room_epoch
     request = json.loads(created['request_json'])
     assert request['prompt'] == '换一个 Agent，覆盖边界场景'
+    assert request.get('contextParentJobId') == context_parent
     assert request['parameters']['maxNodes'] == RETRY_MAX_NODES
     assert request['parameters']['maxDepth'] == ORIGINAL_MAX_DEPTH
     assert request['parameters']['density'] == 'detailed'
@@ -345,6 +353,31 @@ async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_ses
     assert result.retry_of_job_id == FAILED_JOB_ID
     assert result.parent_job_id is None
     schedule.assert_called_once_with(created['id'])
+    with (
+        patch('module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+              AsyncMock(side_effect=lambda _db, identifier, _user: original if identifier == original.id else None)),
+        patch('module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_latest_plan_payload',
+              AsyncMock(return_value=json.dumps({'todos': [{'content': '补齐未完成的边界场景', 'status': 'pending'}], 'origin': 'agent'}))) as plan,
+        patch('module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_visible_reply_payloads',
+              AsyncMock(return_value=['{"text":"下一步补充恢复测试。","visibility":"visible"}'])) as replies,
+    ):
+        history = await MindmapAiTaskManager._editing_continuation_history(
+            database, SimpleNamespace(**created), MindmapAiJobCreateModel.model_validate(request),
+        )
+    if room_epoch != 'old-epoch':
+        assert history == ()
+        plan.assert_not_awaited()
+        replies.assert_not_awaited()
+    else:
+        assert history[0]['request'] == '原始要求'
+        context = AgentRunContext(job_id=created['id'], user_id=7, intent='expand', prompt=request['prompt'],
+            parameters=request['parameters'], source_document=latest_document, tool_service=MindmapToolService(),
+            continuation_history=history)
+        prompt = ClaudeMindmapAdapter._prompt(context)
+        assert '原始要求' in prompt and '补齐未完成的边界场景' in prompt
+        assert '下一步补充恢复测试。' in prompt
+        assert context.source_document is latest_document
+        assert context.external_session_id is None
 
 
 @pytest.mark.asyncio

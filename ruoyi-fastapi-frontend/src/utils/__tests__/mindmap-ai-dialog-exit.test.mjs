@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { babelParse, compileScript, parse } from '@vue/compiler-sfc'
+import { isMindmapExecutionBlocked } from '../mindmap-execution-state.js'
 
 const ref = value => ({ value })
 const noop = () => {}
@@ -63,6 +64,7 @@ test('离页保护接通页面、Edit 暴露方法和真实 Dialog 收尾，并�
 function deletionHarness(target) {
   const calls = []
   const s = {
+    isMindmapExecutionBlocked,
     job: ref({ id: 'job', sessionId: 'session', status: 'running', target, executionMode: 'preview' }),
     recentSessions: ref([{ sessionId: 'session' }]), actionBusy: ref(false),
     livePreviewCanvasMutationBlocked: ref(false), directCanvasOwned: ref(false),
@@ -75,14 +77,15 @@ function deletionHarness(target) {
     beginActionIdentity: () => s.job.value.id,
     assertActionIdentity: id => { if (s.job.value?.id !== id) throw Object.assign(new Error(), { code: 'AI_ACTION_SUPERSEDED' }) },
     deleteMindmapAiSession: async () => {},
+    composerDraftPersistence: { update: text => { assert.equal(text, ''); calls.push('clear-draft') } },
     invalidateActionIdentity: noop, invalidateRestoreOperations: noop, clearAgentRuntimeState: noop,
     clearStoredActiveJob: () => calls.push('clear-active'), clearStoredRecentJob: () => calls.push('clear-recent'),
     restoreDurableAttemptNotice: noop, formatMindmapAiError: error => error.message,
     emitAiCanvasPreviewEvent: () => assert.fail('a non-canvas deletion must not change the canvas'),
   }
   for (const key of ['deletingSession', 'directCanvasRecoveryJobId', 'directCanvasOwnerId', 'jobConfiguration',
-    'proposal', 'proposalError', 'proposalLoading', 'diffConfirmed', 'runningPrompt', 'followupPrompt',
-    'pendingFollowupPrompt', 'retryPrompt', 'currentSessionTitle', 'contextPickerVisible', 'sessionMenuVisible',
+    'proposal', 'proposalError', 'proposalLoading', 'diffConfirmed', 'continuationPrompt',
+    'pendingFollowupPrompt', 'currentSessionTitle', 'contextPickerVisible', 'sessionMenuVisible',
     'sourceContext', 'sourceFingerprint',
     'realtimeConnectionState']) s[key] = ref('')
   for (const key of ['pendingHandoffCanvasJobId', 'livePreviewPendingFrame', 'livePreviewOldestPendingAt',
@@ -103,7 +106,7 @@ for (const target of ['message', 'file']) {
     assert.equal(h.s.job.value, null)
     assert.equal(h.s.running.value, false)
     assert.deepEqual(h.s.recentSessions.value, [])
-    assert.deepEqual(h.calls, ['abort-sse', 'abort-poll', 'abort-draft', 'clear-active', 'clear-recent', 'success'])
+    assert.deepEqual(h.calls, ['clear-draft', 'abort-sse', 'abort-poll', 'abort-draft', 'clear-active', 'clear-recent', 'success'])
   })
 }
 

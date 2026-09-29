@@ -13,6 +13,8 @@ import stat
 import tempfile
 import time
 import uuid
+from contextvars import ContextVar
+from functools import wraps
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -35,6 +37,7 @@ from module_mindmap.ai.adapters.base import (
     agent_message_result,
     agent_needs_input_result,
     agent_target_layout,
+    build_agent_continuation_clause,
     build_agent_discussion_prompt,
     build_agent_draft_changed_payload,
     build_agent_generation_mode_clause,
@@ -45,6 +48,7 @@ from module_mindmap.ai.adapters.base import (
     is_agent_needs_input_signal,
     map_adapter_exception,
 )
+from module_mindmap.ai.adapters.codex_mcp_bridge import TOOL_DESCRIPTORS
 from module_mindmap.ai.credentials import (
     CLAUDE_BEDROCK_ENV_ALLOWLIST,
     CLAUDE_BEDROCK_STATIC_CREDENTIAL_ENV,
@@ -52,16 +56,23 @@ from module_mindmap.ai.credentials import (
     CLAUDE_DIRECT_CREDENTIAL_ENV,
 )
 from module_mindmap.ai.document import MindmapArtifactError
+from module_mindmap.ai.runtime_catalog import claude_cli_options
+from module_mindmap.ai.runtime_trace import RuntimeTrace, detail_text, normalize_todos
 from module_mindmap.ai.tool_contract import SEARCH_TAGS_SCHEMA, TAG_REFERENCE_SCHEMA, TAG_SUGGESTIONS_SCHEMA
 from utils.log_util import logger
 
 from ._fs_utils import (
+    AgentProcessCleanupError,
+    _finish_cleanup,
     ensure_private_directory,
     read_bounded_regular_file,
     session_retention_days,
+    spawn_owned_process,
     terminate_process,
     unlink_snapshot_file,
 )
+
+_CLAUDE_CLEANUP_STARTED: ContextVar[asyncio.Event | None] = ContextVar('claude_cleanup_started', default=None)
 
 ADAPTER_VERSION = '1.5.0'
 PROMPT_VERSION = 'claude-mindmap-6'
@@ -805,12 +816,59 @@ def _validated_claude_model_ref(model_ref: Any) -> str:
     return normalized
 
 
+async def _claude_query(*, prompt: str, options: Any) -> Any:
+    """Own SDK cleanup and verify exit before accepting stopped evidence."""
+    from claude_agent_sdk import ClaudeSDKClient  # noqa: PLC0415
+
+    class VerifiedClient(ClaudeSDKClient):
+        # Integration with pinned claude-agent-sdk 0.2.152. Do not supply a
+        # custom transport: that bypasses the SDK's session-store resume path.
+        _cleanup_failed = False
+
+        async def disconnect(self) -> None:
+            if closing := _CLAUDE_CLEANUP_STARTED.get():
+                closing.set()
+            try:
+                transport = self._transport
+                # Keep the handle before the SDK can silently discard it after
+                # its final wait timeout. Missing SDK fields fail closed too.
+                process = transport._process if transport is not None else None
+                if transport is not None and self._query is None:
+                    # connect() can spawn the CLI and fail before Query exists;
+                    # the SDK's disconnect() otherwise skips transport.close().
+                    await transport.close()
+                await super().disconnect()
+                if process is not None and process.returncode is None:
+                    raise AgentProcessCleanupError
+            except (Exception, asyncio.CancelledError) as exc:
+                self._cleanup_failed = True
+                raise AgentProcessCleanupError from exc
+            # connect() and our finally may both disconnect. A second no-op
+            # must not erase the first call's unconfirmed-exit evidence.
+            if self._cleanup_failed:
+                raise AgentProcessCleanupError
+
+    client = VerifiedClient(options=options)
+    try:
+        await client.connect()
+        await client.query(prompt)
+        async for message in client.receive_response():
+            yield message
+    finally:
+        if closing := _CLAUDE_CLEANUP_STARTED.get():
+            closing.set()
+        try:
+            await client.disconnect()
+        except (Exception, asyncio.CancelledError) as exc:
+            raise AgentProcessCleanupError from exc
+
+
 async def _probe_claude_provider(
     environment: dict[str, str],
     model_ref: str,
 ) -> tuple[bool, str | None]:
     """执行一次受限、低成本且不暴露响应内容的真实 Provider 探测。"""
-    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query  # noqa: PLC0415
+    from claude_agent_sdk import ClaudeAgentOptions, ResultMessage  # noqa: PLC0415
 
     async def consume_probe() -> Any | None:
         result_message: Any | None = None
@@ -845,7 +903,7 @@ async def _probe_claude_provider(
                 max_turns=1,
                 max_budget_usd=CLAUDE_HEALTHCHECK_MAX_BUDGET_USD,
             )
-            async for message in query(prompt='回复 OK。', options=options):
+            async for message in _claude_query(prompt='回复 OK。', options=options):
                 if isinstance(message, ResultMessage):
                     result_message = message
         return result_message
@@ -963,7 +1021,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
                     environment,
                     Path(temporary_directory).joinpath('config'),
                 )
-                process = await asyncio.create_subprocess_exec(
+                process = await spawn_owned_process(
                     str(cli_path), '--setting-sources=', 'auth', 'status',
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -982,6 +1040,8 @@ class ClaudeMindmapAdapter(AgentAdapter):
             return False, '无法确认 Claude Code 登录状态'
         except (OSError, json.JSONDecodeError):
             return False, '无法确认 Claude Code 登录状态'
+        finally:
+            await terminate_process(process)
         if process.returncode == 0 and payload.get('loggedIn') is True:
             return await _probe_claude_provider(environment, resolved_model_ref)
         return False, 'Claude Agent 未识别到有效的本机认证或 Connector 环境凭据'
@@ -989,6 +1049,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
     @staticmethod
     def _prompt(context: AgentRunContext) -> str:
         return (
+            build_agent_continuation_clause(context) +
             f'标准意图：{context.intent}\n用户要求：{context.prompt}\n'
             f'参数：{json.dumps(context.parameters, ensure_ascii=False)}\n'
             f'输出契约：{build_agent_output_contract(context)}\n'
@@ -1012,7 +1073,49 @@ class ClaudeMindmapAdapter(AgentAdapter):
             '"questions":[{"questionId":"scope","prompt":"问题"}]}。'
         )
 
-    async def run(  # noqa: PLR0912, PLR0915
+    async def run(
+        self,
+        context: AgentRunContext,
+        emit: AgentEventHandler,
+    ) -> AgentRunOutcome:
+        owner = asyncio.current_task()
+        if owner is not None:
+            self._tasks[context.job_id] = owner
+        closing = asyncio.Event()
+        cleanup_token = _CLAUDE_CLEANUP_STARTED.set(closing)
+        # Iteration and aclose stay in one task: SDK anyio cancel scopes must
+        # exit in the task that entered them. Only the first outer cancellation
+        # reaches this task; subsequent stop requests wait for the same cleanup.
+        sdk_task = asyncio.create_task(self._run_sdk(context, emit))
+        try:
+            return await asyncio.shield(sdk_task)
+        except asyncio.CancelledError:
+            if cancel_event := self._cancel_events.get(context.job_id):
+                cancel_event.set()
+            if not sdk_task.done() and not closing.is_set():
+                sdk_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _finish_cleanup(sdk_task)
+            raise
+        finally:
+            _CLAUDE_CLEANUP_STARTED.reset(cleanup_token)
+            if self._tasks.get(context.job_id) is owner:
+                self._tasks.pop(context.job_id, None)
+
+    @staticmethod
+    @contextlib.asynccontextmanager
+    async def _closing_stream(stream: Any) -> Any:
+        try:
+            yield stream
+        finally:
+            if closing := _CLAUDE_CLEANUP_STARTED.get():
+                closing.set()
+            try:
+                await stream.aclose()
+            except (Exception, asyncio.CancelledError) as exc:
+                raise AgentProcessCleanupError from exc
+
+    async def _run_sdk(  # noqa: PLR0912, PLR0915
         self,
         context: AgentRunContext,
         emit: AgentEventHandler,
@@ -1038,8 +1141,9 @@ class ClaudeMindmapAdapter(AgentAdapter):
             MirrorErrorMessage,
             ResultMessage,
             create_sdk_mcp_server,
-            query,
-            tool,
+        )
+        from claude_agent_sdk import (  # noqa: PLC0415
+            tool as sdk_tool,
         )
 
         if context.intent == 'discuss':
@@ -1049,9 +1153,25 @@ class ClaudeMindmapAdapter(AgentAdapter):
                 claude_agent_options=ClaudeAgentOptions,
                 mirror_error_message=MirrorErrorMessage,
                 result_message=ResultMessage,
-                query=query,
+                query=_claude_query,
                 max_budget_usd=max_budget_usd,
             )
+
+        tool_arguments: ContextVar[dict | None] = ContextVar('mindmap_tool_arguments', default=None)
+        tool_event: ContextVar[dict | None] = ContextVar('mindmap_tool_event', default=None)
+        tool_step = 0
+
+        def tool(name: str, description: str, schema: dict[str, Any]) -> Any:
+            def decorate(handler: Any) -> Any:
+                @wraps(handler)
+                async def traced(args: dict[str, Any]) -> dict[str, Any]:
+                    token = tool_arguments.set(args)
+                    try:
+                        return await handler(args)
+                    finally:
+                        tool_arguments.reset(token)
+                return sdk_tool(name, description, schema)(traced)
+            return decorate
 
         original_tools = context.tool_service
         tools = original_tools.fork()
@@ -1063,10 +1183,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
         runtime_error: MindmapArtifactError | None = None
         tool_lock = asyncio.Lock()
         cancel_event = asyncio.Event()
-        current_task = asyncio.current_task()
-        if current_task is not None:
-            self._tasks[context.job_id] = current_task
-            self._cancel_events[context.job_id] = cancel_event
+        self._cancel_events[context.job_id] = cancel_event
 
         async def emit_required(
             event_type: str,
@@ -1074,6 +1191,8 @@ class ClaudeMindmapAdapter(AgentAdapter):
         ) -> None:
             nonlocal event_delivery_error, runtime_error
             try:
+                if event_type in {'tool_started', 'tool_completed', 'tool_failed'}:
+                    payload = {**(tool_event.get() or {}), **payload}
                 await emit(event_type, payload)
             except asyncio.CancelledError:
                 raise
@@ -1104,10 +1223,13 @@ class ClaudeMindmapAdapter(AgentAdapter):
             *,
             mutates_draft: bool = False,
         ) -> dict[str, Any]:
-            nonlocal post_completion_attempted, runtime_error, validated
+            nonlocal post_completion_attempted, runtime_error, validated, tool_step
             if cancel_event.is_set():
                 raise asyncio.CancelledError
             async with tool_lock:
+                tool_step += 1
+                started_at = time.monotonic()
+                tool_event.set({'callId': f'{context.job_id}:{tool_step}', 'step': tool_step})
                 if event_delivery_error is not None:
                     raise event_delivery_error
                 if runtime_error is not None:
@@ -1126,7 +1248,8 @@ class ClaudeMindmapAdapter(AgentAdapter):
                     })
                     raise error
                 await emit_required(
-                    'tool_started', {'toolName': tool_name, 'stage': 'building'},
+                    'tool_started', {'toolName': tool_name, 'stage': 'building',
+                                     'toolInput': detail_text(tool_arguments.get())},
                 )
                 if cancel_event.is_set():
                     raise asyncio.CancelledError
@@ -1193,6 +1316,10 @@ class ClaudeMindmapAdapter(AgentAdapter):
                     await emit_required('draft_changed', draft_changed)
                 if tool_name == 'suggest_tags':
                     await emit_required('tag_suggestions', {'suggestions': value})
+                if tool_name == 'update_plan':
+                    await emit_required('todo_updated', {'todos': value['todos'], 'origin': 'agent'})
+                completed_payload.update(toolOutput=detail_text(value),
+                                         durationMs=round((time.monotonic() - started_at) * 1000))
                 await emit_required('tool_completed', completed_payload)
                 return _tool_response(value)
 
@@ -1433,7 +1560,12 @@ class ClaudeMindmapAdapter(AgentAdapter):
                 'complete_artifact', freeze_artifact, mutates_draft=True,
             )
 
+        @tool('update_plan', '向用户展示任务计划，并随执行更新状态；不修改脑图', TOOL_DESCRIPTORS['update_plan']['inputSchema'])
+        async def update_plan(args: dict[str, Any]) -> dict[str, Any]:
+            return await execute_tool('update_plan', lambda: {'todos': normalize_todos(args.get('todos'))})
+
         exposed_tools = [
+            update_plan,
             read_projection,
             search_tags,
             suggest_tags,
@@ -1464,7 +1596,11 @@ class ClaudeMindmapAdapter(AgentAdapter):
             f'mcp__mindmap__{tool.name}'
             for tool in exposed_tools
         ]
-        prompt = self._prompt(context)
+        prompt = self._prompt(context) + (
+            '\n开始时使用 update_plan 发布简短计划，执行过程中更新状态；'
+            '在最终 validate_draft/complete_artifact 之前更新完成状态。'
+            '工具调用之间可向用户提供简短进度说明，不要披露隐藏推理。'
+        )
         usage: dict[str, Any] = {}
         terminal_payload: Any = None
         parent_session_id = (
@@ -1479,6 +1615,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
             lock=self._session_lock,
         )
         audited_message_types: set[str] = set()
+        trace = RuntimeTrace()
         run_succeeded = False
         result_received = False
         try:
@@ -1506,6 +1643,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
                         code='AI_SESSION_UNAVAILABLE',
                     )
                 options = ClaudeAgentOptions(
+                    **claude_cli_options(),
                     system_prompt='你是受限的脑图领域 Agent。禁止使用文件、Shell、网络或浏览器工具。',
                     tools=[],
                     mcp_servers={'mindmap': server},
@@ -1540,13 +1678,16 @@ class ClaudeMindmapAdapter(AgentAdapter):
                         'schema': agent_completion_json_schema(context.execution_mode),
                     },
                 )
-                response_stream = query(prompt=prompt, options=options)
-                # query() owns an SDK client/subprocess.  Closing the async
-                # generator here is required on body exceptions and task
-                # cancellation; relying on GC can leak the provider process.
-                async with contextlib.aclosing(response_stream) as messages:
+                response_stream = _claude_query(prompt=prompt, options=options)
+                # Our generator owns the public SDK client; explicitly close
+                # it on body errors before accepting any stopped evidence.
+                async with self._closing_stream(response_stream) as messages:
                     async for message in messages:
+                        for event_type, event_payload in trace.claude(message):
+                            await emit_required(event_type, event_payload)
                         if isinstance(message, ResultMessage):
+                            for event_type, event_payload in trace.finish():
+                                await emit_required(event_type, event_payload)
                             result_received = True
                             terminal_payload = _claude_result_payload(message)
                             usage = dict(message.usage or {})
@@ -1581,9 +1722,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
                             })
                             raise error
                         else:
-                            # Claude Code 及兼容网关可能为一个逻辑消息重复发送大量
-                            # SystemMessage/AssistantMessage 信封。正文和隐藏推理从不进入
-                            # 审计；同一类信封每轮只记录一次，真实工具与草稿事件仍逐条保留。
+                            # Conversation deltas are normalized separately; dedupe envelope audit.
                             message_type = type(message).__name__
                             if message_type not in audited_message_types:
                                 audited_message_types.add(message_type)
@@ -1682,8 +1821,6 @@ class ClaudeMindmapAdapter(AgentAdapter):
             for session_id in session_store.touched_session_ids - preserved_session_ids:
                 with contextlib.suppress(MindmapArtifactError):
                     await session_store.purge(session_id)
-            if self._tasks.get(context.job_id) is current_task:
-                self._tasks.pop(context.job_id, None)
             if self._cancel_events.get(context.job_id) is cancel_event:
                 self._cancel_events.pop(context.job_id, None)
 
@@ -1700,10 +1837,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
     ) -> AgentMessageResult:
         """Use Claude Code SDK with no MCP server and an empty tool allowlist."""
         cancel_event = asyncio.Event()
-        current_task = asyncio.current_task()
-        if current_task is not None:
-            self._tasks[context.job_id] = current_task
-            self._cancel_events[context.job_id] = cancel_event
+        self._cancel_events[context.job_id] = cancel_event
         parent_session_id = (
             _canonical_claude_session_id(context.external_session_id)
             if context.external_session_id is not None
@@ -1745,6 +1879,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
                         code='AI_SESSION_UNAVAILABLE',
                     )
                 options = claude_agent_options(
+                    **claude_cli_options(),
                     system_prompt=(
                         '你是零工具脑图讨论助手。只可阅读输入并返回 text/plain 文字答复。'
                         '你没有任何脑图、文件、Shell、网络、浏览器或其他工具。'
@@ -1786,11 +1921,16 @@ class ClaudeMindmapAdapter(AgentAdapter):
                     prompt=build_agent_discussion_prompt(context),
                     options=options,
                 )
-                async with contextlib.aclosing(response_stream) as messages:
+                trace = RuntimeTrace(structured_message=True)
+                async with self._closing_stream(response_stream) as messages:
                     async for message in messages:
                         if cancel_event.is_set():
                             raise asyncio.CancelledError
+                        for event_type, event_payload in trace.claude(message):
+                            await emit(event_type, event_payload)
                         if isinstance(message, result_message):
+                            for event_type, event_payload in trace.finish():
+                                await emit(event_type, event_payload)
                             result_received = True
                             terminal_payload = _claude_result_payload(message)
                             usage = dict(message.usage or {})
@@ -1841,8 +1981,6 @@ class ClaudeMindmapAdapter(AgentAdapter):
             for session_id in session_store.touched_session_ids - preserved_session_ids:
                 with contextlib.suppress(MindmapArtifactError):
                     await session_store.purge(session_id)
-            if self._tasks.get(context.job_id) is current_task:
-                self._tasks.pop(context.job_id, None)
             if self._cancel_events.get(context.job_id) is cancel_event:
                 self._cancel_events.pop(context.job_id, None)
 

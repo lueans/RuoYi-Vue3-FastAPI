@@ -425,6 +425,7 @@ async def test_historical_artifact_is_content_source_but_current_turn_remains_pa
     assert created['base_hash'] == 'hash-a'
     request = json.loads(created['request_json'])
     assert request['source']['document']['root']['data']['text'] == 'artifact-a-result'
+    assert request['contextParentJobId'] == JOB_A_ID
     assert request['source']['baselineDocument']['root']['data']['text'] == 'a-baseline'
     assert result.parent_job_id == JOB_B_ID
     assert result.turn_index == BRANCH_TURN_INDEX
@@ -532,7 +533,8 @@ async def test_edit_artifact_can_start_discussion_without_reusing_result_contrac
 
 
 @pytest.mark.asyncio
-async def test_discussion_can_switch_back_to_edit_using_frozen_source() -> None:
+@pytest.mark.parametrize('requested_agent', [None, 'claude', 'kimi'])
+async def test_discussion_can_switch_back_to_edit_using_frozen_source(requested_agent: str | None) -> None:
     parent = _job(
         JOB_A_ID,
         turn_index=1,
@@ -548,7 +550,7 @@ async def test_discussion_can_switch_back_to_edit_using_frozen_source() -> None:
     result, created, add_event = await _run_followup(
         current_parent=parent,
         artifact_parent=parent,
-        requested_agent=None,
+        requested_agent=requested_agent,
         requested_intent='expand',
     )
 
@@ -562,6 +564,19 @@ async def test_discussion_can_switch_back_to_edit_using_frozen_source() -> None:
     assert result.target == 'proposal'
     event_payload = json.loads(add_event.await_args.args[3])
     assert event_payload['sessionMode'] == 'mode_switch'
+    assert request['contextParentJobId'] == parent.id
+    assert created['agent_key'] == (requested_agent or parent.agent_key)
+    parent.expires_time = datetime.now() + timedelta(days=1)
+    reply = SimpleNamespace(id=parent.response_id, job_id=parent.id, user_id=7,
+                            expires_time=parent.expires_time, content_text='第 3 条建议：增加登录断网恢复用例')
+    with (
+        patch('module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job', AsyncMock(return_value=parent)),
+        patch('module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_response', AsyncMock(return_value=reply)),
+    ):
+        history = await MindmapAiTaskManager._editing_continuation_history(
+            object(), SimpleNamespace(**created), MindmapAiJobCreateModel.model_validate(request),
+        )
+    assert history[0]['assistantReply'] == reply.content_text
 
 
 @pytest.mark.parametrize('parent_status', ['applied', 'undone'])

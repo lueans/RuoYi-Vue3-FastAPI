@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.alias_generators import to_camel
 
 from module_mindmap.ai.document import AI_ALLOWED_LAYOUTS
+from module_mindmap.entity.vo.mindmap_ai_device_vo import DeviceId
 
 AI_INTENTS = frozenset({
     'create',
@@ -238,6 +239,7 @@ class MindmapAiJobCreateModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     agent_key: str = Field(default='native_mindmap', min_length=1, max_length=64)
+    device_id: DeviceId | None = None
     model_id: int | None = Field(default=None, gt=0)
     intent: str = Field(default='create', min_length=1, max_length=32)
     prompt: str = Field(min_length=1, max_length=20_000)
@@ -265,6 +267,8 @@ class MindmapAiJobCreateModel(BaseModel):
 
     @model_validator(mode='after')
     def validate_target(self) -> MindmapAiJobCreateModel:
+        if (self.agent_key in {'device_claude', 'device_codex', 'device_kimi'}) != (self.device_id is not None):
+            raise ValueError('“我的电脑”Agent 必须指定 deviceId；平台 Agent 不接受设备参数')
         if self.intent == 'discuss':
             if self.target != 'message':
                 raise ValueError('讨论模式只能生成文字消息')
@@ -297,6 +301,7 @@ class MindmapAiMessageModel(BaseModel):
     prompt: str = Field(min_length=1, max_length=20_000)
     artifact_id: str | None = Field(default=None, min_length=36, max_length=36)
     agent_key: str | None = Field(default=None, min_length=1, max_length=64)
+    device_id: DeviceId | None = None
     model_id: int | None = Field(default=None, gt=0)
     intent: str | None = Field(default=None, min_length=1, max_length=32)
     route: Literal['current', 'next'] = 'current'
@@ -379,6 +384,7 @@ class MindmapAiJobRetryModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     agent_key: str | None = Field(default=None, min_length=1, max_length=64)
+    device_id: DeviceId | None = None
     model_id: int | None = Field(default=None, gt=0)
     prompt: str | None = Field(default=None, min_length=1, max_length=20_000)
     parameters: MindmapAiRetryParametersModel | None = None
@@ -448,6 +454,7 @@ class MindmapAiJobModel(BaseModel):
     retry_of_job_id: str | None = None
     turn_index: int = Field(default=1, ge=1)
     agent_key: str
+    device_id: DeviceId | None = None
     adapter_version: str
     sdk_version: str | None = None
     runtime_version: str | None = None
@@ -460,6 +467,9 @@ class MindmapAiJobModel(BaseModel):
     intent: str
     target: str
     execution_mode: Literal['preview', 'direct'] = 'preview'
+    execution_state: Literal['unknown', 'not_started', 'running', 'stopped', 'unconfirmed'] = 'unknown'
+    execution_epoch: int = Field(default=0, ge=0)
+    cancel_requested_time: datetime | None = None
     source_type: str
     source_mindmap_id: int | None = None
     base_revision: int | None = None

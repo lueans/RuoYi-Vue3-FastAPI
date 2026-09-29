@@ -21,11 +21,11 @@ function drainFrames(current, target, limit = 2000) {
   assert.fail('planner did not converge')
 }
 
-test('多个已存在节点同时改名时，尚未轮到的节点必须保留原文', () => {
+test('多个已存在节点同时改名时逐节点完整替换，尚未轮到的节点保留原文', () => {
   const before = { root: node('root', '根', [node('a', '原节点甲'), node('b', '原节点乙')]) }
   const target = { root: node('root', '根', [node('a', '甲更新'), node('b', '乙更新')]) }
   let current = before
-  for (const text of ['甲', '甲更', '甲更新']) {
+  for (const text of ['甲更新']) {
     const frame = nextMindmapAiDraftFrame(current, target)
     assert.equal(frame.document.root.children[0].data.text, text)
     assert.equal(frame.document.root.children[1].data.text, '原节点乙')
@@ -33,17 +33,17 @@ test('多个已存在节点同时改名时，尚未轮到的节点必须保留�
     current = frame.document
   }
   const next = nextMindmapAiDraftFrame(current, target)
-  assert.equal(next.document.root.children[1].data.text, '乙')
+  assert.equal(next.document.root.children[1].data.text, '乙更新')
 })
 
-test('长旧文替换为短新文仍从首字开始，追加文字从共同前缀继续', () => {
+test('长旧文完整替换为短新文，只有追加文字继续逐字', () => {
   const frame = nextMindmapAiDraftFrame(
     { root: node('root', '这是很长的旧文字') },
     { root: node('root', '新文字') },
   )
-  assert.equal(frame.document.root.data.text, '新')
+  assert.equal(frame.document.root.data.text, '新文字')
   const append = nextMindmapAiDraftFrame(frame.document, { root: node('root', '新文字追加') })
-  assert.equal(append.document.root.data.text, '新文')
+  assert.equal(append.document.root.data.text, '新文字追')
 })
 
 test('移动删除与新增混合时也不能直接展示整个目标树', () => {
@@ -531,13 +531,13 @@ test('生成中收到更新草稿时，从已展示节点继续而不回闪旧�
   assert.deepEqual(nextFrame.root.children.map(child => child.data.uid), ['a', 'b'])
 })
 
-test('混合修改移动删除都维持逐字输出，结构变更不会直出新增全文', () => {
+test('混合修改移动删除时旧文完整替换，新增仍逐字输出', () => {
   const initial = { root: node('root', '根', [node('a', '已有'), node('b', '保留')]) }
   const edited = { root: node('root', '根', [node('a', '修改'), node('b', '保留'), node('c', '新增')]) }
   const moved = { root: node('root', '根', [node('b', '保留'), node('a', '已有'), node('c', '新增')]) }
   const deleted = { root: node('root', '根', [node('b', '保留'), node('c', '新增')]) }
   const editFrames = drainFrames(initial, edited)
-  assert.deepEqual(editFrames.map(frame => frame.change.text), ['修', '修改', '新', '新增'])
+  assert.deepEqual(editFrames.map(frame => frame.change.text), ['修改', '新', '新增'])
   assert.equal(editFrames[0].nodeCount, 3)
   assert.deepEqual(editFrames[0].document.root.children.map(child => child.data.uid), ['a', 'b'])
   for (const target of [moved, deleted]) {

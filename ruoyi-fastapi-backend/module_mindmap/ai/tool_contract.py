@@ -752,7 +752,9 @@ class MindmapToolService:
         draft.document = normalized
         self._authorized_uids.update(item['nodeUid'] for item in created)
         draft.operations.extend(operations)
-        return {'created': created}
+        # Public tool details truncate arrays. Keep the actual count separate
+        # so the UI cannot mistake the visible first 12 rows for the full batch.
+        return {'createdCount': len(created), 'created': created}
 
     def update_nodes(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
         if not isinstance(updates, list) or not 1 <= len(updates) <= MAX_TOOL_BATCH_SIZE:
@@ -785,7 +787,7 @@ class MindmapToolService:
         normalized, _summary = self._normalize_candidate_document(candidate)
         draft.document = normalized
         draft.operations.extend(operations)
-        return {'updated': len(updates)}
+        return {'updated': len(updates), 'nodeUids': list(dict.fromkeys(op.node_uid for op in operations))}
 
     def move_nodes(self, moves: list[dict[str, Any]]) -> dict[str, Any]:
         if not isinstance(moves, list) or not 1 <= len(moves) <= MAX_TOOL_BATCH_SIZE:
@@ -823,7 +825,7 @@ class MindmapToolService:
         self._enforce_candidate_structure_budget(normalized, operations)
         draft.document = normalized
         draft.operations.extend(operations)
-        return {'moved': len(moves)}
+        return {'moved': len(moves), 'nodeUids': list(dict.fromkeys(op.node_uid for op in operations))}
 
     def remove_nodes(self, node_uids: list[str]) -> dict[str, Any]:
         if not isinstance(node_uids, list) or not 1 <= len(node_uids) <= MAX_TOOL_BATCH_SIZE:

@@ -5,12 +5,14 @@ import json
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NoReturn
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from module_mindmap.ai.adapters._fs_utils import AgentProcessCleanupError
 from module_mindmap.ai.adapters.base import (
+    AgentEventHandler,
     AgentNeedsInputResult,
     AgentRunContext,
     agent_needs_input_result,
@@ -335,6 +337,32 @@ async def test_cancellation_and_timeout_propagate_without_retry(failure: BaseExc
 
     assert attempts == 1
     assert sleeps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('intent', ['create', 'discuss'])
+@pytest.mark.parametrize('delivery_failure', [None, RuntimeError, asyncio.CancelledError])
+async def test_cleanup_failure_discards_buffered_progress_before_any_await(
+    intent: str, delivery_failure: type[BaseException] | None,
+) -> None:
+    context = _context()
+    context.intent = intent
+    failure = AgentProcessCleanupError()
+
+    async def run(_context: AgentRunContext, emit: AgentEventHandler) -> NoReturn:
+        await emit('agent_started', {'stage': 'building'})
+        raise failure
+
+    runner = AsyncMock(side_effect=run)
+    emit = AsyncMock(side_effect=delivery_failure)
+    sleep = AsyncMock()
+    with pytest.raises(AgentProcessCleanupError) as error:
+        await run_adapter_with_transient_retries(runner, context, emit, sleep=sleep)
+
+    assert error.value is failure
+    runner.assert_awaited_once()
+    emit.assert_not_awaited()
+    sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio

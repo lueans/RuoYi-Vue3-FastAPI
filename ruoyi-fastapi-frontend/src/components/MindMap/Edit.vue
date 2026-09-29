@@ -15,8 +15,17 @@
       role="region"
       :aria-label="isReadonly ? '脑图只读画布' : '脑图编辑画布'"
       tabindex="0"
+      @pointerdown.capture="aiCamera.pause()"
+      @wheel.capture.passive="aiCamera.pause()"
+      @keydown.capture="aiCamera.pause()"
       @transitionend="onMindMapContainerTransitionEnd"
     ></div>
+    <button v-if="aiEditingBlocked" type="button" class="aiCameraFollow"
+      :aria-pressed="aiCameraFollowing"
+      title="默认保持当前视角；开启后仅跟随屏外变更，手动拖动或缩放将暂停跟随"
+      @click="aiCamera.setFollowing(!aiCameraFollowing)">
+      {{ aiCameraFollowing ? '暂停跟随 AI' : '跟随 AI 变更' }}
+    </button>
     <WorkspaceActivityBar v-if="!isZenMode" />
     <MindmapAiDialog ref="mindmapAiDialogRef" :readonly="aiDialogReadonly" />
     <Navigator v-if="mindMap" :mindMap="mindMap" />
@@ -116,6 +125,8 @@ import {
   updateMindmapView,
 } from '@/api/mindmap/mindmap'
 import { YjsMindmapSync } from '@/utils/yjs-sync'
+import { createMindmapCanvasResize } from '@/utils/mindmap-canvas-resize'
+import { createMindmapAiCamera } from '@/utils/mindmap-ai-camera'
 import {
   countMindmapNodes,
   resolveMindmapPerformanceOptions,
@@ -226,6 +237,7 @@ import {
 } from '@/utils/mindmap-ai-presentation'
 import { summarizeMindmapAiDraftChanges } from '@/utils/mindmap-ai-live-preview'
 import { normalizeNumericOwnerUserId } from '@/utils/mindmap-ai-shared'
+import { focusMindmapToolNode } from '@/utils/mindmap-agent-node-links'
 import './assets/icon-font/iconfont.css'
 import './styles/markdown.scss'
 
@@ -292,9 +304,13 @@ const aiPreparationEditingBlocked = ref(false)
 const collaborationBarrierEditingBlocked = ref(false)
 let collaborationBarrierToken = ''
 let collaborationBarrierRevision = 0
-let aiFocusRequestId = 0
-let aiFocusLastKey = ''
-let aiFocusRetryTimer = null
+const aiCameraFollowing = ref(false)
+const aiCamera = createMindmapAiCamera({
+  getMindmap: () => mindMap.value,
+  getSession: () => terminalState ? null : aiDraftPreviewState,
+  onFollowingChange: value => { aiCameraFollowing.value = value },
+})
+watch(aiEditingBlocked, blocked => { if (!blocked) aiCamera.reset() })
 // 历史预览和整图导入都包含不可避免的网络/插件等待窗口。它们只冻结用户
 // 交互，不撤销当前会话的写权限；已经登记的修改仍须能够在门闩内 flush。
 const versionTransitionEditingBlocked = ref(false)
@@ -392,6 +408,7 @@ let aiDraftPreviewState = null
 let aiCanvasPreparation = null
 let aiPresentationSessionSequence = 0
 let aiPresentationDetached = false
+let aiToolNodeNavigationActive = false
 
 function previewDocumentDataChanged(nextDocumentData) {
   if (nextDocumentData === undefined) return false
@@ -2569,7 +2586,7 @@ const useLeftKeySelectionRightKeyDrag = computed(() => store.localConfig.useLeft
 
 watch([activeSidebar, hasSearchPanel], async () => {
   await nextTick()
-  mindMap.value?.resize?.()
+  handleResize()
 })
 
 function onMindMapContainerTransitionEnd(event) {
@@ -2580,7 +2597,7 @@ function onMindMapContainerTransitionEnd(event) {
   // 侧栏和搜索面板通过 left/right 动画改变画布宽度。watch 中的 resize
   // 发生在动画开始时，此处在最终尺寸落定后再次同步内部 SVG，避免关闭
   // 侧栏后残留一个与侧栏等宽的空白（看起来像透明侧栏）。
-  mindMap.value?.resize?.()
+  handleResize()
 }
 
 // All events to forward from mindMap instance to bus
@@ -2664,6 +2681,11 @@ onMounted(async () => {
   if (!componentMounted || !mindMap.value) return
   setupTextEditExitDetection()
   bindBusEvents()
+  if (typeof ResizeObserver !== 'undefined') {
+    canvasResizeObserver = new ResizeObserver(handleResize)
+    canvasResizeObserver.observe(mindMapContainerRef.value)
+  }
+  handleResize()
   window.addEventListener('resize', handleResize)
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('pagehide', handlePageHide)
@@ -2685,6 +2707,9 @@ onBeforeUnmount(() => {
   stopDraftSessionLease?.()
   stopDraftSessionLease = null
   componentMounted = false
+  canvasResizeObserver?.disconnect()
+  canvasResizeObserver = null
+  canvasResize.dispose()
   initialRenderReady = false
   cancelSessionAsyncWork()
   unbindBusEvents()
@@ -3265,7 +3290,7 @@ async function flushPendingViewSave() {
   return requestPromise
 }
 
-async function retirePendingViewSaveForAuthoritativeReload() {
+async function retirePendingViewSaveForAuthoritativeReload(assertCurrent = () => {}) {
   // 清除尚未发出的视图，并让在途请求的完成回调失效。后端 revision CAS
   // 决定它与已提交 reset 的线性顺序；等待结束后再 GET，保证画布采用最终值。
   viewSaveGeneration += 1
@@ -3275,6 +3300,9 @@ async function retirePendingViewSaveForAuthoritativeReload() {
   pendingViewData = undefined
   const retiredRequest = viewSavePromise
   if (retiredRequest) await retiredRequest
+  // A restoring AI session may be detached while this request is in flight.
+  // Validate ownership before clearing state that may belong to its successor.
+  assertCurrent()
   viewSaveRequested = false
   pendingViewData = undefined
   savedViewChangeVersion = viewChangeVersion
@@ -3282,6 +3310,7 @@ async function retirePendingViewSaveForAuthoritativeReload() {
 
 function onBusViewDataChange(data, sourceMindMap = null) {
   if (!isCurrentMindmapEventSource(sourceMindMap, mindMap.value)) return
+  if (aiToolNodeNavigationActive) return
   if (localAiUndoInProgress) return
   if (isReadonly.value) return
   if (props.mindmapId) {
@@ -5893,9 +5922,12 @@ function onStartPainter() {
   mindMap.value?.painter?.startPainter()
 }
 
-function handleResize() {
-  mindMap.value?.resize()
-}
+let canvasResizeObserver = null
+const canvasResize = createMindmapCanvasResize({
+  getElement: () => mindMapContainerRef.value,
+  getMindmap: () => mindMap.value,
+})
+function handleResize() { canvasResize.schedule() }
 
 // --- Drag and drop import ---
 
@@ -6101,6 +6133,28 @@ async function drainAiCanvasPreparation(preparation) {
   }
 }
 
+async function prepareRestoredAiCanvas(preparation) {
+  assertAiCanvasPreparation(preparation)
+  // An existing job may already have committed changes. Never flush local
+  // content into it or start painting over unsaved human edits. Freeze DOM
+  // editors first, including when the dialog acquired the AI lock earlier.
+  commitActiveEditorsBeforeTermination()
+  aiPreparationEditingBlocked.value = true
+  syncEditingBlockedMode()
+  setAiEditingBlocked(true)
+  if (hasUnsavedChanges()) {
+    throw new Error('人工修改尚未保存，已保留当前内容，请先保存后重试恢复 AI 任务')
+  }
+  // A pre-existing pan/zoom save can outlive the restored job's settlement.
+  // Retire only that presentation-only queue, and await an in-flight
+  // revision-guarded request before reading the authoritative checkpoint.
+  // Its late callback must not resurrect a queue that blocks final commit.
+  if (viewSaveRequested || viewSaveInProgress) {
+    await retirePendingViewSaveForAuthoritativeReload(() => assertAiCanvasPreparation(preparation))
+    assertAiCanvasPreparation(preparation)
+  }
+}
+
 // Render AI draft frames in-place without feeding them into the user's save
 // pipeline. The dialog owns frame pacing/typewriter slicing; the editor only
 // swaps the visible runtime tree and restores the captured baseline on revert.
@@ -6153,12 +6207,14 @@ async function onAiDraftPreview(payload = {}, request = {}) {
       }
       let preparation = null
       try {
-        if (phase === 'prepare' && payload.directCommitted === true && payload.drainLocalChanges === true) {
+        if (payload.directCommitted === true
+          && (phase === 'start' || payload.drainLocalChanges === true)) {
           preparation = {
             jobId, mindMap: mindMap.value, previousAiEditingBlocked: aiEditingBlocked.value,
           }
           aiCanvasPreparation = preparation
-          await drainAiCanvasPreparation(preparation)
+          if (phase === 'prepare') await drainAiCanvasPreparation(preparation)
+          else await prepareRestoredAiCanvas(preparation)
           assertAiCanvasPreparation(preparation)
         }
         clearMindmapAiPresentation(mindMap.value, { render: false })
@@ -6437,6 +6493,7 @@ function bindBusEvents() {
   bus.on('searchPanelVisibilityChange', onSearchPanelVisibilityChange)
   bus.on('toggleOpenNodeRichText', onToggleOpenNodeRichText)
   bus.on('requestAiMindmapContext', onRequestAiMindmapContext)
+  bus.on('requestAiToolNodeFocus', onRequestAiToolNodeFocus)
   bus.on('aiDraftPreview', onAiDraftPreview)
   bus.on('aiEditingState', onAiEditingState)
   bus.on('aiCloudProposalApplied', onAiCloudProposalApplied)
@@ -6467,6 +6524,7 @@ function unbindBusEvents() {
   bus.off('view_data_change', onBusViewDataChange)
   bus.off('toggleOpenNodeRichText', onToggleOpenNodeRichText)
   bus.off('requestAiMindmapContext', onRequestAiMindmapContext)
+  bus.off('requestAiToolNodeFocus', onRequestAiToolNodeFocus)
   bus.off('aiDraftPreview', onAiDraftPreview)
   bus.off('aiEditingState', onAiEditingState)
   clearMindmapAiPresentation(mindMap.value, { render: false })
@@ -6478,10 +6536,7 @@ function unbindBusEvents() {
   bus.off('replaceLocalWithAiArtifact', onReplaceLocalWithAiArtifact)
   bus.off('insertAiArtifactBranch', onInsertAiArtifactBranch)
   bus.off('undoLocalAiProposal', onUndoLocalAiProposal)
-  aiFocusRequestId += 1
-  window.clearTimeout(aiFocusRetryTimer)
-  aiFocusRetryTimer = null
-  aiFocusLastKey = ''
+  aiCamera.dispose()
   bus.off('focusAiNode', onAiNodeFocus)
   bus.off('hide_text_edit', onHideTextEdit)
 }
@@ -6587,38 +6642,33 @@ function focusNodeByUid(nodeUid, { presentationOnly = false } = {}) {
 }
 
 function onAiNodeFocus(payload = {}) {
-  const session = aiDraftPreviewState
+  aiCamera.focus(payload)
+}
+
+function onRequestAiToolNodeFocus(payload = {}, request = {}) {
   const activeMindMap = mindMap.value
-  if (session && String(payload.jobId || '') !== session.jobId) return
-  const nodeUids = Array.isArray(payload.nodeUids)
-    ? payload.nodeUids.map(uid => String(uid || '').trim()).filter(Boolean)
-    : []
-  const targetUid = nodeUids[nodeUids.length - 1]
-  if (!targetUid) return
-  const focusKey = String(payload.focusKey || `${payload.jobId || ''}:${targetUid}`)
-  if (focusKey && focusKey === aiFocusLastKey) return
-  aiFocusLastKey = focusKey
-  window.clearTimeout(aiFocusRetryTimer)
-  aiFocusRetryTimer = null
-  const requestId = ++aiFocusRequestId
-  let attempts = 0
-  const focus = () => {
-    if (requestId !== aiFocusRequestId || terminalState || !mindMap.value
-      || mindMap.value !== activeMindMap || aiDraftPreviewState !== session) return
-    const renderer = mindMap.value.renderer
-    // Never center against coordinates from the previous layout. Waiting for
-    // the pending RAF also collapses duplicate server/polling notifications
-    // into a single visible camera movement.
-    if (!renderer?.isRendering && !renderer?.renderTimer
-      && focusNodeByUid(targetUid, { presentationOnly: Boolean(session) })) {
-      aiFocusRetryTimer = null
-      return
-    }
-    // The event may arrive just before the live-preview frame is rendered.
-    attempts += 1
-    if (attempts < 20) aiFocusRetryTimer = window.setTimeout(focus, 40)
-  }
-  focus()
+  // Bus listeners from another editor instance must neither move nor answer.
+  if (!activeMindMap || payload.editor !== activeMindMap) return
+  try {
+    const documentId = props.mindmapId ? `cloud:${props.mindmapId}` : actions.getData()?.documentId
+    request.resolve?.(focusMindmapToolNode({
+      request: payload, ownerUserId: currentLocalAiOwnerUserId(), documentId, mindMap: activeMindMap,
+      previewJobId: aiDraftPreviewState?.jobId || '',
+      blocked: !componentMounted || !initialRenderReady || Boolean(terminalState || terminatingSession
+        || sessionController?.signal.aborted || localAiJournalRecoveryPromise || aiCanvasPreparation
+        || applyingServerTree || versionChangeTrackingPaused || hasActiveEditingTransition()
+        || authoritativeReloadRequired || authoritativeReloadInProgress
+        || aiDraftPreviewState?.preparing || aiDraftPreviewState?.rendering || aiDraftPreviewState?.committing),
+      navigate(node) {
+        // moveNodeToCenter emits view_data_change synchronously. Suppress its
+        // persistence too: opening a tool receipt must not create any save.
+        const previousNavigationState = aiToolNodeNavigationActive
+        aiToolNodeNavigationActive = true
+        try { activeMindMap.renderer.moveNodeToCenter(node, false) }
+        finally { aiToolNodeNavigationActive = previousNavigationState }
+      },
+    }))
+  } catch { request.resolve?.({ ok: false, message: '暂时无法读取当前画布，请稍后重试定位。' }) }
 }
 
 function onVersionEditingTransition(blocked) {
@@ -6714,6 +6764,24 @@ defineExpose({
   position: relative;
   flex: 1;
   overflow: hidden;
+
+  .aiCameraFollow {
+    position: absolute;
+    right: calc(var(--mindmap-workspace-right, 44px) + 20px);
+    top: 20px;
+    z-index: 2;
+    min-height: 34px;
+    padding: 6px 12px;
+    border: 1px solid var(--el-border-color);
+    border-radius: 8px;
+    background: var(--el-bg-color);
+    color: var(--el-text-color-primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    &[aria-pressed='true'] { color: var(--el-color-primary); border-color: currentColor; }
+    &:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
+  }
 
   .mindMapContainer {
     position: absolute;

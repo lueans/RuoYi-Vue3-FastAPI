@@ -68,6 +68,13 @@ def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 
 TOOL_DESCRIPTORS = {
+    'update_plan': {
+        'description': 'Publish the current task plan and update item status as work progresses; does not change the mind map.',
+        'inputSchema': _schema({'todos': {'type': 'array', 'maxItems': 40, 'items': _schema({
+            'content': {'type': 'string', 'minLength': 1, 'maxLength': 500},
+            'status': {'type': 'string', 'enum': ['pending', 'in_progress', 'completed', 'cancelled']},
+        }, ['content', 'status'])}}, ['todos']),
+    },
     'read_projection': {
         'description': 'Read the current authorized mind-map draft projection.',
         'inputSchema': _schema({}, []),

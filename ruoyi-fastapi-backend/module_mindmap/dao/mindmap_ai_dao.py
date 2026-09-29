@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 _Record = TypeVar('_Record')
 
 MINDMAP_AI_EVENT_TYPE_PATTERN = re.compile(r'^[a-z][a-z0-9_]{0,63}$')
+MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT = 128
 MINDMAP_AI_INACTIVE_EVENT_STATUSES = frozenset({
     'cancel_requested', 'ready', 'applied', 'undone', 'completed_file',
     'completed_no_change', 'completed_direct', 'needs_review', 'stale', 'cancelled', 'failed', 'expired',
@@ -40,6 +41,7 @@ MINDMAP_AI_POST_TRANSITION_EVENT_TYPES = frozenset({
     'needs_input',
     'message_ready',
     'direct_completed',
+    'execution_state',
 })
 
 
@@ -289,7 +291,7 @@ class MindmapAiDao:
         *,
         for_update: bool = False,
     ) -> MindmapAiJob | None:
-        query = select(MindmapAiJob).where(MindmapAiJob.id == job_id)
+        query = select(MindmapAiJob).where(MindmapAiJob.id == job_id).execution_options(populate_existing=True)
         if user_id is not None:
             query = query.where(MindmapAiJob.user_id == user_id)
         return await _select_first(db, query, for_update=for_update)
@@ -555,6 +557,38 @@ class MindmapAiDao:
                 MindmapAiJobEvent.event_type.in_(('draft_initialized', 'draft_changed')),
             )
             .order_by(MindmapAiJobEvent.sequence.asc())
+        )).scalars())
+
+    @classmethod
+    async def get_latest_plan_payload(cls, db: AsyncSession, job_id: str, user_id: int) -> str | None:
+        """One owned, retained snapshot; an empty latest plan clears older ones."""
+        return await db.scalar(
+            select(MindmapAiJobEvent.payload_json)
+            .join(MindmapAiJob, MindmapAiJob.id == MindmapAiJobEvent.job_id)
+            .where(
+                MindmapAiJobEvent.job_id == job_id,
+                MindmapAiJobEvent.event_type == 'todo_updated',
+                MindmapAiJob.user_id == user_id,
+                MindmapAiJob.expires_time > datetime.now(),
+            )
+            .order_by(MindmapAiJobEvent.sequence.desc())
+            .limit(1)
+        )
+
+    @classmethod
+    async def list_visible_reply_payloads(cls, db: AsyncSession, job_id: str, user_id: int) -> list[str]:
+        """Newest public deltas plus one sentinel to detect omitted history."""
+        return list((await db.execute(
+            select(MindmapAiJobEvent.payload_json)
+            .join(MindmapAiJob, MindmapAiJob.id == MindmapAiJobEvent.job_id)
+            .where(
+                MindmapAiJobEvent.job_id == job_id,
+                MindmapAiJobEvent.event_type == 'assistant_delta',
+                MindmapAiJob.user_id == user_id,
+                MindmapAiJob.expires_time > datetime.now(),
+            )
+            .order_by(MindmapAiJobEvent.sequence.desc())
+            .limit(MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT + 1)
         )).scalars())
 
     @classmethod

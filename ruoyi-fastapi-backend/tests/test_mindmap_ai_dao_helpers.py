@@ -47,7 +47,7 @@ async def test_shared_single_record_read_keeps_identity_owner_and_lock_refresh(
     else:
         assert '.user_id =' not in sql
     assert sql.endswith('FOR UPDATE') is for_update
-    assert statement.get_execution_options().get('populate_existing', False) is for_update
+    assert statement.get_execution_options().get('populate_existing', False) is (for_update or method == 'get_job')
 
 
 @pytest.mark.asyncio
@@ -129,6 +129,40 @@ async def test_shared_deletes_with_empty_ids_do_not_access_database(method: str)
     counts = await getattr(MindmapAiDao, method)(db, [])
     assert counts and all(count == 0 for count in counts.values())
     db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owner', [0, 7])
+async def test_visible_reply_read_has_owned_retained_type_order_and_fixed_sentinel_limit(owner: int) -> None:
+    result = SimpleNamespace(scalars=lambda: ['{"text":"newest"}', '{"text":"previous"}'])
+    db = SimpleNamespace(execute=AsyncMock(return_value=result))
+    assert await MindmapAiDao.list_visible_reply_payloads(db, 'job-id', owner) == list(result.scalars())
+    statement = db.execute.await_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={'literal_binds': True}))
+    assert 'JOIN mindmap_ai_job ON mindmap_ai_job.id = mindmap_ai_job_event.job_id' in sql
+    assert f'mindmap_ai_job.user_id = {owner}' in sql
+    assert "mindmap_ai_job_event.job_id = 'job-id'" in sql
+    assert "mindmap_ai_job_event.event_type = 'assistant_delta'" in sql
+    assert 'mindmap_ai_job.expires_time >' in sql
+    assert 'ORDER BY mindmap_ai_job_event.sequence DESC' in sql
+    assert 'LIMIT 129' in sql
+    assert list(statement.selected_columns.keys()) == ['payload_json']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owner', [0, 7])
+async def test_latest_plan_read_is_owner_scoped_retained_and_bounded(owner: int) -> None:
+    db = SimpleNamespace(scalar=AsyncMock(return_value='{"todos":[],"origin":"agent"}'))
+    assert await MindmapAiDao.get_latest_plan_payload(db, 'job-id', owner) == '{"todos":[],"origin":"agent"}'
+    statement = db.scalar.await_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={'literal_binds': True}))
+    assert 'JOIN mindmap_ai_job ON mindmap_ai_job.id = mindmap_ai_job_event.job_id' in sql
+    assert f'mindmap_ai_job.user_id = {owner}' in sql
+    assert "mindmap_ai_job_event.job_id = 'job-id'" in sql
+    assert "mindmap_ai_job_event.event_type = 'todo_updated'" in sql
+    assert 'mindmap_ai_job.expires_time >' in sql
+    assert 'ORDER BY mindmap_ai_job_event.sequence DESC' in sql
+    assert 'LIMIT 1' in sql
 
 
 @pytest.mark.asyncio

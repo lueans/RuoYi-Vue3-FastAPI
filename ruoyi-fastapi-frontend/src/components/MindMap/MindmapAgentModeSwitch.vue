@@ -1,26 +1,31 @@
 <template>
-  <div class="agentModeSwitch" role="radiogroup" aria-label="AI 工作模式" :aria-disabled="disabled || undefined">
-    <label v-for="mode in modes" :key="mode.label" :class="{ 'is-selected': modelValue === mode.value, 'is-disabled': disabled }" :title="mode.description">
-      <input type="radio" :name="name" :value="String(mode.value)" :checked="modelValue === mode.value"
-        :disabled="disabled" :aria-label="mode.description" @change="select(mode.value)" />
-      <span>{{ mode.label }}</span>
-    </label>
-  </div>
+  <button
+    type="button"
+    class="agentModeSwitch"
+    :class="{ 'is-discussion': modelValue }"
+    role="switch"
+    :aria-checked="modelValue"
+    :aria-label="description"
+    :title="description"
+    :disabled="disabled"
+    @click="select(!modelValue)"
+  >
+    <svg v-if="modelValue" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+    <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-3 1 1-3L16.5 3.5z"/></svg>
+  </button>
 </template>
 <script setup>
-import { useId } from 'vue'
+import { computed } from 'vue'
 const props = defineProps({ modelValue: Boolean, disabled: Boolean })
 const emit = defineEmits(['update:modelValue'])
-const name = `agent-mode-${useId()}`
-const modes = [{ label: '讨论', value: true, description: '讨论：只回答，不修改脑图' }, { label: '编辑', value: false, description: '编辑：允许修改授权范围内的脑图' }]
+const description = computed(() => props.modelValue ? '讨论：只回答，不修改脑图' : '编辑：允许修改授权范围内的脑图')
 function select(value) { if (!props.disabled) emit('update:modelValue', value) }
 </script>
 <style scoped>
-.agentModeSwitch { display: inline-flex; flex: none; padding: 2px; gap: 2px; border: 1px solid var(--agent-border); border-radius: 7px; background: var(--ai-panel-bg); }
-label { position: relative; cursor: pointer; }
-input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: inherit; }
-span { display: flex; align-items: center; justify-content: center; min-width: 38px; min-height: 26px; padding: 0 5px; border-radius: 4px; font-size: 12px; line-height: 1.5; color: var(--agent-muted); }
-.is-selected span { background: var(--agent-user-bg); color: var(--agent-user-ink); }
-input:focus-visible + span { outline: 2px solid var(--agent-accent); outline-offset: 1px; }
-.is-disabled { cursor: not-allowed; opacity: .6; }
+.agentModeSwitch { display:grid; width:32px; height:32px; flex:none; padding:0; place-items:center; border:1px solid var(--agent-border); border-radius:50%; background:var(--ai-panel-bg); color:var(--agent-ink); cursor:pointer; }
+.agentModeSwitch:hover:not(:disabled) { background:var(--agent-hover); }
+.agentModeSwitch.is-discussion { color:var(--agent-muted); }
+.agentModeSwitch:focus-visible { outline:2px solid var(--agent-accent); outline-offset:2px; }
+.agentModeSwitch:disabled { cursor:not-allowed; opacity:.55; }
+svg { width:16px; height:16px; transform:translateY(1px); }
 </style>

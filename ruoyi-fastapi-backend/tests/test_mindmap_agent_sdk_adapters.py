@@ -3804,7 +3804,7 @@ async def test_claude_requires_explicit_complete_artifact(
 
 
 @pytest.mark.asyncio
-async def test_claude_rejects_any_tool_after_completion_and_fails_the_run(
+async def test_claude_rejects_draft_access_after_completion_and_fails_the_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -3842,6 +3842,55 @@ async def test_claude_rejects_any_tool_after_completion_and_fails_the_run(
         for event_type, payload in events
         if event_type == 'tool_failed'
     ] == ['read_projection']
+
+
+@pytest.mark.asyncio
+async def test_claude_allows_final_plan_update_after_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_server(*, tools: list[Any], **_kwargs: Any) -> dict[str, Any]:
+        captured['tools'] = tools
+        return {'type': 'sdk', 'name': 'mindmap', 'instance': object()}
+
+    async def fake_query(**_kwargs: Any) -> Any:
+        tools = {item.name: item for item in captured['tools']}
+        await tools['start_document'].handler({
+            'title': '订单系统', 'layout': 'logicalStructure',
+        })
+        await tools['complete_artifact'].handler({})
+        response = await tools['update_plan'].handler({'todos': [{
+            'content': '校验草稿并冻结 artifact',
+            'status': 'completed',
+        }]})
+        assert json.loads(response['content'][0]['text'])['todos'][0]['status'] == 'completed'
+        yield claude_agent_sdk.ResultMessage(
+            subtype='success', duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id=CLAUDE_SESSION_ID, usage={},
+        )
+
+    async def collect_event(event_type: str, payload: dict[str, Any]) -> None:
+        events.append((event_type, payload))
+
+    monkeypatch.setattr(claude_agent_sdk, 'create_sdk_mcp_server', fake_server)
+    monkeypatch.setattr(claude_adapter_module, '_claude_query', fake_query)
+
+    result = await ClaudeMindmapAdapter().run(_context(), collect_event)
+
+    assert result.title == '订单系统'
+    assert [
+        payload.get('toolName')
+        for event_type, payload in events
+        if event_type == 'tool_failed'
+    ] == []
+    assert [
+        payload['todos'][0]['status']
+        for event_type, payload in events
+        if event_type == 'todo_updated'
+    ] == ['completed']
+    assert events[-1][0] == 'agent_completed'
 
 
 @pytest.mark.asyncio

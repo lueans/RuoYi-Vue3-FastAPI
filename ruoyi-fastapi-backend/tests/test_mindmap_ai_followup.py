@@ -80,6 +80,16 @@ def test_local_current_snapshot_followup_requires_snapshot_hash_and_parent_statu
         })
 
 
+def test_followup_scope_is_explicit_optional_and_requires_current_source() -> None:
+    assert MindmapAiMessageModel(prompt='继续').scope is None
+    with pytest.raises(ValueError, match='当前脑图'):
+        MindmapAiMessageModel(prompt='继续', scope={'type': 'document'})
+    with pytest.raises(ValueError, match='rootUid'):
+        MindmapAiMessageModel(
+            prompt='继续', continuation_base='current_document', scope={'type': 'branch'},
+        )
+
+
 @pytest.mark.asyncio
 async def test_local_snapshot_backend_normalizes_and_recomputes_claimed_hash() -> None:
     raw_document = _document('hash-check')
@@ -224,6 +234,8 @@ async def _run_followup(
     authoritative_source: tuple[dict, int, str, int | None, str | None] | None = None,
     locked_current_parent: SimpleNamespace | None = None,
     current_snapshot_source: dict | None = None,
+    requested_scope: dict | None = None,
+    requested_attachments: list[dict] | None = None,
     call_observer: dict | None = None,
 ) -> tuple[object, dict, AsyncMock]:
     selected_document = _document('artifact-a-result')
@@ -294,6 +306,10 @@ async def _run_followup(
     if requested_intent is not None:
         model_payload['intent'] = requested_intent
     model_payload['continuationBase'] = continuation_base
+    if requested_scope is not None:
+        model_payload['scope'] = requested_scope
+    if requested_attachments is not None:
+        model_payload['attachments'] = requested_attachments
     if continuation_base == 'current_snapshot':
         model_payload['expectedParentStatus'] = current_parent.status
         model_payload['source'] = current_snapshot_source or {
@@ -432,6 +448,26 @@ async def test_historical_artifact_is_content_source_but_current_turn_remains_pa
     event_payload = json.loads(add_event.await_args.args[3])
     assert event_payload['parentJobId'] == JOB_B_ID
     assert event_payload['turnIndex'] == BRANCH_TURN_INDEX
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('requested_attachments', [None, [], [{
+    'id': 'new', 'name': 'new.txt', 'size': 3, 'mediaType': 'text/plain', 'text': '新的参考',
+}]])
+async def test_followup_attachments_belong_only_to_explicit_current_turn(requested_attachments: list | None) -> None:
+    parent = _job(JOB_A_ID, turn_index=1, agent_key='codex', artifact_id=ARTIFACT_A_ID, marker='a')
+    parent.request_json = json.dumps({**json.loads(parent.request_json), 'attachments': [{
+        'id': 'old', 'name': 'old.txt', 'size': 3, 'mediaType': 'text/plain', 'text': '旧参考不继承',
+    }]})
+    _result, created, _event = await _run_followup(
+        current_parent=parent, artifact_parent=parent, requested_agent=None,
+        requested_attachments=requested_attachments,
+    )
+    request = json.loads(created['request_json'])
+    assert request['attachments'] == (requested_attachments or [])
+    assert request['prompt'] == '从历史结果继续扩写'
+    assert request['source']['scope']['type'] == 'document'
+    assert '旧参考不继承' not in created['request_json']
 
 
 @pytest.mark.asyncio
@@ -627,7 +663,8 @@ async def test_applied_or_undone_cloud_followup_refreezes_authoritative_document
 
 
 @pytest.mark.asyncio
-async def test_current_document_followup_rejects_parent_status_race() -> None:
+@pytest.mark.parametrize('requested_scope', [None, {'type': 'document'}])
+async def test_current_document_followup_rejects_parent_status_race(requested_scope: dict | None) -> None:
     parent = _job(
         JOB_A_ID,
         turn_index=1,
@@ -648,6 +685,7 @@ async def test_current_document_followup_rejects_parent_status_race() -> None:
             artifact_parent=parent,
             requested_agent=None,
             continuation_base='current_document',
+            requested_scope=requested_scope,
             authoritative_source=(
                 _document('status-race-authoritative'),
                 10,
@@ -959,13 +997,145 @@ async def test_local_current_snapshot_rejects_client_supplied_baseline_without_w
 
 
 def test_provider_session_contract_rejects_edit_discussion_switches() -> None:
-    edit = SimpleNamespace(intent='expand', target='proposal')
+    request_json = _request_json('codex', 'same-source')
+    edit = SimpleNamespace(intent='expand', target='proposal', request_json=request_json)
     discuss = SimpleNamespace(intent='discuss', target='message')
-    same_edit = SimpleNamespace(intent='expand', target='proposal')
+    same_edit = SimpleNamespace(intent='expand', target='proposal', request_json=request_json)
 
     assert MindmapAiTaskManager._same_provider_session_contract(edit, same_edit) is True
     assert MindmapAiTaskManager._same_provider_session_contract(edit, discuss) is False
     assert MindmapAiTaskManager._same_provider_session_contract(None, discuss) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('parent_status', [
+    'applied', 'undone', 'completed_direct', 'completed_no_change', 'completed_message',
+])
+@pytest.mark.parametrize('scope', [
+    {'type': 'branch', 'rootUid': 'root-current'},
+    {'type': 'selectedNodes', 'nodeUids': ['child-a', 'child-b']},
+    {'type': 'document'},
+])
+async def test_completed_cloud_turn_accepts_explicit_next_scope_in_same_session(
+    parent_status: str, scope: dict,
+) -> None:
+    discussion = parent_status == 'completed_message'
+    parent = _job(
+        JOB_A_ID, turn_index=1, agent_key='codex',
+        artifact_id=None if discussion else ARTIFACT_A_ID,
+        marker='scope-parent', status=parent_status, source_type='cloud_document',
+        intent='discuss' if discussion else 'expand', target='message' if discussion else 'proposal',
+    )
+    payload = json.loads(parent.request_json)
+    payload['source']['scope'] = {'type': 'branch', 'rootUid': 'old-selection'}
+    parent.request_json = json.dumps(payload)
+    current_document = _document('current')
+    current_document['root']['children'] = [
+        {'data': {'uid': uid, 'text': uid}, 'children': []} for uid in ('child-a', 'child-b')
+    ]
+    _result, created, _events = await _run_followup(
+        current_parent=parent, artifact_parent=parent, requested_agent=None,
+        continuation_base='current_document', requested_scope=scope,
+        authoritative_source=(current_document, AUTHORITATIVE_REVISION, 'current-hash', MINDMAP_ID, 'current-epoch'),
+    )
+    request = json.loads(created['request_json'])
+    assert created['session_id'] == parent.session_id
+    assert created['parent_job_id'] == parent.id
+    assert request['source']['scope'] == scope
+    assert request['source']['mindmapId'] == MINDMAP_ID
+    assert request['source']['document'] == current_document
+    assert request['_userMessageContext'] == {
+        'sourceMode': 'current', 'scopeType': scope['type'],
+        'contextNodes': (
+            [{'uid': 'root-current', 'label': 'current'}] if scope['type'] == 'branch'
+            else [{'uid': uid, 'label': uid} for uid in scope['nodeUids']] if scope['type'] == 'selectedNodes'
+            else []
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_snapshot_scope_only_changes_with_explicit_top_level_authorization() -> None:
+    parent = _job(
+        JOB_A_ID, turn_index=1, agent_key='codex', artifact_id=ARTIFACT_A_ID,
+        marker='local-scope', status='applied', source_type='local_snapshot',
+    )
+    current_document = _document('current')
+    scope = {'type': 'branch', 'rootUid': 'root-current'}
+    _result, created, _events = await _run_followup(
+        current_parent=parent, artifact_parent=parent, requested_agent=None,
+        continuation_base='current_snapshot', requested_scope=scope,
+        current_snapshot_source={
+            'type': 'local_snapshot', 'documentId': 'local:followup-test',
+            'revision': AUTHORITATIVE_REVISION, 'documentHash': 'mmf2:sha256:' + ('a' * 64),
+            'document': current_document, 'scope': {'type': 'document'},
+        },
+        authoritative_source=(current_document, AUTHORITATIVE_REVISION, 'current-hash', None, None),
+    )
+    request = json.loads(created['request_json'])
+    assert created['session_id'] == parent.session_id
+    assert request['source']['scope'] == scope
+    assert request['source']['documentId'] == 'local:followup-test'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('parent_status', ['queued', 'preparing', 'running', 'validating', 'needs_input', 'ready'])
+async def test_unfinished_turn_rejects_scope_override_without_writing(parent_status: str) -> None:
+    parent = _job(
+        JOB_A_ID, turn_index=1, agent_key='codex', artifact_id=ARTIFACT_A_ID,
+        marker='unfinished-scope', status=parent_status, source_type='cloud_document',
+    )
+    observer = {}
+    with pytest.raises(ServiceException) as error:
+        await _run_followup(
+            current_parent=parent, artifact_parent=parent, requested_agent=None,
+            continuation_base='current_document', requested_scope={'type': 'document'},
+            call_observer=observer,
+        )
+    assert error.value.data['errorCode'] in {'AI_FOLLOWUP_SCOPE_LOCKED', 'AI_FOLLOWUP_BASE_INVALID'}
+    observer['add_job'].assert_not_awaited()
+    observer['database'].commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_current_scope_rejects_missing_node_before_followup_write() -> None:
+    parent = _job(
+        JOB_A_ID, turn_index=1, agent_key='codex', artifact_id=ARTIFACT_A_ID,
+        marker='invalid-scope', status='applied', source_type='cloud_document',
+    )
+    observer = {}
+    with pytest.raises(ServiceException) as error:
+        await _run_followup(
+            current_parent=parent, artifact_parent=parent, requested_agent=None,
+            continuation_base='current_document',
+            requested_scope={'type': 'branch', 'rootUid': 'removed-node'},
+            authoritative_source=(_document('current'), AUTHORITATIVE_REVISION, 'current-hash', MINDMAP_ID, 'epoch'),
+            call_observer=observer,
+        )
+    assert error.value.data == {'errorCode': 'AI_FOLLOWUP_SCOPE_INVALID'}
+    observer['add_job'].assert_not_awaited()
+    observer['database'].commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scope_override_cannot_change_authorized_cloud_document_identity() -> None:
+    parent = _job(
+        JOB_A_ID, turn_index=1, agent_key='codex', artifact_id=ARTIFACT_A_ID,
+        marker='identity-scope', status='applied', source_type='cloud_document',
+    )
+    payload = json.loads(parent.request_json)
+    payload['source']['mindmapId'] = MINDMAP_ID + 1
+    parent.request_json = json.dumps(payload)
+    observer = {}
+    with pytest.raises(ServiceException) as error:
+        await _run_followup(
+            current_parent=parent, artifact_parent=parent, requested_agent=None,
+            continuation_base='current_document', requested_scope={'type': 'document'},
+            call_observer=observer,
+        )
+    assert error.value.data == {'errorCode': 'AI_FOLLOWUP_BASE_INVALID'}
+    observer['add_job'].assert_not_awaited()
+    observer['database'].commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

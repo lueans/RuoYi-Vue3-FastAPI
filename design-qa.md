@@ -1,73 +1,264 @@
-# AI 脑图设计 QA
+# AI 脑图左侧交互设计 QA
 
-日期：2026-09-15
+> 验收范围说明：早期记录仅覆盖空会话，不能证明发送区、已发送消息和附件
+> 交互已完整还原。以下历史结论保留用于追踪；这些区域以文末
+> “Composer / user message / attachment fidelity”复核结果为准。
 
-## 对照证据
+- Source visual truth: `/Users/liushuisong/Downloads/mindmap-ai-assistant.html`
+- Rendered implementation: `http://127.0.0.1/mindmap/edit?id=136`
+- Browser evidence: Codex in-app browser capture, initial empty conversation state
+- Viewport: 1280 × 720 CSS px, device scale factor 1
+- Source pixels: 1280 × 720
+- Implementation pixels: 1280 × 720
+- Density normalization: none; both captures used the same browser viewport and density
+- State: light theme, editable cloud mind map, AI panel open, no active AI job, no attachment
 
-- 参考状态：XMind AI 新对话首页，1512×739，见 `.doc/designs/xmind-ai-audit-2026-09-14/01-ai-home.png`。
-- 实现状态：本地 AI 新对话首页，见 `.doc/designs/xmind-ai-audit-2026-09-14/10-local-xmind-style-home.png`；同宽裁剪版本为 `10-local-xmind-style-home-1512x739.png`。
-- 过程状态：`12-local-realtime-generation.png`。
-- 应用状态：`14-local-cloud-applied.png` 和 `15-local-editor-after-apply.png`。
-- 新建脑图结果状态：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-06-result-actions-polished.png`。
-- 协作冲突覆盖确认：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-10-force-overwrite-confirm-final.png`。
-- 覆盖完成状态：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-11-force-overwrite-applied.png`。
-- Native Agent 工作台与左侧交互记录：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-12-native-start.png`。
-- Native 首节点等待反馈：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-17-native-understanding.png` 和 `ai-mindmap-audit-18-native-structuring.png`。
-- Native 实时草稿与最终结果：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-19-native-live-draft.png` 和 `ai-mindmap-audit-20-native-ready.png`。
-- Native 连续任务保温结果：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-21-native-second-task.png`。
-- 云端提案确认即覆盖结果态：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-23-direct-overwrite.png`。
-- 输出语言与目标布局设置：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-26-output-language-layout.jpg`。
-- English 鱼骨图最终结果：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-28-english-fishbone-fit.jpg`。
-- Claude 连接就绪卡：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-30-agent-readiness.png`。
-- Claude、Codex 与 MindMap Agent 同时可选：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-31-both-sdk-agents-ready.png`。
-- 过期健康状态降级与首次连接说明：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-33-stale-health-visible.png`。
-- 当前 XMind AI 工作区：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-34-xmind-current-workspace.png`。
-- 本地应用后差异展开旧状态：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-35-local-applied-diff-expanded.png`。
-- 本地应用后差异折叠新状态：`/Users/liushuisong/.codex/visualizations/2026/09/09/01a085d5-4676-7743-b463-5d85a8f194e4/ai-mindmap-audit-36-local-applied-diff-collapsed.png`。
+**Findings**
 
-## 视觉检查
+- No actionable P0/P1/P2 mismatch remains.
+- Fonts and typography: system Chinese font stack, 23px/600 welcome heading, 13px supporting copy and card labels match the source hierarchy and wrapping closely.
+- Spacing and layout rhythm: the production panel uses the source's 376px preferred width, 60px header, centered welcome block, 2 × 2 cards, 10px card gap, and 18px composer radius. The production editor's 44px tool rail and 52px/30px application chrome are intentional host-shell constraints.
+- Colors and visual tokens: neutral white surface, #262626 primary text, muted gray secondary text, light neutral borders, soft purple AI identity and purple active action match the source palette.
+- Image quality and asset fidelity: the source contains no raster imagery in the panel. All visible controls use the project's Element Plus icon library; no placeholder, emoji, CSS drawing, handcrafted SVG, or generated substitute is present.
+- Copy and content: heading, selection guidance and all four starter prompts match the supplied prototype. Production-only labels reflect live context and the selected Agent.
+- Accessibility and interaction: heading structure, named panel region, labelled context/Agent controls, mode switch state, keyboard focus styles and disabled send state remain available.
 
-- 通过：左侧工作台宽度、浅灰背景、顶部新对话、四张模板卡、底部输入器与右侧脑图的主布局和参考产品一致。
-- 通过：AI 强调色、圆角、弱边框、留白、卡片密度和状态层级形成统一视觉系统。
-- 通过：结果态没有创建第二个编辑器；右侧始终是唯一实时脑图舞台。
-- 通过：窄屏、减弱动效、滚动容器和长会话折叠规则已覆盖。
+**Full-view comparison evidence**
 
-## 交互检查
+- The source and implementation were emitted together in one browser comparison pass at 1280 × 720.
+- The implementation matches the source panel composition: new-conversation header, centered identity/heading/help copy, four starter cards and bottom composer.
+- Expected state differences: the source mock includes a PDF attachment and an enabled Claude send action; the tested production state has no attachment, uses MindMap Agent and therefore shows a disabled send action until text is entered.
 
-- P0 已修复：应用事务回滚后访问过期 ORM 数据导致服务端 500。
-- P1 已修复：AI 抽屉层级低于编辑器工具栏，顶部操作发生点击穿透。
-- P1 已修复：应用操作和差异确认在视觉上分离，用户可能跳过审阅。
-- P1 已修复：生成过程不可见；现在会话事件和脑图变化版本实时更新。
-- P1 已修复：任务、来源或讨论模式变化会静默替换用户已选 Agent；现在保留选择、明确提示不可用原因，并在不兼容时阻止提交。
-- P1 已修复：新建脑图结果的“打开/另存”动作被原生 `template` 隐藏；现在结果可直接下载、打开为本地脑图或保存为云端脑图。
-- P1 已修复：协作版本变化后只能刷新并重新生成提案；现在差异确认本身就是整图覆盖授权，第一次请求直接以最新正文为撤销基线覆盖，不再先失败一次或重复确认，并直接重载为可编辑的权威画布。
-- P1 已修复：浏览器遗留的普通应用冲突记录会拦截新版覆盖请求；现在用户再次确认覆盖后，同一冻结基线的确定性版本冲突记录会原子升级为覆盖请求，结果未知、已确认或完整性失败的记录仍保持失败关闭。
-- P1 已修复：覆盖已在服务端提交，但前端恢复层仍保护旧 revision、长期显示“权威画布尚未同步”；现在覆盖意图贯穿持久恢复记录和编辑器，自动作废旧写入并完成协作重连。
-- P1 已修复：Native Agent 对 `@root` 报参数错后重复调用，且服务恢复时再次创建已存在草稿；现在提供跨轮次引用解析、恢复态工具集、可操作脱敏错误和有限重试熔断。
-- P1 已修复：本机模型首轮推理期间只有静态占位，用户容易误判为卡死并重复提交；现在显示阶段、已等待秒数与首次加载预期，首个节点出现后自动切换为实时脑图。
-- P1 已修复：每个 Native 任务都可能重新加载 Ollama 模型；现在默认保温 30 分钟并尊重管理员自定义值，连续 4 节点任务首个可见 Agent 事件约 4 秒、总耗时约 15 秒。
-- P1 已修复：输出语言写死为中文、目标布局无法选择且三类 Agent 不保证执行；现在用户可配置语言与六类布局，参数可恢复/重试，三类 Agent 共享契约，整图 Artifact 冻结前确定性校正布局，局部编辑与自动标记保持原布局。
-- P1 已修复：Agent 虽可选择，但历史健康检查被无限期展示为“连接正常”，首次连接阶段又只有发送按钮旋转；现在健康结果有 15 分钟有效期，过期后明确提示运行前检查，提交等待持续显示阶段和秒数。
-- P1 已修复：提案应用或撤销后仍长期展开历史差异并保留覆盖确认，挤压回执和继续对话；现在终态默认收起差异、移除已失效确认，可按需展开审计内容，继续调整输入器回到主操作路径。
-- P2 已修复：SDK、认证和使用边界挤在 66px 内部滚动区；现在连接就绪度始终可见，详细治理信息按需展开。
-- P2 已修复：旧弹窗信息密度过高；设置收纳为高级区，常用输入器固定在底部。
-- P2 已修复：Agent 过程过长；默认保留首条用户要求与最近 12 条事件，可展开全部。
+**Focused region comparison evidence**
 
-## 验证
+- Welcome region: icon block, heading baseline, two-line description, card dimensions, 2 × 2 grid, icon tiles and text wrapping checked directly.
+- Composer region: context chip, textarea, attachment/settings/mode controls, compact Agent selector and circular send button checked directly.
+- Header region: new-conversation menu and close control checked directly.
 
-- 前端脑图测试：1117/1117 通过。
-- 前端生产构建：通过。
-- 后端云端应用目标测试：37/37 通过。
-- 后端 AI 与 Agent 完整测试：676/676 通过。
-- Native Adapter 定向测试：213/213 通过，Ruff 通过。
-- 后端 Ruff：通过。
-- 本地真实生成：79 节点，结构校验通过。
-- Native 1.12.0 真实重试：相同“API 发布检查”请求生成 4 节点 Artifact，单次新增 3 个一级节点，无工具失败且不修改当前脑图。
-- Native 首节点反馈真实验收：1 秒显示理解阶段，16 秒显示本机模型阶段，约 32 秒出现 5 节点实时草稿，最终扩展为 9 节点并通过校验。
-- Native 保温连续验收：第二个 4 节点任务约 4 秒出现 Agent/工具事件、约 15 秒进入 `ready`。
-- 直接覆盖结果态验收：79 节点云端 Proposal 显示明确覆盖授权和“覆盖当前脑图”主按钮，确认闸门有效；本轮未执行最终写入。
-- 输出参数与 Agent 契约定向回归：305/305 通过，Ruff 通过；非默认 English + 鱼骨图真实任务生成 17 个英文节点并完成实时预览，未写入当前脑图。
-- 后端 AI 参数、任务、提案与 Agent 相关回归：473/473 通过。
-- 本地真实应用：`#130` 已覆盖到 revision 105、79 节点；AI 任务显示已应用，编辑器完成权威版本重载、协作在线并提供撤销。
+**Interaction checks**
+
+- Starter card inserts the mapped prompt and selects discussion mode when appropriate.
+- Edit/discussion icon switch updates `aria-checked` and returns to edit mode.
+- Agent selector opens the available Agent list without console errors.
+- Browser console: no error or warning entries during the verified interactions.
+- Production build: passed.
+- Targeted frontend tests: 119/119 passed after updating the expected welcome copy.
+
+**Comparison history**
+
+1. Initial implementation rendered starter cards in one column at the production panel's effective inline size, which pushed the welcome heading above the visible area (P1). Removed the over-eager narrow-container fallback; the revised browser capture shows the heading and 2 × 2 card grid together.
+2. The save-policy label wrapped onto an extra row and made the composer materially taller than the source (P2). Kept the policy component and its logic but removed the redundant visible label from the compact composer; the mode switch and task settings retain the same information and controls.
+3. Post-fix evidence shows the welcome region and compact composer fully visible in the production editor at 1280 × 720.
+
+**Follow-up Polish**
+
+- P3: the production editor's surrounding navigation rails make the available panel height shorter than the standalone prototype. The central content is vertically compressed by a few pixels, but all intended hierarchy and controls remain visible without overlap.
+
+**Implementation Checklist**
+
+- [x] Match panel width, header, welcome hierarchy and card grid.
+- [x] Consolidate composer actions into the source ordering.
+- [x] Preserve session, draft, context, Agent, streaming and stop behavior.
+- [x] Verify starter, mode and Agent interactions in the browser.
+- [x] Run targeted tests and a production build.
 
 final result: passed
+
+## 2026-09-30 — Composer context selection correction
+
+The earlier composer check did not cover automatic canvas-selection updates. This
+follow-up specifically corrects and verifies that behavior; it is not a new claim
+that every editor screen or conversation lifecycle visually matches the prototype.
+
+- New requests on the current map default to `整个脑图` (dashed pill).
+- Selecting one node displays its plain-text label; long labels are truncated with
+  the full label in the tooltip. Multiple selections display `用户已选择X节点`.
+- The selected-state pill has the prototype's node icon, multi-selection tint,
+  and clear button; the extra row divider/dropdown arrow were removed.
+- Browser verification: no selection, single selection, Ctrl-multiselect,
+  selection before opening the panel, and clearing the selection back to the
+  whole map. Clearing also disables canvas node commands, confirming that the
+  canvas selection itself was cleared.
+- Scope is normalized from the final selection before a new request. Submitted
+  node labels are frozen with that request snapshot. This initial correction
+  kept existing conversations locked; the completed-turn regression below
+  supersedes that limitation.
+- Targeted existing frontend tests: 146 passed. Production build passed.
+- No real AI request was submitted and no model-generated map edits were made
+  during this verification.
+
+## 2026-09-30 — Completed-turn selection regression
+
+Root cause: the composer used the existence of any job as its scope lock and
+rendered that job's stored nodes, even after generation completed. The follow-up
+API also inherited the old scope, so updating the label alone was insufficient.
+
+- Split the immutable submitted-turn configuration from the next-turn canvas
+  selection. Running, restoring, historical-result and unsettled-review states
+  remain locked; eligible completed current-document turns follow selection.
+- Next-turn requests explicitly carry `scope` and persist the matching frozen
+  node labels. Recovery retains that submitted scope, not a later canvas click.
+- The server validates the new scope against the authorized current document.
+  Scope changes keep the platform conversation but do not reuse provider state
+  or history belonging to a different scope. Legacy requests without `scope`
+  keep their original behavior.
+- Verified with the existing completed-direct conversation “帮我完善这个模块的测试用例”
+  in “AI脑图验收-用户登录”: single selection showed `验证码重发`, Ctrl-multiselect
+  showed `用户已选择2节点`, clearing restored `整个脑图`, and selecting while the
+  panel was hidden was reflected after reopening it.
+- No new AI request was sent, and no generated content was changed during this
+  browser check. Follow-up payload and scope isolation are covered by automated
+  regression tests rather than a paid production generation.
+- Final automated checks: frontend 1,681 passed (17 new selection regressions);
+  targeted backend 475 passed, 3 skipped. Production build and whitespace checks
+  passed.
+
+## 2026-09-30 — Composer / user message / attachment fidelity
+
+### Scope and visual truth
+
+- Reference: the user-provided `mindmap-ai-assistant.html`, rendered locally.
+  Open Design native inspection was unavailable because Computer Use permission
+  was not granted; the supplied HTML was used directly, without generating a new design.
+- Implementation: `http://127.0.0.1/mindmap/edit?id=130`, existing completed
+  conversation “帮我完善这个模块的测试用例”.
+- Both captures: 1280 × 720 CSS pixels, light theme, browser screenshot output
+  1280 × 720. No density resampling or temporary viewport override.
+- Matched composer comparison: whole-map context, no attachment, input text
+  “继续完善”, focused input, idle send control. Matched message text:
+  “帮我优化脑图用例”. Production task IDs and Agent identity remain real.
+
+### Findings corrected
+
+- P1: global `aside` rules added 24px horizontal padding, 16px text and 32px
+  line height to the AI panel. Scoped resets restore the prototype layout.
+- P2: composer spacing, input height and inline baseline differed. Both versions
+  now measure 343 × 143.945 CSS pixels in the matched state, with internal
+  padding 11px 12px 9px, footer spacing 6px 16px 16px, 18px radius,
+  24px single-line input and 10px toolbar top spacing.
+- P2: `composerSubmitGroup` now has one 34px circular purple control: the
+  prototype's upward arrow when idle, or compact pause-shaped stop control
+  while running. The real stop action and accessible label still explicitly
+  mean stopping the task while retaining already generated results.
+- P1: user messages now use the source's shallow-purple bubble, 10px 14px
+  padding, 14px radius, 14px text and 21.7px line height. The same short prompt
+  measures 142 × 43.695 CSS pixels in both versions. Task ID and copy action
+  sit below the bubble; attachment metadata is separate from message text.
+- P1: the plus control is now independent attachment selection, not source-map
+  import. Multiple files can be selected, read locally, displayed as chips and
+  removed independently without changing the selected nodes or source mode.
+- P2: source-provided plus, settings, mode and send SVG paths replace the
+  mismatched controls. This supersedes the earlier all-Element-Plus statement.
+
+### Interaction and request checks
+
+- Browser-verified real local TXT, PDF and DOCX parsing, multiple file selection,
+  independent removal, ready state and enabled send after valid text input.
+- Browser-verified whole-map → single node → two selected nodes after an
+  existing completed AI turn, with attachments retained. Clearing selection
+  leaves attachments; removing attachments leaves selection intact.
+- Copy interaction verified. Temporary input and test attachment were cleared
+  after capture. No new AI request, paid generation or map-content edit was
+  performed during this acceptance pass.
+- Supported attachments: TXT, Markdown, JSON, CSV, PDF and DOCX; maximum five
+  files, 10 MiB each, 50,000 extracted characters per file and 100,000 total.
+  Invalid, unreadable, oversized and duplicate inputs produce explicit feedback.
+- Create, follow-up, queue and retry pass the captured attachment body through
+  the actual backend/Agent request path. Browser-persisted recovery data stores
+  metadata only, never attachment body. Recovery does not silently omit files.
+- A reviewed race was fixed: removing and re-adding the same file during an
+  in-flight request creates a new draft revision; the old response cannot
+  consume that new draft. The local revision does not affect JSON request identity.
+
+### Evidence
+
+- Full reference: `artifacts/composer-fidelity/reference-full.jpg`.
+- Full implementation with a local test attachment:
+  `artifacts/composer-fidelity/implementation-full.jpg`.
+- Matched composer: `reference-composer.jpg` / `implementation-composer.jpg`
+  under `artifacts/composer-fidelity/`.
+- Matched message: `reference-user-message.jpg` /
+  `implementation-user-message.jpg` under the same directory. Message crops
+  were extracted from the verified full screenshots without rescaling.
+- Additional selection/attachment state: `implementation-multi-attachment.jpg`
+  (intermediate capture before final icon polish).
+
+### Verification and boundaries
+
+- Frontend regression suite: 1,729 passed, zero failures or skips.
+- Backend attachment/continuation/retry/recovery/SDK/security regression suites:
+  591 passed, three optional local-Kimi integration cases skipped.
+- Request-size middleware: 23 passed. Final frontend production build and
+  `git diff --check` passed.
+- No actionable P0/P1/P2 remains in the four requested regions. The completed
+  production conversation has real audit/status content, task IDs, Agent icons,
+  a 6px reserved scrollbar and editor chrome absent from the standalone mock;
+  these are not claimed as whole-screen pixel identity.
+- Running/stop, queued follow-up and retry are covered by code-level regression
+  tests, not a new live generation in this browser acceptance pass.
+- This is desktop verification at the supplied prototype size; no new mobile
+  visual or ARTEMIS device-testing claim is made.
+
+final result: passed (the four requested UI regions and their scoped interactions)
+
+## 2026-09-30 — User-requested send-time metadata
+
+- Supersedes the task-ID metadata below user bubbles: display the actual message
+  or task creation time as `YYYY-MM-DD-HH:mm:ss`, with the copy button retained.
+- Prefer message time, fall back to task creation time; pending follow-ups record
+  their send time once. Newly inserted task messages use the server creation time
+  instead of the response arrival time. UTC/offset inputs display in local time.
+- Missing/invalid timestamps do not display fabricated time or a task ID.
+- Browser verified both historical messages, including `2026-09-30-18:04:24`;
+  the full timestamp fits without truncation and copying still copies only text.
+- Evidence: `artifacts/composer-fidelity/implementation-send-time.jpg`.
+- Regression suite: 1,732 passed. Whitespace checks passed.
+
+final result: passed (send-time metadata)
+
+## 2026-09-30 — Sent context and attachment receipts
+
+- Added a read-only context chip and separate attachment group above each user
+  message. No selected nodes displays `整个脑图`; one displays its saved name;
+  multiple display `用户已经选择X个节点`. The composer uses the same multi-select
+  wording. Long names have full titles and do not stretch the message lane.
+- Sent context and attachment metadata come from the submitted turn, not the
+  current composer. Pending follow-ups, accepted turns, queue reconciliation,
+  retry and history restoration retain their own metadata. Historical controls
+  have no remove/clear action; copy still copies only the message text.
+- The server freezes a safe context receipt before source rebasing and derives
+  legacy labels only from the stored source snapshot. Missing/corrupt historical
+  scope displays `上下文不可用` instead of falsely claiming whole-map scope.
+  Existing source authorization and request identity are unchanged.
+- Browser verified actual conversation history: first turn `边界与异常处理`,
+  second turn `整个脑图`; selecting `退出登录` and Ctrl-selecting
+  `自动登录与免登` updates only the composer to `用户已经选择2个节点`.
+  Clearing selection and refreshing/reopening preserve both historical chips.
+- Browser-rendered real-component fixtures cover whole map, single selection,
+  multiple selection with PDF/DOCX metadata, and long names in a narrow lane.
+  No horizontal overflow or console errors. This fixture does not call an AI
+  service or write conversation data.
+- Evidence: `artifacts/composer-fidelity/implementation-message-context-history.jpg`
+  and `implementation-message-context-cases.jpg` in the same directory.
+- Repeatable visual fixture:
+  `ruoyi-fastapi-frontend/src/utils/__tests__/fixtures/mindmap-user-message-context.html`.
+- Frontend regression suite: 1,755 passed. Production build and whitespace
+  checks passed. No new paid AI generation or map-content edit was performed.
+- Backend context/follow-up/retry/retention/recovery/connector suites: 201 passed,
+  including existing and legacy queued-task rebasing without label drift.
+
+final result: passed (sent context and attachment receipts)
+
+## 2026-09-30 — Message footer placement correction
+
+- User-requested order is now message bubble → context/attachments → send time
+  and copy button. This supersedes the earlier above-bubble placement.
+- Removed the historical attachment group's vertical divider and its divider
+  spacing; wrapped file chips align right. The live composer is unchanged.
+- Browser verified actual message DOM order and whole-map/single/multi/long-name
+  fixtures: context starts 6px below the bubble, attachment border-left is 0px,
+  and narrow lanes have no horizontal overflow.
+- Evidence: `artifacts/composer-fidelity/implementation-message-context-bottom.jpg`.
+- Frontend regression suite: 1,755 passed, including 31 component tests.
+
+final result: passed (message footer placement and separator removal)

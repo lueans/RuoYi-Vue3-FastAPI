@@ -628,6 +628,9 @@ async def test_job_runtime_preserves_creation_admission_and_frozen_columns(  # n
     else:
         result = await create()
         values = insert.await_args.args[1]
+        assert json.loads(values['request_json'])['_userMessageContext'] == {
+            'sourceMode': 'new', 'scopeType': 'document', 'contextNodes': [],
+        }
         assert {key: values[key] for key in (
             'agent_key', 'adapter_version', 'sdk_version', 'runtime_version', 'model_ref',
             'max_budget_usd', 'timeout_seconds', 'max_nodes', 'max_depth', 'retention_days',

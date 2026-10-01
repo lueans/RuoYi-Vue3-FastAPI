@@ -223,8 +223,14 @@ async def test_retry_idempotency_key_cannot_be_reused_for_other_overrides() -> N
 @pytest.mark.asyncio
 @pytest.mark.parametrize('context_parent', [None, 'owned-content-ancestor'])
 @pytest.mark.parametrize('room_epoch', ['old-epoch', 'latest-epoch'])
-async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_session(context_parent: str | None, room_epoch: str) -> None:
+@pytest.mark.parametrize('requested_attachments', [None, [], [{
+    'id': 'new', 'name': 'new.txt', 'size': 3, 'mediaType': 'text/plain', 'text': '新参考',
+}]])
+async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_session(context_parent: str | None, room_epoch: str, requested_attachments: list | None) -> None:
     original = _failed_job()
+    original.request_json = json.dumps({**json.loads(original.request_json), 'attachments': [{
+        'id': 'old', 'name': 'old.txt', 'size': 3, 'mediaType': 'text/plain', 'text': '旧参考不继承',
+    }]})
     if context_parent:
         original.request_json = json.dumps({**json.loads(original.request_json), 'contextParentJobId': context_parent})
     existing_later_turn = SimpleNamespace(id='later', turn_index=4)
@@ -256,6 +262,7 @@ async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_ses
         'agentKey': 'claude',
         'prompt': '换一个 Agent，覆盖边界场景',
         'parameters': {'maxNodes': RETRY_MAX_NODES, 'density': 'detailed'},
+        **({'attachments': requested_attachments} if requested_attachments is not None else {}),
     })
 
     with (
@@ -340,6 +347,11 @@ async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_ses
     assert created['base_room_epoch'] == room_epoch
     request = json.loads(created['request_json'])
     assert request['prompt'] == '换一个 Agent，覆盖边界场景'
+    assert request['_userMessageContext'] == {
+        'sourceMode': 'current', 'scopeType': 'document', 'contextNodes': [],
+    }
+    assert request['attachments'] == (requested_attachments or [])
+    assert '旧参考不继承' not in created['request_json']
     assert request.get('contextParentJobId') == context_parent
     assert request['parameters']['maxNodes'] == RETRY_MAX_NODES
     assert request['parameters']['maxDepth'] == ORIGINAL_MAX_DEPTH

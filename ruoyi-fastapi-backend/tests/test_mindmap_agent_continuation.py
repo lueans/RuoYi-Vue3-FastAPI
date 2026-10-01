@@ -204,6 +204,64 @@ def test_scope_order_and_standalone_generated_document_transition() -> None:
     )
 
 
+@pytest.mark.parametrize('changed', [
+    {'scope': {'type': 'branch', 'rootUid': 'selected'}},
+    {'mindmapId': 2}, {'roomEpoch': 'other-epoch'},
+])
+def test_provider_session_never_resumes_different_document_or_scope(changed: dict) -> None:
+    source = {'type': 'cloud_document', 'mindmapId': 1, 'roomEpoch': 'original'}
+    parent = job('parent', intent='create', target='file', request_json=source_request(source).model_dump_json())
+    current = job('current', intent='create', target='file',
+                  request_json=source_request({**source, **changed}).model_dump_json())
+    assert not MindmapAiTaskManager._same_provider_session_contract(parent, current)
+    current.request_json = parent.request_json
+    assert MindmapAiTaskManager._same_provider_session_contract(parent, current)
+    current.request_json = 'invalid'
+    assert not MindmapAiTaskManager._same_provider_session_contract(parent, current)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('same_scope', [True, False])
+async def test_discussion_history_is_isolated_at_scope_boundary(
+    monkeypatch: pytest.MonkeyPatch, same_scope: bool,
+) -> None:
+    source = {'type': 'cloud_document', 'mindmapId': 1, 'scope': {'type': 'branch', 'rootUid': 'selected'}}
+    def discussion_request(scope: dict) -> str:
+        return json.dumps({'prompt': '目标', 'intent': 'discuss', 'target': 'message', 'source': scope})
+    parent = discussion('a')
+    parent.parent_job_id = None
+    parent.request_json = discussion_request(source if same_scope else {**source, 'scope': {'type': 'document'}})
+    current = discussion('current')
+    current.parent_job_id = parent.id
+    current.request_json = discussion_request(source)
+    monkeypatch.setattr(MindmapAiDao, 'list_jobs_for_session', AsyncMock(return_value=[parent, current]))
+    responses = AsyncMock(return_value={parent.id: response('a')})
+    monkeypatch.setattr(MindmapAiDao, 'get_responses_for_jobs', responses)
+    result = await MindmapAiTaskManager._visible_discussion_history(object(), current)
+    assert responses.await_args.args[1] == ([parent.id] if same_scope else [])
+    assert bool(result) == same_scope
+
+
+@pytest.mark.asyncio
+async def test_discussion_scope_boundary_does_not_reintroduce_older_matching_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {'type': 'cloud_document', 'mindmapId': 1, 'scope': {'type': 'branch', 'rootUid': 'selected'}}
+    current = discussion('current')
+    current.parent_job_id = 'wide'
+    current.request_json = source_request(source).model_dump_json()
+    wide = discussion('wide')
+    wide.parent_job_id = 'older'
+    wide.request_json = source_request({**source, 'scope': {'type': 'document'}}).model_dump_json()
+    older = discussion('older')
+    older.request_json = current.request_json
+    monkeypatch.setattr(MindmapAiDao, 'list_jobs_for_session', AsyncMock(return_value=[wide, older]))
+    lookup = AsyncMock(return_value={})
+    monkeypatch.setattr(MindmapAiDao, 'get_responses_for_jobs', lookup)
+    assert await MindmapAiTaskManager._visible_discussion_history(object(), current) == ()
+    assert lookup.await_args.args[1] == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('parent_status', ['completed_file', 'completed_message'])
 async def test_history_loader_does_not_send_wider_scope_parent(monkeypatch: pytest.MonkeyPatch, parent_status: str) -> None:

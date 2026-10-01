@@ -2,8 +2,8 @@
 // responsive/rendered width are separate; resizing never edits a document.
 import { computed, readonly, ref } from 'vue'
 
-export const DEFAULT_AGENT_PANEL_WIDTH = 440
-export const AGENT_PANEL_WIDTH_KEY = 'mindmap.agent-panel-width.v1'
+export const DEFAULT_AGENT_PANEL_WIDTH = 376
+export const AGENT_PANEL_WIDTH_KEY = 'mindmap.agent-panel-width.v2'
 const MIN_WIDTH = 360
 const MAX_WIDTH = 720
 

@@ -84,12 +84,6 @@
   .el-drawer__footer { flex-shrink: 0; padding: 4px 12px 10px; border-top: 0; background: var(--ai-panel-bg); backdrop-filter: none; }
   .panelFooter { gap: 4px; }
   .agentExecutionLocation { margin: -5px 0 10px; color: var(--agent-muted); font-size: 10px; overflow-wrap: anywhere; }
-  .composerAgentBar { gap: 5px; margin: 0 0 6px; min-width: 0; }
-  .composerAgentBar .el-select { width: 168px; max-width: 48%; }
-  .composerAgentBar .el-select__wrapper { box-shadow: none; background: transparent; padding-left: 4px; font-size: 12px; }
-  .composerAgentBar .el-select__wrapper:hover { background: var(--agent-hover); }
-  .composerAgentBar .composerAgentHint { flex: 1; font-size: 10px; color: var(--agent-muted); text-align: left; }
-  .composerAgentBar .el-button { font-size: 11px; color: var(--agent-muted); padding-inline: 5px; }
   .aiComposer { padding: 6px; border-radius: 12px; border-color: var(--agent-border); box-shadow: none; background: var(--agent-surface); transition: border-color 140ms cubic-bezier(0.23, 1, 0.32, 1); }
   .aiComposer:focus-within { border-color: var(--agent-muted); }
   .aiComposer .el-textarea__inner { padding: 6px 8px; background: var(--ai-card-bg); border-radius: 8px; font-size: 14px; line-height: 1.5; min-height: 56px !important; }
@@ -111,8 +105,6 @@
 
 @container (max-width: 430px) {
   .mindmapAiDrawer .activitySidebar { padding-inline: 16px; }
-  .mindmapAiDrawer .composerAgentHint { display: none; }
-  .mindmapAiDrawer .composerAgentBar .el-button { margin-left: auto; }
   .mindmapAiDrawer .newConversationButton > span:first-child { max-width: 140px; }
   .mindmapAiDrawer .composerShortcut { display: none; }
 }
@@ -163,4 +155,294 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .mindmapAiDrawer .aiComposer { transition: none; }
+}
+
+/* mindmap-ai-assistant.html fidelity pass: the panel is a quiet white chat
+ * surface with a centered task launcher and one compact, bottom composer. */
+.mindmapAiDrawer {
+  --agent-ink: oklch(0.205 0.006 285);
+  --agent-muted: oklch(0.555 0.008 285);
+  --agent-border: oklch(0.916 0.004 285);
+  --agent-surface: color-mix(in oklch, var(--agent-ink) 6%, transparent);
+  --agent-hover: var(--agent-surface);
+  --agent-accent: oklch(0.60 0.20 288);
+  --agent-node: oklch(0.52 0.20 266);
+  --agent-highlight: oklch(0.66 0.17 250);
+  --ai-panel-bg: oklch(0.999 0.001 95);
+  --ai-card-bg: var(--ai-panel-bg);
+  --ai-control-border: var(--agent-border);
+  --agent-user-bg: color-mix(in oklch, var(--agent-accent) 12%, transparent);
+  --agent-user-ink: var(--agent-ink);
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  // The app-wide `aside` rule otherwise adds 24px on both sides of this shell.
+  padding: 0;
+  margin: 0;
+  color: var(--agent-ink);
+  border-radius: 0;
+  background: var(--ai-panel-bg);
+
+  .aiPanelHeader {
+    height: 60px;
+    padding: 0 14px 0 16px;
+    border-bottom: 0;
+    background: var(--ai-panel-bg);
+  }
+
+  .newConversationButton {
+    padding: 6px 10px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+
+  .aiPanelHeaderActions {
+    .connectionBadge,
+    .el-button[aria-label='任务与 Agent 设置'] { display: none; }
+
+    .el-button[aria-label='关闭 AI 面板'] {
+      width: 32px;
+      height: 32px;
+      color: var(--agent-muted);
+    }
+  }
+
+  .aiDialogBody { background: var(--ai-panel-bg); }
+  .workspaceMain { display: flex; min-height: 100%; flex: 1 1 auto; }
+  .controlPane { display: flex; width: 100%; min-height: 100%; padding: 8px 16px 4px; flex-direction: column; }
+
+  .aiWelcome {
+    min-height: 0;
+    padding: 28px 0 22px;
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  .aiWelcome .aiWelcomeMark {
+    width: 52px;
+    height: 52px;
+    margin-bottom: 18px;
+    border: 1px solid rgba(121, 86, 232, 0.22);
+    border-radius: 16px;
+    color: var(--agent-accent);
+    background: rgba(121, 86, 232, 0.1);
+    box-shadow: none;
+    font-size: 25px;
+  }
+
+  .aiWelcome h2 {
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .aiWelcomeDescription {
+    max-width: 31ch;
+    margin: 6px auto 0;
+    color: var(--agent-muted);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .starterGrid {
+    width: 100%;
+    margin-top: 22px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .starterGrid button {
+    min-height: 108px;
+    padding: 14px;
+    align-items: flex-start;
+    flex-direction: column;
+    border-radius: 13px;
+    background: var(--ai-card-bg);
+    gap: 10px;
+
+    > span:last-child { font-size: 13px; line-height: 1.45; }
+    .starterIcon {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border-radius: 9px;
+      color: var(--agent-muted);
+      background: var(--agent-surface);
+    }
+    .starterIcon .el-icon { margin: 0; color: inherit; font-size: 16px; }
+  }
+
+  .el-drawer__footer {
+    padding: 6px 16px 16px;
+    background: var(--ai-panel-bg);
+  }
+
+  .panelFooter { gap: 6px; }
+  .activitySidebar { margin: 0; padding: 8px 16px 4px; font: inherit; color: inherit; background: transparent; border-radius: 0; }
+  .conversationTimeline { padding: 6px 4px 16px; gap: 18px; }
+
+  .aiComposer {
+    padding: 11px 12px 9px;
+    border-color: var(--ai-control-border);
+    border-radius: 18px;
+    background: var(--ai-card-bg);
+    box-shadow: 0 1px 2px oklch(0.20 0.02 285 / 0.06);
+  }
+
+  .aiComposer:focus-within {
+    border-color: color-mix(in oklch, var(--agent-highlight) 55%, var(--agent-border));
+    box-shadow: 0 0 0 4px color-mix(in oklch, var(--agent-highlight) 16%, transparent), 0 1px 2px oklch(0.20 0.02 285 / 0.06);
+  }
+
+  .aiComposer .el-textarea__inner {
+    min-height: 24px !important;
+    max-height: 132px;
+    padding: 0 4px;
+    border-radius: 0;
+    background: transparent;
+    color: var(--agent-ink);
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.55;
+    &::placeholder { color: var(--agent-muted); }
+  }
+  .aiComposer .el-textarea { vertical-align: baseline; }
+
+  .composerContextRow {
+    min-height: 24px;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 0;
+    gap: 7px;
+  }
+
+  .composerContextChip,
+  .composerFileChip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: min(220px, 100%);
+    padding: 5px 6px 5px 10px;
+    border: 1px solid var(--agent-border);
+    border-radius: 999px;
+    color: var(--agent-ink);
+    font-size: 12.5px;
+    line-height: 1.3;
+  }
+  .composerContextChip { background: var(--ai-card-bg); }
+  .composerContextChip[data-scope='all'] {
+    border-style: dashed;
+    background: transparent;
+    color: var(--agent-muted);
+  }
+  .composerContextChip[data-scope='multi'] {
+    border-color: color-mix(in oklch, var(--agent-node) 32%, transparent);
+    background: color-mix(in oklch, var(--agent-node) 11%, transparent);
+    color: color-mix(in oklch, var(--agent-node) 80%, var(--agent-ink));
+  }
+  .composerContextChip .contextChip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+  }
+  .contextLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contextIcon { flex: none; width: 14px; height: 14px; color: var(--agent-node); }
+  .composerContextChip[data-scope='all'] .contextIcon { color: inherit; }
+  .contextClear {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    opacity: .6;
+    cursor: pointer;
+    .el-icon { font-size: 11px; }
+    &:hover { opacity: 1; background: color-mix(in srgb, var(--agent-ink) 9%, transparent); }
+    &:disabled { cursor: not-allowed; }
+  }
+  .composerContextRow .composerWriteMode { display: none; }
+  .composerChipGroup { display: flex; flex-wrap: wrap; align-items: center; min-width: 0; max-width: 100%; gap: 7px; }
+  .composerFileGroup { padding-left: 12px; margin-left: 2px; border-left: 1px solid var(--agent-border); }
+  .composerFileChip {
+    background: var(--agent-surface);
+    > .el-icon { flex: none; font-size: 14px; color: var(--agent-muted); }
+    &.is-error { border-color: var(--agent-danger); }
+  }
+  .attachmentSize { flex: none; color: var(--agent-muted); font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-size: 11px; }
+  .composerAttachmentNotice { margin: 0 0 8px; font-size: 12px; line-height: 1.5; color: var(--agent-warning); }
+
+  .composerToolbar { margin-top: 10px; gap: 8px; justify-content: flex-start; }
+  .composerTools { gap: 8px; }
+  .composerTools .el-button.is-circle,
+  .composerToolbar .agentModeSwitch {
+    width: 32px;
+    height: 32px;
+    margin: 0;
+    border: 1px solid var(--agent-border);
+    background: var(--ai-card-bg);
+    color: var(--agent-muted);
+  }
+  .composerTools .el-button.is-circle:hover { background: var(--agent-hover); color: var(--agent-ink); }
+  // Reuse the supplied HTML prototype's icons at their original dimensions.
+  .composerAddIcon { width: 17px; height: 17px; }
+  .composerModelIcon { width: 16px; height: 16px; transform: translateY(1px); }
+
+  .composerExecutionPicker {
+    width: 104px;
+    min-width: 0;
+    margin-left: auto;
+    padding: 0;
+    flex: 0 1 104px;
+  }
+  .composerExecutionPicker .executionPickerBar { gap: 0; }
+  .composerExecutionPicker .executionPickerBar > .el-select { width: 104px; min-width: 0; flex: 1; }
+  .composerExecutionPicker .el-select__wrapper {
+    min-height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--agent-border);
+    border-radius: 9px;
+    background: var(--ai-card-bg);
+    box-shadow: none;
+  }
+  .composerExecutionPicker .executionHint,
+  .composerExecutionPicker .executionPickerBar > .el-button,
+  .composerExecutionPicker .executionDeviceBar,
+  .composerExecutionPicker .executionNotice,
+  .composerExecutionPicker .executionCurrent { display: none; }
+
+  .composerShortcut { display: none; }
+  .composerSubmitGroup { margin: 0; flex: none; gap: 0; }
+  .composerSubmitGroup .composerSendButton.el-button {
+    width: 34px;
+    height: 34px;
+    min-width: 34px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--agent-accent);
+    color: var(--ai-card-bg);
+    svg { width: 17px; height: 17px; }
+    &:disabled { opacity: .45; }
+    &:active:not(:disabled) { transform: scale(.95); }
+  }
+  .composerSubmitGroup .composerSendButton.el-button:hover:not(:disabled) {
+    background: color-mix(in oklch, var(--agent-accent) 86%, black);
+  }
 }

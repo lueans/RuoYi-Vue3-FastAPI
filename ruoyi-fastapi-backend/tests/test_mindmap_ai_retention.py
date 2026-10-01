@@ -512,6 +512,10 @@ async def test_session_timeline_returns_visible_prompt_and_sanitized_events_only
         id='job-1',
         request_json=json.dumps({
             'prompt': '生成登录测试用例',
+            'attachments': [{
+                'id': 'reference-1', 'name': '需求.md', 'size': 60,
+                'mediaType': 'text/markdown', 'text': '附件私密参考正文',
+            }],
             'source': {'document': {'root': {'data': {'text': '私密正文'}}}},
         }, ensure_ascii=False),
         created_time=now,
@@ -553,9 +557,14 @@ async def test_session_timeline_returns_visible_prompt_and_sanitized_events_only
 
     turn = timeline['turns'][0]
     assert turn['userMessage']['content'] == '生成登录测试用例'
+    assert turn['userMessage']['attachments'] == [{
+        'id': 'reference-1', 'name': '需求.md', 'size': 60, 'mediaType': 'text/markdown',
+        'parsing': {'status': 'parsed', 'characterCount': 8},
+    }]
     assert turn['events'][0]['payload'] == {'toolName': 'add_nodes'}
     serialized = json.dumps(timeline, ensure_ascii=False, default=str)
     assert '私密正文' not in serialized
+    assert '附件私密参考正文' not in serialized
     assert '不得返回' not in serialized
 
 

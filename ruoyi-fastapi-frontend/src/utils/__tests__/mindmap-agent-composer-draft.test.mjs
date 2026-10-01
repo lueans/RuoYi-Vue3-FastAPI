@@ -3,11 +3,13 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { parse, babelParse } from '@vue/compiler-sfc'
 import { computed, reactive, ref } from 'vue'
+import { installComposerAttachmentHarness } from './mindmap-composer-attachment-harness.mjs'
 
 const source = readFileSync(new URL('../../components/MindMap/MindmapAiDialog.vue', import.meta.url), 'utf8')
 const script = parse(source).descriptor.scriptSetup.content
 const nodes = babelParse(script, { sourceType: 'module' }).program.body
 function compile(names, scope) {
+  installComposerAttachmentHarness(scope)
   const selected = nodes.filter(node => names.includes(node.id?.name)
     || node.declarations?.some(declaration => names.includes(declaration.id?.name)))
   assert.equal(selected.length, names.length, `missing production declarations: ${names.join(', ')}`)

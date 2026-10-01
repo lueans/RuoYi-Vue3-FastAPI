@@ -46,6 +46,7 @@ from module_mindmap.ai.adapters.base import (
     build_agent_generation_mode_clause,
     build_agent_output_contract,
     build_agent_tool_completed_payload,
+    build_agent_user_prompt,
     enforce_agent_target_layout,
     is_agent_needs_input_signal,
     map_adapter_exception,
@@ -1169,7 +1170,7 @@ class NativeMindmapAdapter(AgentAdapter):
 
         total_timeout = max(1.0, float(context.metadata.get('timeoutSeconds') or 900))
         started_at = asyncio.get_running_loop().time()
-        response_stream = agent.arun(context.prompt, stream=True, stream_events=True)
+        response_stream = agent.arun(build_agent_user_prompt(context), stream=True, stream_events=True)
         await asyncio.wait_for(
             consume_response_stream(response_stream),
             timeout=total_timeout,
@@ -1344,6 +1345,17 @@ class NativeMindmapAdapter(AgentAdapter):
         if cancel_event.is_set():
             raise asyncio.CancelledError
         terminal_payload = getattr(run_output, 'content', None)
+        # Agno's non-streaming path returns provider failures as ERROR runs,
+        # with the exception text in content. Never validate that as an answer
+        # or let Ollama's plain-text fallback publish it as a successful reply.
+        status = getattr(run_output, 'status', None)
+        status = str(getattr(status, 'value', status) or '').casefold()
+        if status == 'cancelled':
+            raise asyncio.CancelledError
+        if status == 'error':
+            raise map_adapter_exception(RuntimeError(terminal_payload)) from None
+        if status and status != 'completed':
+            raise map_adapter_exception(RuntimeError('Agent discussion did not complete')) from None
         metrics = getattr(run_output, 'metrics', None)
         usage = metrics.to_dict() if metrics is not None else {}
         result = _native_discussion_result(

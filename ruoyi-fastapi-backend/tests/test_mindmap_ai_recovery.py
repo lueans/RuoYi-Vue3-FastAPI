@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
+from sqlalchemy.exc import MissingGreenlet
 
 from config.env import MindmapAiConfig
 from module_mindmap.ai.adapters.base import AgentRunResult
@@ -249,6 +250,7 @@ async def test_wake_waiting_followups_releases_only_the_oldest_queued_turn() -> 
     released = next(item.args[2] for item in update_job.await_args_list if item.args[1] == first_child.id)
     assert json.loads(released['request_json']) == {
         'source': {'type': 'none'}, 'contextParentJobId': parent.id,
+        '_userMessageContext': {'sourceMode': 'new', 'scopeType': 'document', 'contextNodes': []},
     }
     update_job.assert_any_await(
         database,
@@ -315,7 +317,8 @@ async def test_next_route_waits_for_parent_proposal_to_be_applied() -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_undo_wakes_followup_against_authoritative_document() -> None:
+@pytest.mark.parametrize('existing_context_receipt', [False, True])
+async def test_direct_undo_wakes_followup_against_authoritative_document(existing_context_receipt: bool) -> None:
     """A direct receipt has no artifact, so an undone parent must still rebase its child."""
     parent = SimpleNamespace(
         id='direct-undone-parent',
@@ -353,10 +356,16 @@ async def test_direct_undo_wakes_followup_against_authoritative_document() -> No
                 'documentHash': 'old-hash',
                 'document': old_document,
                 'baselineDocument': old_document,
+                'scope': {'type': 'branch', 'rootUid': 'root'},
             },
         }),
         base_hash='old-hash',
     )
+    if existing_context_receipt:
+        child.request_json = json.dumps({**json.loads(child.request_json), '_userMessageContext': {
+            'sourceMode': 'current', 'scopeType': 'branch',
+            'contextNodes': [{'uid': 'root', 'label': '发送当时的名称'}],
+        }})
     authoritative_document = {
         'root': {
             'data': {'uid': 'root', 'text': 'after undo'},
@@ -405,6 +414,10 @@ async def test_direct_undo_wakes_followup_against_authoritative_document() -> No
     assert request_payload['source']['revision'] == EXPECTED_RELEASE_REVISION
     assert request_payload['source']['documentHash'] == 'new-hash'
     assert request_payload['source']['document'] == authoritative_document
+    assert request_payload['_userMessageContext'] == {
+        'sourceMode': 'current', 'scopeType': 'branch',
+        'contextNodes': [{'uid': 'root', 'label': '发送当时的名称' if existing_context_receipt else 'old'}],
+    }
     schedule.assert_called_once_with(child.id)
 
 
@@ -442,15 +455,27 @@ async def test_review_parent_does_not_release_queued_followups_before_user_decis
 
 
 @pytest.mark.asyncio
-async def test_rejected_parent_closes_waiting_followups_during_recovery() -> None:
-    parent = SimpleNamespace(
-        id='rejected-parent',
-        session_id='rejected-session',
-        user_id=7,
-        status='rejected',
-        artifact_id='rejected-artifact',
-    )
-    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+@pytest.mark.parametrize('parent_status', ['failed', 'cancelled', 'expired', 'stale', 'rejected'])
+async def test_terminal_parent_closes_waiting_followups_after_rollback(parent_status: str) -> None:
+    class ExpiringParent:
+        expired = False
+
+        @property
+        def status(self) -> str:
+            if self.expired:
+                raise MissingGreenlet('rollback expired the parent status')
+            return parent_status
+
+    parent = ExpiringParent()
+    parent_id = 'terminal-parent'
+
+    def expire_parent() -> None:
+        parent.expired = True
+
+    async def close_after_rollback(*_args: object, **_kwargs: object) -> None:
+        assert parent.expired, 'release the parent row lock before closing waiting turns'
+
+    database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock(side_effect=expire_parent))
 
     with (
         patch(
@@ -464,21 +489,22 @@ async def test_rejected_parent_closes_waiting_followups_during_recovery() -> Non
         patch.object(
             MindmapAiTaskManager,
             '_close_waiting_followups',
-            new=AsyncMock(),
+            new=AsyncMock(side_effect=close_after_rollback),
         ) as close_waiting_followups,
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
             new=AsyncMock(),
         ) as list_waiting,
     ):
-        await MindmapAiTaskManager._wake_waiting_followups(parent.id)
+        await MindmapAiTaskManager._wake_waiting_followups(parent_id)
 
     close_waiting_followups.assert_awaited_once_with(
-        parent.id,
-        parent_status='rejected',
+        parent_id,
+        parent_status=parent_status,
     )
     list_waiting.assert_not_awaited()
     database.rollback.assert_awaited_once()
+    database.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -881,6 +907,10 @@ async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
         'agentKey': 'codex',
         'intent': 'create',
         'prompt': '生成脑图',
+        'attachments': [{
+            'id': 'recovery-reference', 'name': '需求.txt', 'size': 9,
+            'mediaType': 'text/plain', 'text': '恢复后仍需使用的附件资料',
+        }],
         'source': source,
         'target': 'file',
     })
@@ -937,6 +967,11 @@ async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
     )
 
     async def run_adapter(context: object, _emit: object) -> AgentRunResult:
+        assert context.prompt == '生成脑图'
+        assert context.attachments == ({
+            'id': 'recovery-reference', 'name': '需求.txt', 'size': 9,
+            'mediaType': 'text/plain', 'text': '恢复后仍需使用的附件资料',
+        },)
         if source_kind == 'none':
             context.tool_service.start_document('AI 脑图', 'logicalStructure')
         else:

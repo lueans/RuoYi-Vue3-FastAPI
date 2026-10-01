@@ -130,8 +130,19 @@ test('AI Agent 能力来自服务端 manifest 且按当前意图和来源协商'
 test('Agent 选择明确展示连接就绪度且首次检查期间持续反馈', () => {
   assert.match(dialog, /class="agentReadiness"[\s\S]*selectedAgentReadinessLabel[\s\S]*selectedAgentReadinessDescription/)
   assert.match(dialog, /class="agentDisclosureDetails"[\s\S]*连接与使用范围/)
-  assert.match(dialog, /healthStatus === 'healthy'[\s\S]*连接正常/)
-  assert.match(dialog, /healthStatus === 'unknown'[\s\S]*首次运行时检查/)
+  const state = {
+    form: { agentKey: 'codex' }, selectedAgent: ref({ displayName: 'Codex', status: 'enabled', healthStatus: 'healthy' }),
+    loadingAgents: ref(false), agentError: ref(''), agentSelectionIssue: ref(''), isDeviceAgent: () => false,
+  }
+  state.selectedAgentReadinessTone = ref(computedValue('selectedAgentReadinessTone', state))
+  assert.equal(state.selectedAgentReadinessTone.value, 'ready')
+  assert.match(computedValue('selectedAgentReadinessLabel', state), /运行环境已检查/)
+  assert.match(computedValue('selectedAgentReadinessDescription', state), /认证与运行环境已通过检查/)
+  state.selectedAgent.value.healthStatus = 'unknown'
+  state.selectedAgentReadinessTone.value = computedValue('selectedAgentReadinessTone', state)
+  assert.equal(state.selectedAgentReadinessTone.value, 'pending')
+  assert.match(computedValue('selectedAgentReadinessLabel', state), /首次运行前检查连接/)
+  assert.match(computedValue('selectedAgentReadinessDescription', state), /自动校验认证和 SDK 状态/)
   assert.match(dialog, /v-if="submitting" class="submissionStatus"[\s\S]*aria-live="polite"/)
   assert.match(dialog, /submissionStageTitle[\s\S]*正在检查[\s\S]*submissionStageDescription/)
   assert.match(dialog, /submissionStartedAt\.value = Date\.now\(\)[\s\S]*submitting\.value = true/)
@@ -666,7 +677,8 @@ test('AI 抽屉展示安全会话与连接状态，脑图只在主编辑器流�
   assert.match(dialog, /正在冻结输入与生成约束，请勿重复提交/)
   assert.match(dialog, /role="status" aria-live="polite"/)
   assert.match(dialog, /clearInterval\(generationClockTimer\)/)
-  assert.match(dialog, /一起把想法变成脑图/)
+  assert.match(dialog, /今天想做点什么？/)
+  assert.match(dialog, /在右侧导图中选中节点，AI 会围绕你选中的部分来回答。/)
   assert.match(dialog, /class="aiComposer"/)
   assert.match(dialog, /描述你想怎样修改当前脑图/)
   assert.match(dialog, /@media \(max-width: 760px\)/)
@@ -1158,7 +1170,7 @@ test('继续生成 attempt 通过原 key、parent、session、turn 与已知 job
   assert.match(dialog, /async function hashAttemptFingerprint[\s\S]*return sha256Hex\(bytes\)/)
   assert.match(dialog, /async function resolveDurableAttempt[\s\S]*fingerprintHash/)
   assert.match(dialog, /metadata: \{[\s\S]*parentJobId,[\s\S]*parentTurnIndex,[\s\S]*sessionId: parentJob\.sessionId,[\s\S]*knownMaxTurnIndex:[\s\S]*knownJobIds:[\s\S]*requestPayload/)
-  assert.match(dialog, /async function replayFollowupAttempt[\s\S]*reconcileMindmapAiJob\(attempt\.key[\s\S]*isHttpNotFound\(error\)[\s\S]*attempt\.parentJobId,[\s\S]*attempt\.requestPayload,[\s\S]*attempt\.key/)
+  assert.match(dialog, /async function replayFollowupAttempt[\s\S]*reconcileMindmapAiJob\(attempt\.key[\s\S]*isHttpNotFound\(error\)[\s\S]*attempt\.parentJobId,[\s\S]*replayPayload,[\s\S]*attempt\.key/)
   assert.match(dialog, /persistedRequestPayload = continuationBase === 'current_snapshot'[\s\S]*source: undefined[\s\S]*requestPayload: persistedRequestPayload/)
   assert.match(dialog, /function assertFollowupAttemptResult[\s\S]*candidateParentId !== parentJobId[\s\S]*candidateSessionId !== String\(expectedSessionId\)[\s\S]*turnIndex \|\| 0\) <= knownMaxTurnIndex[\s\S]*knownJobIds\.has\(candidateId\)/)
   assert.doesNotMatch(dialog, /recoverLatestSessionChild/)
@@ -1216,9 +1228,38 @@ test('失败任务通过正式 retry 新建同会话轮次并可切换 Agent', (
 test('重试 attempt 以 retryOf、session、turn 和新 job 精确对账并可恢复', () => {
   assert.match(dialog, /resolveDurableAttempt\([\s\S]*'retry',[\s\S]*retryOfJobId: retriedJob\.id/)
   assert.match(dialog, /function assertRetryAttemptResult[\s\S]*candidateRetryOfJobId !== retryOfJobId[\s\S]*candidateParentJobId[\s\S]*candidateSessionId !== String\(expectedSessionId\)[\s\S]*knownJobIds\.has\(candidateId\)/)
-  assert.match(dialog, /async function replayRetryAttempt[\s\S]*attempt\.retryOfJobId,[\s\S]*attempt\.requestPayload,[\s\S]*attempt\.key/)
+  assert.match(dialog, /async function replayRetryAttempt[\s\S]*attempt\.retryOfJobId,[\s\S]*replayPayload,[\s\S]*attempt\.key/)
   assert.match(dialog, /persistedAttempts\.retry\?\.key[\s\S]*jobId: persistedAttempts\.retry\.retryOfJobId/)
-  assert.match(dialog, /reconciledRetryAttemptKey[\s\S]*clearDurableAttempt\('retry', reconciledRetryAttemptKey\)/)
+  const restoreSource = declaration(dialog, 'restoreActiveJob')
+  function findCleanup(node) {
+    if (!node || typeof node !== 'object') return null
+    if (node.type === 'ForOfStatement' && node.right?.elements?.some(pair =>
+      pair.elements?.[1]?.name === 'reconciledRetryAttemptKey')) return node
+    return Object.values(node).flatMap(value => Array.isArray(value) ? value : [value])
+      .map(value => value && typeof value === 'object' ? findCleanup(value) : null).find(Boolean)
+  }
+  const cleanup = findCleanup(babelParse(restoreSource, { sourceType: 'module' }))
+  assert.ok(cleanup, 'both reconciled attempt types must reach cleanup')
+  const runCleanup = new Function('scope', `with(scope) { ${restoreSource.slice(cleanup.start, cleanup.end)} }`)
+  for (const retryKey of ['retry-key', 'newer-key']) {
+    const calls = []
+    const attempts = { followup: { key: 'followup-key', requestPayload: { prompt: 'followup', attachments: ['followup-file'] } },
+      retry: { key: retryKey, requestPayload: { prompt: 'retry', attachments: ['retry-file'] } } }
+    runCleanup({
+      reconciledFollowupAttemptKey: 'followup-key', reconciledRetryAttemptKey: 'retry-key',
+      readPersistedAttempts: () => attempts,
+      consumeSubmittedComposerDraft: (...args) => calls.push(['draft', ...args]),
+      consumeComposerAttachments: files => calls.push(['files', files]),
+      clearDurableAttempt: (...args) => calls.push(['clear', ...args]),
+      restoreDurableAttemptNotice: () => calls.push(['notice']),
+    })
+    assert.deepEqual(calls, [
+      ['draft', 'followup', 'followup', 'followup-key'], ['files', ['followup-file']],
+      ['clear', 'followup', 'followup-key'], ['notice'],
+      ...(retryKey === 'retry-key' ? [['draft', 'retry', 'retry', 'retry-key'], ['files', ['retry-file']]] : []),
+      ['clear', 'retry', 'retry-key'], ['notice'],
+    ])
+  }
   assert.match(dialog, /if \(pointerPersisted\) clearDurableAttempt\('retry', attemptKey\)/)
 })
 

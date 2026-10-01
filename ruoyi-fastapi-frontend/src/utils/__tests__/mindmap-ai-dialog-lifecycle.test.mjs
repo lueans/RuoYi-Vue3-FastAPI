@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { babelParse, parse } from '@vue/compiler-sfc'
+import { installComposerAttachmentHarness } from './mindmap-composer-attachment-harness.mjs'
 import { compareMindmapAiPreviewCoordinates, countMindmapAiDraftNodes } from '../mindmap-ai-live-preview.js'
 import { directImpactForMindmapAiResult, resolveMindmapAiDirectChangeSummary } from '../mindmap-ai-result-summary.js'
 import { mergeMindmapAiJobSnapshot } from '../mindmap-ai-stream.js'
@@ -21,6 +22,7 @@ function functionSource(name) {
   return script.slice(declaration.start, declaration.end)
 }
 function compile(scope, names) {
+  installComposerAttachmentHarness(scope)
   scope.isDeviceAgent = isDeviceAgent
   scope.isMindmapExecutionBlocked = isMindmapExecutionBlocked
   scope.agentSwitchPending ??= ref(false)
@@ -34,6 +36,7 @@ function harness() {
   const s = {
     componentAlive: true, job: ref({ id: 'job1', status: 'cancelled', executionMode: 'direct' }),
     visible: ref(false), running: ref(false), directCanvasOwnerId: ref('job1'),
+    composerContextLocked: ref(true),
     directCanvasRecoveryJobId: ref(''),
     uncertainCanvasCreation: ref(null), preparingCanvas: ref(false), livePreviewRecovering: ref(false),
     pendingHandoffCanvasJobId: '',
@@ -611,6 +614,40 @@ function restoredDirectJobHarness() {
   return { ...h, ...api, order, targets, snapshot, preview }
 }
 
+for (const type of ['followup', 'retry']) {
+  for (const revision of ['submitted', 'reselected', 'replaced-attempt']) {
+    test(`restoring an accepted ${type} consumes only its submitted attachment revision (${revision})`, async () => {
+      const h = restoredDirectJobHarness()
+      const receipt = { id: 'same-content', name: 'notes.txt', draftRevision: 'submitted' }
+      const attempts = { [type]: { key: 'original-key', parentJobId: 'job1', retryOfJobId: 'job1',
+        sessionId: 'session1', requestPayload: { prompt: '原要求', attachments: [receipt] } } }
+      const accepted = { ...h.snapshot, id: 'child', parentJobId: 'job1', status: 'completed_direct' }
+      h.s.job.value = { ...h.snapshot }
+      h.s.composerAttachments.value = [
+        { ...receipt, draftRevision: revision === 'reselected' ? 'reselected' : 'submitted', status: 'ready' },
+        { id: 'later-upload', draftRevision: 'later', status: 'ready' },
+      ]
+      Object.assign(h.s, {
+        readPersistedAttempts: () => structuredClone(attempts),
+        replayFollowupAttempt: async () => accepted, replayRetryAttempt: async () => accepted,
+        clearDurableAttempt: (attemptType, key) => {
+          if (attempts[attemptType]?.key === key) delete attempts[attemptType]
+        },
+        restoreDurableAttemptNotice: noop, finalizeTerminalJob: async () => true,
+        restoreSessionTimeline: async () => {
+          if (revision === 'replaced-attempt') attempts[type].key = 'newer-key'
+          return true
+        },
+      })
+      assert.equal(await h.restoreActiveJob(), true)
+      assert.equal(h.s.job.value.id, 'child')
+      assert.deepEqual(h.s.composerAttachments.value.map(item => item.id), revision === 'submitted'
+        ? ['later-upload'] : ['same-content', 'later-upload'])
+      assert.equal(attempts[type]?.key, revision === 'replaced-attempt' ? 'newer-key' : undefined)
+    })
+  }
+}
+
 test('timeline recovery failure still fences the baseline and establishes the latest draft floor before SSE', async () => {
   const h = restoredDirectJobHarness()
   let resolveDraft
@@ -710,12 +747,14 @@ for (const activationName of ['activateCreatedJob', 'activateRetryJob', 'activat
       })
       h.s.latestPreviewVersion.value = 99
       const api = compile(h.s, [activationName])
+      h.s.composerAttachments.value = [{ id: 'submitted-file' }, { id: 'new-unsent-file' }]
       assert.equal(await api[activationName](h.snapshot, {
         identity: { jobId: 'previous' }, requestConfiguration: { intent: 'expand' },
-        requestPayload: { prompt: '继续编辑', agentKey: 'codex', executionMode: 'direct' },
+        requestPayload: { prompt: '继续编辑', agentKey: 'codex', executionMode: 'direct', attachments: [{ id: 'submitted-file' }] },
         attemptKey: 'same-durable-key', preparationId: 'preparing:same-durable-key',
         retryOfJob: { id: 'previous' }, recoverExisting,
       }), true)
+      assert.deepEqual(h.s.composerAttachments.value.map(file => file.id), ['new-unsent-file'], 'activation consumes only the accepted attachment snapshot')
       assert.equal(h.order.includes('latest-draft'), recoverExisting)
       assert.deepEqual(h.targets, recoverExisting ? [9] : [])
       assert.equal(h.order.at(-1), recoverExisting ? 'stream:2:9' : 'stream:1:-1')

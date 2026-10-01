@@ -38,6 +38,7 @@ from module_mindmap.ai.adapters.base import (
     agent_needs_input_result,
     agent_target_layout,
     build_agent_continuation_clause,
+    build_agent_attachment_clause,
     build_agent_discussion_prompt,
     build_agent_draft_changed_payload,
     build_agent_generation_mode_clause,
@@ -1051,6 +1052,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
         return (
             build_agent_continuation_clause(context) +
             f'标准意图：{context.intent}\n用户要求：{context.prompt}\n'
+            f'{build_agent_attachment_clause(context)}'
             f'参数：{json.dumps(context.parameters, ensure_ascii=False)}\n'
             f'输出契约：{build_agent_output_contract(context)}\n'
             f'{build_agent_generation_mode_clause(context)}\n'
@@ -1236,7 +1238,12 @@ class ClaudeMindmapAdapter(AgentAdapter):
                     raise runtime_error
                 if cancel_event.is_set():
                     raise asyncio.CancelledError
-                if completed:
+                # The artifact is immutable after completion, but Claude may
+                # still close out the user-visible plan.  Treat that UI-only
+                # bookkeeping as part of the terminal response instead of
+                # discarding an otherwise valid artifact.  Every tool that
+                # can read or change the draft remains forbidden here.
+                if completed and tool_name != 'update_plan':
                     post_completion_attempted = True
                     error = MindmapArtifactError(
                         'complete_artifact 必须是最后一个工具调用',
@@ -1599,6 +1606,8 @@ class ClaudeMindmapAdapter(AgentAdapter):
         prompt = self._prompt(context) + (
             '\n开始时使用 update_plan 发布简短计划，执行过程中更新状态；'
             '在最终 validate_draft/complete_artifact 之前更新完成状态。'
+            'complete_artifact 后不要再读取或修改脑图；若仍需把计划标记为完成，'
+            '只允许最后调用一次 update_plan。'
             '工具调用之间可向用户提供简短进度说明，不要披露隐藏推理。'
         )
         usage: dict[str, Any] = {}

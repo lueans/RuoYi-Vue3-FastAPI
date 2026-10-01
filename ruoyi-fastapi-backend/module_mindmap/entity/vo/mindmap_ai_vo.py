@@ -235,9 +235,43 @@ class MindmapAiParametersModel(BaseModel):
         return normalized
 
 
-class MindmapAiJobCreateModel(BaseModel):
+class MindmapAiAttachmentModel(BaseModel):
+    """Client-extracted text is reference data, never an authorized map source."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra='forbid')
+
+    id: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=255)
+    size: int = Field(ge=0, le=10 * 1024 * 1024, strict=True)
+    media_type: str = Field(max_length=128)
+    text: str = Field(min_length=1, max_length=50_000)
+
+    @field_validator('id', 'name', 'text')
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError('附件名称、标识和提取正文不能为空')
+        return value
+
+
+class MindmapAiAttachmentsModel(BaseModel):
+    """Attachments belong only to this submitted turn, including retries."""
+
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
+    attachments: list[MindmapAiAttachmentModel] = Field(default_factory=list, max_length=5)
+
+    @field_validator('attachments')
+    @classmethod
+    def validate_attachments(cls, value: list[MindmapAiAttachmentModel]) -> list[MindmapAiAttachmentModel]:
+        if sum(len(item.text) for item in value) > 100_000:
+            raise ValueError('附件正文合计不能超过 100000 字符')
+        if len({item.id for item in value}) != len(value):
+            raise ValueError('附件标识不能重复')
+        return value
+
+
+class MindmapAiJobCreateModel(MindmapAiAttachmentsModel):
     agent_key: str = Field(default='native_mindmap', min_length=1, max_length=64)
     device_id: DeviceId | None = None
     model_id: int | None = Field(default=None, gt=0)
@@ -295,9 +329,7 @@ class MindmapAiArtifactValidateModel(BaseModel):
     require_passed: bool = True
 
 
-class MindmapAiMessageModel(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
+class MindmapAiMessageModel(MindmapAiAttachmentsModel):
     prompt: str = Field(min_length=1, max_length=20_000)
     artifact_id: str | None = Field(default=None, min_length=36, max_length=36)
     agent_key: str | None = Field(default=None, min_length=1, max_length=64)
@@ -310,6 +342,9 @@ class MindmapAiMessageModel(BaseModel):
     ] = 'artifact'
     expected_parent_status: Literal['applied', 'undone', 'completed_direct'] | None = None
     source: MindmapAiSourceModel | None = None
+    # Explicit next-turn authorization; omitted by legacy clients so their
+    # existing source scope remains unchanged.
+    scope: MindmapAiScopeModel | None = None
 
     @field_validator('prompt')
     @classmethod
@@ -328,6 +363,8 @@ class MindmapAiMessageModel(BaseModel):
 
     @model_validator(mode='after')
     def validate_continuation_source(self) -> MindmapAiMessageModel:
+        if self.scope is not None and self.continuation_base == 'artifact':
+            raise ValueError('只有基于当前脑图继续时才能更新节点范围')
         if self.continuation_base == 'current_snapshot':
             if (
                 self.source is None
@@ -378,10 +415,8 @@ class MindmapAiRetryParametersModel(BaseModel):
         return MindmapAiParametersModel.validate_layout(value)
 
 
-class MindmapAiJobRetryModel(BaseModel):
+class MindmapAiJobRetryModel(MindmapAiAttachmentsModel):
     """Create a fresh turn from a failed terminal job without provider-session reuse."""
-
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     agent_key: str | None = Field(default=None, min_length=1, max_length=64)
     device_id: DeviceId | None = None

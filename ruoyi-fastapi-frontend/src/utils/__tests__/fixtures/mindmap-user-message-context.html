@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>用户消息与文件解析记录 · 组件验收</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 24px; background: #f7f7f9; color: #292929; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; }
+    h1 { margin: 0 0 8px; font-size: 20px; }
+    .note { margin: 0 0 24px; color: #737373; font-size: 13px; }
+    .cases { display: grid; grid-template-columns: repeat(auto-fit, 376px); gap: 24px; align-items: start; }
+    .case { padding: 16px 20px 24px; background: white; border: 1px solid #e9e9e9; border-radius: 14px; }
+    .case h2 { margin: 0 0 24px; color: #737373; font-size: 12px; font-weight: 500; }
+    .lane { display: grid; gap: 18px; }
+    .case.narrow { width: 280px; }
+    .fixtureAssistantReply { margin: 0; color: #292929; font-size: 13px; line-height: 1.7; }
+    .conversationMessageMeta { display: flex; justify-content: space-between; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <h1>已发送消息 · 上下文、附件与解析记录</h1>
+  <p class="note">真实 Vue 组件的本地验收样例，不发送 AI 请求、不写入会话。点击“文件解析记录”展开明细；网址加 ?expanded=1 可展开所有记录。</p>
+  <div id="app"></div>
+  <script type="module">
+    import { createApp, h, onMounted } from 'vue'
+    import Message from '/src/components/MindMap/MindmapAgentUserMessage.vue'
+    import Records from '/src/components/MindMap/MindmapAgentAttachmentRecords.vue'
+    import '/src/components/MindMap/styles/agent-chat.scss'
+
+    const attachments = [
+      { id: 'pdf', name: '改版需求清单.pdf', size: 889, mediaType: 'application/pdf', parsing: { status: 'parsed', characterCount: 628 } },
+      { id: 'docx', name: '需求说明.docx', size: 1024, mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', parsing: { status: 'parsed', characterCount: 1204 } },
+    ]
+    const cases = [
+      { title: '无附件 · 不显示解析记录', context: { sourceMode: 'current', scopeType: 'document', contextNodes: [] } },
+      { title: '单选节点 · 独立附件分组', context: { sourceMode: 'current', scopeType: 'branch', contextNodes: [{ uid: 'login', label: '验证码登录' }] }, attachments },
+      { title: '多选节点 · 发送时的选择', context: { sourceMode: 'current', scopeType: 'selectedNodes', contextNodes: [{ uid: 'login', label: '验证码登录' }, { uid: 'retry', label: '验证码重发' }] }, attachments },
+      { title: '窄栏 · 长名称不撑开消息', narrow: true, context: { sourceMode: 'current', scopeType: 'branch', contextNodes: [{ uid: 'long', label: '这是发送时选择的一个非常长的脑图节点名称' }] }, attachments: [{ ...attachments[0], name: '验证码登录功能需求说明与详细验收清单-AuthenticationAndRecoveryAcceptanceCriteria-2026.pdf' }, attachments[1]] },
+      { title: '旧数据 · 解析状态未知', context: null, attachments: [{ id: 'legacy', name: '历史需求.pdf', size: 2048, mediaType: 'application/pdf' }] },
+      { title: '五个附件 · 混合解析状态', context: { sourceMode: 'current', scopeType: 'document', contextNodes: [] }, attachments: [
+        ...attachments,
+        { id: 'txt', name: '补充说明.txt', size: 4096, mediaType: 'text/plain', parsing: { status: 'parsed', characterCount: 3120 } },
+        { id: 'unknown', name: '旧版业务说明.md', size: 8192, mediaType: 'text/markdown', parsing: { status: 'unknown' } },
+        { id: 'invalid', name: '状态缺失的验收附件.txt', size: 128, mediaType: 'text/plain' },
+      ] },
+    ]
+    createApp({ setup() {
+      onMounted(() => {
+        if (new URLSearchParams(location.search).get('expanded') === '1') {
+          document.querySelectorAll('.attachmentRecords details').forEach(details => { details.open = true })
+        }
+      })
+      return () => h('div', { class: 'cases' }, cases.map(item => h('section', { class: ['case agentChatSurface', { narrow: item.narrow }] }, [
+      h('h2', item.title),
+      h('div', { class: 'lane' }, [
+        h(Message, { content: '请完善这些场景的测试用例', createdTime: '2026-09-30T18:04:24', context: item.context, attachments: item.attachments || [] }),
+        h('div', { class: 'conversationMessage is-assistant' }, [
+          h('div', { class: 'conversationMessageMeta' }, [h('strong', 'AI 助手'), h('span', '本地验收样例')]),
+          h(Records, { attachments: item.attachments || [] }),
+          h('p', { class: 'fixtureAssistantReply' }, '这里是助手过程与回复的展示位置。'),
+        ]),
+      ]),
+    ]))) } }).mount('#app')
+  </script>
+</body>
+</html>

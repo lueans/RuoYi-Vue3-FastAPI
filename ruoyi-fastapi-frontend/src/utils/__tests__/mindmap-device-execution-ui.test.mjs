@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { parse, babelParse } from '@vue/compiler-sfc'
 import { createRenderer, nextTick, ref } from 'vue'
+import { installComposerAttachmentHarness } from './mindmap-composer-attachment-harness.mjs'
 import { useMindmapAgentDevices } from '../use-mindmap-agent-devices.js'
 import { isMindmapExecutionBlocked } from '../mindmap-execution-state.js'
 import { agentExecutionLocation, deviceExecutionIssue, deviceExecutionLabel, deviceExecutionCommand, deviceBudgetNotice, isDeviceAgent, isDeviceCatalogFresh, CODEX_DEVICE_BUDGET_NOTICE, KIMI_DEVICE_BUDGET_NOTICE } from '../mindmap-agent-devices.js'
@@ -50,6 +51,32 @@ const ast = babelParse(script, { sourceType: 'module' }).program
 const declaration = name => ast.body.find(node => node.type === 'FunctionDeclaration' && node.id.name === name)
 const run = (name, values) => { const bindings = { isDeviceAgent, isMindmapExecutionBlocked, ...values }; return new Function(...Object.keys(bindings), `${script.slice(declaration(name).start, declaration(name).end)}; return ${name}`)(...Object.values(bindings)) }
 
+test('task settings exposes the complete execution picker and device failures remain visible in the composer', () => {
+  const template = parse(source).descriptor.template.ast
+  function descendants(node) {
+    return [node, ...(node.children || []).flatMap(descendants)]
+  }
+  const elements = descendants(template)
+  const directive = (node, name, arg) => node.props?.find(prop => prop.type === 7 && prop.name === name && (!arg || prop.arg?.content === arg))?.exp?.content
+  const settings = elements.find(node => node.tag === 'el-dialog' && directive(node, 'model') === 'showAdvancedSettings')
+  const picker = descendants(settings).find(node => node.tag === 'MindmapAgentExecutionPicker')
+  assert.ok(picker, 'device selection, refresh and agent management must remain reachable')
+  assert.ok(!picker.props.some(prop => prop.name === 'class' && prop.value?.content.includes('composerExecutionPicker')),
+    'the compact composer rules hide device selection and must not apply inside settings')
+  assert.equal(directive(picker, 'on', 'select'), 'requestAgentSwitch')
+  assert.equal(directive(picker, 'on', 'refresh'), 'refreshDeviceCatalog')
+  assert.equal(directive(picker, 'on', 'manage'), 'agentManagerVisible = true')
+  const disabled = directive(picker, 'bind', 'disabled')
+  const guards = ['actionBusy', 'restoringJob', 'agentSwitchPending', 'executionStopBlocked']
+  const evaluateDisabled = new Function(...guards, `return ${disabled}`)
+  assert.equal(evaluateDisabled(false, false, false, false), false)
+  guards.forEach((_, index) => assert.equal(evaluateDisabled(...guards.map((__, item) => index === item)), true))
+  const issue = elements.find(node => node.tag === 'MindmapAgentComposerIssue' && directive(node, 'bind', 'description') === 'agentSelectionIssue')
+  const evaluateIssue = new Function('agentSelectionIssue', 'selectedDeviceIssue', 'composerEnabled', 'showAdvancedSettings', `return ${directive(issue, 'if')}`)
+  assert.equal(evaluateIssue('请选择执行电脑', '请选择执行电脑', true, false), true)
+  assert.equal(evaluateIssue('请选择执行电脑', '请选择执行电脑', true, true), false)
+})
+
 for (const method of ['retryJob', 'continueJob']) {
   test(`${method} blocks unconfirmed execution before preparing a canvas or creating a task`, async () => {
     const notices = []
@@ -95,14 +122,15 @@ function findPayload(node) {
 for (const method of ['submitJob', 'retryJob', 'continueJob', 'queueRunningMessage']) {
   test(`${method} carries only the explicitly selected device in its actual request payload`, () => {
     const payload = findPayload(declaration(method))
-    const bindings = {
+    const bindings = installComposerAttachmentHarness({
       form: { agentKey: 'device_claude', deviceId, prompt: '测试' }, prompt: '测试', isDeviceAgent,
       runningMessageRoute: ref('next'), effectiveFormIntent: ref('expand'),
       continuationPrompt: ref('测试'), submittedPrompt: '测试', jobConfiguration: ref({}), job: ref({}),
       continuationBase: 'artifact', parentJob: {}, expectedParentStatus: null,
-      currentSnapshotSource: undefined, requestedIntent: 'expand', source: { type: 'none' },
+      currentSnapshotSource: undefined, submittedSelection: undefined, requestedIntent: 'expand', source: { type: 'none' },
+      submittedAttachments: [],
       effectiveRequestLayout: () => 'logicalStructure', discussionMode: ref(false), directExecution: false, sourceContext: ref(null),
-    }
+    })
     const evaluate = () => new Function(...Object.keys(bindings), `return (${script.slice(payload.start, payload.end)})`)(...Object.values(bindings))
     assert.equal(evaluate().deviceId, deviceId)
     bindings.form.agentKey = 'device_codex'
@@ -127,7 +155,7 @@ for (const method of ['submitJob', 'retryJob', 'continueJob', 'queueRunningMessa
 test('stored request configuration does not pick up a later form device during recovery', () => {
   const capture = run('captureJobConfiguration', {
     form: { agentKey: 'device_claude', deviceId: 'later-device' },
-    GENERATION_MODE_VALUES: new Set(), discussionMode: ref(false),
+    GENERATION_MODE_VALUES: new Set(), discussionMode: ref(false), composerContextNodes: ref([]),
   })
   assert.equal(capture({ agentKey: 'device_claude', deviceId }).deviceId, deviceId)
   assert.equal(capture({ agentKey: 'claude', deviceId }).deviceId, '')

@@ -40,6 +40,7 @@ from module_mindmap.ai.adapters.base import (
     agent_needs_input_result,
     agent_target_layout,
     build_agent_continuation_clause,
+    build_agent_attachment_clause,
     build_agent_discussion_prompt,
     build_agent_generation_mode_clause,
     build_agent_output_contract,
@@ -1554,6 +1555,7 @@ class CodexMindmapAdapter(AgentAdapter):
         )
         return f"""{build_agent_continuation_clause(context)}你是受限的脑图生成 Agent。{action}，意图为 {context.intent}。
 用户要求（JSON 字符串）：{json.dumps(context.prompt, ensure_ascii=False)}
+{build_agent_attachment_clause(context)}
 参数：{json.dumps(context.parameters, ensure_ascii=False)}
 输出契约：{output_contract}
 {generation_mode_clause}

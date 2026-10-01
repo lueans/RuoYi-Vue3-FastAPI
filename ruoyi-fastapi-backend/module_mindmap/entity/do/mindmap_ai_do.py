@@ -76,7 +76,9 @@ class MindmapAiJob(Base):
     parent_job_id = Column(String(36), nullable=True)
     retry_of_job_id = Column(String(36), nullable=True)
     turn_index = Column(Integer, nullable=False, server_default='1')
-    execution_epoch = Column(Integer, nullable=False, server_default='0')
+    # MySQL cannot return this server default on INSERT; initialize it locally
+    # so the async response serializer never needs implicit database I/O.
+    execution_epoch = Column(Integer, nullable=False, default=0, server_default='0')
     agent_key = Column(String(64), nullable=False)
     adapter_version = Column(String(32), nullable=False)
     sdk_version = Column(String(32), nullable=True)

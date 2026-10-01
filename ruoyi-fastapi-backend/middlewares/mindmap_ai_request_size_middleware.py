@@ -14,11 +14,13 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # One request may contain one local document of up to 2 MiB, plus a UTF-8 prompt
-# and bounded JSON metadata.  The encrypted envelope is Base64URL encoded, hence
-# the separate (still bounded) wire allowance.
+# and bounded JSON metadata. Text attachments add at most 100k characters
+# (400k UTF-8 bytes plus file metadata). The encrypted envelope is Base64URL
+# encoded, hence the separate (still bounded) wire allowance.
 MINDMAP_AI_REQUEST_METADATA_ALLOWANCE_BYTES = 256 * 1024
+MINDMAP_AI_REQUEST_ATTACHMENT_ALLOWANCE_BYTES = 512 * 1024
 MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES = (2 * 1024 * 1024) + (
-    MINDMAP_AI_REQUEST_METADATA_ALLOWANCE_BYTES
+    MINDMAP_AI_REQUEST_METADATA_ALLOWANCE_BYTES + MINDMAP_AI_REQUEST_ATTACHMENT_ALLOWANCE_BYTES
 )
 MINDMAP_AI_REQUEST_ENCRYPTED_WIRE_MAX_BYTES = (
     4 * ((MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES + 2) // 3)
@@ -30,7 +32,7 @@ MINDMAP_DEVICE_ENROLL_ENCRYPTED_WIRE_MAX_BYTES = (
 ) + 4096
 MINDMAP_AI_INPUT_TOO_LARGE_STATUS = 413
 MINDMAP_AI_INPUT_TOO_LARGE_ERROR_CODE = 'AI_INPUT_TOO_LARGE'
-MINDMAP_AI_INPUT_TOO_LARGE_MESSAGE = 'AI 输入内容超过任务上限，请缩小脑图后重试'
+MINDMAP_AI_INPUT_TOO_LARGE_MESSAGE = 'AI 输入内容超过任务上限，请缩小脑图或附件后重试'
 TRANSPORT_ENCRYPT_HEADER_DUPLICATE_STATUS = 400
 TRANSPORT_ENCRYPT_HEADER_DUPLICATE_MESSAGE = 'x-transport-encrypt 请求头不能重复'
 TRANSPORT_ENCRYPT_HEADER_DUPLICATE_RESPONSE_HEADERS = {
@@ -42,6 +44,7 @@ TRANSPORT_ENCRYPT_HEADER_DUPLICATE_RESPONSE_HEADERS = {
 
 _CREATE_PATH_PATTERN = re.compile(r'^/mindmap/ai/jobs/?$')
 _FOLLOWUP_PATH_PATTERN = re.compile(r'^/mindmap/ai/jobs/[^/]{36}/messages/?$')
+_RETRY_PATH_PATTERN = re.compile(r'^/mindmap/ai/jobs/[^/]{36}/retry/?$')
 _DEVICE_ENROLL_PATH_PATTERN = re.compile(r'^/mindmap/ai/device-bridge/enroll/?$')
 _TOO_LARGE_CONTENT = {
     'code': MINDMAP_AI_INPUT_TOO_LARGE_STATUS,
@@ -144,6 +147,7 @@ class MindmapAiRequestSizeMiddleware:
             and (
                 _CREATE_PATH_PATTERN.fullmatch(path)
                 or _FOLLOWUP_PATH_PATTERN.fullmatch(path)
+                or _RETRY_PATH_PATTERN.fullmatch(path)
                 or _DEVICE_ENROLL_PATH_PATTERN.fullmatch(path)
             )
         )

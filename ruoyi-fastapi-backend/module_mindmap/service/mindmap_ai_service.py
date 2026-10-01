@@ -58,6 +58,11 @@ from module_mindmap.ai.document import (
     validate_smm_artifact,
 )
 from module_mindmap.ai.execution_state import EXECUTION_STATES, execution_blocks_continuation, job_execution_state
+from module_mindmap.ai.message_context import (
+    freeze_user_message_context,
+    user_message_attachments,
+    user_message_context,
+)
 from module_mindmap.ai.proposal_operations import (
     PROPOSAL_INTEGRITY_ERROR_CODE,
     materialize_editor_document_from_proposal,
@@ -437,6 +442,8 @@ def _manifest_supports_result(manifest: Any, result_type: str) -> bool:
 def _stable_create_fingerprint(request_model: MindmapAiJobCreateModel) -> str:
     """Hash only client intent, never mutable server-fetched cloud contents."""
     request_payload = request_model.model_dump(by_alias=True, exclude_none=True)
+    if not request_payload.get('attachments'):
+        request_payload.pop('attachments', None)
     if request_model.source.type == 'cloud_document':
         source_payload = request_payload.get('source') or {}
         for field in (
@@ -455,10 +462,13 @@ def _stable_followup_fingerprint(
     parent_job_id: str,
     model: MindmapAiMessageModel,
 ) -> str:
+    message = model.model_dump(by_alias=True, exclude_none=True)
+    if not message.get('attachments'):
+        message.pop('attachments', None)
     fingerprint_payload = {
         'operation': 'followup',
         'parentJobId': parent_job_id,
-        'message': model.model_dump(by_alias=True, exclude_none=True),
+        'message': message,
     }
     return hashlib.sha256(canonical_json_bytes(fingerprint_payload)).hexdigest()
 
@@ -468,10 +478,13 @@ def _stable_retry_fingerprint(
     model: MindmapAiJobRetryModel,
 ) -> str:
     """Fingerprint only the user's retry intent, before mutable cloud state is fetched."""
+    overrides = model.model_dump(by_alias=True, exclude_unset=True)
+    if not overrides.get('attachments'):
+        overrides.pop('attachments', None)
     fingerprint_payload = {
         'operation': 'retry',
         'retryOfJobId': retry_of_job_id,
-        'overrides': model.model_dump(by_alias=True, exclude_unset=True),
+        'overrides': overrides,
     }
     return hashlib.sha256(canonical_json_bytes(fingerprint_payload)).hexdigest()
 
@@ -2581,10 +2594,12 @@ class MindmapAiTaskManager:
                 if parent.status in {
                     'cancelled', 'failed', 'expired', 'stale', 'rejected',
                 }:
+                    # Rollback expires ORM attributes even with expire_on_commit=False.
+                    parent_status = str(parent.status)
                     await db.rollback()
                     await cls._close_waiting_followups(
                         parent_job_id,
-                        parent_status=str(parent.status),
+                        parent_status=parent_status,
                     )
                     return
                 if parent.status not in {
@@ -2695,7 +2710,7 @@ class MindmapAiTaskManager:
                     )
                 )
                 if direct_authoritative_parent:
-                    request_payload = _json_loads(waiting_job.request_json, {})
+                    request_payload = freeze_user_message_context(_json_loads(waiting_job.request_json, {}))
                     source_payload = request_payload.get('source') or {}
                     if source_payload.get('type') != 'cloud_document':
                         raise MindmapArtifactError(
@@ -2744,7 +2759,7 @@ class MindmapAiTaskManager:
                         'base_room_epoch': authoritative_room_epoch,
                     })
                 elif isinstance(artifact_document, dict):
-                    request_payload = _json_loads(waiting_job.request_json, {})
+                    request_payload = freeze_user_message_context(_json_loads(waiting_job.request_json, {}))
                     source_payload = request_payload.get('source') or {}
                     source_type = source_payload.get('type')
                     if source_type in {'local_snapshot', 'cloud_document'}:
@@ -2848,7 +2863,7 @@ class MindmapAiTaskManager:
                     values['source_type'] = request_payload['source']['type']
                     if 'base_hash' not in values:
                         values['base_hash'] = waiting_job.base_hash
-                released_request = _json_loads(values.get('request_json') or waiting_job.request_json, {})
+                released_request = freeze_user_message_context(_json_loads(values.get('request_json') or waiting_job.request_json, {}))
                 released_request['contextParentJobId'] = str(parent.id)
                 values['request_json'] = _json_dumps(released_request)
                 await MindmapAiDao.update_job(db, waiting_job.id, values)
@@ -3284,14 +3299,36 @@ class MindmapAiTaskManager:
             )
         return external_session_id
 
-    @staticmethod
-    def _same_provider_session_contract(parent_job: Any, job: Any) -> bool:
+    @classmethod
+    def _same_provider_session_contract(cls, parent_job: Any, job: Any) -> bool:
         """Whether two platform turns may share one provider SDK session."""
-        return bool(
+        if not (
             parent_job is not None
             and parent_job.intent == job.intent
             and parent_job.target == job.target
-        )
+        ):
+            return False
+        # A provider transcript can retain attachment text even when the next
+        # turn omits it. Start a fresh provider session across attachment turns;
+        # only the owned visible conversation is allowed to carry forward.
+        try:
+            parent_request = MindmapAiJobCreateModel.model_validate_json(parent_job.request_json)
+            request = MindmapAiJobCreateModel.model_validate_json(job.request_json)
+        except (AttributeError, ValueError):
+            return False
+        if parent_request.attachments or request.attachments:
+            return False
+        return cls._same_continuation_scope(parent_request, request)
+
+    @classmethod
+    def _same_job_continuation_scope(cls, parent_job: Any, job: Any) -> bool:
+        """Fail closed when persisted source identity or scope cannot be read."""
+        try:
+            parent_request = MindmapAiJobCreateModel.model_validate_json(parent_job.request_json)
+            request = MindmapAiJobCreateModel.model_validate_json(job.request_json)
+        except (AttributeError, ValueError):
+            return False
+        return cls._same_continuation_scope(parent_request, request)
 
     @classmethod
     async def _editing_continuation_history(
@@ -3448,6 +3485,14 @@ class MindmapAiTaskManager:
                     '讨论历史不完整，无法继续当前会话',
                     code='AI_SESSION_UNAVAILABLE',
                 )
+            # A scope change starts fresh provider context even though the
+            # platform conversation and its visible transcript stay intact.
+            if (
+                parent.user_id != job.user_id
+                or parent.session_id != job.session_id
+                or not cls._same_job_continuation_scope(parent, job)
+            ):
+                break
             if parent.intent == 'discuss' and parent.status == 'completed_message':
                 lineage.append(parent)
             cursor = str(parent.parent_job_id or '')
@@ -3831,6 +3876,7 @@ class MindmapAiTaskManager:
                 ),
                 visible_history=visible_history,
                 continuation_history=continuation_history,
+                attachments=tuple(item.model_dump(by_alias=True) for item in request_model.attachments),
             )
             if agent_key in DEVICE_AGENT_KEYS:
                 async def owns_device_lease() -> bool:
@@ -5492,7 +5538,7 @@ class MindmapAiService:
         if source_mindmap_id is not None:
             payload['source']['mindmapId'] = source_mindmap_id
         payload['source'].pop('artifact', None)
-        request_json = _json_dumps(_request_with_undo_baseline(payload, undo_baseline))
+        request_json = _json_dumps(_request_with_undo_baseline(freeze_user_message_context(payload), undo_baseline))
 
         policy, runtime_values = await cls._prepare_job_runtime(db, request_model, manifest, user_id)
         await cls._ensure_concurrency_available(db, manifest.agent_key, policy)
@@ -5614,6 +5660,7 @@ class MindmapAiService:
             ) from exc
 
         payload = original_request.model_dump(by_alias=True, exclude_none=True)
+        payload['attachments'] = [item.model_dump(by_alias=True) for item in model.attachments]
         requested_agent_key = model.agent_key or original_request.agent_key
         payload['agentKey'] = requested_agent_key
         merge_device_selection(payload, model, requested_agent_key, previous=original_request)
@@ -5729,7 +5776,7 @@ class MindmapAiService:
 
         now = datetime.now()
         job_id = str(uuid.uuid4())
-        retry_request_payload = request_model.model_dump(by_alias=True, exclude_none=True)
+        retry_request_payload = freeze_user_message_context(request_model.model_dump(by_alias=True, exclude_none=True))
         context_parent_id = _json_loads(retried_job.request_json, {}).get('contextParentJobId')
         if isinstance(context_parent_id, str) and context_parent_id:
             # Retain only server-owned content ancestry, never the failed
@@ -5813,6 +5860,7 @@ class MindmapAiService:
         merge_device_selection(payload, model, agent_key, previous=content_request)
         payload['intent'] = requested_intent
         payload['prompt'] = model.prompt
+        payload['attachments'] = [item.model_dump(by_alias=True) for item in model.attachments]
         if agent_key == 'native_mindmap':
             native_model_id = model.model_id or content_request.model_id
             if native_model_id is None:
@@ -5919,10 +5967,10 @@ class MindmapAiService:
         source = request_model.source
         source_mindmap_id = source.mindmap_id if source.type == 'cloud_document' else None
         content_has_document_lineage = source.type in {'local_snapshot', 'cloud_document'}
-        durable_request_payload = request_model.model_dump(
+        durable_request_payload = freeze_user_message_context(request_model.model_dump(
             by_alias=True,
             exclude_none=True,
-        )
+        ))
         # Route is orchestration metadata rather than Agent input. Persist it
         # beside the validated request so recovery workers make the same
         # release decision after a process restart.
@@ -6011,6 +6059,11 @@ class MindmapAiService:
                 message='请先确认或不采纳当前 AI 结果，再继续下一轮',
             )
         if parent.status in {'queued', 'preparing', 'running', 'validating'}:
+            if model.scope is not None:
+                raise ServiceException(
+                    data={'errorCode': 'AI_FOLLOWUP_SCOPE_LOCKED'},
+                    message='请等待当前 AI 轮次结束后再更新节点范围',
+                )
             return await cls._create_waiting_followup_job(
                 db,
                 parent,
@@ -6025,7 +6078,7 @@ class MindmapAiService:
         current_snapshot_followup = model.continuation_base == 'current_snapshot'
         current_source_followup = current_document_followup or current_snapshot_followup
         needs_input_followup = parent.status == 'needs_input' and not parent.artifact_id
-        discussion_followup = (
+        completed_discussion_parent = (
             parent.status == 'completed_message'
             and parent.intent == 'discuss'
             and parent.target == 'message'
@@ -6033,6 +6086,7 @@ class MindmapAiService:
             and not parent.artifact_id
             and not parent.proposal_id
         )
+        discussion_followup = not current_source_followup and completed_discussion_parent
         artifact_followup = bool(
             not current_source_followup
             and parent.status in {
@@ -6042,7 +6096,10 @@ class MindmapAiService:
         )
         authoritative_document_followup = bool(
             current_document_followup
-            and parent.status in {'applied', 'undone', 'completed_direct'}
+            and (
+                parent.status in {'applied', 'undone', 'completed_direct', 'completed_no_change'}
+                or completed_discussion_parent
+            )
             and parent.source_type == 'cloud_document'
             and parent.source_mindmap_id
         )
@@ -6057,6 +6114,11 @@ class MindmapAiService:
         authoritative_followup = (
             authoritative_document_followup or authoritative_snapshot_followup
         )
+        if model.scope is not None and not authoritative_followup:
+            raise ServiceException(
+                data={'errorCode': 'AI_FOLLOWUP_BASE_INVALID'},
+                message='只能为已完成轮次的当前脑图更新节点范围',
+            )
         if not any((
             needs_input_followup,
             discussion_followup,
@@ -6080,10 +6142,7 @@ class MindmapAiService:
             raise ServiceException(message='AI 脑图会话不存在或已结束')
         if needs_input_followup and requested_intent != parent.intent:
             raise ServiceException(message='补充澄清信息时不能切换 AI 任务模式')
-        if (
-            (needs_input_followup or discussion_followup)
-            and current_source_followup
-        ):
+        if needs_input_followup and current_source_followup:
             raise ServiceException(
                 data={'errorCode': 'AI_FOLLOWUP_BASE_INVALID'},
                 message='当前文字交互轮次不能切换为当前脑图基线',
@@ -6128,11 +6187,20 @@ class MindmapAiService:
             if content_parent.id == parent.id
             else MindmapAiJobCreateModel.model_validate(_json_loads(parent.request_json, {}))
         )
+        if authoritative_document_followup and (
+            parent_request.source.type != 'cloud_document'
+            or parent_request.source.mindmap_id != parent.source_mindmap_id
+        ):
+            raise ServiceException(
+                data={'errorCode': 'AI_FOLLOWUP_BASE_INVALID'},
+                message='当前云端脑图与原任务血缘不一致',
+            )
         agent_key = model.agent_key or parent.agent_key
 
         payload = content_request.model_dump(by_alias=True, exclude_none=True)
         payload['agentKey'] = agent_key
         merge_device_selection(payload, model, agent_key, previous=parent_request)
+        payload['attachments'] = [item.model_dump(by_alias=True) for item in model.attachments]
         payload['intent'] = requested_intent
         if needs_input_followup:
             supplemented_prompt = (
@@ -6180,8 +6248,8 @@ class MindmapAiService:
                     message=f'本地脑图快照不能超过{AI_MAX_FILE_BYTES}字节',
                 )
             # Only the browser-owned document bytes, revision and claimed hash
-            # are accepted from this turn.  Document identity and scope stay on
-            # the already-authorized platform lineage; historical Artifacts are
+            # are accepted from this turn. Document identity stays on the
+            # already-authorized platform lineage; historical Artifacts are
             # deliberately not consulted for an applied/undone local turn.
             source_payload = submitted_source.model_dump(by_alias=True, exclude_none=True)
             source_payload['documentId'] = trusted_source.document_id
@@ -6213,6 +6281,10 @@ class MindmapAiService:
                     or content_request.source.document
                 )
                 source_payload.pop('artifact', None)
+        if model.scope is not None:
+            # Only this explicit field grants a new next-turn scope. A scope
+            # embedded in a browser snapshot is still ignored for compatibility.
+            source_payload['scope'] = model.scope.model_dump(by_alias=True, exclude_none=True)
         normalized_source_type = str(source_payload.get('type') or 'none')
         payload['target'] = (
             'message'
@@ -6314,6 +6386,18 @@ class MindmapAiService:
             else:
                 source_payload['baselineDocument'] = authoritative_document
             request_model = MindmapAiJobCreateModel.model_validate(payload)
+        if model.scope is not None:
+            try:
+                MindmapToolService(
+                    base_document=request_model.source.document,
+                    scope=model.scope.model_dump(by_alias=True, exclude_none=True),
+                    trusted_source=True,
+                )
+            except MindmapArtifactError as exc:
+                raise ServiceException(
+                    data={'errorCode': 'AI_FOLLOWUP_SCOPE_INVALID'},
+                    message='选择的节点已不在当前脑图中，请重新选择',
+                ) from exc
         policy, runtime_values = await cls._prepare_job_runtime(db, request_model, manifest, user_id)
         await cls._ensure_concurrency_available(db, manifest.agent_key, policy)
 
@@ -6352,10 +6436,13 @@ class MindmapAiService:
                 )
                 or (
                     authoritative_document_followup
-                    and locked_parent.status in {'applied', 'undone', 'completed_direct'}
+                    and locked_parent.status in {
+                        'applied', 'undone', 'completed_direct', 'completed_no_change', 'completed_message',
+                    }
                     and locked_parent.status == observed_parent_status
                     and locked_parent.source_type == 'cloud_document'
                     and locked_parent.source_mindmap_id == parent.source_mindmap_id
+                    and locked_parent.request_json == parent.request_json
                 )
                 or (
                     authoritative_snapshot_followup
@@ -6456,10 +6543,10 @@ class MindmapAiService:
                 'base_hash': base_hash,
                 'base_room_epoch': base_room_epoch,
                 'request_json': _json_dumps(_request_with_undo_baseline(
-                    {
+                    freeze_user_message_context({
                         **request_model.model_dump(by_alias=True, exclude_none=True),
                         'contextParentJobId': str(content_parent.id),
-                    }, undo_baseline,
+                    }), undo_baseline,
                 )),
                 'request_fingerprint': fingerprint,
                 'idempotency_key': idempotency_key,
@@ -6724,6 +6811,8 @@ class MindmapAiService:
                 'userMessage': ({
                     'content': str(prompt)[:20_000],
                     'createdTime': job.created_time,
+                    'context': user_message_context(request_payload),
+                    'attachments': user_message_attachments(request_payload),
                 } if isinstance(prompt, str) and prompt else None),
                 'assistantMessage': assistant_message,
                 'events': visible_events,

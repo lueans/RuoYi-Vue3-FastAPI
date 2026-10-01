@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { installComposerAttachmentHarness } from './mindmap-composer-attachment-harness.mjs'
 import { isDeviceAgent } from '../mindmap-agent-devices.js'
 import { isMindmapExecutionBlocked } from '../mindmap-execution-state.js'
 
@@ -16,6 +17,7 @@ function functionSource(name) {
   return rest.slice(0, end + 1)
 }
 function compile(scope, names) {
+  installComposerAttachmentHarness(scope)
   scope.agentSwitchPending ??= ref(false)
   scope.isDeviceAgent = isDeviceAgent
   scope.isMindmapExecutionBlocked = isMindmapExecutionBlocked
@@ -26,6 +28,7 @@ for (const [method, attemptType] of [['submitJob', 'create'], ['retryJob', 'retr
   for (const reused of [false, true]) {
     test(`${method} ${reused ? 'never drains a persisted unknown request' : 'drains human writes before a new request'}`, async () => {
       const prepared = []
+      let capturedRequest
       const parent = { id: 'parent', status: 'completed_direct', executionMode: 'direct',
         intent: 'expand', sourceType: 'cloud_document', sourceMindmapId: 1, sessionId: 'session', turnIndex: 1 }
       const context = { mindmapId: 1, readonly: false, document: { root: { data: { uid: 'root', text: 'human' } } } }
@@ -37,6 +40,7 @@ for (const [method, attemptType] of [['submitJob', 'create'], ['retryJob', 'retr
         nativeModelConfigurationIssue: ref(''), effectiveFormIntent: ref('expand'),
         messageModeActive: ref(false), discussionMode: ref(false), agentSupportsCurrentTask: () => true,
         restoringJob: ref(false), actionBusy: ref(false), livePreviewCanvasMutationBlocked: ref(false),
+        composerContextLocked: ref(false),
         submitting: ref(false), retrying: ref(false), continuing: ref(false), submissionStartedAt: ref(0),
         sourceContext: ref(context), editorContext: ref(context), sourceFingerprint: ref('hash'),
         submitAttempt: null, retryAttempt: null, followupAttempt: null, jobConfiguration: ref({}),
@@ -49,7 +53,7 @@ for (const [method, attemptType] of [['submitJob', 'create'], ['retryJob', 'retr
         buildSource: async () => ({ type: 'cloud_document', mindmapId: 1 }),
         effectiveRequestLayout: () => 'logicalStructure', captureJobConfiguration: value => value,
         readPersistedAttempts: () => reused ? { [attemptType]: { key: 'key' } } : {},
-        resolveDurableAttempt: async () => ({ key: 'key' }), createMindmapAiIdempotencyKey: () => 'key',
+        resolveDurableAttempt: async (_type, _attempt, payload) => { capturedRequest = payload.requestPayload || payload; return { key: 'key' } }, createMindmapAiIdempotencyKey: () => 'key',
         followupIntent: () => 'expand', followupSourceType: () => 'cloud_document', followupContinuationBase: () => 'current_document',
         currentAiOwnerUserId: () => 'owner', listMindmapAiCloudMutationIntents: () => [],
         flushPendingCloudMutationIntents: async () => true, requestEditorContext: async () => context,
@@ -57,13 +61,17 @@ for (const [method, attemptType] of [['submitJob', 'create'], ['retryJob', 'retr
         preparingCanvas: ref(false), directCanvasOwnerId: ref(''),
         emitEditorRequest: async (event, payload) => {
           prepared.push({ event, payload })
+          s.composerAttachments.value[0].text = 'NEWER_UNSENT_ATTACHMENT_TEXT'
           throw superseded
         },
         releaseCanvasPreparation: async () => true,
         ElMessage: { info: assert.fail, warning: assert.fail, error: assert.fail },
       }
-      const api = compile(s, [method, 'prepareDirectCanvasRequest'])
+      const api = compile(s, [method, 'prepareDirectCanvasRequest', 'captureCanvasSelection', 'contextNodeLabel'])
+      s.composerAttachments.value = [{ id: 'file', name: 'requirements.txt', size: 64, mediaType: 'text/plain', text: 'ORIGINAL_ATTACHMENT_TEXT', status: 'ready' }]
       await api[method]()
+      assert.equal(capturedRequest.attachments[0].text, 'ORIGINAL_ATTACHMENT_TEXT', 'the send snapshot cannot change during asynchronous canvas preparation')
+      assert.equal(s.composerAttachments.value[0].text, 'NEWER_UNSENT_ATTACHMENT_TEXT', 'preparation failure must retain unsent attachments')
       assert.deepEqual(prepared, [{ event: 'aiDraftPreview', payload: {
         phase: 'prepare', jobId: 'preparing:key', directCommitted: true, drainLocalChanges: !reused,
       } }])

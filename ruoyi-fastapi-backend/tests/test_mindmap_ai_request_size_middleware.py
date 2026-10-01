@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from starlette.types import Message, Receive, Scope, Send
 
 FOLLOWUP_PATH = '/mindmap/ai/jobs/20000000-0000-4000-8000-000000000001/messages'
+RETRY_PATH = '/mindmap/ai/jobs/20000000-0000-4000-8000-000000000001/retry'
 CREATE_PATH = '/mindmap/ai/jobs'
 PAYLOAD_TOO_LARGE_STATUS = 413
 DUPLICATE_HEADER_STATUS = 400
@@ -141,7 +142,8 @@ def _decrypt_response_payload(messages: list[Message]) -> tuple[int, dict, dict[
 
 
 @pytest.mark.asyncio
-async def test_declared_oversized_followup_is_rejected_before_downstream() -> None:
+@pytest.mark.parametrize('path', [CREATE_PATH, FOLLOWUP_PATH, RETRY_PATH])
+async def test_declared_oversized_followup_is_rejected_before_downstream(path: str) -> None:
     downstream_called = False
 
     async def downstream(_scope: Scope, _receive: Receive, _send: Send) -> None:
@@ -151,7 +153,7 @@ async def test_declared_oversized_followup_is_rejected_before_downstream() -> No
     guarded = MindmapAiRequestSizeMiddleware(downstream)
     messages = await _invoke(
         guarded,
-        _scope(headers=[
+        _scope(path=path, headers=[
             (b'content-length', str(size_guard.MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES + 1).encode()),
         ]),
         [{'type': 'http.request', 'body': b'', 'more_body': False}],
@@ -251,6 +253,34 @@ async def test_small_followup_is_replayed_once_with_plaintext_limit_state() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('path', [CREATE_PATH, FOLLOWUP_PATH, RETRY_PATH])
+async def test_attachment_utf8_budget_does_not_consume_document_allowance(path: str) -> None:
+    body = json.dumps({
+        'source': {'document': {'text': 'x' * (2 * 1024 * 1024)}},
+        'prompt': '问' * 20_000,
+        'attachments': [
+            {'id': str(index), 'name': '参考.txt', 'size': 200_000,
+             'mediaType': 'text/plain', 'text': '😀' * 50_000}
+            for index in range(2)
+        ],
+    }, ensure_ascii=False).encode()
+    assert len(body) <= size_guard.MINDMAP_AI_REQUEST_PLAINTEXT_MAX_BYTES
+    observed = []
+
+    async def downstream(_scope: Scope, receive: Receive, send: Send) -> None:
+        observed.append((await receive())['body'])
+        await send({'type': 'http.response.start', 'status': 204, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'', 'more_body': False})
+
+    messages = await _invoke(
+        MindmapAiRequestSizeMiddleware(downstream), _scope(path=path),
+        [{'type': 'http.request', 'body': body, 'more_body': False}],
+    )
+    assert _response_payload(messages) == (204, {})
+    assert observed == [body]
+
+
+@pytest.mark.asyncio
 async def test_unrelated_route_is_not_buffered_or_limited() -> None:
     received_message: Message | None = None
 
@@ -262,7 +292,7 @@ async def test_unrelated_route_is_not_buffered_or_limited() -> None:
 
     messages = await _invoke(
         MindmapAiRequestSizeMiddleware(downstream),
-        _scope(path='/mindmap/ai/jobs/20000000-0000-4000-8000-000000000001/retry'),
+        _scope(path='/mindmap/ai/connectors'),
         [{'type': 'http.request', 'body': b'unchanged', 'more_body': False}],
     )
 

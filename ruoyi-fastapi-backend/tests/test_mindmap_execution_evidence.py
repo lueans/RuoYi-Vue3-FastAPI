@@ -9,7 +9,7 @@ from typing import NoReturn
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import Engine, Integer, MetaData, Text, create_engine, select
+from sqlalchemy import Engine, Integer, MetaData, Text, create_engine, event, inspect, select
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -61,6 +61,50 @@ class TestSession:
 
     async def rollback(self):
         self.db.rollback()
+
+
+def test_new_job_epoch_has_both_client_and_database_defaults():
+    column = MindmapAiJob.__table__.c.execution_epoch
+    assert column.default is not None
+    assert column.default.arg == 0
+    assert str(column.server_default.arg) == '0'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('explicit_epoch', [None, 0, 7])
+async def test_new_job_response_without_insert_returning_never_loads_expired_defaults(database, explicit_epoch):
+    # MySQL cannot fetch server defaults with INSERT RETURNING. Exercise the
+    # production ORM/DAO under that constraint, not a pre-populated fake job.
+    database.dialect.insert_returning = False
+    values = {
+        'id': '33333333-3333-4333-8333-333333333333', 'user_id': 7, 'session_id': SESSION,
+        'turn_index': 1, 'agent_key': 'native_mindmap', 'adapter_version': 'test',
+        'max_budget_usd': 5, 'timeout_seconds': 900, 'max_nodes': 100,
+        'max_depth': 6, 'retention_days': 30,
+        'intent': 'discuss', 'target': 'message', 'source_type': 'cloud_document',
+        'request_json': '{"executionMode":"preview"}', 'request_fingerprint': 'new-job',
+        'idempotency_key': 'new-job', 'status': 'queued', 'progress': 0,
+        'expires_time': datetime.now() + timedelta(days=1),
+    }
+    if explicit_epoch is not None:
+        values['execution_epoch'] = explicit_epoch
+
+    async with TestSession(database) as db:
+        job = await Dao.add_job(db, values)
+        await Dao.add_event(db, job.id, 'job_created', '{"status":"queued"}')
+        await db.commit()
+
+        def reject_implicit_load(state):
+            if state.is_column_load:
+                pytest.fail('Response serialization must not trigger implicit ORM I/O')
+
+        event.listen(db.db, 'do_orm_execute', reject_implicit_load)
+        result = service._job_model(job)
+        assert 'execution_epoch' not in inspect(job).expired_attributes
+        assert result.execution_epoch == (explicit_epoch or 0)
+        assert result.execution_state == ('unknown' if explicit_epoch else 'not_started')
+        assert result.status == 'queued'
+        assert result.target == 'message'
 
 
 @pytest.mark.asyncio

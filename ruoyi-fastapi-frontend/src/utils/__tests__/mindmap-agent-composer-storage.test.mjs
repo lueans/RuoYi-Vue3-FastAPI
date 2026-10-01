@@ -284,7 +284,7 @@ test('a missing click-time draft receipt is not recaptured from newer text or co
 
 test('composer exposes restoration/storage status and an explicit clear action without new send gates', () => {
   assert.match(dialog, /class="composerDraftNotice" role="status"/)
-  assert.match(dialog, /composerDraftPersisted/)
+  assert.match(dialog, /<span>\{\{ composerDraftNotice \}\}<\/span>/)
   assert.match(dialog, /@click="composerText = ''">清除草稿/)
   const computed = declarations.find(node => node.declarations?.some(item => item.id.name === 'composerCanSend'))
   assert.doesNotMatch(script.slice(computed.start, computed.end), /composerDraft/)

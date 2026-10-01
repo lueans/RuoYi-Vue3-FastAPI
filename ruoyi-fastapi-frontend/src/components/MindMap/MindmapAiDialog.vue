@@ -18,6 +18,8 @@
       accept=".xmind,.smm,.json,.md,.txt"
       @change="onSourceFileChange"
     />
+    <input ref="attachmentInputRef" class="aiSourceFileInput" type="file" multiple
+      :accept="MINDMAP_AI_ATTACHMENT_ACCEPT" @change="onAttachmentFilesChange" />
     <header class="aiPanelHeader">
       <el-popover
         v-model:visible="sessionMenuVisible"
@@ -206,19 +208,17 @@
             :key="`conversation:${turn.job.id}`"
             class="conversationTurn"
           >
-            <div v-if="turn.userMessage?.content" class="conversationMessage is-user">
-              <div class="conversationMessageMeta">
-                <strong>你</strong>
-                <time :datetime="turn.userMessage.createdTime">{{ formatEventTime(turn.userMessage.createdTime) }}</time>
-              </div>
-              <p>{{ turn.userMessage.content }}</p>
-            </div>
+            <MindmapAgentUserMessage v-if="turn.userMessage?.content"
+              :content="turn.userMessage.content" :job-id="turn.job.id"
+              :context="turn.userMessage.context ?? null"
+              :created-time="turn.userMessage.createdTime || turn.job.createdTime" :attachments="turn.userMessage.attachments || []" />
             <div class="conversationMessage is-assistant">
               <div class="conversationMessageMeta">
                 <strong><el-icon aria-hidden="true"><Cpu /></el-icon>{{ agentDisplayName(turn.job.agentKey) }}</strong>
                 <span>{{ displayJobStatusLabel(turn.job) }}</span>
               </div>
               <p v-if="isDeviceAgent(turn.job.agentKey)" class="agentExecutionLocation">{{ agentExecutionLocation(turn.job, deviceCatalog.devices) }}</p>
+              <MindmapAgentAttachmentRecords :attachments="turn.userMessage?.attachments || []" />
               <MindmapAgentTrace
                 :events="turn.events"
                 :discussion="isMindmapAiMessageJob(turn.job)"
@@ -263,10 +263,8 @@
             </div>
           </li>
           <li v-if="pendingFollowupPrompt" class="conversationTurn">
-            <div class="conversationMessage is-user">
-              <div class="conversationMessageMeta"><strong>你</strong></div>
-              <p>{{ pendingFollowupPrompt }}</p>
-            </div>
+            <MindmapAgentUserMessage :content="pendingFollowupPrompt" :created-time="pendingFollowupCreatedTime"
+              :context="pendingFollowupContext" :attachments="pendingFollowupAttachments" />
             <div class="conversationMessage is-assistant">
               <div class="conversationMessageMeta"><strong>AI · 新一轮</strong><span>正在创建</span></div>
               <p>正在准备本轮任务…</p>
@@ -475,10 +473,10 @@
 
           <section v-if="!job && !agentEvents.length" class="aiWelcome">
             <div class="aiWelcomeMark" aria-hidden="true">
-              <el-icon><MagicStick /></el-icon>
+              <el-icon><Share /></el-icon>
             </div>
-            <h2>一起把想法变成脑图</h2>
-            <p class="aiWelcomeDescription">描述你的想法，或选中一个分支继续完善。<br>在对话中查看执行过程，在画布上查看实时变化。</p>
+            <h2>今天想做点什么？</h2>
+            <p class="aiWelcomeDescription">在右侧导图中选中节点，AI 会围绕你选中的部分来回答。</p>
             <div class="starterGrid">
               <button
                 v-for="starter in starterItems"
@@ -486,7 +484,7 @@
                 type="button"
                 @click="usePromptStarter(starter.type)"
               >
-                <el-icon><MagicStick /></el-icon>
+                <span class="starterIcon" aria-hidden="true"><el-icon><component :is="starter.icon" /></el-icon></span>
                 <span>{{ starter.label }}</span>
               </button>
             </div>
@@ -733,28 +731,36 @@
             :loading="livePreviewRecovering" :disabled="actionBusy || restoringJob"
             @click="retryLivePreviewSync">重试同步</el-button>
         </div>
-        <MindmapAgentExecutionPicker ref="agentExecutionPickerRef" :agent-key="form.agentKey" :device-id="form.deviceId" :agents="personalAgents" :can-use-agent="agentSupportsCurrentTask" :disabled="actionBusy || restoringJob || agentSwitchPending || executionStopBlocked" :running="running" :current-job="job" :catalog="deviceCatalog" :issue="selectedDeviceIssue" @select="requestAgentSwitch" @refresh="refreshDeviceCatalog" @manage="agentManagerVisible = true" />
         <div class="aiComposer" :class="{ 'is-discussion': discussionMode }">
-          <div class="composerContextRow">
+          <div class="composerContextRow" aria-label="提问上下文">
+            <span class="composerChipGroup" data-group="context">
+            <span class="composerContextChip" :data-scope="composerContextScope" :title="composerContextTitle">
             <el-popover
               v-model:visible="contextPickerVisible"
               placement="top-start"
               :width="286"
               trigger="click"
               popper-class="mindmapAiContextPopper"
-              :disabled="taskConfigurationLocked || actionBusy"
+              :disabled="composerContextLocked || actionBusy"
             >
               <template #reference>
                 <button
                   ref="contextTriggerRef"
                   type="button"
                   class="contextChip"
-                  :disabled="taskConfigurationLocked || actionBusy"
+                  :disabled="composerContextLocked || actionBusy"
                   aria-haspopup="menu"
                   :aria-expanded="contextPickerVisible"
                 >
-                  <el-icon><Paperclip /></el-icon>{{ currentContextLabel }}
-                  <el-icon aria-hidden="true"><ArrowUp /></el-icon>
+                  <el-icon v-if="form.sourceMode === 'file'"><Paperclip /></el-icon>
+                  <svg v-else-if="composerContextScope === 'all'" class="contextIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                    <circle cx="6" cy="7" r="2.3" /><circle cx="17.5" cy="6" r="2.3" /><circle cx="12" cy="16.5" r="2.3" />
+                    <path d="M7.7 8.6 10.9 14.4M15.7 7.6 13.3 14.4M8.2 6.3 15.3 6.1" />
+                  </svg>
+                  <svg v-else class="contextIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <rect x="3.2" y="8" width="8.4" height="8" rx="2.4" /><path d="M11.6 12h4.4" /><circle cx="18.4" cy="12" r="2.5" />
+                  </svg>
+                  <span class="contextLabel" aria-live="polite">{{ currentContextLabel }}</span>
                 </button>
               </template>
               <div class="contextMenu" role="menu" aria-label="选择 AI 上下文" @keydown.esc="closeContextPicker">
@@ -783,22 +789,44 @@
                   type="button"
                   role="menuitemradio"
                   :aria-checked="form.sourceMode === 'new'"
-                  :disabled="!contextAvailability.newDocument"
+                  :disabled="taskConfigurationLocked || !contextAvailability.newDocument"
                   @click="selectComposerContext('new')"
                 ><strong>新建脑图</strong><small>不读取当前画布</small></button>
                 <button
                   type="button"
                   role="menuitemradio"
                   :aria-checked="form.sourceMode === 'file'"
-                  :disabled="!contextAvailability.file"
+                  :disabled="taskConfigurationLocked || !contextAvailability.file"
                   @click="selectComposerContext('file')"
                 ><strong>本地文件</strong><small>XMind、SMM、JSON、Markdown 或 TXT</small></button>
               </div>
             </el-popover>
+              <button
+                v-if="form.sourceMode === 'current' && form.scopeType !== 'document' && !composerContextLocked"
+                type="button"
+                class="contextClear"
+                :disabled="actionBusy"
+                :aria-label="composerContextScope === 'multi' ? '取消选择全部节点' : '取消选择节点'"
+                title="取消选择"
+                @click="clearComposerSelection"
+              ><el-icon><Close /></el-icon></button>
+            </span>
+            </span>
+            <span v-if="composerAttachments.length" class="composerChipGroup composerFileGroup" data-group="files" aria-label="本轮附件">
+              <span v-for="attachment in composerAttachments" :key="attachment.id" class="composerFileChip"
+                :class="{ 'is-error': attachment.status === 'error' }" :title="attachment.error || `附件：${attachment.name}`">
+                <el-icon aria-hidden="true"><Paperclip /></el-icon>
+                <span class="contextLabel">{{ attachment.name }}</span>
+                <span class="attachmentSize">{{ attachment.status === 'reading' ? '读取中…' : attachment.status === 'error' ? '读取失败' : formatAttachmentSize(attachment.size) }}</span>
+                <button type="button" class="contextClear" :disabled="!composerEditable"
+                  :aria-label="`移除附件：${attachment.name}`" title="移除附件" @click="removeComposerAttachment(attachment.id)"><el-icon><Close /></el-icon></button>
+              </span>
+            </span>
             <MindmapAgentWritePolicy :label="composerWriteModeLabel" :description="composerPreflightText" :discussion="discussionMode" :dark="settingsStore.isDark" :active="visible" />
           </div>
+          <p v-if="attachmentNotice" class="composerAttachmentNotice" role="status">{{ attachmentNotice }}</p>
           <MindmapAgentComposerIssue
-            v-if="agentSelectionIssue && composerEnabled && !showAdvancedSettings && agentSelectionIssue !== selectedDeviceIssue"
+            v-if="agentSelectionIssue && composerEnabled && !showAdvancedSettings"
             :description="agentSelectionIssue"
             @configure="openTaskSettings"
           />
@@ -813,7 +841,7 @@
             ref="composerInputRef"
             v-model="composerText"
             type="textarea"
-            :autosize="{ minRows: 2, maxRows: 5 }"
+            :autosize="{ minRows: 1, maxRows: 6 }"
             maxlength="20000"
             resize="none"
             :disabled="!composerEditable"
@@ -823,14 +851,12 @@
             @keydown="onComposerKeydown"
           />
           <p v-if="composerDraftOnlyHint" id="mindmap-ai-composer-draft-hint" class="composerInputHint" role="status">{{ composerDraftOnlyHint }}</p>
-          <div v-if="composerText || composerDraftNotice" class="composerDraftNotice" role="status">
-            <span>{{ composerDraftNotice || (composerDraftPersisted
-              ? '未发送文字已保存在此浏览器，7 天内可恢复。'
-              : '未发送文字仅在当前页面保留。') }}</span>
+          <div v-if="composerDraftNotice" class="composerDraftNotice" role="status">
+            <span>{{ composerDraftNotice }}</span>
             <el-button v-if="composerText" text size="small" :disabled="!composerEditable"
               @click="composerText = ''">清除草稿</el-button>
           </div>
-          <div v-if="running" class="composerRoutePicker" role="group" aria-label="运行中消息去向">
+          <div v-if="running && composerText.trim()" class="composerRoutePicker" role="group" aria-label="运行中消息去向">
             <span class="composerRouteLabel">这条要求：</span>
             <button
               type="button"
@@ -851,53 +877,60 @@
                 ? '将在下一个安全边界采用，不会打断当前画布更新。'
                 : '当前轮完成后自动开始，并显示队列位置。' }}
             </span>
+            <el-button class="composerRunningSend" size="small" :loading="composerSending" :disabled="!composerCanSend"
+              :aria-label="runningMessageRoute === 'current' ? '发送补充要求' : '发送到下一轮'"
+              @click="sendComposerMessage">发送</el-button>
           </div>
           <div class="composerToolbar">
             <div class="composerTools">
               <el-tooltip
-                content="添加 XMind、SMM、JSON、Markdown 或文本文件"
+                content="添加附件 · PDF、Word、TXT、Markdown、JSON、CSV（最多 5 个，每个 10 MB）"
                 placement="top"
                 popper-class="mindmapAiTooltipPopper"
               >
                 <el-button
                   circle
                   text
-                  aria-label="添加文件"
-                  :disabled="taskConfigurationLocked || actionBusy"
-                  @click="selectSourceFile"
-                ><el-icon><Paperclip /></el-icon></el-button>
+                  aria-label="上传附件"
+                  :disabled="!composerEditable || composerAttachments.length >= 5 || attachmentReading"
+                  @click="selectAttachmentFiles"
+                ><svg class="composerAddIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></el-button>
+              </el-tooltip>
+              <el-tooltip content="回答精度与任务设置" placement="top" popper-class="mindmapAiTooltipPopper">
+                <el-button
+                  circle
+                  text
+                  aria-label="回答精度与任务设置"
+                  :disabled="actionBusy || restoringJob"
+                  @click="openTaskSettings"
+                ><svg class="composerModelIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7z" /></svg></el-button>
               </el-tooltip>
               <MindmapAgentModeSwitch
                 v-model="discussionMode"
                 :disabled="Boolean(job) && !canSwitchInteractionMode"
               />
             </div>
+            <MindmapAgentExecutionPicker class="composerExecutionPicker" ref="agentExecutionPickerRef" :agent-key="form.agentKey" :device-id="form.deviceId" :agents="personalAgents" :can-use-agent="agentSupportsCurrentTask" :disabled="actionBusy || restoringJob || agentSwitchPending || executionStopBlocked" :running="running" :current-job="job" :catalog="deviceCatalog" :issue="selectedDeviceIssue" @select="requestAgentSwitch" @refresh="refreshDeviceCatalog" @manage="agentManagerVisible = true" />
             <span class="composerShortcut" title="Ctrl / ⌘ + Enter 发送 · Enter 换行">⌘ / Ctrl + Enter</span>
             <div class="composerSubmitGroup">
-              <el-button
-                v-if="running"
-                circle
-                type="primary"
-                :aria-label="runningMessageRoute === 'current' ? '加入当前任务' : '排到下一轮'"
-                :loading="composerSending"
-                :disabled="!composerCanSend"
-                @click="sendComposerMessage"
-              ><el-icon v-if="!composerSending"><Promotion /></el-icon></el-button>
               <MindmapAgentStopButton
                 v-if="running"
+                compact
                 :stopping="cancelling"
                 :disabled="actionBusy && !cancelling"
                 @stop="cancelJob"
               />
               <el-button
                 v-else
+                class="composerSendButton"
                 circle
                 type="primary"
                 aria-label="发送给 AI"
                 :loading="composerSending"
                 :disabled="!composerCanSend"
                 @click="sendComposerMessage"
-              ><el-icon v-if="!composerSending"><Promotion /></el-icon></el-button>
+                title="发送 · ⌘ / Ctrl + Enter"
+              ><svg v-if="!composerSending" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6" /></svg></el-button>
             </div>
           </div>
         </div>
@@ -916,11 +949,20 @@
     @closed="finishTaskSettings"
   >
     <section ref="advancedSettingsRef" tabindex="-1" aria-label="任务与 Agent 设置">
-      <p class="settingsIntro">{{ taskConfigurationLocked ? '编辑范围与内容设置沿用当前任务，追加要求请在对话框中输入。' : '调整模型与生成偏好，修改要求统一在对话框中输入。' }}</p>
+      <p class="settingsIntro">{{ taskConfigurationLocked ? '内容设置沿用当前任务；完成后可选择画布节点作为下一轮编辑范围。' : '调整模型与生成偏好，修改要求统一在对话框中输入。' }}</p>
       <div class="settingsContextSummary"><span>{{ currentContextLabel }}</span><span>{{ composerWriteModeLabel }}</span></div>
       <el-form label-position="top" :model="form" @submit.prevent>
         <div class="formGrid">
           <el-form-item label="当前 Agent" class="settingsAgentSummary">
+            <MindmapAgentExecutionPicker
+              ref="settingsAgentExecutionPickerRef"
+              class="fullWidth"
+              :agent-key="form.agentKey" :device-id="form.deviceId" :agents="personalAgents"
+              :can-use-agent="agentSupportsCurrentTask"
+              :disabled="actionBusy || restoringJob || agentSwitchPending || executionStopBlocked"
+              :running="running" :current-job="job" :catalog="deviceCatalog" :issue="selectedDeviceIssue"
+              @select="requestAgentSwitch" @refresh="refreshDeviceCatalog" @manage="agentManagerVisible = true"
+            />
             <strong class="settingsAgentName">{{ selectedAgent?.displayName || form.agentKey }}</strong>
             <div v-if="agentSelectionIssue && !selectedAgent" class="agentSelectionIssue" role="status">
               <el-icon aria-hidden="true"><WarningFilled /></el-icon>
@@ -1101,15 +1143,21 @@ import { h } from 'vue'
 import { saveAs } from 'file-saver'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
+import { getTextFromHtml } from '@/libs/simple-mind-map/src/utils'
+import { MINDMAP_AI_ATTACHMENT_ACCEPT, readMindmapAiAttachment, validateMindmapAiAttachments } from '@/utils/mindmap-ai-attachments'
+import { buildMindmapAiAttachmentMetadata, formatAttachmentSize } from '@/utils/mindmap-ai-attachment-records'
+import MindmapAgentAttachmentRecords from './MindmapAgentAttachmentRecords.vue'
 import {
   ArrowDown,
-  ArrowUp,
   Close,
   Cpu,
   MagicStick,
   Paperclip,
   Plus,
-  Promotion,
+  Search,
+  Share,
+  TrendCharts,
+  List,
   Setting,
   WarningFilled,
 } from '@element-plus/icons-vue'
@@ -1228,6 +1276,7 @@ import { projectAgentHandoff } from '@/utils/mindmap-agent-handoff'
 import MindmapAgentComposerIssue from './MindmapAgentComposerIssue.vue'
 import MindmapAgentWritePolicy from './MindmapAgentWritePolicy.vue'
 import MindmapAgentStopButton from './MindmapAgentStopButton.vue'
+import MindmapAgentUserMessage from './MindmapAgentUserMessage.vue'
 import MindmapAgentResizeHandle from './MindmapAgentResizeHandle.vue'
 import MindmapAgentPanel from './MindmapAgentPanel.vue'
 import MindmapAgentModeSwitch from './MindmapAgentModeSwitch.vue'
@@ -1288,6 +1337,7 @@ const agentManagerVisible = ref(false)
 const agentSwitchPending = ref(false)
 const agentSwitchPhase = ref('')
 const agentExecutionPickerRef = ref(null)
+const settingsAgentExecutionPickerRef = ref(null)
 const handoffTimelineReceipt = ref(null)
 let agentSwitchGeneration = 0
 const agentPreferences = ref(readAgentPreferences(userStore.id))
@@ -1351,13 +1401,24 @@ const jobConfiguration = ref(null)
 const proposal = ref(null)
 const diffConfirmed = ref(false)
 const pendingFollowupPrompt = ref('')
+const pendingFollowupCreatedTime = ref('')
+const pendingFollowupContext = ref(null)
+const pendingFollowupAttachments = ref([])
 const composerInputRef = ref(null)
 const selectedNodeUids = ref([])
+const selectedNodeLabels = ref({})
 const sourceContext = ref(null)
 const editorContext = ref(null)
 const sourceFingerprint = ref('')
 const sourceBaselineMismatch = ref(false)
 const sourceFileInputRef = ref(null)
+const attachmentInputRef = ref(null)
+const composerAttachments = ref([])
+const attachmentNotice = ref('')
+const attachmentReading = ref(false)
+// File bodies stay in memory until sent, never in browser draft/recovery storage.
+const privateAttachmentRequests = new Map()
+let attachmentReadGeneration = 0
 const activityTimelineRef = ref(null)
 const chatScrollRef = ref(null)
 const chatFollowing = ref(true)
@@ -1603,14 +1664,34 @@ const messageModeActive = computed(() => (
 const contextAvailability = computed(() => resolveMindmapAiContextAvailability({
   selectedCount: selectedNodeUids.value.length,
   hasEditor: Boolean(editorContext.value?.document?.root),
-  locked: taskConfigurationLocked.value || actionBusy.value,
+  locked: composerContextLocked.value || actionBusy.value,
 }))
+const composerContextNodes = computed(() => (
+  composerContextLocked.value && job.value
+    ? (jobConfiguration.value?.contextNodes || [])
+    : selectedNodeUids.value.map(uid => ({ uid, label: selectedNodeLabels.value[uid] || '未命名节点' }))
+))
+const composerContextScope = computed(() => {
+  if (form.sourceMode !== 'current') return 'source'
+  if (form.scopeType === 'document') return 'all'
+  return composerContextNodes.value.length > 1 ? 'multi' : 'one'
+})
 const currentContextLabel = computed(() => {
   if (form.sourceMode === 'file') return uploadedFileName.value || '本地文件'
   if (form.sourceMode === 'new') return '新建脑图'
-  if (form.scopeType === 'selectedNodes') return `已选节点 · ${selectedNodeUids.value.length}`
-  if (form.scopeType === 'branch') return '当前分支'
-  return '整份当前脑图'
+  if (form.scopeType === 'document') return '整个脑图'
+  const nodes = composerContextNodes.value
+  if (nodes.length > 1) return `用户已经选择${nodes.length}个节点`
+  if (nodes.length === 1) {
+    const label = Array.from(nodes[0].label)
+    return label.length > 10 ? `${label.slice(0, 7).join('')}...` : nodes[0].label
+  }
+  return form.scopeType === 'branch' ? '当前分支' : '已选节点'
+})
+const composerContextTitle = computed(() => {
+  if (form.sourceMode !== 'current') return currentContextLabel.value
+  if (form.scopeType === 'document') return '未选择节点，默认对整个脑图提问'
+  return composerContextNodes.value.map(node => node.label).join('、') || '沿用当前会话的节点范围'
 })
 const composerWriteModeLabel = computed(() => {
   if (discussionMode.value) return '讨论 · 不改图'
@@ -1622,25 +1703,13 @@ const composerWriteModeLabel = computed(() => {
 })
 const starterItems = computed(() => {
   const hasEditor = Boolean(editorContext.value?.document?.root)
-  const hasSelection = selectedNodeUids.value.length > 0
-  if (!hasEditor) {
-    return [
-      { type: 'topic', label: '从一个主题开始搭建脑图' },
-      { type: 'outline', label: '先列出这个主题的主要分支' },
-      { type: 'question', label: '和我一起讨论脑图结构' },
-    ]
-  }
-  if (editorReadonly.value) {
-    return [
-      { type: 'analyze', label: '分析这张图的结构和重点' },
-      { type: 'gaps', label: '找出当前脑图的缺口' },
-      { type: 'duplicates', label: '检查重复、冲突和遗漏' },
-    ]
-  }
+  const hasEditableSelection = hasEditor && !editorReadonly.value && selectedNodeUids.value.length > 0
   return [
-    { type: 'analyze', label: hasSelection ? '分析当前分支' : '分析这张图' },
-    { type: 'supplement', label: hasSelection ? '补充当前分支' : '补充薄弱分支' },
-    { type: 'duplicates', label: '检查重复、冲突和遗漏' },
+    { type: 'research', label: hasEditableSelection ? '围绕当前分支调研并总结' : '调研一个主题并总结要点', icon: Search },
+    { type: 'plan', label: '把一个项目拆解成执行计划', icon: List },
+    { type: 'trends', label: '探索某个领域的最新趋势', icon: TrendCharts },
+    { type: hasEditor && editorReadonly.value ? 'analyze' : 'optimize',
+      label: hasEditableSelection ? '分析并优化当前分支' : '分析并优化我的思维导图', icon: MagicStick },
   ]
 })
 const composerText = computed({
@@ -1667,7 +1736,6 @@ const composerDraftPersistence = useMindmapComposerDraft({
   },
 })
 const composerDraftNotice = composerDraftPersistence.notice
-const composerDraftPersisted = composerDraftPersistence.persisted
 
 function consumeSubmittedComposerDraft(prompt, type, attemptKey) {
   const attempt = readPersistedAttempts()[type]
@@ -1771,6 +1839,8 @@ const composerCanSend = computed(() => Boolean(
   && composerText.value.trim()
   && !restoreError.value
   && selectedAgentReady.value
+  && !attachmentReading.value
+  && composerAttachments.value.every(file => file.status === 'ready')
 ))
 const livePreviewCatchingUp = computed(() => {
   const received = Number(latestPreviewVersion.value)
@@ -1897,6 +1967,7 @@ const followupParentJob = computed(() => {
     && (
       ['applied', 'undone'].includes(candidate?.status)
       || candidate?.status === 'completed_direct'
+      || (candidate?.sourceType === 'cloud_document' && candidate?.status === 'completed_no_change')
     )
   ) return candidate
   return candidate?.artifactId
@@ -1932,6 +2003,18 @@ const canSwitchInteractionMode = computed(() => Boolean(
   && !livePreviewCanvasMutationBlocked.value
 ))
 const taskConfigurationLocked = computed(() => restoringJob.value || Boolean(job.value))
+// A submitted turn is immutable, but its completed conversation may prepare a
+// new scope for the next turn. Historical artifacts and unfinished reviews
+// cannot silently become a request against the current canvas.
+const composerContextLocked = computed(() => Boolean(
+  restoringJob.value
+  || (job.value && (
+    !followupAvailable.value
+    || viewingHistoricalArtifact.value
+    || livePreviewCanvasMutationBlocked.value
+    || !['current_document', 'current_snapshot'].includes(followupContinuationBase())
+  ))
+))
 const agentSelectionLocked = computed(() => (
   restoringJob.value
   || agentSwitchPending.value
@@ -2591,9 +2674,21 @@ async function resolveDurableAttempt(type, currentAttempt, payload, {
   const candidate = reusingPersistedAttempt
     ? { key: persisted.key, fingerprint }
     : resolveMindmapAiRequestAttempt(currentAttempt, payload, { createKey })
+  const privatePayload = payload?.requestPayload || payload
+  if (privatePayload?.attachments?.length) privateAttachmentRequests.set(candidate.key, cloneRuntimeValue(privatePayload))
+  const safeMetadata = cloneRuntimeValue(metadata)
+  if (privatePayload?.attachments?.length) {
+    safeMetadata.attachmentIds = privatePayload.attachments.map(file => file.id)
+    safeMetadata.attachmentsOmitted = true
+    if (safeMetadata.requestPayload) {
+      // Keep recovery identity and plain prompt, never raw attachment bodies.
+      safeMetadata.requestPayload.attachments = buildMindmapAiAttachmentMetadata(privatePayload.attachments)
+        .map((file, index) => ({ ...file, draftRevision: privatePayload.attachments[index].draftRevision }))
+    }
+  }
   persistedAttempts[type] = {
     ...(reusingPersistedAttempt ? cloneRuntimeValue(persisted) : {}),
-    ...(!reusingPersistedAttempt ? cloneRuntimeValue(metadata) : {}),
+    ...(!reusingPersistedAttempt ? safeMetadata : {}),
     ...(!reusingPersistedAttempt && composerDraft ? { composerDraft } : {}),
     ownerUserId,
     key: candidate.key,
@@ -2609,8 +2704,19 @@ async function resolveDurableAttempt(type, currentAttempt, payload, {
 function clearDurableAttempt(type, key = '') {
   const attempts = readPersistedAttempts()
   if (!attempts[type] || (key && attempts[type].key !== key)) return
+  privateAttachmentRequests.delete(attempts[type].key)
   delete attempts[type]
   writePersistedAttempts(attempts)
+}
+
+function replayableRequestPayload(attempt) {
+  if (!attempt?.attachmentsOmitted) return attempt?.requestPayload
+  const inMemory = privateAttachmentRequests.get(attempt.key)
+  if (inMemory) return inMemory
+  const restored = (attempt.attachmentIds || []).map(id => composerAttachments.value.find(file => file.id === id && file.status === 'ready'))
+  if (!restored.length || restored.some(file => !file)) return null
+  return { ...attempt.requestPayload,
+    attachments: restored.map(({ id, name, size, mediaType, text }) => ({ id, name, size, mediaType, text })) }
 }
 
 function restoreDurableAttemptNotice() {
@@ -2657,6 +2763,7 @@ function captureJobConfiguration(overrides = {}) {
     intent: overrides.intent ?? form.intent,
     sourceMode: overrides.sourceMode ?? form.sourceMode,
     scopeType: overrides.scopeType ?? form.scopeType,
+    contextNodes: overrides.contextNodes ?? composerContextNodes.value.map(node => ({ ...node })),
     language: overrides.language ?? form.language,
     layout: overrides.layout ?? form.layout,
     density: overrides.density ?? form.density,
@@ -2795,7 +2902,7 @@ function restoreJobConfiguration(snapshot, saved = {}) {
   // 继续生成仍由服务端按原任务参数与最新策略做最终校验。
   form.maxNodes = maxNodes
   form.maxDepth = maxDepth
-  jobConfiguration.value = captureJobConfiguration()
+  jobConfiguration.value = captureJobConfiguration({ contextNodes: stored.contextNodes || [] })
 }
 
 function restoreJobSourceState(snapshot, saved = {}) {
@@ -3063,7 +3170,10 @@ async function requestAgentSwitch(selection) {
       agentSwitchPhase.value = ''
       await nextTick()
       if (returnToPicker && componentAlive && generation === agentSwitchGeneration
-        && ownerId === currentAiOwnerUserId()) agentExecutionPickerRef.value?.focus()
+        && ownerId === currentAiOwnerUserId()) {
+        const picker = showAdvancedSettings.value ? settingsAgentExecutionPickerRef : agentExecutionPickerRef
+        picker.value?.focus()
+      }
     }
   }
 }
@@ -4181,14 +4291,6 @@ function applyRealtimeJobEvent(jobId, event) {
     || isTerminalStatus(payload.status)) schedulePoll(0, true)
 }
 
-function agentStatusText(agent) {
-  if (agent.status === 'enabled' && !agentSupportsCurrentTask(agent)) return '不支持当前任务或来源'
-  if (agent.status === 'enabled' && agent.healthStatus === 'healthy') return '连接正常'
-  if (agent.status === 'enabled' && agent.healthStatus === 'unknown') return '首次运行时检查'
-  if (agent.status === 'enabled') return agent.sdkName || '可用'
-  return agent.statusReason || '当前不可用'
-}
-
 function currentSourceType() {
   if (form.sourceMode === 'new') return 'none'
   if (form.sourceMode === 'file') return 'uploaded_artifact'
@@ -4212,6 +4314,8 @@ function followupSourceType(parentJob = followupParentJob.value) {
 }
 
 function followupContinuationBase(parentJob = followupParentJob.value) {
+  if (parentJob?.sourceType === 'cloud_document'
+    && ['completed_message', 'completed_no_change'].includes(parentJob?.status)) return 'current_document'
   if (!['applied', 'undone', 'completed_direct'].includes(parentJob?.status)) return 'artifact'
   if (parentJob?.sourceType === 'cloud_document') return 'current_document'
   if (parentJob?.sourceType === 'local_snapshot') return 'current_snapshot'
@@ -4317,13 +4421,11 @@ function onAgentChange() {
 
 function usePromptStarter(type) {
   const starters = {
-    topic: { intent: 'create', prompt: '从这个主题开始搭建一张清晰的脑图，先列出核心概念和主要分支。' },
-    outline: { intent: 'create', prompt: '先列出这个主题的主要分支，并说明每个分支应该继续展开什么。' },
-    question: { intent: 'discuss', prompt: '和我一起讨论这张脑图适合如何组织，先指出最值得澄清的问题。' },
+    research: { intent: 'discuss', prompt: '围绕这个主题进行调研，提炼关键事实、主要观点和可以继续展开的分支。' },
+    plan: { intent: 'create', prompt: '把这个项目拆解成一张可执行的计划脑图，包含阶段、任务、负责人建议和关键里程碑。' },
+    trends: { intent: 'discuss', prompt: '分析这个领域的重要趋势、驱动因素、潜在影响和接下来值得关注的方向。' },
+    optimize: { intent: 'expand', prompt: '分析并优化当前思维导图，补齐薄弱分支，整理重复内容，并让层级与表达更清晰。' },
     analyze: { intent: 'discuss', prompt: '分析当前脑图的结构、重点和薄弱处，给出可以直接执行的改进建议。' },
-    supplement: { intent: 'expand', prompt: '补充当前最薄弱的分支，优先添加缺失的关键概念、例子和下一步行动。' },
-    gaps: { intent: 'discuss', prompt: '找出当前脑图的信息缺口、结构断点和容易被忽略的内容。' },
-    duplicates: { intent: 'discuss', prompt: '检查当前脑图中的重复、冲突、含义相近节点和层级遗漏，并说明判断依据。' },
   }
   const starter = starters[type]
   if (!starter) return
@@ -4366,6 +4468,7 @@ async function queueRunningMessage() {
   const parentJobId = String(parentJob.id)
   const requestPayload = {
     prompt,
+    attachments: captureComposerAttachments(),
     route: runningMessageRoute.value === 'next' ? 'next' : 'current',
     agentKey: form.agentKey,
     deviceId: isDeviceAgent(form.agentKey) ? form.deviceId : undefined,
@@ -4375,6 +4478,7 @@ async function queueRunningMessage() {
   // Reconciliation may await the network while the composer stays editable.
   // Only this clicked revision belongs to the send, even if later text matches.
   const draftReceipt = composerDraftPersistence.capture(prompt)
+  const requestConfiguration = cloneRuntimeValue(jobConfiguration.value)
   const identity = beginActionIdentity('queue', { jobId: parentJobId })
   continuing.value = true
   let requestStarted = false
@@ -4406,6 +4510,7 @@ async function queueRunningMessage() {
             ...sessionTurns.value.map(turn => String(turn?.job?.id || '')),
           ].filter(Boolean))),
           requestPayload,
+          configuration: requestConfiguration,
         },
       },
     )
@@ -4424,9 +4529,10 @@ async function queueRunningMessage() {
       durableAttempt,
       parentJob.sessionId,
     )
-    upsertSessionTurn(childJob, prompt)
+    upsertSessionTurn(childJob, prompt, requestPayload.attachments, durableAttempt?.configuration || requestConfiguration)
     appendClientPrompt(childJob.id, prompt, childJob.turnIndex)
     consumeSubmittedComposerDraft(prompt, 'queue', queueAttempt.key)
+    consumeComposerAttachments(requestPayload.attachments)
     clearDurableAttempt('queue', queueAttempt.key)
     queueAttempt = null
     restoreDurableAttemptNotice()
@@ -4529,10 +4635,56 @@ async function requestEditorContext({ previewJobId = '' } = {}) {
     if (!handled) reject(new Error('脑图编辑器尚未就绪'))
   })
   editorContext.value = context
-  selectedNodeUids.value = Array.isArray(context?.selectedNodeUids)
-    ? context.selectedNodeUids
-    : []
+  const selection = captureCanvasSelection(context)
+  selectedNodeUids.value = selection.contextNodes.map(node => node.uid)
+  selectedNodeLabels.value = Object.fromEntries(selection.contextNodes.map(node => [node.uid, node.label]))
   return context
+}
+
+function captureCanvasSelection(context) {
+  const uids = [...new Set((Array.isArray(context?.selectedNodeUids) ? context.selectedNodeUids : [])
+    .map(uid => String(uid || '').trim()).filter(Boolean))]
+  const selected = new Set(uids)
+  const labels = {}
+  const pending = context?.document?.root ? [context.document.root] : []
+  while (pending.length && selected.size) {
+    const node = pending.pop()
+    const uid = String(node?.data?.uid || '')
+    if (selected.delete(uid)) labels[uid] = contextNodeLabel(node.data)
+    if (Array.isArray(node?.children)) pending.push(...node.children)
+  }
+  return {
+    scope: uids.length === 0
+      ? { type: 'document' }
+      : uids.length === 1
+        ? { type: 'branch', rootUid: uids[0] }
+        : { type: 'selectedNodes', nodeUids: uids },
+    contextNodes: uids.map(uid => ({ uid, label: labels[uid] || '未命名节点' })),
+  }
+}
+
+function contextNodeLabel(data) {
+  const raw = String(data?.text ?? '')
+  const text = data?.richText ? getTextFromHtml(raw) : raw
+  return String(text || '').replace(/\s+/g, ' ').trim() || '未命名节点'
+}
+
+function syncComposerSelection({ allowBusy = false } = {}) {
+  // Only the active turn stays frozen. A completed turn follows the canvas for
+  // its next request, without changing jobConfiguration's submitted snapshot.
+  if (form.sourceMode !== 'current' || composerContextLocked.value
+    || (!allowBusy && actionBusy.value)) return
+  const count = selectedNodeUids.value.length
+  form.scopeType = count === 0 ? 'document' : count === 1 ? 'branch' : 'selectedNodes'
+}
+
+function clearComposerSelection() {
+  if (composerContextLocked.value || actionBusy.value) return false
+  bus.emit('execCommand', 'CLEAR_ACTIVE_NODE')
+  selectedNodeUids.value = []
+  selectedNodeLabels.value = {}
+  syncComposerSelection()
+  return true
 }
 
 function nodeUid(node) {
@@ -4549,13 +4701,18 @@ function onEditorNodeActive(_node, activeNodes) {
   selectedNodeUids.value = Array.from(new Set(
     (Array.isArray(activeNodes) ? activeNodes : []).map(nodeUid).filter(Boolean),
   ))
-  if (form.scopeType === 'branch' && selectedNodeUids.value.length !== 1 && !job.value) {
-    form.scopeType = selectedNodeUids.value.length ? 'selectedNodes' : 'document'
-  }
+  selectedNodeLabels.value = Object.fromEntries(
+    (Array.isArray(activeNodes) ? activeNodes : []).map(node => [
+      nodeUid(node), contextNodeLabel(node?.getData?.() || node?.nodeData?.data),
+    ]),
+  )
+  syncComposerSelection()
 }
 
 function selectComposerContext(type) {
-  if (taskConfigurationLocked.value || actionBusy.value) return false
+  if (composerContextLocked.value || actionBusy.value) return false
+  // Follow-up may change nodes, not the parent document's identity or source.
+  if (job.value && ['new', 'file'].includes(type)) return false
   if (type === 'file') {
     if (!contextAvailability.value.file) return false
     contextPickerVisible.value = false
@@ -4570,6 +4727,8 @@ function selectComposerContext(type) {
     if (!contextAvailability.value[type]) return false
     form.sourceMode = 'current'
     form.scopeType = type
+    if (type === 'document') clearComposerSelection()
+    else syncComposerSelection()
   } else {
     return false
   }
@@ -4588,6 +4747,86 @@ function parseMindmapFile(file) {
 function selectSourceFile() {
   sourceFileInputRef.value?.click()
 }
+
+function selectAttachmentFiles() {
+  if (composerEditable.value && composerAttachments.value.length < 5 && !attachmentReading.value) attachmentInputRef.value?.click()
+}
+
+function removeComposerAttachment(id) {
+  if (!composerEditable.value) return
+  composerAttachments.value = composerAttachments.value.filter(file => file.id !== id)
+  attachmentNotice.value = ''
+}
+
+async function onAttachmentFilesChange(event) {
+  const files = Array.from(event.target?.files || [])
+  if (event.target) event.target.value = ''
+  if (!composerEditable.value || !files.length || attachmentReading.value) return
+  if (files.length + composerAttachments.value.length > 5) {
+    attachmentNotice.value = '最多添加 5 个附件，请移除后再选择。'
+    return
+  }
+  const generation = attachmentReadGeneration
+  attachmentNotice.value = ''
+  attachmentReading.value = true
+  try {
+    for (const file of files) {
+      if (generation !== attachmentReadGeneration) return
+      const pendingId = createMindmapAiIdempotencyKey('attachment-read')
+      composerAttachments.value.push({ id: pendingId, name: file.name, size: file.size, status: 'reading' })
+      try {
+        const attachment = await readMindmapAiAttachment(file)
+        if (generation !== attachmentReadGeneration) return
+        const index = composerAttachments.value.findIndex(item => item.id === pendingId)
+        if (index < 0) continue // Removed while the parser was running.
+        if (composerAttachments.value.some(item => item.id === attachment.id)) {
+          composerAttachments.value.splice(index, 1)
+          attachmentNotice.value = `已添加 ${file.name}，不重复添加。`
+          continue
+        }
+        validateMindmapAiAttachments([...composerAttachments.value.filter(item => item.status === 'ready'), attachment])
+        composerAttachments.value.splice(index, 1, { ...attachment, draftRevision: pendingId, status: 'ready' })
+      } catch (error) {
+        if (generation !== attachmentReadGeneration) return
+        const pending = composerAttachments.value.find(item => item.id === pendingId)
+        if (pending) Object.assign(pending, { status: 'error', error: error.message || '附件读取失败，请重新选择。' })
+        attachmentNotice.value = error.message || '附件读取失败，请重新选择。'
+      }
+    }
+  } finally {
+    if (generation === attachmentReadGeneration) attachmentReading.value = false
+  }
+}
+
+function captureComposerAttachments() {
+  if (attachmentReading.value || composerAttachments.value.some(file => file.status !== 'ready')) throw new Error('请等待附件读取完成，或移除读取失败的附件。')
+  const attachments = composerAttachments.value.map(({ id, name, size, mediaType, text, draftRevision }) => {
+    const payload = { id, name, size, mediaType, text }
+    // Local receipt only: JSON requests include the server contract, not this
+    // revision. Re-adding identical content while sending creates a new draft.
+    Object.defineProperty(payload, 'draftRevision', { value: draftRevision })
+    return payload
+  })
+  validateMindmapAiAttachments(attachments)
+  return attachments.length ? attachments : undefined
+}
+
+function consumeComposerAttachments(attachments = []) {
+  const revisions = new Map(attachments.map(file => [file.id, file.draftRevision]))
+  composerAttachments.value = composerAttachments.value.filter(file => !revisions.has(file.id) || revisions.get(file.id) !== file.draftRevision)
+}
+
+function clearComposerAttachments() {
+  attachmentReadGeneration += 1
+  composerAttachments.value = []
+  attachmentNotice.value = ''
+  attachmentReading.value = false
+}
+
+watch(() => [currentAiOwnerUserId(), route.query?.id, job.value?.sessionId || ''], (next, previous) => {
+  if (previous && next.some((value, index) => value !== previous[index])) clearComposerAttachments()
+  if (previous && next[0] !== previous[0]) privateAttachmentRequests.clear()
+})
 
 async function onSourceFileChange(event) {
   const input = event.target
@@ -4758,7 +4997,7 @@ function latestSessionTurn() {
     || null
 }
 
-function upsertSessionTurn(jobSnapshot, prompt = '') {
+function upsertSessionTurn(jobSnapshot, prompt = '', attachments, configuration) {
   if (!jobSnapshot?.id) return
   const existing = sessionTurns.value.find(turn => turn.job?.id === jobSnapshot.id)
   const nextTurn = {
@@ -4766,9 +5005,24 @@ function upsertSessionTurn(jobSnapshot, prompt = '') {
     job: cloneRuntimeValue(jobSnapshot),
     userMessage: existing?.userMessage || (prompt ? {
       content: prompt,
-      createdTime: new Date().toISOString(),
+      createdTime: jobSnapshot.createdTime || new Date().toISOString(),
     } : null),
     events: existing?.events || [],
+  }
+  if (attachments && nextTurn.userMessage) {
+    nextTurn.userMessage = { ...nextTurn.userMessage,
+      attachments: buildMindmapAiAttachmentMetadata(attachments) }
+  }
+  // Keep each turn's submitted context separate from the editable next draft.
+  // Later status updates must not overwrite an existing (including unknown)
+  // server history context with the currently selected nodes.
+  if (configuration !== undefined && nextTurn.userMessage && !Object.hasOwn(nextTurn.userMessage, 'context')) {
+    nextTurn.userMessage = { ...nextTurn.userMessage, context: configuration ? {
+      sourceMode: configuration.sourceMode,
+      scopeType: configuration.scopeType,
+      contextNodes: (configuration.contextNodes || []).map(({ uid, label }) => ({ uid, label })),
+      ...(configuration.fileName ? { fileName: configuration.fileName } : {}),
+    } : null }
   }
   sessionTurns.value = [
     ...sessionTurns.value.filter(turn => turn.job?.id !== jobSnapshot.id),
@@ -4927,17 +5181,19 @@ async function replayFollowupAttempt(attempt, expectedSessionId, { signal } = {}
   } catch (error) {
     if (!isHttpNotFound(error)) throw error
   }
+  const replayPayload = replayableRequestPayload(attempt)
+  if (!replayPayload) throw new Error('附件原文不会保存在浏览器。请重新选择原附件后重试；原请求号已保留，不会在缺少附件时发送。')
   // A persisted local-snapshot attempt intentionally omits the full document
   // from localStorage. In the original page lifetime the in-memory attempt is
   // still complete and can be retried exactly; after a reload, a confirmed
   // 404 leaves the marker in place until the user submits a fresh snapshot.
   if (
-    attempt.requestPayload.continuationBase === 'current_snapshot'
-    && !attempt.requestPayload.source?.document
+    replayPayload.continuationBase === 'current_snapshot'
+    && !replayPayload.source?.document
   ) return null
   const replayed = await continueMindmapAiJob(
     attempt.parentJobId,
-    attempt.requestPayload,
+    replayPayload,
     attempt.key,
     { signal },
   )
@@ -4946,9 +5202,14 @@ async function replayFollowupAttempt(attempt, expectedSessionId, { signal } = {}
 
 async function replayRetryAttempt(attempt, expectedSessionId, { signal } = {}) {
   if (!attempt?.key || !attempt?.retryOfJobId || !attempt?.requestPayload) return null
+  const replayPayload = replayableRequestPayload(attempt)
+  if (!replayPayload) {
+    const reconciled = await reconcileMindmapAiJob(attempt.key, { signal })
+    return assertRetryAttemptResult(reconciled.data, attempt, expectedSessionId)
+  }
   const response = await retryMindmapAiJob(
     attempt.retryOfJobId,
-    attempt.requestPayload,
+    replayPayload,
     attempt.key,
     { signal },
   )
@@ -5179,7 +5440,9 @@ async function restoreActiveJob({
           try { recovered = await reconcileMindmapAiJob(createAttempt.key) }
           catch (error) {
             if (!isHttpNotFound(error)) throw error
-            recovered = await createMindmapAiJob(createAttempt.requestPayload, createAttempt.key)
+            const replayPayload = replayableRequestPayload(createAttempt)
+            if (!replayPayload) throw new Error('请重新选择原附件后重试恢复；原请求号已保留，不会缺少附件重发。')
+            recovered = await createMindmapAiJob(replayPayload, createAttempt.key)
           }
           assertActionIdentity(identity)
           restoreJobSourceState(recovered.data, saved)
@@ -5269,6 +5532,11 @@ async function restoreActiveJob({
         ) return false
         if (recoveredChild) {
           job.value = recoveredChild
+          saved = {
+            ...saved,
+            sourceRevision: recoveredChild.baseRevision ?? saved.sourceRevision,
+            configuration: persistedFollowup.configuration || saved.configuration,
+          }
           reconciledFollowupAttemptKey = persistedFollowup.key
         }
       }
@@ -5335,14 +5603,14 @@ async function restoreActiveJob({
     if (!persistActiveJob() && (reconciledFollowupAttemptKey || reconciledRetryAttemptKey)) {
       throw new Error('浏览器无法保存新轮次任务恢复指针，请重试')
     }
-    if (reconciledFollowupAttemptKey) {
-      consumeSubmittedComposerDraft(readPersistedAttempts().followup?.requestPayload?.prompt, 'followup', reconciledFollowupAttemptKey)
-      clearDurableAttempt('followup', reconciledFollowupAttemptKey)
-      restoreDurableAttemptNotice()
-    }
-    if (reconciledRetryAttemptKey) {
-      consumeSubmittedComposerDraft(readPersistedAttempts().retry?.requestPayload?.prompt, 'retry', reconciledRetryAttemptKey)
-      clearDurableAttempt('retry', reconciledRetryAttemptKey)
+    for (const [type, key] of [['followup', reconciledFollowupAttemptKey], ['retry', reconciledRetryAttemptKey]]) {
+      if (!key) continue
+      const attempt = readPersistedAttempts()[type]
+      if (attempt?.key === key) {
+        consumeSubmittedComposerDraft(attempt.requestPayload?.prompt, type, key)
+        consumeComposerAttachments(attempt.requestPayload?.attachments)
+      }
+      clearDurableAttempt(type, key)
       restoreDurableAttemptNotice()
     }
     if (!isMindmapAiMessageJob(job.value) && job.value.proposalId) await loadProposal()
@@ -5532,6 +5800,12 @@ async function showDialog(preset = {}) {
   // baseline and cancellation/recovery controls even while it owns the canvas.
   if (job.value || preparingCanvas.value || directCanvasOwned.value || livePreviewActive.value) {
     visible.value = true
+    if (!composerContextLocked.value && !actionBusy.value) {
+      try {
+        await requestEditorContext()
+        syncComposerSelection()
+      } catch {}
+    }
     return true
   }
   if (livePreviewCanvasMutationBlocked.value) {
@@ -5733,8 +6007,17 @@ async function buildSource() {
   }
   let context = await requestEditorContext()
   context = await reconcileCloudMutationBeforeSource(context)
+  // Submission has already set actionBusy; authorize the final observed
+  // selection rather than the scope from an earlier canvas event.
+  syncComposerSelection({ allowBusy: true })
   const scope = buildScope()
-  sourceContext.value = context
+  // Freeze names with the same snapshot/UIDs as the actual request. Canvas
+  // selection can still change while fingerprinting or sending asynchronously.
+  const scopeUids = scope.type === 'branch' ? [scope.rootUid] : (scope.nodeUids || [])
+  sourceContext.value = {
+    ...context,
+    aiContextNodes: scopeUids.map(uid => ({ uid, label: selectedNodeLabels.value[uid] || '未命名节点' })),
+  }
   sourceFingerprint.value = await computeMindmapSnapshotFingerprint(context.document)
   if (context.mindmapId) {
     return { type: 'cloud_document', mindmapId: context.mindmapId, scope }
@@ -5793,9 +6076,10 @@ async function reconcileQueuedCanvasRequest(parentJobId) {
   }
   if (!child?.id) throw new Error('下一轮请求尚未确认，请重试同步，脑图保持只读')
   const prompt = attempt.requestPayload?.prompt || ''
-  upsertSessionTurn(child, prompt)
+  upsertSessionTurn(child, prompt, attempt.requestPayload?.attachments, attempt.configuration)
   appendClientPrompt(child.id, prompt, child.turnIndex)
   consumeSubmittedComposerDraft(prompt, 'queue', attempt.key)
+  consumeComposerAttachments(attempt.requestPayload?.attachments)
   clearDurableAttempt('queue', attempt.key)
   if (queueAttempt?.key === attempt.key) queueAttempt = null
   restoreDurableAttemptNotice()
@@ -6542,7 +6826,7 @@ async function activateCreatedJob(nextJob, { identity, requestPayload, requestCo
   currentSessionTitle.value = deriveMindmapAiSessionTitle(requestPayload.prompt, '新对话')
   jobConfiguration.value = requestConfiguration
   appendClientPrompt(job.value.id, requestPayload.prompt, job.value.turnIndex)
-  upsertSessionTurn(job.value, requestPayload.prompt)
+  upsertSessionTurn(job.value, requestPayload.prompt, requestPayload.attachments, requestConfiguration)
   selectedTurnJobId.value = String(job.value.id)
   draftDocument.value = discussionMode.value || requestPayload.executionMode === 'direct'
     ? null : cloneRuntimeValue(sourceContext.value?.document) || null
@@ -6550,6 +6834,7 @@ async function activateCreatedJob(nextJob, { identity, requestPayload, requestCo
   proposalError.value = ''
   diffConfirmed.value = false
   consumeSubmittedComposerDraft(requestPayload.prompt, 'create', attemptKey)
+  consumeComposerAttachments(requestPayload.attachments)
   if (persistActiveJob()) clearDurableAttempt('create', attemptKey)
   else {
     restoreDurableAttemptNotice()
@@ -6588,6 +6873,7 @@ async function submitJob() {
   let creationResponseReceived = false
   let reusedPersistedAttempt = false
   try {
+    const submittedAttachments = captureComposerAttachments()
     const source = await buildSource()
     assertActionIdentity(identity)
     const directExecution = Boolean(
@@ -6601,6 +6887,7 @@ async function submitJob() {
       modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
       intent: requestedIntent,
       prompt: form.prompt.trim(),
+      attachments: submittedAttachments,
       parameters: {
         language: form.language,
         layout: effectiveRequestLayout(source),
@@ -6622,6 +6909,8 @@ async function submitJob() {
       agentKey: requestPayload.agentKey,
       deviceId: requestPayload.deviceId || '',
       modelId: requestPayload.modelId,
+      scopeType: source.scope?.type || 'document',
+      contextNodes: sourceContext.value?.aiContextNodes || [],
       // Preserve the selected editor intent while discussionMode controls the
       // actual request intent. This makes discussion -> edit deterministic.
       intent: form.intent,
@@ -6701,6 +6990,7 @@ async function submitJob() {
 async function activateFollowupJob(nextJob, {
   identity,
   requestPayload,
+  requestConfiguration = null,
   attemptKey,
   preparationId,
   initialPreview = null,
@@ -6727,8 +7017,10 @@ async function activateFollowupJob(nextJob, {
     ? 'new'
     : job.value.sourceType === 'uploaded_artifact' ? 'file' : 'current'
   form.sourceMode = nextSourceMode
+  form.scopeType = requestConfiguration?.scopeType || requestPayload.scope?.type || form.scopeType
   jobConfiguration.value = captureJobConfiguration({
     ...(jobConfiguration.value || {}),
+    ...(requestConfiguration || {}),
     agentKey: requestPayload.agentKey,
     deviceId: requestPayload.deviceId || '',
     modelId: requestPayload.modelId,
@@ -6757,11 +7049,12 @@ async function activateFollowupJob(nextJob, {
   }
   sourceFingerprint.value = job.value.baseHash || ''
   appendClientPrompt(job.value.id, requestPayload.prompt, job.value.turnIndex)
-  upsertSessionTurn(job.value, requestPayload.prompt)
+  upsertSessionTurn(job.value, requestPayload.prompt, requestPayload.attachments, jobConfiguration.value)
   selectedTurnJobId.value = String(job.value.id)
   // Automatic queue handoff consumes an already accepted message, not the
   // still-unsent composer draft (even when its text happens to be identical).
   if (identity.type !== 'queue-activate') consumeSubmittedComposerDraft(requestPayload.prompt, 'followup', attemptKey)
+  if (identity.type !== 'queue-activate') consumeComposerAttachments(requestPayload.attachments)
   pendingFollowupPrompt.value = ''
   proposal.value = null
   proposalError.value = ''
@@ -6845,9 +7138,10 @@ async function activateRetryJob(nextJob, {
     || originalTurn?.userMessage?.content
     || '复用原任务要求'
   appendClientPrompt(job.value.id, visiblePrompt, job.value.turnIndex)
-  upsertSessionTurn(job.value, visiblePrompt)
+  upsertSessionTurn(job.value, visiblePrompt, requestPayload.attachments, originalTurn?.userMessage?.context ?? nextConfiguration)
   selectedTurnJobId.value = String(job.value.id)
   consumeSubmittedComposerDraft(requestPayload.prompt, 'retry', attemptKey)
+  consumeComposerAttachments(requestPayload.attachments)
   proposal.value = null
   proposalError.value = ''
   diffConfirmed.value = false
@@ -6914,6 +7208,7 @@ async function retryJob() {
       deviceId: isDeviceAgent(form.agentKey) ? form.deviceId : undefined,
       modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
       prompt: continuationPrompt.value.trim() || undefined,
+      attachments: captureComposerAttachments(),
       parameters: {
         language: jobConfiguration.value?.language || form.language,
         layout: jobConfiguration.value?.layout || form.layout,
@@ -7054,6 +7349,7 @@ async function continueJob() {
       && parentJob.status !== 'needs_input'
       && !(isMindmapAiMessageJob(parentJob) && parentJob.status === 'completed_message')
       && parentJob.status !== 'completed_direct'
+      && !(parentJob.sourceType === 'cloud_document' && parentJob.status === 'completed_no_change')
     )
     || !continuationPrompt.value.trim()
   ) {
@@ -7069,6 +7365,7 @@ async function continueJob() {
   const requestedIntent = followupIntent(parentJob)
   const requestedSourceType = followupSourceType(parentJob)
   const continuationBase = followupContinuationBase(parentJob)
+  const useCanvasSelection = !composerContextLocked.value
   if (
     !selectedAgent.intents?.includes(requestedIntent)
     || !selectedAgent.inputTypes?.includes(requestedSourceType)
@@ -7081,6 +7378,7 @@ async function continueJob() {
   // editable during those awaits; later edits belong to the next draft.
   const submittedPrompt = continuationPrompt.value.trim()
   const draftReceipt = composerDraftPersistence.capture(submittedPrompt)
+  pendingFollowupContext.value = cloneRuntimeValue(captureJobConfiguration())
   continuing.value = true
   const identity = beginActionIdentity('followup', { jobId: job.value?.id })
   let preparationId = null
@@ -7100,8 +7398,12 @@ async function continueJob() {
   let followupResponseReceived = false
   let reusedPersistedAttempt = false
   let currentSnapshotSource
+  let submittedSelection
+  let requestConfiguration
   let expectedParentStatus
   try {
+    const submittedAttachments = captureComposerAttachments()
+    pendingFollowupAttachments.value = buildMindmapAiAttachmentMetadata(submittedAttachments)
     const parentJobId = parentJob.id
     if (continuationBase === 'current_document') {
       await flushPendingCloudMutationIntents()
@@ -7123,6 +7425,7 @@ async function continueJob() {
       }
       sourceContext.value = currentContext
       editorContext.value = currentContext
+      if (useCanvasSelection) submittedSelection = captureCanvasSelection(currentContext)
       sourceFingerprint.value = await computeMindmapSnapshotFingerprint(currentContext.document)
       assertActionIdentity(identity)
     } else if (continuationBase === 'current_snapshot') {
@@ -7199,6 +7502,7 @@ async function continueJob() {
       }
       sourceContext.value = confirmedContext
       editorContext.value = confirmedContext
+      if (useCanvasSelection) submittedSelection = captureCanvasSelection(stableContext)
       sourceFingerprint.value = confirmedHash
       currentSnapshotSource = {
         type: 'local_snapshot',
@@ -7211,6 +7515,7 @@ async function continueJob() {
     }
     const requestPayload = {
       prompt: submittedPrompt,
+      attachments: submittedAttachments,
       artifactId: continuationBase === 'artifact'
         ? (parentJob.artifactId || undefined)
         : undefined,
@@ -7219,11 +7524,18 @@ async function continueJob() {
       modelId: form.agentKey === 'native_mindmap' ? form.modelId : undefined,
       intent: requestedIntent,
       continuationBase,
+      scope: submittedSelection?.scope,
       expectedParentStatus: continuationBase === 'current_snapshot'
         ? expectedParentStatus
         : undefined,
       source: currentSnapshotSource,
     }
+    requestConfiguration = captureJobConfiguration({
+      ...(jobConfiguration.value || {}),
+      scopeType: submittedSelection?.scope.type ?? jobConfiguration.value?.scopeType,
+      contextNodes: submittedSelection?.contextNodes ?? jobConfiguration.value?.contextNodes,
+    })
+    pendingFollowupContext.value = cloneRuntimeValue(requestConfiguration)
     const persistedRequestPayload = continuationBase === 'current_snapshot'
       ? { ...requestPayload, source: undefined }
       : requestPayload
@@ -7248,6 +7560,7 @@ async function continueJob() {
             ...sessionTurns.value.map(turn => String(turn?.job?.id || '')),
           ].filter(Boolean))),
           requestPayload: persistedRequestPayload,
+          configuration: requestConfiguration,
         },
       },
     )
@@ -7278,6 +7591,7 @@ async function continueJob() {
     await activateFollowupJob(exactChild, {
       identity,
       requestPayload,
+      requestConfiguration,
       attemptKey,
       preparationId,
       recoverExisting: reusedPersistedAttempt,
@@ -7302,6 +7616,7 @@ async function continueJob() {
         await activateFollowupJob(recoveredChild, {
           identity,
           requestPayload: durableFollowupAttempt.requestPayload,
+          requestConfiguration: durableFollowupAttempt.configuration || requestConfiguration,
           attemptKey: durableFollowupAttempt.key,
           preparationId,
           recoverExisting: true,
@@ -7319,6 +7634,7 @@ async function continueJob() {
           const recoveredChild = await replayFollowupAttempt(durableFollowupAttempt, parentJob.sessionId)
           return recoveredChild && activateFollowupJob(recoveredChild, {
             identity, requestPayload: durableFollowupAttempt.requestPayload,
+            requestConfiguration: durableFollowupAttempt.configuration || requestConfiguration,
             attemptKey: durableFollowupAttempt.key, preparationId,
             recoverExisting: true,
           })
@@ -8599,6 +8915,14 @@ async function deleteSessionRecord() {
   }
 }
 
+watch([
+  () => form.sourceMode,
+  () => form.scopeType,
+  selectedNodeUids,
+  composerContextLocked,
+  actionBusy,
+], () => syncComposerSelection())
+
 watch(() => form.sourceMode, (mode) => {
   if (mode === 'new' && form.intent !== 'create') {
     form.intent = 'create'
@@ -8672,7 +8996,12 @@ watch(() => agentEvents.value.length, async () => {
 })
 
 watch(pendingFollowupPrompt, async prompt => {
-  if (!prompt) return
+  pendingFollowupCreatedTime.value = prompt ? new Date().toISOString() : ''
+  if (!prompt) {
+    pendingFollowupContext.value = null
+    pendingFollowupAttachments.value = []
+    return
+  }
   await nextTick()
   followAgentOutput()
 })
@@ -8832,6 +9161,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   componentAlive = false
+  clearComposerAttachments()
+  privateAttachmentRequests.clear()
   clearLivePreviewAnnouncement()
   // Route exit leaves the durable server job running; it is not completion or
   // rejection, and must never initiate an authoritative settlement.
@@ -9344,10 +9675,6 @@ onBeforeUnmount(() => {
 
   .controlPane { overflow: visible; }
 }
-
-.composerAgentBar { display:flex; align-items:center; gap:8px; margin:4px 0 10px; }
-.composerAgentBar .el-select { width:145px; flex-shrink:0; }
-.composerAgentBar > small { flex:1; color:var(--el-text-color-secondary); font-size:10px; }
 
 @media (prefers-reduced-motion: reduce) {
   .connectionBadge i { animation: none !important; }

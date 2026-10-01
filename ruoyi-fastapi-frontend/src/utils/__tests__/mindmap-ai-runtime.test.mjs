@@ -100,6 +100,7 @@ function switchHarness() {
   const scope = {
     h: createVNode, MindmapAgentHandoffSummary: {}, projectAgentHandoff, nextTick,
     agentSwitchPhase: ref(''), agentExecutionPickerRef: ref(null), agentEvents: ref([]),
+    settingsAgentExecutionPickerRef: ref(null), showAdvancedSettings: ref(false),
     sessionTurns: ref([]), handoffTimelineReceipt: ref(null), timelineLoading: ref(false),
     timelineError: ref(''), currentResultState: ref({ title: '预览中' }), proposal: ref(null),
     isDeviceAgent, deviceExecutionIssue,
@@ -184,6 +185,24 @@ test('cancelled confirmation retains execution and restores keyboard focus after
   assert.equal(await fixture.run('codex'), false)
   assert.deepEqual(fixture.calls, ['focus'])
 })
+
+for (const outcome of ['accepted', 'cancelled']) {
+  test(`${outcome} switching from task settings returns focus inside the open dialog`, async () => {
+    const fixture = switchHarness()
+    fixture.scope.agentManagerVisible.value = false
+    fixture.scope.showAdvancedSettings.value = true
+    fixture.scope.agentExecutionPickerRef.value = { focus: () => assert.fail('cannot focus behind an open modal') }
+    fixture.scope.settingsAgentExecutionPickerRef.value = { focus() {
+      assert.equal(fixture.scope.agentSwitchPending.value, false)
+      fixture.calls.push('settings-focus')
+    } }
+    if (outcome === 'cancelled') fixture.scope.ElMessageBox.confirm = async () => { throw new Error('cancel') }
+    assert.equal(await fixture.run('codex'), outcome === 'accepted')
+    assert.deepEqual(fixture.calls, outcome === 'accepted'
+      ? ['confirm', 'cancel', 'change', 'settings-focus'] : ['settings-focus'])
+    assert.equal(fixture.scope.running.value, outcome !== 'accepted')
+  })
+}
 
 for (const change of ['disabled', 'hidden', 'capability', 'removed']) {
   test(`target ${change} during confirmation must not cancel the current run`, async () => {

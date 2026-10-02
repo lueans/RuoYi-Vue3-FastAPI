@@ -382,10 +382,17 @@
   .composerFileChip {
     background: var(--agent-surface);
     > .el-icon { flex: none; font-size: 14px; color: var(--agent-muted); }
+    &.is-template {
+      border-color: color-mix(in oklch, var(--agent-accent) 28%, var(--agent-border));
+      background: color-mix(in oklch, var(--agent-accent) 8%, var(--ai-card-bg));
+      > .el-icon, .attachmentPurpose { color: var(--agent-accent); }
+    }
     &.is-error { border-color: var(--agent-danger); }
   }
+  .attachmentPurpose { flex: none; font-size: 11px; font-weight: 550; }
   .attachmentSize { flex: none; color: var(--agent-muted); font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-size: 11px; }
   .composerAttachmentNotice { margin: 0 0 8px; font-size: 12px; line-height: 1.5; color: var(--agent-warning); }
+  .composerTemplateHint { margin: 0 0 8px; font-size: 11px; line-height: 1.5; color: var(--agent-muted); }
 
   .composerToolbar { margin-top: 10px; gap: 8px; justify-content: flex-start; }
   .composerTools { gap: 8px; }

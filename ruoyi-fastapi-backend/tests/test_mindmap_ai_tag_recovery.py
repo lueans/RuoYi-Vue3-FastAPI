@@ -206,6 +206,11 @@ async def test_catalog_keyset_reads_every_page_and_refreshes_next_run(monkeypatc
         id=index, category_id=None, uuid=f'uuid-{index}', tag_key=f'tag-{index}',
         name=f'Tag {index}', description='', style={}, status=0, definition_revision=1,
     ) for index in range(1, 4)]
+    custom_style = {
+        'fill': '#ffede0', 'color': '#992b00', 'fontSize': 16, 'radius': 7,
+        'paddingX': 12, 'iconKey': 'priority_2', 'placement': 'top', 'align': 'left',
+    }
+    tags[0].style = deepcopy(custom_style)
     cursors = []
 
     async def execute(query: object) -> SimpleNamespace:
@@ -218,10 +223,14 @@ async def test_catalog_keyset_reads_every_page_and_refreshes_next_run(monkeypatc
     first = await load_ai_tag_catalog(db, 7)
     assert [tag['tagId'] for tag in first] == [1, 2, 3]
     assert cursors == [0, 2]
+    assert first[0]['style'] == custom_style
     tags[0].name = 'Renamed'
+    tags[0].style['fill'] = '#ffffff'
     second = await load_ai_tag_catalog(db, 7)
     assert second[0]['text'] == 'Renamed'
     assert first[0]['text'] == 'Tag 1'
+    assert second[0]['style'] == {**custom_style, 'fill': '#ffffff'}
+    assert first[0]['style'] == custom_style
 
 
 @pytest.mark.parametrize('scope', [

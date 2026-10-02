@@ -36,6 +36,7 @@ function harness(options = {}) {
   let timerId = 0
   let clock = 1000
   const s = {
+    authExpired: ref(false),
     job: ref({ id: 'job1', status: 'running', executionMode: 'direct' }),
     livePreviewPendingFrame: null, livePreviewOldestPendingAt: null,
     livePreviewFlushTimer: null, livePreviewFlushInFlight: false,

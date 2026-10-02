@@ -159,7 +159,7 @@ test('工作台只有一处结果结论，技术 ID 折叠而恢复操作和运�
   assert.match(details, /statusLabel/)
   assert.doesNotMatch(details, /jobErrorMessage|retryTerminalHydration|needsInputQuestions|livePreviewError/)
   assert.match(template, /v-if="job.errorMessage \|\| job.errorCode"/)
-  assert.match(template, /v-if="executionStopBlocked"/)
+  assert.match(template, /v-if="executionStopBlocked && !authExpired"/)
   assert.match(template, /v-if="livePreviewError && !canvasSyncStatus"/)
   const footer = template.slice(template.indexOf('<template #footer>'))
   assert.match(footer, /v-if="canvasSyncStatus"[^>]*id="mindmap-ai-canvas-recovery"[^>]*role="status"/)

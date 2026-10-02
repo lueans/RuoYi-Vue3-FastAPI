@@ -8,6 +8,10 @@
     @dragover.stop.prevent
     @drop.stop.prevent
   >
+    <div v-if="authenticationExpired" class="authExpiryBanner" role="status" aria-live="polite">
+      <span><strong>登录已失效，编辑与同步已暂停。</strong> {{ authenticationRecoveryMessage }}</span>
+      <el-button size="small" type="primary" @click="requestAuthLogin">重新登录</el-button>
+    </div>
     <div
       class="mindMapContainer"
       id="mindMapContainer"
@@ -125,6 +129,9 @@ import {
   updateMindmapView,
 } from '@/api/mindmap/mindmap'
 import { YjsMindmapSync } from '@/utils/yjs-sync'
+import { createMindmapCollaborationRecoveryGuard } from '@/utils/mindmap-collaboration-recovery'
+import { isAuthSessionExpired, subscribeAuthExpiry } from '@/utils/auth-expiry'
+import { requestAuthLogin } from '@/utils/request'
 import { createMindmapCanvasResize } from '@/utils/mindmap-canvas-resize'
 import { createMindmapAiCamera } from '@/utils/mindmap-ai-camera'
 import {
@@ -338,6 +345,11 @@ const aiDialogReadonly = computed(() => (
   || (Boolean(props.mindmapId) && serverCanEdit.value !== true)
 ))
 let terminalState = ''
+const authenticationExpired = ref(false)
+const authenticationRecoveryMessage = ref('正在保护本地未保存内容…')
+let unsubscribeAuthExpiry = null
+let terminalCleanup = null
+let terminalCleanupPending = null
 
 const editContainerRef = ref(null)
 const mindMapContainerRef = ref(null)
@@ -391,6 +403,7 @@ let authoritativeReloadAttempt = 0
 let authoritativeReloadInProgress = false
 let authoritativeReloadNoticeShown = false
 let authoritativeReloadMinimumRevision = 0
+const collaborationRecoveryGuard = createMindmapCollaborationRecoveryGuard()
 let viewChangeVersion = 0
 let savedViewChangeVersion = 0
 let savedDocumentMeta = null
@@ -2556,6 +2569,7 @@ function bindYjsDetailTracking() {
 function startYjsSyncIfReady() {
   if (
     yjsSync
+    || collaborationRecoveryGuard.blocked
     || authoritativeReloadRequired
     || restoredLocalDraft
     || versionChangeTrackingPaused
@@ -2664,6 +2678,8 @@ watch(isShowScrollbar, (val) => {
 onMounted(async () => {
   componentMounted = true
   sessionController = new AbortController()
+  unsubscribeAuthExpiry = subscribeAuthExpiry(handleAuthenticationExpired)
+  if (sessionCancelled(sessionController?.signal)) return
   actions.initLocalConfig()
   try {
     await initMindMap(sessionController.signal)
@@ -2697,6 +2713,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unsubscribeAuthExpiry?.()
+  unsubscribeAuthExpiry = null
   localAiUndoSnapshot = null
   localAiUndoInProgress = false
   commitActiveEditorsBeforeTermination()
@@ -3740,6 +3758,7 @@ function scheduleNextAuthoritativeReload() {
 }
 
 function scheduleAuthoritativeReload(delay = 0) {
+  if (collaborationRecoveryGuard.blocked) return
   if (terminalState || !componentMounted || !authoritativeReloadRequired) return
   clearTimeout(authoritativeReloadTimer)
   authoritativeReloadTimer = setTimeout(() => {
@@ -3753,6 +3772,7 @@ function scheduleAuthoritativeReload(delay = 0) {
 }
 
 async function performAuthoritativeReload({ allowDuringEditingTransition = false } = {}) {
+  if (collaborationRecoveryGuard.blocked) return false
   if (!authoritativeReloadRequired) return true
   if (shouldDeferAiAuthoritativeDocument()) return false
   if (hasActiveEditingTransition() && !allowDuringEditingTransition) return false
@@ -3783,7 +3803,6 @@ async function performAuthoritativeReload({ allowDuringEditingTransition = false
     })
     if (reloaded) {
       resolveAuthoritativeReload()
-      ElMessage.success('已同步协作后的最新画布')
       return true
     }
     if (!terminalState && !hasUnsavedChanges()) scheduleNextAuthoritativeReload()
@@ -4495,6 +4514,26 @@ async function handleStaleCollaborationState(data) {
   // 历史版本画布不是可保存/可备份的当前文档。先只记录单调 revision
   // 下界，退出预览后再由 onVersionChangeTracking 锁定编辑并权威回源。
   if (versionChangeTrackingPaused || resolvingStaleState || !mindMap.value) return
+  if (!collaborationRecoveryGuard.recordFailure()) {
+    // Preserve the canvas and pending mutations, but stop rebuilding a new
+    // connection against the same rejected collaboration baseline forever.
+    commitActiveEditorsBeforeTermination()
+    setAuthoritativeRecoveryEditingBlocked(true)
+    stopCurrentCollaborationSource()
+    clearTimeout(authoritativeReloadTimer)
+    clearTimeout(autoSaveTimer)
+    saveRecoveryKind.value = 'sync'
+    setSaveStatus('error')
+    if (!authoritativeReloadNoticeShown) {
+      authoritativeReloadNoticeShown = true
+      ElNotification.warning({
+        title: '协作同步暂时中断',
+        message: '连续重连未恢复，已暂停自动重试。当前画布仍保留，请点击“同步画布”重试。',
+      })
+    }
+    if (hasUnsavedChanges()) void persistLocalDraft()
+    return
+  }
   setResolvingStaleState(true)
   try {
     clearTimeout(autoSaveTimer)
@@ -4521,7 +4560,6 @@ async function handleStaleCollaborationState(data) {
       ? await performAuthoritativeReload()
       : await reloadLatestServerDocument()
     if (!reloaded) return
-    ElMessage.info('已同步服务器最新内容')
   } catch (error) {
     if (sessionCancelled(sessionController?.signal)) return
     console.error('恢复协作状态失败:', error)
@@ -4607,8 +4645,30 @@ async function handleRemoteDocumentReset(data) {
   }
 }
 
+async function handleAuthenticationExpired() {
+  if (!componentMounted || !isAuthSessionExpired(userStore.token)) return
+  authenticationExpired.value = true
+  authenticationRecoveryMessage.value = '正在保护本地未保存内容…'
+  const result = await terminateEditingSession('session-ended', {
+    reason: 'http_auth_expired',
+    authHandledGlobally: true,
+    message: '登录已失效，编辑与同步已暂停。',
+  })
+  if (result?.needsLocalBackup && !result.localRecoveryProtected) {
+    authenticationRecoveryMessage.value = '自动备份未完成，当前内容仍保留在画布；请重试备份后登录。'
+    throw new Error('未保存的脑图内容尚未备份，请保留当前页面并重试')
+  }
+  authenticationRecoveryMessage.value = result?.localDraftPreserved
+    ? '未保存修改已保留在本地草稿中心。'
+    : result?.localBackupCreated
+      ? '未保存修改已下载为 JSON 备份。'
+      : result?.needsLocalBackup
+        ? '未保存修改已分别保存在本地草稿和 JSON 备份中。'
+        : '当前画布保留为只读，可重新登录后继续。'
+}
+
 function terminateEditingSession(eventName, data) {
-  if (terminalState || terminatingSession) return
+  if (terminalState || terminatingSession) return terminalCleanup?.()
   terminatingSession = true
   // HTTP 保存开始时已经冻结了用户实际提交的文档。终止事件可能在请求等待
   // 期间到达，而远端 Yjs 预览此时仍可能改写运行时画布；必须在提交浮层
@@ -4643,6 +4703,7 @@ function terminateEditingSession(eventName, data) {
         document: frozenMutationSnapshot.document,
         downloadPrefix: `mindmap-${eventName}-mutation`,
         fallbackSaved: false,
+        downloaded: false,
       })
     }
     // 浮层提交可能产生冻结后的新输入；远端 Yjs 也可能已经改变 runtime。
@@ -4659,6 +4720,7 @@ function terminateEditingSession(eventName, data) {
         document: fullData,
         downloadPrefix: `mindmap-${eventName}${frozenMutationSnapshot ? '-runtime' : ''}`,
         fallbackSaved: false,
+        downloaded: false,
       })
     }
     for (const entry of terminalDraftEntries) {
@@ -4667,7 +4729,7 @@ function terminateEditingSession(eventName, data) {
     localDraftPreserved = terminalDraftEntries.length > 0
       && terminalDraftEntries.every(entry => entry.fallbackSaved)
     const downloadedBackups = terminalDraftEntries.map(entry => (
-      downloadConflictBackup(entry.document, entry.downloadPrefix)
+      entry.downloaded = downloadConflictBackup(entry.document, entry.downloadPrefix)
     ))
     localBackupCreated = terminalDraftEntries.length > 0
       && downloadedBackups.every(Boolean)
@@ -4700,25 +4762,44 @@ function terminateEditingSession(eventName, data) {
   yjsSyncRef.value = null
   refreshStructureWriteBlockedState()
   terminatedSync?.destroy?.({ flushCheckpoint: false })
-  const emitTerminalEvent = (draftPreserved) => emit(eventName, {
-    ...data,
-    localBackupCreated,
-    localDraftPreserved: draftPreserved,
-  })
+  let terminalEventEmitted = false
+  const emitTerminalEvent = (draftPreserved) => {
+    const result = {
+      ...data, localBackupCreated, localDraftPreserved: draftPreserved, needsLocalBackup,
+      localRecoveryProtected: terminalDraftEntries.every(entry => entry.fallbackSaved || entry.downloaded),
+    }
+    if (!terminalEventEmitted) {
+      terminalEventEmitted = true
+      emit(eventName, result)
+    }
+    return result
+  }
   if (terminalDraftEntries.length === 0) {
-    emitTerminalEvent(false)
-    return
+    terminalCleanup = () => Promise.resolve(emitTerminalEvent(false))
+    return terminalCleanup()
   }
   // 同步 localStorage 只承载小文档；每份快照继续分别等待 IndexedDB。只有
   // 冻结批次及不同的冻结后 runtime 都已落入至少一层存储，才宣告草稿安全。
-  const durableDraftResults = terminalDraftEntries.map(entry => (
-    enqueueDraftOperation(() => saveMindmapDraft(entry.options)).then(result => (
-      entry.fallbackSaved || result?.saved === true
+  terminalCleanup = () => {
+    if (terminalCleanupPending) return terminalCleanupPending
+    const durableDraftResults = terminalDraftEntries.map(entry => (
+      enqueueDraftOperation(() => saveMindmapDraft(entry.options)).then(result => {
+        entry.fallbackSaved ||= result?.saved === true
+        // A user-triggered relogin retries only backups that previously failed.
+        if (!entry.fallbackSaved && !entry.downloaded) {
+          entry.downloaded = downloadConflictBackup(entry.document, entry.downloadPrefix)
+        }
+        return entry.fallbackSaved
+      }).catch(() => entry.fallbackSaved)
     ))
-  ))
-  void Promise.all(durableDraftResults).then((results) => {
-    emitTerminalEvent(localDraftPreserved || results.every(Boolean))
-  })
+    terminalCleanupPending = Promise.all(durableDraftResults).then((results) => {
+      localDraftPreserved ||= results.every(Boolean)
+      localBackupCreated ||= terminalDraftEntries.every(entry => entry.downloaded)
+      return emitTerminalEvent(localDraftPreserved)
+    }).finally(() => { terminalCleanupPending = null })
+    return terminalCleanupPending
+  }
+  return terminalCleanup()
 }
 
 function commitActiveEditorsBeforeTermination() {
@@ -5060,6 +5141,11 @@ async function manualSave() {
 }
 
 async function recoverSave() {
+  if (collaborationRecoveryGuard.blocked) {
+    collaborationRecoveryGuard.reset()
+    authoritativeReloadNoticeShown = false
+    setAuthoritativeRecoveryEditingBlocked(false)
+  }
   if (pendingRemoteDocumentReset) {
     const resetData = pendingRemoteDocumentReset
     remoteDocumentResetRetryBlocked = false
@@ -6739,8 +6825,16 @@ defineExpose({
   getMindMap: () => mindMap.value,
   getYjsSync: () => yjsSync,
   getCollaborators: () => yjsSyncRef.value?.collaborators.value || [],
-  getCollaborationState: () => yjsSyncRef.value?.connectionState.value || 'connecting',
-  getCollaborationError: () => yjsSyncRef.value?.syncError.value || '',
+  getCollaborationState: () => {
+    const state = yjsSyncRef.value?.connectionState.value
+    return collaborationRecoveryGuard.blocked ? 'paused' : state || 'connecting'
+  },
+  getCollaborationError: () => {
+    const error = yjsSyncRef.value?.syncError.value
+    return collaborationRecoveryGuard.blocked
+      ? '连续重连未恢复，已暂停自动同步。请点击“同步画布”重试。'
+      : error || ''
+  },
   isCollaborationSynced: () => yjsSyncRef.value?.isSynced.value === true,
   retryCollaboration: () => yjsSyncRef.value?.retryConnection?.() === true,
   isLocalDraftProtected: () => draftProtection.isProtected(),
@@ -6764,6 +6858,24 @@ defineExpose({
   position: relative;
   flex: 1;
   overflow: hidden;
+
+  .authExpiryBanner {
+    position: absolute;
+    inset: 12px 16px auto 56px;
+    z-index: 35;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--el-color-warning-light-5);
+    border-radius: 8px;
+    background: var(--el-color-warning-light-9);
+    color: var(--el-text-color-primary);
+    font-size: 13px;
+    line-height: 1.6;
+  }
 
   .aiCameraFollow {
     position: absolute;

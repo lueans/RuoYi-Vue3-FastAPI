@@ -1,4 +1,5 @@
 import Cookies from 'js-cookie'
+import { resetAuthExpirySession } from './auth-expiry.js'
 
 const TokenKey = 'Admin-Token'
 
@@ -7,7 +8,9 @@ export function getToken() {
 }
 
 export function setToken(token) {
-  return Cookies.set(TokenKey, token)
+  const result = Cookies.set(TokenKey, token)
+  resetAuthExpirySession()
+  return result
 }
 
 export function removeToken() {

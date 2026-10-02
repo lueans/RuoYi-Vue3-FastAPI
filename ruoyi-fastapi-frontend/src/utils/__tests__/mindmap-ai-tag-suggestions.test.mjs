@@ -165,7 +165,7 @@ test('shared busy computation still blocks playback for every in-flight action',
   const playbackStart = source.indexOf('const livePreviewPlaybackAvailable = computed(')
   const playbackEnd = source.indexOf('\nconst livePreviewCanvasMutationBlocked =', playbackStart)
   const flags = [
-    'restoringJob', 'submitting', 'cancelling', 'savingCloud', 'applying', 'rejectingReview',
+    'authExpired', 'restoringJob', 'submitting', 'cancelling', 'savingCloud', 'applying', 'rejectingReview',
     'continuing', 'retrying', 'openingLocal', 'replacingLocal', 'insertingLocal', 'undoing',
     'deletingSession', 'sessionSwitching',
   ]

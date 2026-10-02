@@ -47,7 +47,7 @@ test('AI 业务错误从请求 data 与任务字段提取并映射为可操作�
   )
   assert.equal(
     formatMindmapAiError({ errorCode: 'AI_MODEL_CONFIG_INVALID' }),
-    '所选模型配置无效，请到 AI 模型管理检查提供商、模型编码和 Base URL',
+    '所选模型配置无效，请到 AI 模型管理检查提供商、模型编码、Base URL 和温度等参数',
   )
   assert.equal(
     formatMindmapAiError({ errorCode: 'AI_PROPOSAL_INTEGRITY_INVALID' }),

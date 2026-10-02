@@ -128,3 +128,22 @@ test('production records component hides absent files and displays no more than 
   assert.match(html, /5\/5 个已解析/)
   assert.doesNotMatch(html, /附件6/)
 })
+
+test('server template warnings remain visible outside collapsed details and never become HTML or upload instructions', async () => {
+  const warning = '模版中的部分标签当前不可引用，已跳过这些标签：紧急'
+  const file = attachment({ purpose: 'template', warnings: [warning, warning, '<img src=x onerror=attack()>'],
+    parsing: { status: 'parsed', characterCount: 7 } })
+  const [metadata] = buildMindmapAiAttachmentMetadata([file])
+  assert.deepEqual(metadata.warnings, [warning, '<img src=x onerror=attack()>'])
+  assert.deepEqual(buildMindmapAiAttachmentMetadata([metadata]), [metadata])
+  const html = await render([file])
+  assert.ok(html.indexOf(warning) < html.indexOf('<details>'))
+  assert.match(html, /role="status"/)
+  assert.doesNotMatch(html, /<img|<details[^>]*\bopen\b/)
+  for (const input of [attachment({ warnings: [warning] }), { ...file, text: 'client data' }]) {
+    assert.equal(buildMindmapAiAttachmentMetadata([input])[0].warnings, undefined)
+  }
+  const bounded = buildMindmapAiAttachmentMetadata([{ ...file, warnings: [null, {}, '', ...Array.from({ length: 8 }, (_, index) => `${index}${'😀'.repeat(700)}`)] }])[0]
+  assert.equal(bounded.warnings.length, 5)
+  assert.ok(bounded.warnings.every(value => Array.from(value).length === 500))
+})

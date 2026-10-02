@@ -239,7 +239,7 @@ function dialogHarness() {
   const streams = [], delays = [], events = []
   const ref = value => ({ value })
   const s = {
-    componentAlive: true, navigator: { onLine: true }, job: ref({ id: 'job', status: 'running' }),
+    authExpired: ref(false), componentAlive: true, navigator: { onLine: true }, job: ref({ id: 'job', status: 'running' }),
     realtimeReconnectTimer: null, realtimeReconnectAttempt: 0, realtimeGeneration: 0, realtimeController: null,
     realtimeConnectionState: ref('idle'), realtimeError: ref(''), latestEventSequence: ref(7),
     latestPreviewVersion: ref(1), latestPreviewEpoch: ref(1), jobEventSequences: new Map(),

@@ -481,12 +481,13 @@ const realtimeStatusText = computed(() => {
     authenticating: '正在认证',
     'auth-error': '协作不可用',
     offline: '协作离线',
+    paused: '协作已暂停',
     closed: '协作已关闭',
   }[realtimeState.value] || '正在连接')
 })
 const realtimeStatusClass = computed(() => ({
   online: isRealtimeConnected.value && realtimeState.value === 'connected',
-  error: ['auth-error', 'offline'].includes(realtimeState.value),
+  error: ['auth-error', 'offline', 'paused'].includes(realtimeState.value),
   warning: ['syncing', 'stale', 'reconnecting', 'authenticating', 'degraded'].includes(realtimeState.value),
 }))
 const realtimeStatusDetail = computed(() => {
@@ -733,6 +734,9 @@ async function onAccessRevoked(data) {
 }
 
 async function onSessionEnded(data) {
+  // The global expiry prompt and editor's persistent recovery banner own HTTP
+  // authentication failures. Do not stack a second modal or navigate over it.
+  if (data?.authHandledGlobally) return
   const authenticationUnavailable = data?.reason === 'auth_unavailable'
   await showTerminalDialog(
     authenticationUnavailable ? '协作认证暂时不可用' : '登录会话已失效',

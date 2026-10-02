@@ -10,6 +10,7 @@ import pytest
 
 from exceptions.exception import ServiceException
 from module_mindmap.ai.document import AI_MAX_FILE_BYTES
+from module_mindmap.ai.template_profile import read_template_profile
 from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiJobCreateModel,
     MindmapAiMessageModel,
@@ -229,13 +230,11 @@ async def _run_followup(
     current_parent: SimpleNamespace,
     artifact_parent: SimpleNamespace,
     requested_agent: str | None,
-    requested_intent: str | None = None,
     continuation_base: str = 'artifact',
     authoritative_source: tuple[dict, int, str, int | None, str | None] | None = None,
     locked_current_parent: SimpleNamespace | None = None,
     current_snapshot_source: dict | None = None,
-    requested_scope: dict | None = None,
-    requested_attachments: list[dict] | None = None,
+    request_overrides: dict | None = None,
     call_observer: dict | None = None,
 ) -> tuple[object, dict, AsyncMock]:
     selected_document = _document('artifact-a-result')
@@ -303,13 +302,8 @@ async def _run_followup(
         model_payload['artifactId'] = ARTIFACT_A_ID
     if requested_agent is not None:
         model_payload['agentKey'] = requested_agent
-    if requested_intent is not None:
-        model_payload['intent'] = requested_intent
     model_payload['continuationBase'] = continuation_base
-    if requested_scope is not None:
-        model_payload['scope'] = requested_scope
-    if requested_attachments is not None:
-        model_payload['attachments'] = requested_attachments
+    model_payload.update(request_overrides or {})
     if continuation_base == 'current_snapshot':
         model_payload['expectedParentStatus'] = current_parent.status
         model_payload['source'] = current_snapshot_source or {
@@ -461,7 +455,7 @@ async def test_followup_attachments_belong_only_to_explicit_current_turn(request
     }]})
     _result, created, _event = await _run_followup(
         current_parent=parent, artifact_parent=parent, requested_agent=None,
-        requested_attachments=requested_attachments,
+        request_overrides={'attachments': requested_attachments} if requested_attachments is not None else {},
     )
     request = json.loads(created['request_json'])
     assert request['attachments'] == (requested_attachments or [])
@@ -553,7 +547,7 @@ async def test_edit_artifact_can_start_discussion_without_reusing_result_contrac
         current_parent=parent,
         artifact_parent=parent,
         requested_agent=None,
-        requested_intent='discuss',
+        request_overrides={'intent': 'discuss'},
     )
 
     request = json.loads(created['request_json'])
@@ -587,7 +581,7 @@ async def test_discussion_can_switch_back_to_edit_using_frozen_source(requested_
         current_parent=parent,
         artifact_parent=parent,
         requested_agent=requested_agent,
-        requested_intent='expand',
+        request_overrides={'intent': 'expand'},
     )
 
     request = json.loads(created['request_json'])
@@ -685,7 +679,7 @@ async def test_current_document_followup_rejects_parent_status_race(requested_sc
             artifact_parent=parent,
             requested_agent=None,
             continuation_base='current_document',
-            requested_scope=requested_scope,
+            request_overrides={'scope': requested_scope} if requested_scope is not None else {},
             authoritative_source=(
                 _document('status-race-authoritative'),
                 10,
@@ -715,7 +709,7 @@ async def test_applied_cloud_result_can_switch_to_discussion_on_current_document
         current_parent=parent,
         artifact_parent=parent,
         requested_agent=None,
-        requested_intent='discuss',
+        request_overrides={'intent': 'discuss'},
         continuation_base='current_document',
         authoritative_source=(
             authoritative_document,
@@ -818,7 +812,7 @@ async def test_local_current_snapshot_can_switch_to_discussion_without_baseline(
         current_parent=parent,
         artifact_parent=parent,
         requested_agent=None,
-        requested_intent='discuss',
+        request_overrides={'intent': 'discuss'},
         continuation_base='current_snapshot',
         current_snapshot_source={
             'type': 'local_snapshot',
@@ -1035,7 +1029,7 @@ async def test_completed_cloud_turn_accepts_explicit_next_scope_in_same_session(
     ]
     _result, created, _events = await _run_followup(
         current_parent=parent, artifact_parent=parent, requested_agent=None,
-        continuation_base='current_document', requested_scope=scope,
+        continuation_base='current_document', request_overrides={'scope': scope},
         authoritative_source=(current_document, AUTHORITATIVE_REVISION, 'current-hash', MINDMAP_ID, 'current-epoch'),
     )
     request = json.loads(created['request_json'])
@@ -1064,7 +1058,7 @@ async def test_local_snapshot_scope_only_changes_with_explicit_top_level_authori
     scope = {'type': 'branch', 'rootUid': 'root-current'}
     _result, created, _events = await _run_followup(
         current_parent=parent, artifact_parent=parent, requested_agent=None,
-        continuation_base='current_snapshot', requested_scope=scope,
+        continuation_base='current_snapshot', request_overrides={'scope': scope},
         current_snapshot_source={
             'type': 'local_snapshot', 'documentId': 'local:followup-test',
             'revision': AUTHORITATIVE_REVISION, 'documentHash': 'mmf2:sha256:' + ('a' * 64),
@@ -1089,7 +1083,7 @@ async def test_unfinished_turn_rejects_scope_override_without_writing(parent_sta
     with pytest.raises(ServiceException) as error:
         await _run_followup(
             current_parent=parent, artifact_parent=parent, requested_agent=None,
-            continuation_base='current_document', requested_scope={'type': 'document'},
+            continuation_base='current_document', request_overrides={'scope': {'type': 'document'}},
             call_observer=observer,
         )
     assert error.value.data['errorCode'] in {'AI_FOLLOWUP_SCOPE_LOCKED', 'AI_FOLLOWUP_BASE_INVALID'}
@@ -1108,7 +1102,7 @@ async def test_current_scope_rejects_missing_node_before_followup_write() -> Non
         await _run_followup(
             current_parent=parent, artifact_parent=parent, requested_agent=None,
             continuation_base='current_document',
-            requested_scope={'type': 'branch', 'rootUid': 'removed-node'},
+            request_overrides={'scope': {'type': 'branch', 'rootUid': 'removed-node'}},
             authoritative_source=(_document('current'), AUTHORITATIVE_REVISION, 'current-hash', MINDMAP_ID, 'epoch'),
             call_observer=observer,
         )
@@ -1130,7 +1124,7 @@ async def test_scope_override_cannot_change_authorized_cloud_document_identity()
     with pytest.raises(ServiceException) as error:
         await _run_followup(
             current_parent=parent, artifact_parent=parent, requested_agent=None,
-            continuation_base='current_document', requested_scope={'type': 'document'},
+            continuation_base='current_document', request_overrides={'scope': {'type': 'document'}},
             call_observer=observer,
         )
     assert error.value.data == {'errorCode': 'AI_FOLLOWUP_BASE_INVALID'}
@@ -1229,3 +1223,31 @@ async def test_needs_input_answer_cannot_switch_intent() -> None:
             idempotency_key='needs-input-mode-switch',
         )
     assert error.value.message == '补充澄清信息时不能切换 AI 任务模式'
+
+
+@pytest.mark.asyncio
+async def test_followup_freezes_current_template_and_clears_previous_turn_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    attachment = {
+        'id': 'template', 'name': '模版', 'size': 10, 'mediaType': 'application/x-mindmap-template',
+        'text': '示例内容不约束新内容', 'purpose': 'template',
+        'templateSource': {'mindmapId': 9, 'contentRevision': 4},
+    }
+    getter = AsyncMock(return_value={
+        'id': 9, 'contentRevision': 4, 'layout': 'mindMap', 'theme': {'template': 'default', 'config': {}},
+        'nodeTree': {'data': {'uid': 'template-root', 'text': 'Old example', 'fillColor': '#123456'}, 'children': []},
+    })
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_template_service.MindmapAiTemplateService.get_template', getter)
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_template_service.load_ai_tag_catalog', AsyncMock(return_value=[]))
+    parent = _job(JOB_A_ID, turn_index=1, agent_key='codex', artifact_id=ARTIFACT_A_ID, marker='a')
+    _result, created, _event = await _run_followup(
+        current_parent=parent, artifact_parent=parent, requested_agent=None, request_overrides={'attachments': [attachment]},
+    )
+    frozen = json.loads(created['request_json'])
+    assert read_template_profile(frozen)['roles']['r']['style'] == {'fillColor': '#123456'}
+    assert frozen['attachments'] == [attachment]
+    parent.request_json = created['request_json']
+    _result, subsequent, _event = await _run_followup(
+        current_parent=parent, artifact_parent=parent, requested_agent=None, request_overrides={'attachments': []},
+    )
+    assert '_templateProfile' not in json.loads(subsequent['request_json'])
+    getter.assert_awaited_once()

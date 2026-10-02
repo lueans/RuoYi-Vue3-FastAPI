@@ -14,6 +14,7 @@ from module_mindmap.ai.message_context import (
     user_message_context,
 )
 from module_mindmap.entity.vo.mindmap_ai_vo import MindmapAiJobCreateModel
+from module_mindmap.service import mindmap_ai_service as service
 from module_mindmap.service.mindmap_ai_service import MindmapAiDao, MindmapAiService, _stable_create_fingerprint
 
 
@@ -101,7 +102,7 @@ def test_rich_text_labels_are_plain_bounded_and_stable_on_repeated_reads() -> No
     assert user_message_context(request)['contextNodes'] == expected
     assert user_message_context(frozen)['contextNodes'] == expected
     assert user_message_context(freeze_user_message_context(frozen))['contextNodes'] == expected
-    assert len(user_message_context(payload({'type': 'branch', 'rootUid': 'login'}, document=document('x' * 10_000)))['contextNodes'][0]['label']) == 512
+    assert user_message_context(payload({'type': 'branch', 'rootUid': 'login'}, document=document('x' * 10_000)))['contextNodes'][0]['label'] == 'x' * 512
 
 
 def test_server_receipt_cannot_be_injected_as_client_context_or_change_fingerprint() -> None:
@@ -117,8 +118,6 @@ def test_server_receipt_cannot_be_injected_as_client_context_or_change_fingerpri
 
 @pytest.mark.asyncio
 async def test_timeline_exposes_each_saved_context_and_attachment_metadata_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    from module_mindmap.service import mindmap_ai_service as service
-
     now = datetime.now()
     session = SimpleNamespace(id='session', title='会话', status='active', current_agent_key='codex',
         created_time=now, update_time=now, expires_time=now + timedelta(days=1))
@@ -141,7 +140,9 @@ async def test_timeline_exposes_each_saved_context_and_attachment_metadata_only(
     turns = timeline['turns']
     assert turns[0]['userMessage']['context']['contextNodes'] == [{'uid': 'login', 'label': '发送时的登录节点'}]
     assert turns[1]['userMessage']['context']['scopeType'] == 'selectedNodes'
-    assert len(turns[1]['userMessage']['context']['contextNodes']) == 2
+    assert turns[1]['userMessage']['context']['contextNodes'] == [
+        {'uid': 'sms', 'label': '短信验证码'}, {'uid': 'login', 'label': '发送时的登录节点'},
+    ]
     assert turns[2]['userMessage']['context'] is None
     assert turns[0]['userMessage']['attachments'] == [{
         'id': 'file', 'name': '需求.md', 'size': 3, 'mediaType': 'text/markdown',
@@ -201,6 +202,15 @@ def test_attachment_receipt_missing_legacy_text_never_trusts_claimed_parser_resu
     encoded = json.dumps(receipts, ensure_ascii=False)
     assert '附件正文' not in encoded and 'extra private body' not in encoded
     assert 'parsedAt' not in encoded and 'pages' not in encoded
+
+
+@pytest.mark.parametrize('text', ['模版正文', None])
+def test_template_receipt_keeps_purpose_without_disclosing_text(text: str | None) -> None:
+    receipt = user_message_attachments({'attachments': [attachment(purpose='template', text=text)]})
+    assert len(receipt) == 1
+    assert receipt[0]['purpose'] == 'template'
+    assert receipt[0]['parsing']['status'] == ('parsed' if text else 'unknown')
+    assert 'text' not in receipt[0]
 
 
 @pytest.mark.parametrize('payload', [None, [], {}, {'attachments': None}, {'attachments': {}}])

@@ -42,7 +42,7 @@ function harness({ executionMode = 'direct', status = 'completed_direct', propos
     impact: { changeSummaryVersion: 2, changeSummary: { added: 84 } },
   })
   const s = {
-    componentAlive: true, job: ref({ ...finalJob, status: 'running', progress: 30, updateTime: '2026-09-24T10:00:01Z' }),
+    authExpired: ref(false), componentAlive: true, job: ref({ ...finalJob, status: 'running', progress: 30, updateTime: '2026-09-24T10:00:01Z' }),
     proposal: ref(executionMode === 'direct' ? { ...receipt(), appliedRevision: 652, resultHash: 'first-batch' } : null),
     navigator: { onLine: true }, restoreGeneration: 1, restoringJob: ref(false), timelineLoadGeneration: 0,
     timelineController: null, timelineLoading: ref(false), timelineError: ref(''),
@@ -58,6 +58,7 @@ function harness({ executionMode = 'direct', status = 'completed_direct', propos
     buildMindmapAiTimelineEnvelopeKey, compareMindmapAiPreviewCoordinates,
     agentEventKeys: new Set(), agentEventEnvelopeKeys: new Set(), agentEvents: ref([]), jobEventSequences: new Map(),
     latestEventSequence: ref(3), latestPreviewVersion: ref(4), latestPreviewEpoch: ref(1),
+    draftFreshness: ref('unavailable'), draftFreshnessMessage: ref(''), draftDocument: ref(null),
     livePreviewEligible: ref(true), livePreviewActive: ref(true), livePreviewError: ref(''),
     upsertSessionTurn: noop, persistActiveJob: noop,
     syncCurrentJobCursor: jobId => { s.latestEventSequence.value = s.jobEventSequences.get(jobId) || 0 },
@@ -132,6 +133,30 @@ test('duplicate terminal sources share an in-flight hydration instead of abortin
   await tick()
   assert.equal(h.s.terminalHydrationState.value, 'ready')
   assert.equal(h.calls.filter(call => call === 'settle:job1').length, 1)
+})
+
+test('terminal failure clears running-only draft notices before hydration and ignores a late unavailable cache result', async () => {
+  const h = harness({ executionMode: 'proposal', status: 'failed' })
+  h.s.messageModeActive = ref(false)
+  const acceptDraftPreview = new Function('scope', `with(scope) { ${functionSource('acceptDraftPreview')} return acceptDraftPreview; }`)(h.s)
+  assert.equal(acceptDraftPreview({ available: false }), false)
+  assert.match(h.s.draftFreshnessMessage.value, /Agent 仍会继续运行/)
+  const oldDraft = { root: { data: { uid: 'draft', text: '已恢复的内容' }, children: [] } }
+  h.s.draftDocument.value = oldDraft
+  h.s.job.value = { ...h.finalJob, errorCode: 'AI_AGENT_UNAVAILABLE', proposalId: null, artifactId: null }
+  const read = deferred()
+  h.s.getMindmapAiJob = () => read.promise
+  const finalizing = h.finalizeTerminalJob('job1')
+  assert.equal(h.s.draftFreshnessMessage.value, '', 'clear before the authoritative request can finish')
+  h.s.draftFreshnessMessage.value = 'stale cache warning'
+  assert.equal(acceptDraftPreview({ available: false }), false)
+  assert.equal(h.s.draftFreshnessMessage.value, '')
+  assert.equal(h.s.draftDocument.value, oldDraft, 'notice cleanup must preserve the recovered document')
+  read.resolve({ data: h.s.job.value })
+  assert.equal(await finalizing, true)
+  assert.equal(h.s.draftFreshnessMessage.value, '')
+  assert.equal(h.s.job.value.errorCode, 'AI_AGENT_UNAVAILABLE')
+  assert.match(source, /v-if="draftFreshnessMessage && !isTerminalStatus\(job\?\.status\)"/)
 })
 
 for (const executionMode of ['direct', 'proposal']) {

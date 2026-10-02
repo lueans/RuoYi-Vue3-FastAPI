@@ -11,6 +11,7 @@ const nodes = babelParse(script, { sourceType: 'module' }).program.body
 // Supply the real production attachment state/helpers to focused SFC harnesses.
 // Empty attachments retain each older test's original non-attachment scenario.
 export function installComposerAttachmentHarness(scope) {
+  scope.authExpired ??= ref(false)
   scope.composerAttachments ??= ref([])
   scope.attachmentNotice ??= ref('')
   scope.attachmentReading ??= ref(false)

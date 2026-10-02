@@ -220,13 +220,62 @@ async def test_retry_idempotency_key_cannot_be_reused_for_other_overrides() -> N
     assert '幂等键已被用于不同' in error.value.message
 
 
+def _assert_fresh_retry_request(
+    created: dict, room_epoch: str, requested_attachments: list | None,
+    template_getter: AsyncMock, context_parent: str | None, latest_document: dict,
+) -> dict:
+    """Check the durable retry contract independently from execution-history assertions."""
+    assert created['id'] != FAILED_JOB_ID
+    assert created['session_id'] == SESSION_ID
+    assert created['turn_index'] == NEXT_TURN_INDEX
+    assert created['parent_job_id'] is None
+    assert created['retry_of_job_id'] == FAILED_JOB_ID
+    assert created['external_session_ref'] is None
+    assert created['agent_key'] == 'claude'
+    assert created['base_revision'] == LATEST_CLOUD_REVISION
+    assert created['base_hash'] == 'latest-hash'
+    assert created['base_room_epoch'] == room_epoch
+    request = json.loads(created['request_json'])
+    assert request['prompt'] == '换一个 Agent，覆盖边界场景'
+    assert request['_userMessageContext'] == {
+        'sourceMode': 'current', 'scopeType': 'document', 'contextNodes': [],
+    }
+    assert request['attachments'] == (requested_attachments or [])
+    if requested_attachments and requested_attachments[0].get('templateSource'):
+        assert request['_templateProfile']['roles']['r']['style'] == {'fillColor': '#123456'}
+        template_getter.assert_awaited_once()
+    else:
+        assert '_templateProfile' not in request
+        template_getter.assert_not_awaited()
+    assert '旧参考不继承' not in created['request_json']
+    assert request.get('contextParentJobId') == context_parent
+    assert request['parameters']['maxNodes'] == RETRY_MAX_NODES
+    assert request['parameters']['maxDepth'] == ORIGINAL_MAX_DEPTH
+    assert request['parameters']['density'] == 'detailed'
+    assert request['source']['document'] == latest_document
+    assert request['source']['baselineDocument'] == latest_document
+    assert request['source']['revision'] == LATEST_CLOUD_REVISION
+    assert 'modelId' not in request
+    return request
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('context_parent', [None, 'owned-content-ancestor'])
 @pytest.mark.parametrize('room_epoch', ['old-epoch', 'latest-epoch'])
 @pytest.mark.parametrize('requested_attachments', [None, [], [{
     'id': 'new', 'name': 'new.txt', 'size': 3, 'mediaType': 'text/plain', 'text': '新参考',
+}], [{
+    'id': 'template', 'name': '模版', 'size': 10, 'mediaType': 'application/x-mindmap-template',
+    'text': '示例内容不限制新内容', 'purpose': 'template',
+    'templateSource': {'mindmapId': 9, 'contentRevision': 4},
 }]])
-async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_session(context_parent: str | None, room_epoch: str, requested_attachments: list | None) -> None:
+async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_session(context_parent: str | None, room_epoch: str, requested_attachments: list | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    template_getter = AsyncMock(return_value={
+        'id': 9, 'contentRevision': 4, 'layout': 'mindMap', 'theme': {'template': 'default', 'config': {}},
+        'nodeTree': {'data': {'uid': 'template-root', 'text': 'Old example', 'fillColor': '#123456'}, 'children': []},
+    })
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_template_service.MindmapAiTemplateService.get_template', template_getter)
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_template_service.load_ai_tag_catalog', AsyncMock(return_value=[]))
     original = _failed_job()
     original.request_json = json.dumps({**json.loads(original.request_json), 'attachments': [{
         'id': 'old', 'name': 'old.txt', 'size': 3, 'mediaType': 'text/plain', 'text': '旧参考不继承',
@@ -335,31 +384,9 @@ async def test_retry_creates_fresh_turn_and_refetches_cloud_without_provider_ses
     prepared_request = prepare_source.await_args.args[1]
     assert prepared_request.source.type == 'cloud_document'
     created = add_job.await_args.args[1]
-    assert created['id'] != FAILED_JOB_ID
-    assert created['session_id'] == SESSION_ID
-    assert created['turn_index'] == NEXT_TURN_INDEX
-    assert created['parent_job_id'] is None
-    assert created['retry_of_job_id'] == FAILED_JOB_ID
-    assert created['external_session_ref'] is None
-    assert created['agent_key'] == 'claude'
-    assert created['base_revision'] == LATEST_CLOUD_REVISION
-    assert created['base_hash'] == 'latest-hash'
-    assert created['base_room_epoch'] == room_epoch
-    request = json.loads(created['request_json'])
-    assert request['prompt'] == '换一个 Agent，覆盖边界场景'
-    assert request['_userMessageContext'] == {
-        'sourceMode': 'current', 'scopeType': 'document', 'contextNodes': [],
-    }
-    assert request['attachments'] == (requested_attachments or [])
-    assert '旧参考不继承' not in created['request_json']
-    assert request.get('contextParentJobId') == context_parent
-    assert request['parameters']['maxNodes'] == RETRY_MAX_NODES
-    assert request['parameters']['maxDepth'] == ORIGINAL_MAX_DEPTH
-    assert request['parameters']['density'] == 'detailed'
-    assert request['source']['document'] == latest_document
-    assert request['source']['baselineDocument'] == latest_document
-    assert request['source']['revision'] == LATEST_CLOUD_REVISION
-    assert 'modelId' not in request
+    request = _assert_fresh_retry_request(
+        created, room_epoch, requested_attachments, template_getter, context_parent, latest_document,
+    )
     event_payload = json.loads(add_event.await_args.args[3])
     assert event_payload['retryOfJobId'] == FAILED_JOB_ID
     assert result.retry_of_job_id == FAILED_JOB_ID

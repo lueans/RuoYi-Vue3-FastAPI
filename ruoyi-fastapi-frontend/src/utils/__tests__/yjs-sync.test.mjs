@@ -6066,6 +6066,74 @@ test('持久化根节点残缺缓存会被隔离并由 HTTP 权威文档替换',
   staleSource.destroy()
 })
 
+for (const cacheKind of ['完整缓存', '残缺缓存', '仅元数据缓存', '损坏缓存']) {
+  test(`真实 Y.Doc 观察器在${cacheKind}初始化期间不会抢先发送无 lineage 的更新`, t => {
+    const document = createDocument()
+    const sourceDocument = structuredClone(document)
+    if (cacheKind === '残缺缓存') sourceDocument.root.children = []
+    const source = new YjsMindmapSync(1, createMindmap(sourceDocument), 5)
+    if (cacheKind === '仅元数据缓存') source.doc.getMap('meta').set('layout', document.layout)
+    else source.initFromMindmap(sourceDocument)
+    const sync = new YjsMindmapSync(1, createMindmap(document), 5)
+    t.after(() => {
+      source.destroy({ flushCheckpoint: false })
+      sync.destroy({ flushCheckpoint: false })
+    })
+    sync.serverCapabilities = new Set(['yjs-checkpoint-v1', 'yjs-source-cas-v1', 'yjs-lineage-v1'])
+    const sent = []
+    sync.wsClient.connect = () => {}
+    sync.wsClient.send = message => { sent.push(message); return true }
+    sync.start()
+    sync._beginSyncHandshake()
+    const state = cacheKind === '损坏缓存'
+      ? Buffer.from('invalid-yjs-state').toString('base64')
+      : sync._encodeUpdate(Y.encodeStateAsUpdate(source.doc))
+    sync._handleSyncInit(withStateDigests({
+      contentRevision: 5, states: [state], stateSources: ['persisted-source'],
+    }))
+
+    if (cacheKind === '完整缓存') {
+      assert.equal(sync.hasData(), true)
+      assert.equal(sync._getYjsLineageId(), source._getYjsLineageId())
+      assert.equal(sent.some(message => message.type === 'request_seed'), false)
+    } else {
+      assert.equal(sync.hasData(), false)
+      assert.equal(sent.some(message => message.type === 'request_seed'), true)
+      assert.deepEqual(sent.filter(message => ['update', 'checkpoint'].includes(message.type)), [],
+        '内部空文档迁移不能在 seed 租约授予前广播')
+      sync._handleSeedGranted({ contentRevision: 5 })
+      const firstWrite = sent.find(message => ['update', 'checkpoint'].includes(message.type))
+      assert.equal(firstWrite.type, 'update')
+      assert.equal(firstWrite.seedState, true)
+      assert.ok(firstWrite.lineageId)
+      const decodedSeed = new Y.Doc()
+      try {
+        Y.applyUpdate(decodedSeed, sync._decodeUpdate(firstWrite.state))
+        assert.equal(decodedSeed.getMap('nodes').size, 2)
+        assert.equal(decodedSeed.getMap('meta').get('lineageId'), firstWrite.lineageId)
+      } finally { decodedSeed.destroy() }
+    }
+    assert.equal(sync.connectionState.value, 'connected')
+    for (const message of sent.filter(message => ['update', 'checkpoint'].includes(message.type))) {
+      assert.equal(message.lineageId, sync._getYjsLineageId())
+    }
+
+    // The repair must not silence the first real edit after initialization.
+    sent.length = 0
+    const updatedChild = structuredClone(document.root.children[0])
+    updatedChild.data.text = '初始化后真实用户修改'
+    sync.onDataChangeDetail([{
+      action: 'update', oldData: document.root.children[0], data: updatedChild,
+    }], 'user-after-initialization')
+    const userUpdate = sent.find(message => message.type === 'update')
+    assert.ok(userUpdate)
+    assert.equal(userUpdate.clientMutationId, 'user-after-initialization')
+    assert.equal(userUpdate.mutationUpdateSeq, 1)
+    assert.equal(userUpdate.seedState, undefined)
+    assert.equal(userUpdate.lineageId, sync._getYjsLineageId())
+  })
+}
+
 test('已有 Yjs 状态的客户端会响应房间种子请求', () => {
   const mindMap = createMindmap(createDocument())
   const sync = new YjsMindmapSync(1, mindMap, 5)

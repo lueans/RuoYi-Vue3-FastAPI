@@ -17,6 +17,11 @@ from module_mindmap.ai.document import (
     normalize_ai_document,
     normalize_ai_editable_source_document,
 )
+from module_mindmap.ai.template_profile import (
+    TEMPLATE_NODE_FORMAT_FIELDS,
+    validate_template_document_format,
+    validate_template_node_format,
+)
 from module_mindmap.service.simple_mind_document_codec import clone_json_value
 
 PROPOSAL_INTEGRITY_ERROR_CODE = 'AI_PROPOSAL_INTEGRITY_INVALID'
@@ -125,6 +130,8 @@ def _require_set_unset_payload(
 def _replay_proposal_operations_in_place(  # noqa: PLR0912, PLR0915
     document: dict[str, Any],
     operations: list[dict[str, Any]],
+    *,
+    template_profile: dict[str, Any] | None = None,
 ) -> None:
     """共用冻结协议回放；调用者提供私有副本并校验各自的结果边界。
 
@@ -132,6 +139,10 @@ def _replay_proposal_operations_in_place(  # noqa: PLR0912, PLR0915
     富文本、view、扩展字段的编辑器原文。操作载荷始终复制后写入。
     """
     nodes, parents, root_uid = _index_tree(document['root'])
+    previous_document = clone_json_value(document) if template_profile else None
+    allowed_node_fields = PROPOSAL_NODE_DATA_FIELDS | (
+        TEMPLATE_NODE_FORMAT_FIELDS if template_profile else frozenset()
+    )
 
     for operation_index, raw_operation in enumerate(operations):
         label = f'Proposal operation[{operation_index}]'
@@ -168,8 +179,12 @@ def _replay_proposal_operations_in_place(  # noqa: PLR0912, PLR0915
                 raise _invalid('新增节点 data 无效')
             if data.get('uid') != uid:
                 raise _invalid('新增节点 nodeUid 与 data.uid 不一致')
-            if set(data) - (PROPOSAL_NODE_DATA_FIELDS | {'uid'}):
+            if set(data) - (allowed_node_fields | {'uid'}):
                 raise _invalid('新增节点 data 包含未知字段')
+            try:
+                validate_template_node_format(data, template_profile)
+            except MindmapArtifactError as exc:
+                raise _invalid(str(exc)) from exc
             new_node = {'data': clone_json_value(data), 'children': []}
             children.insert(index, new_node)
             nodes[uid] = new_node
@@ -187,13 +202,19 @@ def _replay_proposal_operations_in_place(  # noqa: PLR0912, PLR0915
             )
             if 'uid' in set_values or 'uid' in unset_values:
                 raise _invalid('更新节点不能修改 UID')
-            if (set(set_values) | set(unset_values)) - PROPOSAL_NODE_DATA_FIELDS:
+            if (set(set_values) | set(unset_values)) - allowed_node_fields:
                 raise _invalid('更新节点包含未知字段')
-            data = node['data']
+            previous_data = node['data']
+            data = clone_json_value(previous_data)
             for field, value in set_values.items():
                 data[field] = clone_json_value(value)
             for field in unset_values:
                 data.pop(field, None)
+            try:
+                validate_template_node_format(data, template_profile, previous_data=previous_data)
+            except MindmapArtifactError as exc:
+                raise _invalid(str(exc)) from exc
+            node['data'] = data
             continue
 
         if operation_type == 'move_node':
@@ -272,10 +293,21 @@ def _replay_proposal_operations_in_place(  # noqa: PLR0912, PLR0915
             label='文档元数据',
             allowed_fields=DOCUMENT_META_FIELDS,
         )
+        if template_profile:
+            for field in ('layout', 'theme'):
+                if field in unset_values or (
+                    field in set_values and set_values[field] != template_profile[field]
+                ):
+                    raise _invalid('文档格式与本轮可信模版不一致')
         for field, value in set_values.items():
             document[field] = clone_json_value(value)
         for field in unset_values:
             document.pop(field, None)
+
+    try:
+        validate_template_document_format(document, template_profile, previous_document=previous_document)
+    except MindmapArtifactError as exc:
+        raise _invalid(str(exc)) from exc
 
 
 def strict_replay_document_operations(
@@ -283,6 +315,7 @@ def strict_replay_document_operations(
     operations: list[dict[str, Any]],
     *,
     max_node_count: int = AI_MAX_NODE_COUNT,
+    template_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """在基线副本上原子重放冻结 Proposal 操作。
 
@@ -306,7 +339,7 @@ def strict_replay_document_operations(
         if exc.code == PROPOSAL_INTEGRITY_ERROR_CODE:
             raise
         raise _invalid(f'Proposal 基线文档无效: {exc}') from exc
-    _replay_proposal_operations_in_place(document, operations)
+    _replay_proposal_operations_in_place(document, operations, template_profile=template_profile)
 
     # 再次索引可捕获最终重复 UID/非法 children；规范化与精确比较阻止
     # 事件字段被静默删除、缺失元数据被静默补默认值等非规范结果。
@@ -332,6 +365,7 @@ def materialize_editor_document_from_proposal(
     operations: list[dict[str, Any]],
     artifact_document: dict[str, Any],
     max_node_count: int = AI_MAX_NODE_COUNT,
+    template_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把已验证的 Proposal 增量重放到编辑器原始文档上。
 
@@ -351,6 +385,7 @@ def materialize_editor_document_from_proposal(
         normalized_source,
         operations,
         max_node_count=max_node_count,
+        template_profile=template_profile,
     )
     if canonical_json_bytes(canonical_result) != canonical_json_bytes(
         artifact_document,
@@ -358,7 +393,7 @@ def materialize_editor_document_from_proposal(
         raise _invalid('Proposal 编辑器重放基线与 Artifact 不一致')
 
     editor_document = clone_json_value(source_document)
-    _replay_proposal_operations_in_place(editor_document, operations)
+    _replay_proposal_operations_in_place(editor_document, operations, template_profile=template_profile)
 
     normalized_editor_result, _summary = normalize_ai_editable_source_document(
         editor_document,
@@ -377,6 +412,7 @@ def normalize_proposal_operations_for_apply(  # noqa: PLR0912, PLR0915
     operations: list[dict[str, Any]],
     artifact_document: dict[str, Any],
     max_node_count: int = AI_MAX_NODE_COUNT,
+    template_profile: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """验证并把唯一可确定的 v0 Proposal 转为当前冻结协议。
 
@@ -420,6 +456,7 @@ def normalize_proposal_operations_for_apply(  # noqa: PLR0912, PLR0915
                 normalized_base,
                 current_operations,
                 max_node_count=max_node_count,
+                template_profile=template_profile,
             )
             if canonical_json_bytes(replayed) != canonical_json_bytes(normalized_artifact):
                 raise _invalid('Proposal operations 重放结果与 Artifact 不一致')
@@ -490,6 +527,7 @@ def normalize_proposal_operations_for_apply(  # noqa: PLR0912, PLR0915
             normalized_base,
             translated,
             max_node_count=max_node_count,
+            template_profile=template_profile,
         )
         if canonical_json_bytes(replayed_legacy) != canonical_json_bytes(
             normalized_artifact,
@@ -513,12 +551,14 @@ def verify_proposal_document_integrity(
     proposal_result_hash: str,
     manifest_document_hash: str,
     max_node_count: int = AI_MAX_NODE_COUNT,
+    template_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """绑定基线、规范操作序列、Artifact 正文和两个持久化哈希。"""
     replayed = strict_replay_document_operations(
         base_document,
         operations,
         max_node_count=max_node_count,
+        template_profile=template_profile,
     )
     try:
         normalized_base, _summary = normalize_ai_document(

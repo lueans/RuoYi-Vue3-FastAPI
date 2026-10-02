@@ -21,9 +21,12 @@
             v-for="(attachment, index) in visibleAttachments"
             :key="`${attachment.id || attachment.name}:${index}`"
             class="userMessageAttachment"
-            :title="`附件：${attachment.name}${attachment.sizeLabel ? ` · ${attachment.sizeLabel}` : ''}`"
+            :data-purpose="attachment.purpose"
+            :title="`${attachment.purpose === 'template' ? '模版' : '附件'}：${attachment.name}${attachment.sizeLabel ? ` · ${attachment.sizeLabel}` : ''}`"
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 12.5 12.4 20a4.5 4.5 0 0 1-6.4-6.4l7.9-7.9a3 3 0 0 1 4.3 4.3l-7.9 7.9a1.5 1.5 0 0 1-2.2-2.2l7.2-7.2" /></svg>
+            <svg v-if="attachment.purpose === 'template'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="3" /><path d="M4 9h16M10 9v12" /></svg>
+            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 12.5 12.4 20a4.5 4.5 0 0 1-6.4-6.4l7.9-7.9a3 3 0 0 1 4.3 4.3l-7.9 7.9a1.5 1.5 0 0 1-2.2-2.2l7.2-7.2" /></svg>
+            <span v-if="attachment.purpose === 'template'" class="userMessageTemplateLabel">模版</span>
             <span class="userMessageAttachmentName">{{ attachment.name }}</span>
             <span v-if="attachment.sizeLabel" class="userMessageAttachmentSize">{{ attachment.sizeLabel }}</span>
           </span>
@@ -95,7 +98,8 @@ const visibleAttachments = computed(() => (Array.isArray(props.attachments) ? pr
   .map(attachment => ({
     id: typeof attachment.id === 'string' ? attachment.id : '',
     name: attachment.name,
-    sizeLabel: formatAttachmentSize(attachment.size),
+    purpose: attachment.purpose === 'template' ? 'template' : 'reference',
+    sizeLabel: attachment.purpose === 'template' ? '' : formatAttachmentSize(attachment.size),
   })))
 const sentTime = computed(() => {
   const value = String(props.createdTime || '').trim()
@@ -212,6 +216,10 @@ onBeforeUnmount(resetCopyState)
 .userMessageContextLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .userMessageAttachment { background: var(--agent-surface, color-mix(in oklch, var(--agent-ink, oklch(0.205 0.006 285)) 6%, transparent)); }
 .userMessageAttachment svg { flex: none; width: 14px; height: 14px; color: var(--agent-muted, oklch(0.555 0.008 285)); }
+.userMessageAttachment[data-purpose='template'] { border-color: color-mix(in oklch, var(--agent-accent, oklch(0.60 0.20 288)) 28%, transparent); background: color-mix(in oklch, var(--agent-accent, oklch(0.60 0.20 288)) 8%, transparent); }
+.userMessageAttachment[data-purpose='template'] svg,
+.userMessageTemplateLabel { flex: none; color: var(--agent-accent, oklch(0.60 0.20 288)); }
+.userMessageTemplateLabel { font-size: 11px; }
 .userMessageAttachmentName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .userMessageAttachmentSize { flex: none; color: var(--agent-muted, oklch(0.555 0.008 285)); font-size: 11px; font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; }
 

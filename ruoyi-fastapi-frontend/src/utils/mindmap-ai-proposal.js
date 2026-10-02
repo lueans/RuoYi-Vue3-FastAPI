@@ -4,6 +4,10 @@ import {
   normalizeMindmapAiSourceSnapshot,
 } from './mindmap-ai-artifact.js'
 import { isRecord } from './mindmap-ai-shared.js'
+import {
+  MINDMAP_AI_TEMPLATE_FORMAT_FIELDS, assertMindmapAiTemplateProfile,
+  assertMindmapAiTemplateNodeFormat, assertMindmapAiTemplateDocumentFormat, assertMindmapAiTemplateDocumentMeta,
+} from './mindmap-ai-template-profile.js'
 
 const MAX_PROPOSAL_OPERATIONS = 10_000
 const MAX_UID_LENGTH = 128
@@ -111,7 +115,7 @@ function assertFieldChanges(payload, allowedFields, label) {
   }
 }
 
-function applyCreate(document, operation) {
+function applyCreate(document, operation, templateProfile) {
   assertUid(operation.nodeUid, '新增节点 UID')
   assertExactKeys(
     operation.payload,
@@ -133,22 +137,30 @@ function applyCreate(document, operation) {
     throw proposalError('新增节点 data.uid 与 nodeUid 不一致')
   }
   for (const field of Object.keys(operation.payload.data)) {
-    if (field !== 'uid' && !MUTABLE_NODE_FIELDS.has(field)) {
+    if (field !== 'uid' && !MUTABLE_NODE_FIELDS.has(field)
+      && !(templateProfile && MINDMAP_AI_TEMPLATE_FORMAT_FIELDS.includes(field))) {
       throw proposalError(`新增节点包含不允许的字段: ${field}`)
     }
   }
+  assertMindmapAiTemplateNodeFormat(operation.payload.data, {}, templateProfile)
   parent.children.splice(operation.payload.index, 0, {
     data: cloneJson(operation.payload.data, '新增节点数据'),
     children: [],
   })
 }
 
-function applyUpdate(document, operation) {
+function applyUpdate(document, operation, templateProfile) {
   const uid = assertUid(operation.nodeUid, '更新节点 UID')
   const { nodes } = indexDocument(document)
   const node = nodes.get(uid)
   if (!node) throw proposalError(`更新节点不存在: ${uid}`)
-  assertFieldChanges(operation.payload, MUTABLE_NODE_FIELDS, 'update_node.payload')
+  const allowedFields = templateProfile
+    ? new Set([...MUTABLE_NODE_FIELDS, ...MINDMAP_AI_TEMPLATE_FORMAT_FIELDS])
+    : MUTABLE_NODE_FIELDS
+  assertFieldChanges(operation.payload, allowedFields, 'update_node.payload')
+  const nextData = { ...node.data, ...operation.payload.set }
+  for (const field of operation.payload.unset) delete nextData[field]
+  assertMindmapAiTemplateNodeFormat(nextData, node.data, templateProfile)
   for (const [field, value] of Object.entries(operation.payload.set)) {
     node.data[field] = cloneJson(value, `节点字段 ${field}`)
   }
@@ -199,37 +211,40 @@ function applyDelete(document, operation) {
   detachNode(indexed, uid)
 }
 
-function applyDocumentMeta(document, operation) {
+function applyDocumentMeta(document, operation, templateProfile) {
   if (operation.nodeUid !== null) throw proposalError('set_document_meta.nodeUid 必须为 null')
   assertFieldChanges(operation.payload, DOCUMENT_META_FIELDS, 'set_document_meta.payload')
+  assertMindmapAiTemplateDocumentMeta(operation.payload, templateProfile)
   for (const [field, value] of Object.entries(operation.payload.set)) {
     document[field] = cloneJson(value, `文档字段 ${field}`)
   }
   for (const field of operation.payload.unset) delete document[field]
 }
 
-function applyOperation(document, operation) {
+function applyOperation(document, operation, templateProfile) {
   assertExactKeys(operation, new Set(['type', 'nodeUid', 'payload']), '提案操作')
   if (!OPERATION_TYPES.has(operation.type)) throw proposalError('提案包含未知操作类型')
-  if (operation.type === 'create_node') return applyCreate(document, operation)
-  if (operation.type === 'update_node') return applyUpdate(document, operation)
+  if (operation.type === 'create_node') return applyCreate(document, operation, templateProfile)
+  if (operation.type === 'update_node') return applyUpdate(document, operation, templateProfile)
   if (operation.type === 'move_node') return applyMove(document, operation)
   if (operation.type === 'delete_subtree') return applyDelete(document, operation)
-  return applyDocumentMeta(document, operation)
+  return applyDocumentMeta(document, operation, templateProfile)
 }
 
 /**
  * 在独立 JSON 克隆上严格、按序重放服务端提案。任何一步失败都只抛错，
  * 调用方传入的画布基线保持不变。
  */
-export function strictApplyMindmapAiProposal(baseDocument, operations) {
+export function strictApplyMindmapAiProposal(baseDocument, operations, { templateProfile = null } = {}) {
+  assertMindmapAiTemplateProfile(templateProfile)
   if (!Array.isArray(operations) || operations.length > MAX_PROPOSAL_OPERATIONS) {
     throw proposalError('提案操作列表无效或过大')
   }
   const candidate = cloneJson(baseDocument, '提案基线')
   indexDocument(candidate)
-  for (const operation of operations) applyOperation(candidate, operation)
+  for (const operation of operations) applyOperation(candidate, operation, templateProfile)
   indexDocument(candidate)
+  assertMindmapAiTemplateDocumentFormat(candidate, baseDocument, templateProfile)
   return candidate
 }
 
@@ -252,12 +267,13 @@ export async function verifyMindmapAiLocalProposal({
   resultHash,
   artifactDocument,
   artifactHash,
+  templateProfile = null,
 }) {
   const normalizedBase = normalizeMindmapAiSourceSnapshot(baseDocument)
   const actualBaseHash = await computeMindmapDocumentHash(normalizedBase)
   if (actualBaseHash !== baseHash) throw proposalError('提案基线哈希不匹配')
 
-  const shadow = strictApplyMindmapAiProposal(normalizedBase, operations)
+  const shadow = strictApplyMindmapAiProposal(normalizedBase, operations, { templateProfile })
   const normalizedShadow = normalizeMindmapAiSourceSnapshot(shadow)
   if (!mindmapAiDocumentsEqual(shadow, normalizedShadow)) {
     throw proposalError('提案操作重放结果不是规范脑图文档')
@@ -274,7 +290,7 @@ export async function verifyMindmapAiLocalProposal({
   // 安全门禁继续使用去 HTML 的规范投影；真正写回编辑器时，把同一组已
   // 验证 operations 重放到原始基线上，保留未修改节点的富文本字节、运行
   // 时字段和 view。重放结果重新投影后必须仍等于签名 Artifact。
-  const editorDocument = strictApplyMindmapAiProposal(baseDocument, operations)
+  const editorDocument = strictApplyMindmapAiProposal(baseDocument, operations, { templateProfile })
   const normalizedEditorDocument = normalizeMindmapAiSourceSnapshot(editorDocument)
   if (!mindmapAiDocumentsEqual(normalizedEditorDocument, shadow)) {
     throw proposalError('提案编辑器重放结果与 AI 文件内容不一致')

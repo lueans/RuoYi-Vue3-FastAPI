@@ -12,6 +12,7 @@ from module_mindmap.ai.adapters.base import AgentEventDeliveryError, AgentRunCon
 from module_mindmap.ai.adapters.native import NativeMindmapAdapter, NativeTodoItem
 from module_mindmap.ai.document import MindmapArtifactError
 from module_mindmap.ai.runtime_trace import RuntimeTrace
+from module_mindmap.ai.template_profile import build_template_profile
 from module_mindmap.ai.tool_contract import MindmapToolService
 
 EXPECTED_NODE_COUNT = 2
@@ -264,3 +265,47 @@ async def test_native_provider_cannot_continue_trace_after_swallowing_tool_deliv
     with pytest.raises(AgentEventDeliveryError):
         await NativeMindmapAdapter().run(context(), emit)
     assert not any(kind == 'assistant_delta' for kind, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_native_template_role_failure_guides_correction_without_misreporting_parent_uid(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = []
+    ctx = context()
+    profile = build_template_profile({
+        'id': 9, 'contentRevision': 1, 'layout': 'mindMap', 'theme': {'template': 'default', 'config': {}},
+        'nodeTree': {'data': {'uid': 'example-root', 'text': 'Example'}, 'children': [
+            {'data': {'uid': 'example-child', 'text': 'Example child', 'fillColor': '#123456', 'tag': [{'tagId': 7}]}, 'children': []},
+        ]},
+    })
+    ctx.template_profile = profile
+    ctx.tool_service = MindmapToolService(template_profile=profile, tag_catalog=[
+        {'tagId': 7, 'text': 'Allowed', 'style': {'color': '#123456'}, 'status': 0},
+        {'tagId': 8, 'text': 'Another role', 'style': {}, 'status': 0},
+    ])
+
+    async def scenario(tools: dict[str, Any]) -> AsyncIterator[Any]:
+        await tools['start_document']('Generated topic')
+        failed = json.loads(await tools['add_nodes']([{'parentUid': '@root', 'text': 'Child', 'templateRole': 'r'}]))
+        assert failed['ok'] is False
+        assert 'templateRole' in failed['message']
+        assert '省略 templateRole' in failed['message']
+        assert 'parentUid 无效' not in failed['message']
+        wrong_tag = json.loads(await tools['add_nodes']([{'parentUid': '@root', 'text': 'Child', 'tag': [{'tagId': 8}]}]))
+        assert wrong_tag['ok'] is False
+        assert '只引用该角色列出的 tagIds' in wrong_tag['message']
+        assert '省略 tag' in wrong_tag['message']
+        corrected = json.loads(await tools['add_nodes']([{'parentUid': '@root', 'text': 'Child'}]))
+        assert corrected['createdCount'] == 1
+        await tools['validate_draft']()
+        await tools['complete_artifact']()
+        yield RunCompletedEvent(content='完成')
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        events.append((kind, payload))
+
+    install_agent(monkeypatch, scenario)
+    result = await NativeMindmapAdapter().run(ctx, emit)
+    assert result.artifact['document']['root']['children'][0]['data']['fillColor'] == '#123456'
+    failures = [payload for kind, payload in events if kind == 'tool_failed']
+    assert [item['toolName'] for item in failures] == ['add_nodes', 'add_nodes']
+    assert all(item['retryable'] for item in failures)

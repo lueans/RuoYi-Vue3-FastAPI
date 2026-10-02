@@ -39,6 +39,10 @@ FULL_TAG = {
     'status': 0,
     'definitionRevision': 1,
 }
+CUSTOM_TAG_STYLE = {
+    'fill': '#ffe9d6', 'color': '#963e00', 'fontSize': 16, 'radius': 7,
+    'paddingX': 10, 'iconKey': 'priority_2', 'placement': 'top', 'align': 'right',
+}
 
 
 class _Rows:
@@ -194,6 +198,50 @@ async def test_gateway_tags_match_real_persistence_and_readback(
     expected = {'added': 0, 'updated': 0, 'moved': 0, 'deleted': 0, 'total': 1, summary_kind: 1}
     assert result['changeSummary'] == expected
     assert summarize_committed_node_changes([row.operations for row in state.logs]) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('operations', 'target'), [
+    ([_create({'tagId': 7})], 'new'),
+    ([_create(), _bind()], 'new'),
+    ([_set_tag(tag={'tagId': 7})], 'existing'),
+])
+async def test_minimal_tag_reference_restores_full_custom_style_after_persistence(
+    monkeypatch: pytest.MonkeyPatch, operations: list[dict], target: str,
+) -> None:
+    state = _TagPersistence(monkeypatch)
+    state.tag.style = deepcopy(CUSTOM_TAG_STYLE)
+    result = await state.run(operations)
+    document = await state.normalized_document()
+    expected_tag = {**FULL_TAG, 'style': CUSTOM_TAG_STYLE}
+    assert state.saved_documents
+    assert _find_node(document, target)['data']['tag'] == [expected_tag]
+    assert _find_node(result['_committedDocument'], target)['data']['tag'] == [expected_tag]
+    assert result['documentHash'] == compute_document_hash(document)
+
+
+@pytest.mark.asyncio
+async def test_minimal_tag_reference_keeps_local_position_and_custom_style_after_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _TagPersistence(monkeypatch, initial_tag=True)
+    state.tag.style = deepcopy(CUSTOM_TAG_STYLE)
+    state.encoded.node_tags[0].update(placement='bottom', align='left')
+    operation = _set_tag(tag={'tagId': 7})
+    # A text edit forces an actual persistence cycle while the identity-only
+    # reference retains this node's user-chosen position over definition defaults.
+    operation['payload']['set']['text'] = 'Updated'
+    result = await state.run([operation])
+    document = await state.normalized_document()
+    expected_tag = {
+        **FULL_TAG, 'style': CUSTOM_TAG_STYLE, 'placement': 'bottom', 'align': 'left',
+    }
+    assert state.saved_documents
+    assert _find_node(document, 'existing')['data']['tag'] == [expected_tag]
+    assert _find_node(result['_committedDocument'], 'existing')['data']['tag'] == [expected_tag]
+    assert state.encoded.node_tags[0]['placement'] == 'bottom'
+    assert state.encoded.node_tags[0]['align'] == 'left'
+    assert result['documentHash'] == compute_document_hash(document)
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,7 @@
-// Attachments are read locally. Only the extracted plain text is sent to the AI.
+// Reference files are read locally. Cloud templates also carry a source revision
+// so the server can authorize and freeze their formatting independently.
 export const MINDMAP_AI_ATTACHMENT_ACCEPT = '.txt,.md,.markdown,.json,.csv,.pdf,.docx'
+export const MINDMAP_AI_TEMPLATE_MEDIA_TYPE = 'application/x-mindmap-template'
 export const MAX_MINDMAP_AI_ATTACHMENTS = 5
 export const MAX_MINDMAP_AI_ATTACHMENT_BYTES = 10 * 1024 * 1024
 export const MAX_MINDMAP_AI_ATTACHMENT_CHARS = 50_000
@@ -59,8 +61,31 @@ export function validateMindmapAiAttachments(list) {
   if (!Array.isArray(list)) rejectAttachment('附件列表无效，请重新选择文件')
   if (list.length > MAX_MINDMAP_AI_ATTACHMENTS) rejectAttachment('每次最多添加 5 个附件')
   let characters = 0
+  let templates = 0
   for (const file of list) {
-    attachmentExtension(file)
+    if (file?.purpose !== undefined && !['reference', 'template'].includes(file.purpose)) {
+      rejectAttachment('附件用途无效，请重新选择文件')
+    }
+    if (file?.templateSource !== undefined) {
+      const source = file.templateSource
+      if (file.purpose !== 'template' || !source || typeof source !== 'object' || Array.isArray(source)
+        || Object.keys(source).some(key => !['mindmapId', 'contentRevision'].includes(key))
+        || !Number.isSafeInteger(source.mindmapId) || source.mindmapId <= 0
+        || !Number.isSafeInteger(source.contentRevision) || source.contentRevision < 0) {
+        rejectAttachment('模版来源或版本无效，请从模版文件夹重新选择')
+      }
+    }
+    if (file?.purpose === 'template') {
+      if (++templates > 1) rejectAttachment('每次只能添加 1 个模版')
+      if (file.mediaType !== MINDMAP_AI_TEMPLATE_MEDIA_TYPE) rejectAttachment('请从模版文件夹中选择脑图')
+      if (typeof file.name !== 'string' || !file.name.trim() || file.name.length > 255
+        || /[\u0000-\u001f\u007f]/u.test(file.name)) rejectAttachment('模版名称无效，请重新选择')
+      if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > MAX_MINDMAP_AI_ATTACHMENT_BYTES) {
+        rejectAttachment('模版内容大小无效或超过 10 MB，请简化脑图后重新选择')
+      }
+    } else {
+      attachmentExtension(file)
+    }
     validateText(file.text, file.name)
     characters += file.text.length
   }

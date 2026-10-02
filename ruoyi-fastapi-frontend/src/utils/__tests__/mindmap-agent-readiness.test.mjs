@@ -22,6 +22,7 @@ test('running composer placeholder follows the actual selected routing mode', ()
 })
 
 function compile(names, scope) {
+  scope.authExpired ??= ref(false)
   const selected = nodes.filter(node => names.includes(node.id?.name)
     || node.declarations?.some(declaration => names.includes(declaration.id?.name)))
   assert.equal(selected.length, names.length)

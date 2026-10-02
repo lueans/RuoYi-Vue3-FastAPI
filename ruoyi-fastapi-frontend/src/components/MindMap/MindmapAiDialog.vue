@@ -114,8 +114,12 @@
         </el-tooltip>
       </div>
     </header>
+    <el-alert v-if="authExpired" title="登录已过期，AI 同步已暂停" type="warning" :closable="false" show-icon role="status">
+      <p>未发送的文字和已选附件仍保留在当前页面。重新登录后可继续查看后台任务。</p>
+      <el-button text @click="requestRelogin">重新登录</el-button>
+    </el-alert>
     <el-alert
-      v-if="executionStopBlocked"
+      v-if="executionStopBlocked && !authExpired"
       :title="job?.executionState === 'running' ? '结果已停止更新，正在等待 Agent 退出' : '尚未确认 Agent 已退出'"
       type="warning"
       :closable="false"
@@ -439,7 +443,7 @@
               @click="retryLivePreviewSync"
             >重新同步画布</el-button>
           </div>
-          <div v-if="draftFreshnessMessage" class="draftFreshnessRecovery">
+          <div v-if="draftFreshnessMessage && !isTerminalStatus(job?.status)" class="draftFreshnessRecovery">
             <el-alert
               :title="draftFreshnessMessage"
               :type="['stale', 'restarted'].includes(draftFreshness) ? 'warning' : 'info'"
@@ -814,17 +818,23 @@
             </span>
             <span v-if="composerAttachments.length" class="composerChipGroup composerFileGroup" data-group="files" aria-label="本轮附件">
               <span v-for="attachment in composerAttachments" :key="attachment.id" class="composerFileChip"
-                :class="{ 'is-error': attachment.status === 'error' }" :title="attachment.error || `附件：${attachment.name}`">
-                <el-icon aria-hidden="true"><Paperclip /></el-icon>
+                :class="{ 'is-error': attachment.status === 'error', 'is-template': attachment.purpose === 'template' }"
+                :title="attachment.error || `${attachment.purpose === 'template' ? '模版' : '附件'}：${attachment.name}`">
+                <el-icon aria-hidden="true"><Document v-if="attachment.purpose === 'template'" /><Paperclip v-else /></el-icon>
+                <span v-if="attachment.purpose === 'template'" class="attachmentPurpose">模版</span>
                 <span class="contextLabel">{{ attachment.name }}</span>
-                <span class="attachmentSize">{{ attachment.status === 'reading' ? '读取中…' : attachment.status === 'error' ? '读取失败' : formatAttachmentSize(attachment.size) }}</span>
+                <span v-if="attachment.purpose !== 'template' || attachment.status !== 'ready'" class="attachmentSize">{{ attachment.status === 'reading' ? '读取中…' : attachment.status === 'error' ? '读取失败' : formatAttachmentSize(attachment.size) }}</span>
                 <button type="button" class="contextClear" :disabled="!composerEditable"
-                  :aria-label="`移除附件：${attachment.name}`" title="移除附件" @click="removeComposerAttachment(attachment.id)"><el-icon><Close /></el-icon></button>
+                  :aria-label="`移除${attachment.purpose === 'template' ? '模版' : '附件'}：${attachment.name}`"
+                  :title="attachment.purpose === 'template' ? '移除模版' : '移除附件'" @click="removeComposerAttachment(attachment.id)"><el-icon><Close /></el-icon></button>
               </span>
             </span>
             <MindmapAgentWritePolicy :label="composerWriteModeLabel" :description="composerPreflightText" :discussion="discussionMode" :dark="settingsStore.isDark" :active="visible" />
           </div>
           <p v-if="attachmentNotice" class="composerAttachmentNotice" role="status">{{ attachmentNotice }}</p>
+          <p v-if="composerTemplate?.status === 'ready'" class="composerTemplateHint" role="status">本轮仅参考模版的样式、节点关系和标签用法，内容按你的需求和参考资料生成，可充分扩展。</p>
+          <p v-if="composerTemplateReuseHint" class="composerTemplateHint" role="status">{{ composerTemplateReuseHint }}</p>
+          <p v-if="composerTemplateDepthHint" class="composerAttachmentNotice" role="status">{{ composerTemplateDepthHint }}</p>
           <MindmapAgentComposerIssue
             v-if="agentSelectionIssue && composerEnabled && !showAdvancedSettings"
             :description="agentSelectionIssue"
@@ -883,19 +893,25 @@
           </div>
           <div class="composerToolbar">
             <div class="composerTools">
-              <el-tooltip
-                content="添加附件 · PDF、Word、TXT、Markdown、JSON、CSV（最多 5 个，每个 10 MB）"
-                placement="top"
-                popper-class="mindmapAiTooltipPopper"
-              >
-                <el-button
-                  circle
-                  text
-                  aria-label="上传附件"
-                  :disabled="!composerEditable || composerAttachments.length >= 5 || attachmentReading"
-                  @click="selectAttachmentFiles"
-                ><svg class="composerAddIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></el-button>
-              </el-tooltip>
+              <MindmapAgentAddMenu
+                ref="composerAddMenuRef"
+                :active="visible"
+                :dark="settingsStore.isDark"
+                :disabled="!composerEditable || (attachmentReading && !templateSelecting)"
+                :attachment-disabled="composerAttachments.length >= 5 || templateSelecting"
+                :template-disabled="authExpired || composerAttachments.length >= 5 || Boolean(composerTemplate)"
+                :has-template="Boolean(composerTemplate)"
+                :templates="composerTemplates"
+                :template-loading="templateListLoading"
+                :template-error="templateListError"
+                :template-has-more="templateHasMore"
+                :template-selecting="templateSelecting"
+                @attachment="selectAttachmentFiles"
+                @template-open="searchComposerTemplates('')"
+                @template-search="searchComposerTemplates"
+                @template-more="loadMoreComposerTemplates"
+                @template-select="selectComposerTemplate"
+              />
               <el-tooltip content="回答精度与任务设置" placement="top" popper-class="mindmapAiTooltipPopper">
                 <el-button
                   circle
@@ -1070,7 +1086,7 @@
               v-model="form.layout"
               class="fullWidth"
               popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked || targetLayoutLocked"
+              :disabled="taskConfigurationLocked || targetLayoutLocked || templateLayoutLocked"
             >
               <el-option
                 v-for="item in aiLayoutOptions"
@@ -1079,8 +1095,10 @@
                 :value="item.value"
               />
             </el-select>
-            <div v-if="targetLayoutLocked" class="fieldHint">局部编辑只修改授权节点，保持当前脑图布局。</div>
+            <div v-if="templateLayoutLocked" class="fieldHint">整图生成使用模版布局；局部编辑保留当前脑图布局。</div>
+            <div v-else-if="targetLayoutLocked" class="fieldHint">局部编辑只修改授权节点，保持当前脑图布局。</div>
             <div v-else class="fieldHint">生成过程和最终结果都会使用所选布局。</div>
+            <div v-if="composerTemplateReuseHint" class="fieldHint" role="status">{{ composerTemplateReuseHint }}</div>
           </el-form-item>
           <el-form-item v-if="!discussionMode" label="内容规模">
             <div class="reasoningModes" role="group" aria-label="脑图内容规模">
@@ -1145,12 +1163,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { getTextFromHtml } from '@/libs/simple-mind-map/src/utils'
 import { MINDMAP_AI_ATTACHMENT_ACCEPT, readMindmapAiAttachment, validateMindmapAiAttachments } from '@/utils/mindmap-ai-attachments'
+import { createMindmapAiTemplateAttachment } from '@/utils/mindmap-ai-templates'
 import { buildMindmapAiAttachmentMetadata, formatAttachmentSize } from '@/utils/mindmap-ai-attachment-records'
 import MindmapAgentAttachmentRecords from './MindmapAgentAttachmentRecords.vue'
+import MindmapAgentAddMenu from './MindmapAgentAddMenu.vue'
 import {
   ArrowDown,
   Close,
   Cpu,
+  Document,
   MagicStick,
   Paperclip,
   Plus,
@@ -1164,6 +1185,8 @@ import {
 import { listModelAll } from '@/api/ai/model'
 import useSettingsStore from '@/store/modules/settings'
 import useUserStore from '@/store/modules/user'
+import { requestRelogin } from '@/utils/request'
+import { useMindmapAuthExpiry } from '@/utils/use-mindmap-auth-expiry'
 import {
   ackMindmapAiLocalApply,
   ackMindmapAiLocalUndo,
@@ -1177,7 +1200,9 @@ import {
   getMindmapAiJobDraft,
   getMindmapAiProposal,
   getMindmapAiSessionTimeline,
+  getMindmapAiTemplate,
   listMindmapAiSessions,
+  listMindmapAiTemplates,
   listMindmapAiAgents,
   listMindmapAiDevices,
   prepareMindmapAiLocalApply,
@@ -1301,6 +1326,7 @@ const route = useRoute()
 const router = useRouter()
 const settingsStore = useSettingsStore()
 const userStore = useUserStore()
+const authExpired = useMindmapAuthExpiry(() => userStore.token, pauseForAuthExpiry)
 const agentLayout = useMindmapAgentLayout()
 const { width: agentPanelWidth, bounds: agentPanelBounds } = agentLayout
 
@@ -1387,6 +1413,7 @@ const job = ref(null)
 const executionStop = useMindmapExecutionStop({
   job,
   ownerId: currentAiOwnerUserId,
+  enabled: () => !authExpired.value,
   loadJob: getMindmapAiJob,
   onUpdated: snapshot => {
     persistActiveJob()
@@ -1414,6 +1441,25 @@ const sourceBaselineMismatch = ref(false)
 const sourceFileInputRef = ref(null)
 const attachmentInputRef = ref(null)
 const composerAttachments = ref([])
+const composerTemplate = computed(() => composerAttachments.value.find(file => file.purpose === 'template'))
+const composerTemplateDepthHint = computed(() => {
+  const depth = composerTemplate.value?.templateDepth
+  const limit = Number(form.maxDepth)
+  if (composerTemplate.value?.status !== 'ready' || !Number.isSafeInteger(depth)
+    || !Number.isSafeInteger(limit) || limit < 1 || depth <= limit) return ''
+  return `模版最深${depth}层，当前上限${limit}层；可在任务设置提高层级，以使用深层关系和标签。`
+})
+const composerAddMenuRef = ref(null)
+const composerTemplates = ref([])
+const templateListLoading = ref(false)
+const templateListError = ref('')
+const templateSelecting = ref(false)
+const templateHasMore = ref(false)
+let templateKeyword = ''
+let templatePage = 0
+let templateListGeneration = 0
+let templateListController = null
+let templateSelectionController = null
 const attachmentNotice = ref('')
 const attachmentReading = ref(false)
 // File bodies stay in memory until sent, never in browser draft/recovery storage.
@@ -1605,7 +1651,7 @@ const form = reactive({
 })
 
 const { state: deviceCatalog, refresh: refreshDeviceCatalog } = useMindmapAgentDevices(
-  () => agentManagerVisible.value || (visible.value && (isDeviceAgent(form.agentKey) || isDeviceAgent(job.value?.agentKey))),
+  () => !authExpired.value && (agentManagerVisible.value || (visible.value && (isDeviceAgent(form.agentKey) || isDeviceAgent(job.value?.agentKey)))),
   () => userStore.id, listMindmapAiDevices,
 )
 const selectedDeviceIssue = computed(() => !isDeviceAgent(form.agentKey) ? '' : deviceExecutionIssue(
@@ -1648,7 +1694,7 @@ const mutationActionBusy = computed(() => Boolean(
   || deletingSession.value
   || sessionSwitching.value
 ))
-const actionBusy = computed(() => restoringJob.value || mutationActionBusy.value)
+const actionBusy = computed(() => authExpired.value || restoringJob.value || mutationActionBusy.value)
 const reasoningMode = computed(() => ({
   concise: 'quick',
   detailed: 'deep',
@@ -1758,6 +1804,7 @@ const composerEnabled = computed(() => Boolean(
 ))
 const composerDraftOnlyHint = computed(() => {
   if (!composerEditable.value) return ''
+  if (authExpired.value) return '登录已过期，暂不能发送。可继续编写草稿，已选附件仍保留在当前页面。'
   if (agentSwitchPending.value) return `${agentSwitchPhase.value || '正在切换 Agent'}。可继续写草稿，切换完成后再发送；不会自动发送。`
   if (executionStopBlocked.value) return '旧 Agent 尚未确认停止。可继续写草稿，确认停止后再发送；不会自动发送。'
   if (!composerEnabled.value) return '当前暂不能发送，但可以继续编写或清除草稿。待操作完成、脑图同步或处理结果后，再确认发送。'
@@ -2269,6 +2316,18 @@ const maxDepthCap = computed(() => Number(selectedAgent.value?.maxDepth || 32))
 const targetLayoutLocked = computed(() => (
   form.sourceMode === 'current' && form.scopeType !== 'document'
 ))
+const currentJobTemplate = computed(() => sessionTurns.value
+  .find(turn => String(turn?.job?.id || '') === String(job.value?.id || ''))
+  ?.userMessage?.attachments?.find(attachment => attachment.purpose === 'template'))
+// A running job uses its frozen inputs. Retry/follow-up requests use only the
+// current composer, so historical attachments cannot promise future formatting.
+const templateLayoutLocked = computed(() => Boolean(composerTemplate.value)
+  || (running.value && Boolean(currentJobTemplate.value)))
+const composerTemplateReuseHint = computed(() => (
+  !composerTemplate.value && currentJobTemplate.value && (retryAvailable.value || followupAvailable.value)
+    ? '模版仅用于发送它的那一轮；本轮如需继续使用，请重新添加模版。'
+    : ''
+))
 const availableModels = computed(() => {
   const allowlist = Array.isArray(selectedAgent.value?.modelAllowlist)
     ? selectedAgent.value.modelAllowlist.map(String)
@@ -2442,6 +2501,7 @@ const canvasSyncStatus = computed(() => {
 // Current task facts always take precedence over the next turn's settings.
 // This is presentation only; readiness, send and exit gates remain unchanged.
 const panelStatus = computed(() => {
+  if (authExpired.value) return { label: '登录已过期', tone: 'warning', description: 'AI 同步已暂停，未发送内容仍保留' }
   if (restoringJob.value) return { label: '恢复中', tone: 'connecting', description: '正在读取已有任务与会话，尚未确认当前状态。' }
   if (submitting.value) return { label: '准备中', tone: 'connecting', description: submissionStageTitle.value }
   if (job.value) {
@@ -2712,11 +2772,11 @@ function clearDurableAttempt(type, key = '') {
 function replayableRequestPayload(attempt) {
   if (!attempt?.attachmentsOmitted) return attempt?.requestPayload
   const inMemory = privateAttachmentRequests.get(attempt.key)
-  if (inMemory) return inMemory
+  if (inMemory) return cloneRuntimeValue(inMemory)
   const restored = (attempt.attachmentIds || []).map(id => composerAttachments.value.find(file => file.id === id && file.status === 'ready'))
   if (!restored.length || restored.some(file => !file)) return null
   return { ...attempt.requestPayload,
-    attachments: restored.map(({ id, name, size, mediaType, text }) => ({ id, name, size, mediaType, text })) }
+    attachments: restored.map(({ id, name, size, mediaType, text, purpose, templateSource }) => ({ id, name, size, mediaType, text, ...(purpose === 'template' ? { purpose, ...(templateSource ? { templateSource: { ...templateSource } } : {}) } : {}) })) }
 }
 
 function restoreDurableAttemptNotice() {
@@ -3487,6 +3547,40 @@ function clearAgentRuntimeState() {
   clearLivePreviewAnnouncement()
 }
 
+function pauseForAuthExpiry() {
+  // Freeze network and playback ownership without resetting the conversation:
+  // composer text, attachments, job identity and durable mutation receipts stay.
+  composerDraftPersistence.update(composerText.value)
+  invalidateActionIdentity()
+  invalidateRestoreOperations({ clearError: false })
+  invalidateSessionList()
+  stopPolling()
+  stopRealtime('auth-expired')
+  terminalFinalizationState?.controller?.abort()
+  terminalFinalizationState = null
+  terminalHydrationGeneration += 1
+  clearTimeout(terminalHydrationRetryTimer)
+  terminalHydrationRetryTimer = null
+  clearLocalAckRetryTimer()
+  if (templateSelecting.value) attachmentReading.value = false
+  cancelTemplateRequests()
+  livePreviewPaused.value = true
+  livePreviewGeneration += 1
+  clearTimeout(livePreviewFlushTimer)
+  livePreviewFlushTimer = null
+  clearTimeout(livePreviewAutoAcceptTimer)
+  livePreviewAutoAcceptTimer = null
+  clearLivePreviewAnnouncement()
+  clearInterval(generationClockTimer)
+  generationClockTimer = null
+  loadingAgents.value = false
+  sessionMenuVisible.value = false
+  showAdvancedSettings.value = false
+  agentManagerVisible.value = false
+  agentSwitchGeneration += 1
+  agentSwitchPending.value = false
+}
+
 function stopRealtime(state = 'idle') {
   realtimeGeneration += 1
   clearTimeout(realtimeReconnectTimer)
@@ -3661,6 +3755,7 @@ function livePreviewFrameDelay(frame = livePreviewPendingFrame) {
 }
 
 function scheduleLivePreviewFlush(delay = livePreviewFrameDelay()) {
+  if (authExpired.value) return
   if (livePreviewFlushTimer || livePreviewFlushInFlight) return
   livePreviewFlushTimer = setTimeout(() => {
     livePreviewFlushTimer = null
@@ -3966,6 +4061,7 @@ function scheduleDefaultLivePreviewAcceptance(jobId) {
 }
 
 async function acceptCompletedLivePreviewByDefault(jobId = job.value?.id, { retry = false } = {}) {
+  if (authExpired.value) return false
   const normalizedJobId = String(jobId || '')
   if (livePreviewAutoAcceptPromise) return livePreviewAutoAcceptPromise
   if (
@@ -4216,6 +4312,12 @@ function acceptDraftPreview(preview, { realtimeFrame = false } = {}) {
     return false
   }
   if (preview?.available !== true) {
+    // A late cache response must not promise further generation after a
+    // terminal job has already stopped or failed.
+    if (isTerminalStatus(job.value?.status)) {
+      draftFreshnessMessage.value = ''
+      return false
+    }
     if (draftFreshness.value === 'restarted') return false
     const hasVisibleDraft = Boolean(draftDocument.value?.root)
     draftFreshness.value = hasVisibleDraft ? 'stale' : 'unavailable'
@@ -4752,6 +4854,98 @@ function selectAttachmentFiles() {
   if (composerEditable.value && composerAttachments.value.length < 5 && !attachmentReading.value) attachmentInputRef.value?.click()
 }
 
+function cancelTemplateRequests() {
+  templateListGeneration += 1
+  templateListController?.abort()
+  templateListController = null
+  templateSelectionController?.abort()
+  templateSelectionController = null
+  composerTemplates.value = []
+  templateListLoading.value = false
+  templateListError.value = ''
+  templateHasMore.value = false
+  templateSelecting.value = false
+  templateKeyword = ''
+  templatePage = 0
+  composerAddMenuRef.value?.close()
+}
+
+function searchComposerTemplates(keyword = '') {
+  templateKeyword = String(keyword || '').trim().slice(0, 100)
+  templatePage = 0
+  composerTemplates.value = []
+  templateHasMore.value = false
+  return loadComposerTemplates()
+}
+
+function loadMoreComposerTemplates() {
+  if (templateListLoading.value || !templateHasMore.value) return
+  return loadComposerTemplates(true)
+}
+
+async function loadComposerTemplates(append = false) {
+  if (authExpired.value) return
+  const generation = ++templateListGeneration
+  templateListController?.abort()
+  const controller = new AbortController()
+  templateListController = controller
+  const pageNum = append ? templatePage + 1 : 1
+  templateListLoading.value = true
+  templateListError.value = ''
+  try {
+    const response = await listMindmapAiTemplates({ keyword: templateKeyword, pageNum, pageSize: 20 }, { signal: controller.signal })
+    if (generation !== templateListGeneration || controller.signal.aborted) return
+    const rows = Array.isArray(response.rows) ? response.rows : []
+    const current = append ? composerTemplates.value : []
+    const seen = new Set(current.map(item => String(item.id)))
+    composerTemplates.value = [...current, ...rows.filter(item => {
+      if (!item?.id || seen.has(String(item.id))) return false
+      seen.add(String(item.id))
+      return true
+    })]
+    templatePage = pageNum
+    templateHasMore.value = rows.length > 0 && (response.hasNext === true || pageNum * 20 < Number(response.total || 0))
+  } catch (error) {
+    if (generation !== templateListGeneration || controller.signal.aborted) return
+    templateListError.value = formatMindmapAiError(error, '模版列表加载失败，请重试')
+  } finally {
+    if (generation === templateListGeneration) {
+      templateListLoading.value = false
+      templateListController = null
+    }
+  }
+}
+
+async function selectComposerTemplate(item) {
+  if (authExpired.value) return
+  if (!item?.id || !composerEditable.value || attachmentReading.value || composerTemplate.value || composerAttachments.value.length >= 5) return
+  const generation = attachmentReadGeneration
+  const controller = new AbortController()
+  templateSelectionController = controller
+  templateSelecting.value = true
+  attachmentReading.value = true
+  templateListError.value = ''
+  attachmentNotice.value = ''
+  try {
+    const response = await getMindmapAiTemplate(item.id, { signal: controller.signal })
+    if (generation !== attachmentReadGeneration || controller.signal.aborted) return
+    const attachment = await createMindmapAiTemplateAttachment(response.data)
+    if (generation !== attachmentReadGeneration || controller.signal.aborted) return
+    validateMindmapAiAttachments([...composerAttachments.value.filter(file => file.status === 'ready'), attachment])
+    composerAttachments.value.push({ ...attachment, draftRevision: createMindmapAiIdempotencyKey('template-read'), status: 'ready' })
+    composerAddMenuRef.value?.close()
+  } catch (error) {
+    if (generation !== attachmentReadGeneration || controller.signal.aborted) return
+    templateListError.value = formatMindmapAiError(error, '模版读取失败，请重新选择')
+  } finally {
+    if (generation === attachmentReadGeneration && templateSelectionController === controller) {
+      templateSelecting.value = false
+      attachmentReading.value = false
+      templateSelectionController = null
+    }
+  }
+}
+
 function removeComposerAttachment(id) {
   if (!composerEditable.value) return
   composerAttachments.value = composerAttachments.value.filter(file => file.id !== id)
@@ -4800,8 +4994,8 @@ async function onAttachmentFilesChange(event) {
 
 function captureComposerAttachments() {
   if (attachmentReading.value || composerAttachments.value.some(file => file.status !== 'ready')) throw new Error('请等待附件读取完成，或移除读取失败的附件。')
-  const attachments = composerAttachments.value.map(({ id, name, size, mediaType, text, draftRevision }) => {
-    const payload = { id, name, size, mediaType, text }
+  const attachments = composerAttachments.value.map(({ id, name, size, mediaType, text, purpose, templateSource, draftRevision }) => {
+    const payload = { id, name, size, mediaType, text, ...(purpose === 'template' ? { purpose, ...(templateSource ? { templateSource: { ...templateSource } } : {}) } : {}) }
     // Local receipt only: JSON requests include the server contract, not this
     // revision. Re-adding identical content while sending creates a new draft.
     Object.defineProperty(payload, 'draftRevision', { value: draftRevision })
@@ -4824,7 +5018,10 @@ function clearComposerAttachments() {
 }
 
 watch(() => [currentAiOwnerUserId(), route.query?.id, job.value?.sessionId || ''], (next, previous) => {
-  if (previous && next.some((value, index) => value !== previous[index])) clearComposerAttachments()
+  if (previous && next.some((value, index) => value !== previous[index])) {
+    clearComposerAttachments()
+    cancelTemplateRequests()
+  }
   if (previous && next[0] !== previous[0]) privateAttachmentRequests.clear()
 })
 
@@ -5239,6 +5436,7 @@ function invalidateSessionList() {
 }
 
 async function loadRecentSessions() {
+  if (authExpired.value) return
   if (!visible.value || sessionListLoading.value) return false
   const generation = ++sessionListGeneration
   sessionListController?.abort()
@@ -5764,6 +5962,7 @@ function startRevisionFromRejected() {
 }
 
 async function loadCapabilities({ recoveryGeneration = restoreGeneration } = {}) {
+  if (authExpired.value) return false
   modelRecovery.invalidate()
   loadingAgents.value = true
   agentError.value = ''
@@ -5789,6 +5988,7 @@ async function loadCapabilities({ recoveryGeneration = restoreGeneration } = {})
 }
 
 async function showDialog(preset = {}) {
+  if (authExpired.value) { visible.value = true; return true }
   bus.emit('hide_search')
   if (['outline', 'shortcutKey'].includes(store.activeSidebar)) {
     actions.setActiveSidebar(null)
@@ -5895,6 +6095,7 @@ function readAutoRecoveryPointer() {
 }
 
 async function restoreActiveJobWhenEditorReady() {
+  if (authExpired.value) return
   if (!componentAlive || visible.value || restoringJob.value || livePreviewCanvasMutationBlocked.value) return false
   if (getRequestedAiJobId()) return restoreRequestedAiJob()
   const storedJob = readAutoRecoveryPointer()
@@ -6045,6 +6246,7 @@ function effectiveRequestLayout(source) {
 }
 
 function schedulePoll(delay = 900, force = false) {
+  if (authExpired.value) return
   if (!componentAlive || !job.value?.id || job.value.id === monitoringSuspendedJobId) return
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     realtimeConnectionState.value = 'offline'
@@ -6163,6 +6365,7 @@ async function activateQueuedFollowupTurn(parentJobId) {
 }
 
 async function refreshDraftPreview(jobId) {
+  if (authExpired.value) return false
   if (!componentAlive || !jobId || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return false
   if (isMindmapAiMessageJob(job.value)) return false
   if (selectedTurnJobId.value && selectedTurnJobId.value !== String(jobId)) return false
@@ -6171,10 +6374,10 @@ async function refreshDraftPreview(jobId) {
   draftController = controller
   try {
     const response = await getMindmapAiJobDraft(jobId, { signal: controller.signal })
-    if (!componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return false
+    if (authExpired.value || controller.signal.aborted || !componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return false
     return acceptDraftPreview(response.data)
   } catch (error) {
-    if (!isAbortError(error) && job.value?.id === jobId && jobId !== monitoringSuspendedJobId) {
+    if (!authExpired.value && !isAbortError(error) && job.value?.id === jobId && jobId !== monitoringSuspendedJobId) {
       realtimeError.value = formatMindmapAiError(error, '实时脑图草稿暂时不可用')
     }
     return false
@@ -6348,6 +6551,7 @@ async function restoreTerminalPreview(jobId, {
 }
 
 function scheduleTerminalHydrationRetry(jobId) {
+  if (authExpired.value) return
   clearTimeout(terminalHydrationRetryTimer)
   terminalHydrationRetryTimer = null
   if (
@@ -6367,7 +6571,7 @@ function scheduleTerminalHydrationRetry(jobId) {
 async function hydrateTerminalResources(jobId, {
   recoveryGeneration = restoreGeneration,
 } = {}) {
-  if (!jobId || job.value?.id !== jobId) return false
+  if (authExpired.value || !jobId || job.value?.id !== jobId) return false
   const hydrationGeneration = ++terminalHydrationGeneration
   const isCurrent = () => componentAlive && recoveryGeneration === restoreGeneration
     && hydrationGeneration === terminalHydrationGeneration && job.value?.id === jobId
@@ -6453,6 +6657,7 @@ function finalizeTerminalJob(jobId = job.value?.id, {
 } = {}) {
   if (!componentAlive || !jobId || job.value?.id !== jobId
     || recoveryGeneration !== restoreGeneration || !isTerminalStatus(job.value.status)) return Promise.resolve(false)
+  draftFreshnessMessage.value = ''
   let state = terminalFinalizationState
   if (!state || state.jobId !== jobId || state.generation !== recoveryGeneration) {
     state?.controller?.abort()
@@ -6535,6 +6740,7 @@ function retryTerminalHydration() {
 }
 
 async function pollJob({ jobId = job.value?.id, force = false } = {}) {
+  if (authExpired.value) return
   if (!componentAlive || !jobId || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     realtimeConnectionState.value = 'offline'
@@ -6546,7 +6752,7 @@ async function pollJob({ jobId = job.value?.id, force = false } = {}) {
   pollController = controller
   try {
     const response = await getMindmapAiJob(jobId, { signal: controller.signal })
-    if (!componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return
+    if (authExpired.value || controller.signal.aborted || !componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return
     job.value = mergeMindmapAiJobSnapshot(job.value, response.data)
     // 权威轮询成功说明任务连接已经恢复。先清除旧 SSE 警告；若随后草稿
     // 拉取仍失败，refreshDraftPreview 会写入更准确的草稿错误。
@@ -6570,7 +6776,7 @@ async function pollJob({ jobId = job.value?.id, force = false } = {}) {
     const delay = realtimeConnectionState.value === 'connected' ? 6000 : 1500
     schedulePoll(delay)
   } catch (error) {
-    if (!isAbortError(error) && job.value?.id === jobId && jobId !== monitoringSuspendedJobId) {
+    if (!authExpired.value && !isAbortError(error) && job.value?.id === jobId && jobId !== monitoringSuspendedJobId) {
       if (isTerminalStatus(job.value.status) || force) {
         terminalHydrationState.value = 'error'
         terminalHydrationError.value = formatMindmapAiError(
@@ -6591,6 +6797,7 @@ async function pollJob({ jobId = job.value?.id, force = false } = {}) {
 }
 
 function scheduleRealtimeReconnect(jobId) {
+  if (authExpired.value) return
   if (!componentAlive || job.value?.id !== jobId || isTerminalStatus(job.value?.status)) return
   clearTimeout(realtimeReconnectTimer)
   realtimeReconnectAttempt += 1
@@ -6608,6 +6815,7 @@ function scheduleRealtimeReconnect(jobId) {
 }
 
 function connectRealtime(jobId) {
+  if (authExpired.value) return
   if (!componentAlive || !jobId || job.value?.id !== jobId || isTerminalStatus(job.value.status)) return
   if (!navigator.onLine) {
     realtimeConnectionState.value = 'offline'
@@ -6704,6 +6912,7 @@ function connectRealtime(jobId) {
 }
 
 function beginJobMonitoring({ resetCursor = false } = {}) {
+  if (authExpired.value) return
   const jobId = job.value?.id
   if (!jobId || isTerminalStatus(job.value.status)) return
   stopPolling()
@@ -8047,6 +8256,7 @@ function updateCloudMutationRecoveryNotice(failures = []) {
 }
 
 function flushPendingCloudMutationIntents({ allowDuringLivePreview = false } = {}) {
+  if (authExpired.value) return Promise.resolve({ settled: [], failures: [], deferred: true })
   const ownerUserId = currentAiOwnerUserId()
   if (!ownerUserId) {
     updateCloudMutationRecoveryNotice()
@@ -8200,6 +8410,7 @@ function clearLocalAckRetryTimer() {
 }
 
 function scheduleLocalAckRetry() {
+  if (authExpired.value) return
   clearLocalAckRetryTimer()
   if (!componentAlive || (typeof navigator !== 'undefined' && !navigator.onLine)) return
   const pending = listMindmapAiLocalAcks(currentAiOwnerUserId())
@@ -8216,6 +8427,7 @@ function scheduleLocalAckRetry() {
 }
 
 async function flushLocalApplyAcks() {
+  if (authExpired.value) return { sent: 0, pending: 0, discarded: 0 }
   clearLocalAckRetryTimer()
   const ownerUserId = currentAiOwnerUserId()
   if (!ownerUserId) return { sent: 0, pending: 0, discarded: 0 }
@@ -8384,6 +8596,7 @@ async function applyLocalProposal({
     resultHash: prepared.resultHash,
     artifactDocument: document,
     artifactHash: documentHash,
+    templateProfile: prepared.templateProfile,
   })
   assertActionIdentity(actionIdentity)
   const applied = await emitEditorRequest('setData', verified.document, {
@@ -8848,6 +9061,7 @@ async function undoProposal() {
 }
 
 async function cancelJob({ previewAlreadyReverted = false, initiatedByReject = false } = {}) {
+  if (authExpired.value) return false
   const jobId = job.value?.id
   if (!jobId || (actionBusy.value && !initiatedByReject)) return false
   const preserveDraft = Boolean(!previewAlreadyReverted && livePreviewActive.value)
@@ -9019,7 +9233,7 @@ watch(activityTimelineRef, element => {
 watch(() => job.value?.sessionId, () => { chatFollowing.value = true })
 onBeforeUnmount(() => chatResizeObserver?.disconnect())
 
-watch(() => running.value || submitting.value, (active) => {
+watch(() => !authExpired.value && (running.value || submitting.value), (active) => {
   if (!active) {
     clearInterval(generationClockTimer)
     generationClockTimer = null
@@ -9096,6 +9310,7 @@ watch(() => store.activeSidebar, sidebarName => {
 })
 
 async function onNetworkOnline() {
+  if (authExpired.value) return
   if (uncertainCanvasCreation.value) await reconcilePendingCanvasCreation()
   await flushPendingCloudMutationIntents()
   await flushLocalApplyAcks()
@@ -9162,6 +9377,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   componentAlive = false
   clearComposerAttachments()
+  cancelTemplateRequests()
   privateAttachmentRequests.clear()
   clearLivePreviewAnnouncement()
   // Route exit leaves the durable server job running; it is not completion or

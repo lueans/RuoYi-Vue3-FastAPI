@@ -126,6 +126,19 @@ def test_unknown_adapter_exception_is_availability_failure_without_raw_details()
     assert private_detail not in str(error)
 
 
+@pytest.mark.parametrize('provider_message', [
+    '<400> InternalError.Algo.InvalidParameter: Temperature should be in [0.0, 2.0)',
+    'Error code: 400 invalid_parameter_error: temperature must be between 0 and 1',
+])
+def test_provider_temperature_rejection_is_sanitized_model_configuration_error(provider_message: str) -> None:
+    error = map_adapter_exception(RuntimeError(provider_message + ' credential=private-value'))
+    assert error.code == 'AI_MODEL_CONFIG_INVALID'
+    assert 'temperature' in str(error)
+    assert '调整' in str(error)
+    assert 'private-value' not in str(error)
+    assert provider_message not in str(error)
+
+
 def test_explicit_artifact_violation_keeps_output_invalid_classification() -> None:
     violation = MindmapArtifactError('结构校验失败', code='AI_OUTPUT_INVALID')
 
@@ -1283,7 +1296,7 @@ async def test_native_mindmap_agent_uses_only_domain_tools_and_collects_usage(
         'request_clarification',
     }
     start_document_schema = tool_by_name['start_document'].to_dict()
-    assert set(start_document_schema['parameters']['properties']) == {'title'}
+    assert set(start_document_schema['parameters']['properties']) == {'title', 'templateRole'}
     assert start_document_schema['parameters']['required'] == ['title']
     expected_layouts = [
         'mindMap', 'logicalStructure', 'organizationStructure', 'catalogOrganization',
@@ -1305,7 +1318,7 @@ async def test_native_mindmap_agent_uses_only_domain_tools_and_collects_usage(
         .to_dict()['parameters']['properties']['updates']['items']
     )
     patch_properties = update_item_schema['properties']['patch']['properties']
-    assert set(patch_properties) == {'text', 'note', 'hyperlink', 'tag'}
+    assert set(patch_properties) == {'text', 'note', 'hyperlink', 'tag', 'templateRole'}
     clarification_schema = tool_by_name['request_clarification'].to_dict()['parameters']
     assert clarification_schema['required'] == ['questions']
     question_list_schema = clarification_schema['properties']['questions']

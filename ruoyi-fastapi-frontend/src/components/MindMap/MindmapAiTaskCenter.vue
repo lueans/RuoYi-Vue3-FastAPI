@@ -30,7 +30,7 @@
         <button
           type="button"
           class="mindmapAiTaskCenterRefresh"
-          :disabled="loading"
+          :disabled="loading || authExpired"
           aria-label="刷新 AI 任务"
           @click="refreshTasks"
         >
@@ -38,7 +38,11 @@
         </button>
       </header>
 
-      <div v-if="error" class="mindmapAiTaskCenterState is-error" role="alert">
+      <div v-if="authExpired" class="mindmapAiTaskCenterState is-error" role="status">
+        <span>登录已过期，任务同步已暂停。</span>
+        <button type="button" @click="requestRelogin">重新登录</button>
+      </div>
+      <div v-else-if="error" class="mindmapAiTaskCenterState is-error" role="alert">
         <span>{{ error }}</span>
         <button type="button" @click="refreshTasks">重试</button>
       </div>
@@ -78,14 +82,19 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, Bell, Refresh } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listMindmapAiSessions } from '@/api/mindmap/mindmap'
 import { formatMindmapAiError } from '@/utils/mindmap-ai-errors'
+import useUserStore from '@/store/modules/user'
+import { requestRelogin } from '@/utils/request'
+import { useMindmapAuthExpiry } from '@/utils/use-mindmap-auth-expiry'
 
 const router = useRouter()
 const route = useRoute()
+const userStore = useUserStore()
+const authExpired = useMindmapAuthExpiry(() => userStore.token, stopForAuthExpiry)
 const visible = ref(false)
 const loading = ref(false)
 const error = ref('')
@@ -190,17 +199,17 @@ function summarizeJob(job, status) {
 }
 
 async function refreshTasks() {
-  if (!componentAlive || loading.value) return
+  if (!componentAlive || authExpired.value || loading.value) return
   const controller = new AbortController()
   requestController = controller
   loading.value = true
   error.value = ''
   try {
     const response = await listMindmapAiSessions({ limit: 20, signal: controller.signal })
-    if (!componentAlive || controller.signal.aborted) return
+    if (!componentAlive || authExpired.value || controller.signal.aborted) return
     rawSessions.value = Array.isArray(response?.data?.items) ? response.data.items : []
   } catch (requestError) {
-    if (!componentAlive || controller.signal.aborted) return
+    if (!componentAlive || authExpired.value || controller.signal.aborted) return
     error.value = formatMindmapAiError(requestError, 'AI 任务暂时无法同步')
   } finally {
     if (requestController === controller) requestController = null
@@ -210,6 +219,8 @@ async function refreshTasks() {
 
 function scheduleRefresh() {
   clearTimeout(refreshTimer)
+  refreshTimer = null
+  if (!componentAlive || authExpired.value) return
   refreshTimer = setTimeout(async () => {
     refreshTimer = null
     await refreshTasks()
@@ -222,7 +233,7 @@ function onWindowFocus() {
 }
 
 function openTask(item) {
-  if (!item?.canOpen || !item.jobId) return
+  if (authExpired.value || !item?.canOpen || !item.jobId) return
   visible.value = false
   const currentMindmapId = Number(route.query?.id)
   if (route.path === '/mindmap/edit' && currentMindmapId === item.sourceMindmapId) {
@@ -239,6 +250,21 @@ function openTask(item) {
     },
   })
 }
+
+function stopForAuthExpiry() {
+  clearTimeout(refreshTimer)
+  refreshTimer = null
+  requestController?.abort()
+  requestController = null
+  loading.value = false
+}
+
+watch(authExpired, expired => {
+  if (!expired && componentAlive) {
+    void refreshTasks()
+    scheduleRefresh()
+  }
+})
 
 onMounted(() => {
   void refreshTasks()

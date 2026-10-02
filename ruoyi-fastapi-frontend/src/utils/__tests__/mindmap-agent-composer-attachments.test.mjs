@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { parse, babelParse } from '@vue/compiler-sfc'
-import { ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { installComposerAttachmentHarness } from './mindmap-composer-attachment-harness.mjs'
 import { fingerprintMindmapAiRequest, resolveMindmapAiRequestAttempt, mergeMindmapAiJobSnapshot, mergeMindmapAiJobEventSnapshot } from '../mindmap-ai-stream.js'
 import { buildMindmapAiConversationTurns, resolveMindmapAiSessionTitle } from '../mindmap-ai-conversation.js'
@@ -352,3 +352,95 @@ for (const accepted of [true, false]) {
     }
   })
 }
+
+
+test('template source revision survives frozen capture and exact private retry replay', () => {
+  const attachment = {
+    id: 'template-map-130-7', name: '项目模版', size: 10,
+    mediaType: 'application/x-mindmap-template', text: '# 项目',
+    purpose: 'template', templateSource: { mindmapId: 130, contentRevision: 7 }, status: 'ready',
+  }
+  const s = installComposerAttachmentHarness({ composerAttachments: ref([attachment]) })
+  const captured = s.captureComposerAttachments()
+  attachment.templateSource.contentRevision = 8
+  assert.deepEqual(captured[0].templateSource, { mindmapId: 130, contentRevision: 7 })
+  const stored = { key: 'template-attempt', attachmentsOmitted: true,
+    requestPayload: { prompt: '沿用模版', attachments: [{ id: attachment.id }] } }
+  s.privateAttachmentRequests.set(stored.key, { ...stored.requestPayload, attachments: captured })
+  const replay = s.replayableRequestPayload(stored)
+  assert.deepEqual(replay.attachments[0].templateSource, { mindmapId: 130, contentRevision: 7 })
+  replay.attachments[0].templateSource.contentRevision = 9
+  assert.equal(captured[0].templateSource.contentRevision, 7)
+})
+
+test('composer warns about deep templates without changing the budget or leaking UI depth into requests', () => {
+  const attachment = { id: 'template-depth', name: '七层模版', size: 20,
+    mediaType: 'application/x-mindmap-template', text: '- 示例节点', purpose: 'template',
+    templateSource: { mindmapId: 136, contentRevision: 0 }, templateDepth: 7, status: 'ready' }
+  const s = installComposerAttachmentHarness({ computed, form: reactive({ maxDepth: 6 }),
+    composerAttachments: ref([attachment]), composerEditable: ref(true) })
+  const names = ['composerTemplate', 'composerTemplateDepthHint']
+  const declarations = nodes.filter(node => node.type === 'VariableDeclaration'
+    && node.declarations.some(item => names.includes(item.id?.name)))
+  assert.equal(declarations.length, names.length)
+  const ui = new Function('scope', `with(scope) { ${declarations.map(node => script.slice(node.start, node.end)).join('\n')}; return { ${names.join(', ')} }; }`)(s)
+  assert.equal(ui.composerTemplateDepthHint.value, '模版最深7层，当前上限6层；可在任务设置提高层级，以使用深层关系和标签。')
+  assert.equal(s.form.maxDepth, 6)
+  const captured = s.captureComposerAttachments()
+  assert.equal(captured.length, 1, 'depth guidance does not block submission')
+  assert.equal(Object.hasOwn(captured[0], 'templateDepth'), false)
+  const replay = s.replayableRequestPayload({ attachmentsOmitted: true,
+    attachmentIds: [attachment.id], requestPayload: { prompt: '生成内容' } })
+  assert.equal(Object.hasOwn(replay.attachments[0], 'templateDepth'), false)
+  s.form.maxDepth = 7
+  assert.equal(ui.composerTemplateDepthHint.value, '')
+  s.form.maxDepth = 6
+  delete s.composerAttachments.value[0].templateDepth
+  assert.equal(ui.composerTemplateDepthHint.value, '', 'legacy metadata does not invent depth')
+  s.composerAttachments.value[0].templateDepth = 7
+  const api = compile(['removeComposerAttachment'], s)
+  api.removeComposerAttachment(attachment.id)
+  assert.equal(ui.composerTemplateDepthHint.value, '')
+  assert.equal(s.form.maxDepth, 6, 'removal also preserves the selected budget')
+})
+
+test('template layout guidance follows frozen running inputs, then the actual retry or follow-up attachments', () => {
+  const attachment = { id: 'template-turn', name: '模版', size: 20,
+    mediaType: 'application/x-mindmap-template', text: '- 示例节点', purpose: 'template',
+    templateSource: { mindmapId: 136, contentRevision: 21 }, status: 'ready' }
+  const s = installComposerAttachmentHarness({ computed, job: ref(null), sessionTurns: ref([]),
+    followupAvailable: ref(false), composerAttachments: ref([attachment]) })
+  const names = ['composerTemplate', 'terminalStatuses', 'retryableStatuses', 'running', 'retryAvailable',
+    'currentJobTemplate', 'templateLayoutLocked', 'composerTemplateReuseHint']
+  const declarations = nodes.filter(node => node.type === 'VariableDeclaration'
+    && node.declarations.some(item => names.includes(item.id?.name)))
+  assert.equal(declarations.length, names.length)
+  const ui = new Function('scope', `with(scope) { ${declarations.map(node => script.slice(node.start, node.end)).join('\n')}; return { ${names.join(', ')} }; }`)(s)
+  assert.equal(ui.templateLayoutLocked.value, true)
+  assert.equal(ui.composerTemplateReuseHint.value, '')
+  const submitted = s.captureComposerAttachments()
+  s.job.value = { id: 'first', status: 'running' }
+  s.sessionTurns.value = [{ job: { id: 'first' }, userMessage: { attachments: submitted } }]
+  s.consumeComposerAttachments(submitted)
+  assert.equal(ui.templateLayoutLocked.value, true, 'in-flight task still uses its frozen template')
+  assert.equal(ui.composerTemplateReuseHint.value, '')
+
+  s.job.value.status = 'failed'
+  assert.equal(ui.templateLayoutLocked.value, false, 'history must not promise a template on the next request')
+  assert.match(ui.composerTemplateReuseHint.value, /本轮.*重新添加模版/)
+  assert.equal(s.captureComposerAttachments(), undefined, 'guidance agrees with the actual retry payload')
+  s.composerAttachments.value = [{ ...attachment, templateSource: { mindmapId: 140, contentRevision: 3 } }]
+  assert.equal(ui.templateLayoutLocked.value, true)
+  assert.equal(ui.composerTemplateReuseHint.value, '')
+  assert.equal(s.captureComposerAttachments()[0].templateSource.mindmapId, 140)
+
+  s.composerAttachments.value = []
+  s.job.value.status = 'completed_file'
+  s.followupAvailable.value = true
+  assert.equal(ui.templateLayoutLocked.value, false)
+  assert.match(ui.composerTemplateReuseHint.value, /重新添加模版/)
+  s.job.value = { id: 'next-without-template', status: 'running' }
+  s.followupAvailable.value = false
+  assert.equal(ui.templateLayoutLocked.value, false, 'another turn cannot borrow an earlier template receipt')
+  assert.equal(ui.composerTemplateReuseHint.value, '')
+})

@@ -11,7 +11,11 @@ from html.parser import HTMLParser
 from typing import Any
 
 from module_mindmap.ai.document import AI_MAX_NODE_COUNT
-from module_mindmap.entity.vo.mindmap_ai_vo import MindmapAiAttachmentModel, MindmapAiScopeModel
+from module_mindmap.entity.vo.mindmap_ai_vo import (
+    MAX_SELECTED_NODE_COUNT,
+    MindmapAiAttachmentModel,
+    MindmapAiScopeModel,
+)
 
 _RECEIPT_KEY = '_userMessageContext'
 _LABEL_MAX_LENGTH = 512
@@ -130,7 +134,7 @@ def _safe_receipt(value: Any) -> dict | None:
         return None
     scope_type = value.get('scopeType')
     nodes = value.get('contextNodes')
-    if not isinstance(nodes, list) or len(nodes) > 200:
+    if not isinstance(nodes, list) or len(nodes) > MAX_SELECTED_NODE_COUNT:
         return None
     if any(not isinstance(node, dict) for node in nodes):
         return None
@@ -189,6 +193,8 @@ def user_message_attachments(payload: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         metadata = {field: item.get(field) for field in ('id', 'name', 'size', 'mediaType')}
+        if 'purpose' in item:
+            metadata['purpose'] = item['purpose']
         try:
             # Validate metadata independently so a missing legacy text body
             # cannot break the entire timeline or erase its known file name.
@@ -196,6 +202,12 @@ def user_message_attachments(payload: Any) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         receipt = attachment.model_dump(by_alias=True, exclude={'text'})
+        profile = payload.get('_templateProfile')
+        if (attachment.purpose == 'template' and isinstance(profile, dict)
+            and profile.get('source') == item.get('templateSource')
+            and isinstance(profile.get('unavailableTags'), list) and profile['unavailableTags']):
+            names = '、'.join(str(name)[:100] for name in profile['unavailableTags'][:10])
+            receipt['warnings'] = [f'模版中的部分标签当前不可引用，已跳过这些标签：{names}']
         text = item.get('text')
         receipt['parsing'] = (
             {'status': 'parsed', 'characterCount': len(text)}

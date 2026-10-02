@@ -417,8 +417,10 @@ function createTagNode() {
       // v0.10.3+版本支持对象类型
       str = item.text
       style = { ...defaultTagStyle, ...item.style }
-      placement = item.placement || null
-      align = item.align || null
+      // 托管标签的默认布局保存在定义样式中，AI/模版引用通常只有 tagId。
+      // 仅当节点明确设置了局部布局时才覆盖定义，文字标签和标记共用此规则。
+      placement = item.placement || style.placement || null
+      align = item.align || style.align || null
     }
     // 是否手动设置了标签宽度
     const hasCustomWidth = typeof style.width !== 'undefined'

@@ -37,8 +37,8 @@ from module_mindmap.ai.adapters.base import (
     agent_message_result,
     agent_needs_input_result,
     agent_target_layout,
-    build_agent_continuation_clause,
     build_agent_attachment_clause,
+    build_agent_continuation_clause,
     build_agent_discussion_prompt,
     build_agent_draft_changed_payload,
     build_agent_generation_mode_clause,
@@ -152,6 +152,7 @@ AWS_PROFILE_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.@+=,-]{0,127}$')
 AWS_ROLE_SESSION_NAME_PATTERN = re.compile(r'^[A-Za-z0-9_+=,.@-]{2,64}$')
 
 NODE_FIELDS_SCHEMA = {
+    'templateRole': {'type': 'string', 'minLength': 1, 'maxLength': 200},
     'clientRef': {'type': 'string'},
     'parentUid': {'type': 'string', 'minLength': 1},
     'text': {'type': 'string', 'minLength': 1},
@@ -1407,11 +1408,16 @@ class ClaudeMindmapAdapter(AgentAdapter):
                 mutates_draft=True,
             )
 
-        @tool('start_document', '创建候选脑图', {'title': str, 'layout': str})
+        @tool('start_document', '创建候选脑图', {
+            'type': 'object', 'properties': {
+                'title': {'type': 'string'}, 'layout': {'type': 'string'},
+                'templateRole': {'type': 'string', 'minLength': 1, 'maxLength': 200},
+            }, 'required': ['title'], 'additionalProperties': False,
+        })
         async def start_document(args: dict[str, Any]) -> dict[str, Any]:
             return await execute_tool(
                 'start_document',
-                lambda: tools.start_document(args['title'], agent_target_layout(context)),
+                lambda: tools.start_document(args['title'], agent_target_layout(context), args.get('templateRole')),
                 mutates_draft=True,
             )
 

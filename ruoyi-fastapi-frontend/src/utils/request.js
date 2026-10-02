@@ -22,38 +22,119 @@ import {
 import { getCurrentLoginReturnPath } from '@/utils/login-redirect'
 import {
   claimReloginPrompt,
+  claimAuthExpiryPrompt,
   createAuthExpiredError,
+  isAuthExpiredError,
+  isAuthSessionExpired,
+  hasAuthExpiredSession,
+  markAuthSessionExpired,
+  waitForAuthExpiryCleanup,
   releaseReloginPrompt
 } from '@/utils/auth-expiry'
 
 let downloadLoadingInstance;
 // 是否显示重新登录
 export let isRelogin = { show: false };
+let activeAuthPromptToken = null
+let authLoginAttempt = null
 
 function shouldHandleAuthExpired(config) {
   return config?.skipAuthExpiredHandler !== true
 }
 
-function handleAuthExpired() {
-  if (!claimReloginPrompt(isRelogin)) return
+function assertAuthSessionUsable(config) {
+  if ((isAuthSessionExpired(config?.__authSessionToken)
+      || isAuthSessionExpired(config?.__authSessionOwnerToken))
+    && shouldHandleAuthExpired(config)) {
+    const error = createAuthExpiredError('登录状态已失效，请重新登录后继续')
+    error.config = config
+    // This is a local owner fence, not a 401 proving a newly replaced cookie
+    // invalid. The response interceptor must not revoke that newer credential.
+    error.authExpiryHandled = true
+    throw error
+  }
+}
 
+async function loginAfterExpiredSession(expiredToken) {
+  if (getToken() !== expiredToken || !hasAuthExpiredSession()) return false
+  const newSessionInAnotherTab = !isAuthSessionExpired(expiredToken)
   const returnPath = getCurrentLoginReturnPath(location)
+  try {
+    await waitForAuthExpiryCleanup({ retryFailed: true })
+  } catch {
+    if (getToken() === expiredToken && hasAuthExpiredSession()) {
+      ElMessage.error('未能安全保存当前编辑内容，请先重试保存或备份，再重新登录')
+    }
+    return false
+  }
+  // A newer login (including another tab) must survive an old dialog's click
+  // or a late draft-cleanup completion.
+  if (getToken() !== expiredToken || !hasAuthExpiredSession()) return false
+  if (newSessionInAnotherTab) {
+    // Another tab can replace or remove the cookie without updating this
+    // tab's Pinia identity. After protecting the old editor, remount with the
+    // current cookie (or let the route guard open login if it was removed).
+    // Never clear or log out a newer credential.
+    location.href = returnPath
+    return true
+  }
+  if (!isAuthSessionExpired(expiredToken)) return false
+  const userStore = useUserStore()
+  userStore.resetToken()
+  // Local revocation and navigation do not depend on the logout endpoint.
+  location.href = returnPath
+  Promise.resolve()
+    .then(() => userStore.logOutRemote(expiredToken))
+    .catch(() => undefined)
+  return true
+}
+
+function requestAuthLoginForToken(token) {
+  if (authLoginAttempt && authLoginAttempt.token === token) return authLoginAttempt.promise
+  const attempt = { token, promise: null }
+  authLoginAttempt = attempt
+  attempt.promise = loginAfterExpiredSession(token).finally(() => {
+    if (authLoginAttempt === attempt) authLoginAttempt = null
+  })
+  return attempt.promise
+}
+
+// Inline “重新登录” actions reuse the protected exit without reopening a
+// dismissed modal. Failed draft protection can be retried explicitly.
+export function requestAuthLogin() {
+  return requestAuthLoginForToken(getToken())
+}
+export const requestRelogin = requestAuthLogin
+
+function handleAuthExpired(config) {
+  const token = config?.__authSessionToken
+  if (!shouldHandleAuthExpired(config) || !token) return
+  const cookieToken = getToken()
+  const ownerToken = useUserStore().token
+  // Another tab can remove the cookie while this tab still owns an editor and
+  // unsaved input. Expire that captured owner, but never a newer cookie/login.
+  const currentSessionToken = cookieToken || ownerToken
+  if (token !== currentSessionToken) return
+  markAuthSessionExpired(token, {
+    // A still-mounted editor retains its original owner when another tab logs
+    // in. Protect its local drafts too, without assigning them to the cookie's
+    // user. A request from an older mounted owner cannot terminate a new one.
+    ownerToken: config.__authSessionOwnerToken === ownerToken ? ownerToken : null,
+  })
+  // The bootstrap route guard temporarily owns the legacy prompt gate.
+  if (isRelogin.show && !activeAuthPromptToken) return
+  if (!claimAuthExpiryPrompt(token)) return
+  if (!isRelogin.show) claimReloginPrompt(isRelogin)
+  activeAuthPromptToken = token
   ElMessageBox.confirm(
     '登录状态已过期，您可以继续留在该页面，或者重新登录',
     '系统提示',
     { confirmButtonText: '重新登录', cancelButtonText: '取消', type: 'warning' },
-  ).then(() => {
-    const userStore = useUserStore()
-    const expiredToken = userStore.token
-    userStore.resetToken()
-    releaseReloginPrompt(isRelogin)
-    // 本地退出和页面跳转是权威动作，不能等待远端 logout 成功。
-    location.href = returnPath
-    Promise.resolve()
-      .then(() => userStore.logOutRemote(expiredToken))
-      .catch(() => undefined)
-  }).catch(() => {
-    releaseReloginPrompt(isRelogin)
+  ).then(() => requestAuthLoginForToken(cookieToken)).catch(() => undefined).finally(() => {
+    if (activeAuthPromptToken === token) {
+      activeAuthPromptToken = null
+      releaseReloginPrompt(isRelogin)
+    }
   })
 }
 
@@ -80,8 +161,16 @@ service.interceptors.request.use(async config => {
   const isRepeatSubmit = (config.headers || {}).repeatSubmit === false
   // 间隔时间(ms)，小于此时间视为重复提交
   const interval = (config.headers || {}).interval || 1000
-  if (getToken() && !isToken) {
-    config.headers['Authorization'] = 'Bearer ' + getToken() // 让每个请求携带自定义token 请根据实际情况自行修改
+  const token = !isToken ? getToken() : null
+  const ownerToken = isToken ? null : useUserStore().token || null
+  // Keep the mounted session's identity if its cookie disappeared. This is
+  // only an expiry/cleanup fence: never reuse the removed token as a credential.
+  // Explicitly anonymous requests (login, public shares, logout) stay exempt.
+  config.__authSessionOwnerToken = ownerToken
+  config.__authSessionToken = token || ownerToken
+  assertAuthSessionUsable(config)
+  if (token) {
+    config.headers['Authorization'] = 'Bearer ' + token // 让每个请求携带自定义token 请根据实际情况自行修改
   }
   if (!isRepeatSubmit && isRepeatSubmitMethod(config.method)) {
     try {
@@ -102,6 +191,9 @@ service.interceptors.request.use(async config => {
   }
   // 在参数拼接前完成传输层加密，避免明文查询串提前写入 URL。
   config = await encryptTransportRequest(config)
+  // Another response may expire the session while encryption/key discovery
+  // was pending. Fence again before Axios reaches its transport adapter.
+  assertAuthSessionUsable(config)
   // get请求映射params参数
   if (config.method === 'get' && config.params) {
     let url = config.url + '?' + tansParams(config.params);
@@ -135,7 +227,7 @@ service.interceptors.response.use(async res => {
       return res.data
     }
     if (code === 401) {
-      if (shouldHandleAuthExpired(res.config)) handleAuthExpired()
+      handleAuthExpired(res.config)
       return Promise.reject(createAuthExpiredError(
         res.data.msg || msg,
         { data: res.data.data, response: res },
@@ -181,13 +273,15 @@ service.interceptors.response.use(async res => {
     const responseStatus = response?.status
     const responseCode = response?.data?.code
     const responseMsg = response?.data?.msg
-    const authExpired = Number(responseStatus) === 401 || Number(responseCode) === 401
+    const authExpired = isAuthExpiredError(error)
     if (authExpired) {
       const skipAuthExpiredHandler = (
         !shouldHandleAuthExpired(error.config)
         || !shouldHandleAuthExpired(response?.config)
       )
-      if (!skipAuthExpiredHandler) handleAuthExpired()
+      if (!skipAuthExpiredHandler && error.authExpiryHandled !== true) {
+        handleAuthExpired(error.config || response?.config)
+      }
       return Promise.reject(createAuthExpiredError(
         responseMsg || errorCode[401],
         { data: response?.data?.data, response },

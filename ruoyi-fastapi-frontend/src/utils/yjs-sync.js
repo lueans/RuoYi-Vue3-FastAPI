@@ -2997,6 +2997,11 @@ export class YjsMindmapSync {
    * records are imported only for keys they explicitly carry.
    */
   _normalizeEmbeddedCrossNodeState() {
+    // Rejected or metadata-only caches leave the Y.Doc without nodes. There
+    // is no legacy node state to migrate until the authoritative seed arrives.
+    // Writing even the schema marker here fires start()'s update observer
+    // before a lineage/seed lease exists and makes the server close the socket.
+    if (!this.hasData()) return false
     const schemaVersion = Number(this.yMeta.get('crossNodeSchemaVersion'))
     const hasEmbeddedState = this._hasEmbeddedCrossNodeState()
     if (schemaVersion >= CROSS_NODE_SCHEMA_VERSION && !hasEmbeddedState) return false

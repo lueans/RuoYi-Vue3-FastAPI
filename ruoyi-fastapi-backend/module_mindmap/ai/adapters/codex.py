@@ -39,8 +39,8 @@ from module_mindmap.ai.adapters.base import (
     agent_message_result,
     agent_needs_input_result,
     agent_target_layout,
-    build_agent_continuation_clause,
     build_agent_attachment_clause,
+    build_agent_continuation_clause,
     build_agent_discussion_prompt,
     build_agent_generation_mode_clause,
     build_agent_output_contract,
@@ -901,6 +901,7 @@ class _CodexToolExecutionBridge:
         if tool_name == 'start_document':
             result = tools.start_document(
                 normalized.get('title'), agent_target_layout(self._context),
+                normalized.get('templateRole'),
             )
             self._references['root'] = result['rootUid']
             return result

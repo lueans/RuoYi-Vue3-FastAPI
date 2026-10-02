@@ -1,4 +1,4 @@
-import { onBeforeUnmount, reactive, watch } from 'vue'
+import { onScopeDispose, reactive, watch } from 'vue'
 import { createAgentRequestScope } from './mindmap-agent-devices.js'
 
 // Account/dialog-scoped catalog. An old response must never enable execution
@@ -8,6 +8,7 @@ export function useMindmapAgentDevices(active, ownerId, list) {
   const scope = createAgentRequestScope()
   let timer
   let pendingRefresh = null
+  let controller = null
   async function refresh({ afterPending = false } = {}) {
     const current = scope.capture()
     // Handoff needs a read issued after confirmation/exit, not a poll that
@@ -15,10 +16,12 @@ export function useMindmapAgentDevices(active, ownerId, list) {
     if (afterPending && pendingRefresh) await pendingRefresh
     if (!current() || !active() || !ownerId() || state.loading) return false
     state.loading = true
+    const requestController = new AbortController()
+    controller = requestController
     const request = (async () => {
       try {
-        const response = await list()
-        if (!current()) return false
+        const response = await list({ signal: requestController.signal })
+        if (!current() || requestController.signal.aborted) return false
         state.devices = Array.isArray(response.data?.devices) ? response.data.devices : []
         state.enabled = response.data?.enabled === true
         state.loaded = true
@@ -29,7 +32,10 @@ export function useMindmapAgentDevices(active, ownerId, list) {
       } catch {
         if (current()) state.error = '设备状态读取失败'
         return false
-      } finally { if (current()) state.loading = false }
+      } finally {
+        if (current()) state.loading = false
+        if (controller === requestController) controller = null
+      }
     })()
     pendingRefresh = request
     try { return await request }
@@ -39,6 +45,9 @@ export function useMindmapAgentDevices(active, ownerId, list) {
     scope.invalidate()
     pendingRefresh = null
     clearInterval(timer)
+    timer = null
+    controller?.abort()
+    controller = null
     Object.assign(state, { devices: [], loaded: false, loading: false, enabled: false, error: '', updatedAt: 0 })
   }
   watch(() => [active(), ownerId()], () => {
@@ -51,6 +60,6 @@ export function useMindmapAgentDevices(active, ownerId, list) {
       if (++ticks % 5 === 0) void refresh()
     }, 1000)
   }, { immediate: true, flush: 'sync' })
-  onBeforeUnmount(reset)
+  onScopeDispose(reset)
   return { state, refresh }
 }

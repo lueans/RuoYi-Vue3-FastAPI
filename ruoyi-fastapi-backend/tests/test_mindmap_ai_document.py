@@ -42,6 +42,41 @@ def test_tag_catalog_search_and_fork_are_read_only_and_references_use_trusted_sn
     assert tag == {'tagId': 7, 'text': 'Smoke', 'style': {'color': '#123456'}, 'status': 0}
 
 
+def test_custom_tag_style_survives_reference_stream_preview_and_artifact_round_trip() -> None:
+    style = {
+        'fill': '#ffe9d6', 'color': '#963e00', 'fontSize': 16, 'radius': 7,
+        'paddingX': 10, 'iconKey': 'priority_2', 'placement': 'top', 'align': 'right',
+    }
+    definition = {'tagId': 7, 'text': '高优先级', 'style': style, 'definitionRevision': 3}
+    document = _document()
+    document['root']['children'][0]['data']['tag'] = [{
+        'tagId': 7, 'text': '高优先级', 'style': {'color': '#000'},
+        'placement': 'bottom', 'align': 'left',
+    }]
+    tools = MindmapToolService(base_document=document, tag_catalog=[definition])
+    # A definition's default position stays in style; only existing node-local
+    # overrides live at the tag's top level and must survive a definition refresh.
+    expected_existing = {**definition, 'placement': 'bottom', 'align': 'left'}
+    tools.edit_node_tags('child', [{'tagId': 7}])
+    tools.add_nodes([{'parentUid': 'root', 'text': 'New', 'tag': [{'tagId': 7}]}])
+    delta = tools.build_stream_delta(after_cursor=0, tool_name='add_nodes')
+    assert delta['operations'][0]['payload']['set']['tag'] == [expected_existing]
+    assert delta['operations'][1]['payload']['data']['tag'] == [definition]
+    assert delta['previewState']['root']['children'][0]['data']['tag'] == [expected_existing]
+    assert delta['previewState']['root']['children'][1]['data']['tag'] == [definition]
+    # Returned snapshots may be consumed by independent UI surfaces without
+    # mutating the draft's canonical style or its final export.
+    delta['operations'][1]['payload']['data']['tag'][0]['style']['fill'] = '#000'
+    tools.validate_draft()
+    artifact, _summary, _operations = tools.complete_artifact(
+        title='带自定义标签的脑图', agent_key='native_mindmap',
+        adapter_version='1.0.0', prompt_version='mindmap-create-1',
+    )
+    restored, _summary = validate_smm_artifact(json.loads(json.dumps(artifact)))
+    assert restored['document']['root']['children'][0]['data']['tag'] == [expected_existing]
+    assert restored['document']['root']['children'][1]['data']['tag'] == [definition]
+
+
 @pytest.mark.parametrize('tags', [
     ['Smoke'], [{'text': 'Smoke'}], [{'tagId': True}], [{'tagId': '7'}], [{'tagId': 0}],
     [{'tagId': -1}], [{'tagId': 999}], [{'tagId': 7, 'text': '伪造'}],

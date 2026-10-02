@@ -16,6 +16,14 @@ export function buildMindmapAiAttachmentMetadata(attachments = []) {
         name: file.name.slice(0, 255),
         size: Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : undefined,
         mediaType: typeof file.mediaType === 'string' ? file.mediaType.slice(0, 128) : '',
+        ...(['reference', 'template'].includes(file.purpose) ? { purpose: file.purpose } : {}),
+      }
+      // Warnings are bounded server receipts, never client upload instructions.
+      if (file.purpose === 'template' && !Object.hasOwn(file, 'text') && Array.isArray(file.warnings)) {
+        const warnings = [...new Set(file.warnings.filter(value => typeof value === 'string')
+          .map(value => Array.from(value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()).slice(0, 500).join(''))
+          .filter(Boolean))].slice(0, 5)
+        if (warnings.length) metadata.warnings = warnings
       }
       // Match the backend's Unicode code-point count, including non-BMP text.
       const count = typeof file.text === 'string' && file.text.trim()

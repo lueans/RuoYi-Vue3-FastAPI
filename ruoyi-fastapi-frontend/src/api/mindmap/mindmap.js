@@ -197,12 +197,20 @@ export function listMindmapAiAgents(params = {}) {
   })
 }
 
+export function listMindmapAiTemplates(params = {}, { signal } = {}) {
+  return request({ url: '/mindmap/ai/templates', method: 'get', params, signal, silentError: true })
+}
+
+export function getMindmapAiTemplate(mindmapId, { signal } = {}) {
+  return request({ url: `/mindmap/ai/templates/${encodeURIComponent(mindmapId)}`, method: 'get', signal, silentError: true })
+}
+
 export function listMindmapAiRuntimes(params = {}) {
   return request({ url: '/mindmap/ai/runtimes', method: 'get', params, timeout: 20000 })
 }
 
-export function listMindmapAiDevices() {
-  return request({ url: '/mindmap/ai/devices', method: 'get', silentError: true })
+export function listMindmapAiDevices({ signal } = {}) {
+  return request({ url: '/mindmap/ai/devices', method: 'get', signal, silentError: true })
 }
 
 export function createMindmapAiDevicePairing(name) {

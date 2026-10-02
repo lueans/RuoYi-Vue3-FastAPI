@@ -19,7 +19,7 @@ from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
 from common.constant import ApiNamespace
 from common.enums import BusinessType
 from common.router import APIRouterPro
-from common.vo import DataResponseModel
+from common.vo import DataResponseModel, PageResponseModel
 from config.database import AsyncSessionLocal
 from exceptions.exception import ServiceException
 from module_admin.entity.vo.user_vo import CurrentUserModel
@@ -27,6 +27,10 @@ from module_mindmap.ai.document import MindmapArtifactError, validate_smm_artifa
 from module_mindmap.ai.runtime_catalog import discover_runtimes
 from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
 from module_mindmap.entity.do.mindmap_ai_do import MINDMAP_AI_EVENT_SEQUENCE_MAX
+from module_mindmap.entity.vo.mindmap_ai_template_vo import (
+    MindmapAiTemplateDetailModel,
+    MindmapAiTemplateSummaryModel,
+)
 from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiArtifactValidateModel,
     MindmapAiCancelModel,
@@ -51,6 +55,7 @@ from module_mindmap.service.mindmap_ai_service import (
     MindmapAiService,
     sanitize_mindmap_ai_event_payload,
 )
+from module_mindmap.service.mindmap_ai_template_service import MindmapAiTemplateService
 from utils.response_util import ResponseUtil
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._:-]{8,100}$')
@@ -165,6 +170,41 @@ async def list_mindmap_agents(
         current_user.user.user_id,
         intent,
         input_type,
+    ))
+
+
+@mindmap_ai_controller.get(
+    '/templates', summary='搜索可查看的云端脑图模版',
+    response_model=PageResponseModel[MindmapAiTemplateSummaryModel],
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('query'))],
+)
+async def list_mindmap_ai_templates(
+    request: Request,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    keyword: Annotated[str | None, Query(max_length=200)] = None,
+    page_num: Annotated[int, Query(alias='pageNum', ge=1)] = 1,
+    page_size: Annotated[int, Query(alias='pageSize', ge=1, le=50)] = 20,
+) -> Response:
+    result = await MindmapAiTemplateService.list_templates(
+        query_db, current_user.user.user_id, keyword, page_num, page_size,
+    )
+    return ResponseUtil.success(model_content=result)
+
+
+@mindmap_ai_controller.get(
+    '/templates/{mindmap_id}', summary='读取云端脑图模版结构',
+    response_model=DataResponseModel[MindmapAiTemplateDetailModel],
+    dependencies=[UserInterfaceAuthDependency(mindmap_permissions('query'))],
+)
+async def get_mindmap_ai_template(
+    request: Request,
+    mindmap_id: Annotated[int, Path(gt=0)],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    return ResponseUtil.success(data=await MindmapAiTemplateService.get_template(
+        query_db, mindmap_id, current_user.user.user_id,
     ))
 
 

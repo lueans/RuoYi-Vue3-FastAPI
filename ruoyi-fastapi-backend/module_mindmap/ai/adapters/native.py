@@ -157,6 +157,7 @@ class NativeTagSuggestion(_NativeToolInput):
 
 
 class NativeNodePatchInput(_NativeToolInput):
+    template_role: str | None = Field(default=None, alias='templateRole', min_length=1, max_length=200)
     text: str | None = None
     note: str | None = None
     hyperlink: str | None = None
@@ -252,6 +253,21 @@ def _native_constraint_failure(error: MindmapArtifactError) -> tuple[str, str]:
             'TOOL_CONSTRAINT_VIOLATION',
             'clientRef 必须唯一且不带 @；请为新节点换用未使用的别名',
         )
+    template_guidance = (
+        ('模版节点角色与父节点关系不匹配',
+         'templateRole 与父节点的模版角色不匹配；请选择该父角色的子角色，'
+         '或省略 templateRole 让平台选择默认角色。格式角色不能作为 parentUid'),
+        ('根节点必须使用模版根角色', '根节点的 templateRole 必须为 r，不能使用模版子角色'),
+        ('模版节点角色不存在', 'templateRole 不存在；请从本轮模版角色清单选择，或省略该字段'),
+        ('本轮未选择可信模版', '本轮未选择可信模版；请移除 templateRole，不能自行创建格式角色'),
+        ('节点标签不属于选定模版角色',
+         '标签不属于当前 templateRole；只引用该角色列出的 tagIds，'
+         '或省略 tag 让平台继承该角色标签。不要把其他角色的标签绑定到当前节点'),
+        ('节点标签位置与选定模版角色不一致', '模版标签位置由平台继承；标签仅传 tagId，不要提交自定义位置或样式'),
+    )
+    for fragment, guidance in template_guidance:
+        if fragment in message:
+            return ('TOOL_CONSTRAINT_VIOLATION', guidance)
     if any(fragment in message for fragment in (
         'parentUid', 'parent_uid', '父节点', '授权范围',
     )):
@@ -870,11 +886,11 @@ class NativeMindmapAdapter(AgentAdapter):
                 mutates_draft=True,
             )
 
-        async def start_document(title: str) -> str:
+        async def start_document(title: str, templateRole: str | None = None) -> str:  # noqa: N803
             """创建新的候选脑图，返回根节点 UID。"""
             layout_value = agent_target_layout(context)
             def create_document() -> dict[str, Any]:
-                result = tools.start_document(title, layout_value)
+                result = tools.start_document(title, layout_value, templateRole)
                 node_references['root'] = str(result['rootUid'])
                 return result
 

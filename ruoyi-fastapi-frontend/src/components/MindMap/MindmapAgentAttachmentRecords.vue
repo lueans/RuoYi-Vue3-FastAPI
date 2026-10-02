@@ -1,12 +1,13 @@
 <template>
   <section v-if="records.length" class="attachmentRecords" aria-label="文件解析记录">
+    <p v-for="(warning, index) in warnings" :key="index" class="attachmentRecordWarning" role="status">{{ warning }}</p>
     <details>
       <summary>文件解析记录 <span>{{ parsedCount }}/{{ records.length }} 个已解析</span></summary>
       <ul>
         <li v-for="(file, index) in records" :key="`${file.id}:${index}`">
-          <span class="attachmentRecordName" :title="file.name">{{ file.name }}</span>
+          <span class="attachmentRecordName" :title="file.name"><span v-if="file.purpose === 'template'" class="attachmentRecordTemplate">模版</span>{{ file.name }}</span>
           <span v-if="file.parsing.status === 'parsed'" class="attachmentRecordResult">
-            文本提取完成 · {{ file.parsing.characterCount.toLocaleString('zh-CN') }} 字符
+            {{ file.purpose === 'template' ? '脑图结构读取完成' : '文本提取完成' }} · {{ file.parsing.characterCount.toLocaleString('zh-CN') }} 字符
           </span>
           <span v-else class="attachmentRecordResult">解析记录不可用</span>
         </li>
@@ -23,6 +24,7 @@ import { buildMindmapAiAttachmentMetadata } from '@/utils/mindmap-ai-attachment-
 const props = defineProps({ attachments: { type: Array, default: () => [] } })
 const records = computed(() => buildMindmapAiAttachmentMetadata(props.attachments))
 const parsedCount = computed(() => records.value.filter(file => file.parsing.status === 'parsed').length)
+const warnings = computed(() => records.value.flatMap(file => (file.warnings || []).map(warning => `${file.name}：${warning}`)))
 </script>
 
 <style scoped>
@@ -33,6 +35,8 @@ summary:focus-visible { outline: 2px solid var(--agent-accent); outline-offset: 
 ul { display: grid; gap: 8px; padding: 0; margin: 10px 0; list-style: none; }
 li { display: grid; gap: 2px; padding-left: 10px; }
 .attachmentRecordName { color: var(--agent-ink); overflow-wrap: anywhere; }
+.attachmentRecordTemplate { display: inline-block; margin-right: 5px; padding: 0 4px; border-radius: 4px; color: var(--agent-accent); background: color-mix(in oklch, var(--agent-accent) 10%, transparent); font-size: 10px; }
 .attachmentRecordResult { font-size: 11px; }
+.attachmentRecordWarning { margin: 0 0 8px; padding: 6px 8px; border-radius: 6px; color: var(--el-color-warning-dark-2, #9a6700); background: var(--el-color-warning-light-9, #fff8e6); overflow-wrap: anywhere; }
 p { margin: 8px 0 0; font-size: 11px; }
 </style>

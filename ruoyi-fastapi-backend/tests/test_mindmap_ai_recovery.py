@@ -7,6 +7,7 @@ import json
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -15,6 +16,7 @@ from sqlalchemy.exc import MissingGreenlet
 from config.env import MindmapAiConfig
 from module_mindmap.ai.adapters.base import AgentRunResult
 from module_mindmap.ai.document import MindmapArtifactError
+from module_mindmap.ai.template_profile import build_template_profile
 from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
 from module_mindmap.service.mindmap_ai_service import (
     _CURRENT_JOB_EXECUTION_EPOCH,
@@ -589,9 +591,11 @@ async def test_adapter_cancel_has_second_deadline_when_cancel_is_swallowed() -> 
     ('cancel_requested', 'AI_AGENT_UNAVAILABLE', False),
     ('cancelled', 'AI_AGENT_CLEANUP_FAILED', False),
 ])
-async def test_failed_stop_status_is_distinct_from_ordinary_cancel_races(prior, error_code, changed_expected):
+async def test_failed_stop_status_is_distinct_from_ordinary_cancel_races(
+    prior: str, error_code: str, changed_expected: bool,
+) -> None:
     database = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
-    async def transition(_db, _job_id, predecessors, values):
+    async def transition(_db: object, _job_id: str, predecessors: frozenset[str], values: dict[str, Any]) -> bool:
         assert values['status'] == 'failed'
         return prior in predecessors
     events = AsyncMock()
@@ -864,30 +868,10 @@ async def test_completion_gate_rejects_deleting_session_before_result_writes() -
     database.rollback.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize('source_kind', ['none', 'branch', 'recovered_branch'])
-@pytest.mark.parametrize(
-    ('failure_stage', 'reconciliation', 'expects_purge'),
-    [
-        ('validation', None, True),
-        ('session_deletion', None, True),
-        ('commit_not_persisted', False, True),
-        ('commit_persisted', True, False),
-        ('commit_unknown', None, False),
-        ('committed', None, False),
-    ],
-)
-async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
-    failure_stage: str,
-    reconciliation: bool | None,
-    expects_purge: bool,
-    monkeypatch: pytest.MonkeyPatch,
-    source_kind: str,
-) -> None:
-    monkeypatch.setattr(
-        'module_mindmap.service.mindmap_ai_service.load_ai_tag_catalog',
-        AsyncMock(return_value=[{'tagId': 7, 'text': 'Known', 'status': 0}]),
-    )
+def _owned_sdk_recovery_request(
+    monkeypatch: pytest.MonkeyPatch, source_kind: str, with_template: bool,
+) -> str:
+    """Freeze the input and checkpoint variant used by the ownership scenarios."""
     source_document = {'root': {'data': {'uid': 'root', 'text': 'Source'}, 'children': [
         {'data': {'uid': 'allowed', 'text': 'Allowed'}, 'children': []},
         {'data': {'uid': 'private', 'text': 'Private'}, 'children': []},
@@ -914,6 +898,50 @@ async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
         'source': source,
         'target': 'file',
     })
+    if with_template:
+        template_detail = {
+            'id': 9, 'contentRevision': 4, 'layout': 'mindMap', 'theme': {'template': 'default', 'config': {}},
+            'nodeTree': {'data': {'uid': 'template-root', 'text': 'Old topic', 'fillColor': '#123456'}, 'children': []},
+        }
+        payload = json.loads(request_json)
+        payload['attachments'].append({
+            'id': 'template', 'name': '模版', 'size': 10, 'mediaType': 'application/x-mindmap-template',
+            'text': '示例内容', 'purpose': 'template', 'templateSource': {'mindmapId': 9, 'contentRevision': 4},
+        })
+        payload['_templateProfile'] = build_template_profile(template_detail)
+        request_json = json.dumps(payload)
+        monkeypatch.setattr('module_mindmap.service.mindmap_ai_template_service.MindmapAiTemplateService.get_template',
+                            AsyncMock(side_effect=AssertionError('Recovery must use the frozen profile')))
+    return request_json
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('with_template', [False, True])
+@pytest.mark.parametrize('source_kind', ['none', 'branch', 'recovered_branch'])
+@pytest.mark.parametrize(
+    ('failure_stage', 'reconciliation', 'expects_purge'),
+    [
+        ('validation', None, True),
+        ('session_deletion', None, True),
+        ('commit_not_persisted', False, True),
+        ('commit_persisted', True, False),
+        ('commit_unknown', None, False),
+        ('committed', None, False),
+    ],
+)
+async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
+    failure_stage: str,
+    reconciliation: bool | None,
+    expects_purge: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    with_template: bool,
+) -> None:
+    monkeypatch.setattr(
+        'module_mindmap.service.mindmap_ai_service.load_ai_tag_catalog',
+        AsyncMock(return_value=[{'tagId': 7, 'text': 'Known', 'status': 0}]),
+    )
+    request_json = _owned_sdk_recovery_request(monkeypatch, source_kind, with_template)
     job = SimpleNamespace(
         id='job-owned-session',
         status='running',
@@ -968,16 +996,20 @@ async def test_owned_sdk_session_is_purged_until_result_transaction_commits(
 
     async def run_adapter(context: object, _emit: object) -> AgentRunResult:
         assert context.prompt == '生成脑图'
-        assert context.attachments == ({
-            'id': 'recovery-reference', 'name': '需求.txt', 'size': 9,
-            'mediaType': 'text/plain', 'text': '恢复后仍需使用的附件资料',
-        },)
+        assert context.attachments == tuple(json.loads(request_json)['attachments'])
         if source_kind == 'none':
             context.tool_service.start_document('AI 脑图', 'logicalStructure')
         else:
             assert context.source_document['root']['data']['uid'] == 'allowed'
             assert 'private' not in json.dumps(context.source_document)
         assert [tag['tagId'] for tag in context.tool_service.search_tags('Known')] == [7]
+        if with_template:
+            assert context.template_profile == json.loads(request_json)['_templateProfile']
+            if source_kind != 'none':
+                context.tool_service.update_nodes([{'nodeUid': 'allowed', 'patch': {'templateRole': 'r'}}])
+            projection = context.tool_service.read_projection()
+            assert projection['root']['data']['fillColor'] == '#123456'
+            assert projection['root']['data']['aiTemplateRole'].endswith(':r')
         return result
 
     adapter = SimpleNamespace(

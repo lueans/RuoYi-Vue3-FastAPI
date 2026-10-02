@@ -70,6 +70,7 @@ from module_mindmap.ai.proposal_operations import (
     verify_proposal_document_integrity,
 )
 from module_mindmap.ai.runtime_trace import normalize_todos, public_text
+from module_mindmap.ai.template_profile import public_template_profile, read_template_profile
 from module_mindmap.ai.tool_contract import MindmapToolService, normalize_tag_suggestions
 from module_mindmap.dao.mindmap_ai_dao import MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT, MindmapAiDao
 from module_mindmap.dao.mindmap_content_dao import MindmapContentDao
@@ -97,8 +98,13 @@ from module_mindmap.service.mindmap_ai_metrics import (
     record_mindmap_ai_event,
     record_mindmap_ai_run,
 )
-from module_mindmap.service.mindmap_ai_mutation_gateway import MindmapAiMutationGateway, _document_from_detail
+from module_mindmap.service.mindmap_ai_mutation_gateway import (
+    MindmapAiMutationConstraints,
+    MindmapAiMutationGateway,
+    _document_from_detail,
+)
 from module_mindmap.service.mindmap_ai_tag_catalog import load_ai_tag_catalog
+from module_mindmap.service.mindmap_ai_template_service import MindmapAiTemplateService
 from module_mindmap.service.mindmap_comment_service import MindmapCommentService
 from module_mindmap.service.mindmap_service import MindmapService
 from utils.ai_util import AiUtil
@@ -184,6 +190,8 @@ AI_DISCUSSION_HISTORY_MAX_MESSAGES = 20
 AI_DISCUSSION_HISTORY_MAX_CHARS = 40_000
 AI_CONTINUATION_HISTORY_MAX_TURNS = 4
 AI_CONTINUATION_JOB_ID_MAX_LENGTH = 36
+AI_CONTINUATION_REPLY_MAX_JSON_CHARS = 65_536
+AI_CONTINUATION_REPLY_DELTA_MAX_CHARS = 4_000
 AI_SESSION_INITIAL_TITLE_MAX_LENGTH = 36
 _SESSION_TITLE_CONTROL_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
 AI_JOB_LEASE_KEY_PREFIX = 'mindmap:ai:job-lease:'
@@ -349,13 +357,16 @@ def _request_with_undo_baseline(payload: dict[str, Any], baseline: dict[str, Any
     return result
 
 
-def _restore_preview_document(request: MindmapAiJobCreateModel, document: dict[str, Any]) -> dict[str, Any]:
+def _restore_preview_document(
+    request: MindmapAiJobCreateModel, document: dict[str, Any], *, template_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if request.source.document is None:
         return document
     tools = MindmapToolService(
         base_document=request.source.document,
         scope=request.source.scope.model_dump(by_alias=True, exclude_none=True),
         trusted_source=True,
+        template_profile=template_profile,
     )
     return tools.restore_checkpoint_projection(document)
 
@@ -439,11 +450,20 @@ def _manifest_supports_result(manifest: Any, result_type: str) -> bool:
     return isinstance(declared, (tuple, list, set, frozenset)) and result_type in declared
 
 
+def _normalize_fingerprint_attachments(payload: dict[str, Any]) -> None:
+    """Keep legacy reference requests stable while including template intent."""
+    if not payload.get('attachments'):
+        payload.pop('attachments', None)
+        return
+    for attachment in payload['attachments']:
+        if attachment.get('purpose') == 'reference':
+            attachment.pop('purpose')
+
+
 def _stable_create_fingerprint(request_model: MindmapAiJobCreateModel) -> str:
     """Hash only client intent, never mutable server-fetched cloud contents."""
     request_payload = request_model.model_dump(by_alias=True, exclude_none=True)
-    if not request_payload.get('attachments'):
-        request_payload.pop('attachments', None)
+    _normalize_fingerprint_attachments(request_payload)
     if request_model.source.type == 'cloud_document':
         source_payload = request_payload.get('source') or {}
         for field in (
@@ -463,8 +483,7 @@ def _stable_followup_fingerprint(
     model: MindmapAiMessageModel,
 ) -> str:
     message = model.model_dump(by_alias=True, exclude_none=True)
-    if not message.get('attachments'):
-        message.pop('attachments', None)
+    _normalize_fingerprint_attachments(message)
     fingerprint_payload = {
         'operation': 'followup',
         'parentJobId': parent_job_id,
@@ -479,8 +498,7 @@ def _stable_retry_fingerprint(
 ) -> str:
     """Fingerprint only the user's retry intent, before mutable cloud state is fetched."""
     overrides = model.model_dump(by_alias=True, exclude_unset=True)
-    if not overrides.get('attachments'):
-        overrides.pop('attachments', None)
+    _normalize_fingerprint_attachments(overrides)
     fingerprint_payload = {
         'operation': 'retry',
         'retryOfJobId': retry_of_job_id,
@@ -930,7 +948,7 @@ class MindmapAiTaskManager:
             if state == 'running' and previous in {'stopped', 'unconfirmed'}:
                 await db.rollback()
                 raise asyncio.CancelledError
-            if previous == state or previous == 'stopped':
+            if previous in (state, 'stopped'):
                 await db.rollback()
                 return previous == state
             event = await MindmapAiDao.add_event(db, job_id, 'execution_state', _event_json({
@@ -2131,6 +2149,7 @@ class MindmapAiTaskManager:
             base_document=normalized_document,
             scope=source.get('scope') if isinstance(source, dict) else None,
             trusted_source=True,
+            template_profile=read_template_profile(request),
         )
         return tool.read_projection(), tool.authorized_scope_summary()
 
@@ -2163,7 +2182,10 @@ class MindmapAiTaskManager:
             document, _summary = normalize_ai_editable_source_document(_document_from_detail(detail))
             return document
         return (
-            _restore_preview_document(request, recovered_preview['document'])
+            _restore_preview_document(
+                request, recovered_preview['document'],
+                template_profile=read_template_profile(_json_loads(getattr(job, 'request_json', None), {})),
+            )
             if recovered_preview is not None else request.source.document
         )
 
@@ -2238,7 +2260,10 @@ class MindmapAiTaskManager:
                 operations,
                 int(job.user_id),
                 mutation_id=mutation_id,
-                scope=scope if isinstance(scope, dict) else None,
+                constraints=MindmapAiMutationConstraints(
+                    scope=scope if isinstance(scope, dict) else None,
+                    template_profile=read_template_profile(request_payload),
+                ),
                 user_name=f'ai-agent:{job.agent_key}',
                 expected_revision=expected_revision,
                 commit=False,
@@ -3051,6 +3076,30 @@ class MindmapAiTaskManager:
             'credentialEnv': credential_env,
         }
 
+    @staticmethod
+    async def _verify_adapter_result_execution(
+        job_id: str,
+        result: Any,
+        execution_fenced: Callable[[Any], bool],
+        discard_result: Callable[[Any], Awaitable[None]] | None,
+    ) -> None:
+        """Reject a late result and clean up its session before propagating failure."""
+        try:
+            async with AsyncSessionLocal() as db:
+                job = await MindmapAiDao.get_job(db, job_id)
+            if execution_fenced(job):
+                raise asyncio.CancelledError
+        except BaseException:
+            if discard_result is not None:
+                try:
+                    await discard_result(result)
+                except BaseException:
+                    logger.exception(
+                        '丢弃迟到 Adapter 结果时清理 SDK 会话失败: '
+                        f'job_id={job_id}'
+                    )
+            raise
+
     @classmethod
     async def _await_adapter_result(
         cls,
@@ -3107,21 +3156,7 @@ class MindmapAiTaskManager:
                 done, _pending = await asyncio.wait({task}, timeout=min(0.5, remaining))
                 if task in done:
                     result = task.result()
-                    try:
-                        async with AsyncSessionLocal() as db:
-                            job = await MindmapAiDao.get_job(db, job_id)
-                        if execution_fenced(job):
-                            raise asyncio.CancelledError
-                    except BaseException:
-                        if discard_result is not None:
-                            try:
-                                await discard_result(result)
-                            except BaseException:
-                                logger.exception(
-                                    '丢弃迟到 Adapter 结果时清理 SDK 会话失败: '
-                                    f'job_id={job_id}'
-                                )
-                        raise
+                    await cls._verify_adapter_result_execution(job_id, result, execution_fenced, discard_result)
                     return result
                 async with AsyncSessionLocal() as db:
                     job = await MindmapAiDao.get_job(db, job_id)
@@ -3330,6 +3365,45 @@ class MindmapAiTaskManager:
             return False
         return cls._same_continuation_scope(parent_request, request)
 
+    @staticmethod
+    def _editing_reply_context(replies: list[Any]) -> dict[str, str]:
+        """Reconstruct only bounded public deltas after lineage access checks."""
+        if not replies:
+            return {}
+        parts: list[str] = []
+        previous_message = None
+        truncated = len(replies) > MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT
+        for raw in reversed(replies[:MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT]):
+            try:
+                reply = (_json_loads(raw, {})
+                         if isinstance(raw, str) and len(raw) <= AI_CONTINUATION_REPLY_MAX_JSON_CHARS else {})
+            except (ValueError, RecursionError):
+                reply = {}
+            text = reply.get('text') if isinstance(reply, dict) else None
+            if (
+                not isinstance(text, str) or len(text) > AI_CONTINUATION_REPLY_DELTA_MAX_CHARS
+                or reply.get('visibility', 'visible') != 'visible'
+            ):
+                truncated = True
+                previous_message = None  # Never stitch text across an unreadable gap.
+                continue
+            message = reply.get('messageId', '')
+            if parts and message != previous_message:
+                parts.append('\n\n')
+            parts.append(text)
+            previous_message = message
+        # Join before redacting/cropping: credentials can span delta boundaries.
+        # Retain the latest advice when the tail is long.
+        joined_limit = MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT * (AI_CONTINUATION_REPLY_DELTA_MAX_CHARS + len('\n\n'))
+        reply_text = public_text(''.join(parts), joined_limit)
+        return {
+            'assistantReply': reply_text[-MAX_AGENT_MESSAGE_LENGTH:],
+            'assistantReplyKind': 'editing_transcript',
+            'assistantReplyState': (
+                'truncated' if truncated or len(reply_text) > MAX_AGENT_MESSAGE_LENGTH else 'recorded'
+            ),
+        }
+
     @classmethod
     async def _editing_continuation_history(
         cls,
@@ -3407,36 +3481,7 @@ class MindmapAiTaskManager:
                 # Provider sessions cannot be shared across runtimes. Carry
                 # only persisted public text, never tools or hidden reasoning.
                 replies = await MindmapAiDao.list_visible_reply_payloads(db, str(parent.id), job.user_id)
-                if replies:
-                    parts: list[str] = []
-                    previous_message = None
-                    truncated = len(replies) > MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT
-                    for raw in reversed(replies[:MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT]):
-                        try:
-                            reply = _json_loads(raw, {}) if isinstance(raw, str) and len(raw) <= 65_536 else {}
-                        except (ValueError, RecursionError):
-                            reply = {}
-                        text = reply.get('text') if isinstance(reply, dict) else None
-                        if (
-                            not isinstance(text, str) or len(text) > 4000
-                            or reply.get('visibility', 'visible') != 'visible'
-                        ):
-                            truncated = True
-                            previous_message = None  # Never stitch text across an unreadable gap.
-                            continue
-                        message = reply.get('messageId', '')
-                        if parts and message != previous_message:
-                            parts.append('\n\n')
-                        parts.append(text)
-                        previous_message = message
-                    # Join before redacting/cropping: credentials can span delta
-                    # boundaries. Retain the latest advice when the tail is long.
-                    reply_text = public_text(''.join(parts), MINDMAP_AI_VISIBLE_REPLY_EVENT_LIMIT * 4002)
-                    entry['assistantReply'] = reply_text[-MAX_AGENT_MESSAGE_LENGTH:]
-                    entry['assistantReplyKind'] = 'editing_transcript'
-                    entry['assistantReplyState'] = (
-                        'truncated' if truncated or len(reply_text) > MAX_AGENT_MESSAGE_LENGTH else 'recorded'
-                    )
+                entry.update(cls._editing_reply_context(replies))
                 # Only after content-lineage ownership/scope checks. Read one
                 # latest snapshot, never resurrect an older cleared plan or
                 # import raw tools/thinking as instructions for the new Agent.
@@ -3721,6 +3766,7 @@ class MindmapAiTaskManager:
                     getattr(job, 'timeout_seconds', MindmapAiConfig.mindmap_ai_job_timeout_seconds)
                 )
                 request_model = MindmapAiJobCreateModel.model_validate(_json_loads(job.request_json, {}))
+                template_profile = read_template_profile(_json_loads(job.request_json, {}))
                 if request_model.execution_mode == 'direct':
                     # A worker restart loses the process-local fast path. Seed
                     # the next CAS revision from durable direct-commit event
@@ -3811,6 +3857,7 @@ class MindmapAiTaskManager:
                     'ai_job_id': job_id,
                     'max_nodes': max_nodes,
                     'max_depth': max_depth,
+                    'template_profile': template_profile,
                 }
                 tool_service = MindmapToolService(
                     base_document=source_document or None, tag_catalog=tag_catalog, **tool_options,
@@ -3877,6 +3924,7 @@ class MindmapAiTaskManager:
                 visible_history=visible_history,
                 continuation_history=continuation_history,
                 attachments=tuple(item.model_dump(by_alias=True) for item in request_model.attachments),
+                template_profile=template_profile,
             )
             if agent_key in DEVICE_AGENT_KEYS:
                 async def owns_device_lease() -> bool:
@@ -5051,6 +5099,7 @@ class MindmapAiService:
             and not await cls._has_native_model(db, user_id, request_model.model_id)
         ):
             raise ServiceException(message='自研 MindMap Agent 没有可用的模型配置')
+        await MindmapAiTemplateService.freeze_request_template(db, request_model, user_id)
         return policy, {
             'agent_key': manifest.agent_key,
             'adapter_version': manifest.adapter_version,
@@ -5538,9 +5587,10 @@ class MindmapAiService:
         if source_mindmap_id is not None:
             payload['source']['mindmapId'] = source_mindmap_id
         payload['source'].pop('artifact', None)
-        request_json = _json_dumps(_request_with_undo_baseline(freeze_user_message_context(payload), undo_baseline))
-
         policy, runtime_values = await cls._prepare_job_runtime(db, request_model, manifest, user_id)
+        request_json = _json_dumps(_request_with_undo_baseline(freeze_user_message_context(
+            MindmapAiTemplateService.frozen_request_payload(request_model, payload),
+        ), undo_baseline))
         await cls._ensure_concurrency_available(db, manifest.agent_key, policy)
 
         now = datetime.now()
@@ -5776,7 +5826,7 @@ class MindmapAiService:
 
         now = datetime.now()
         job_id = str(uuid.uuid4())
-        retry_request_payload = freeze_user_message_context(request_model.model_dump(by_alias=True, exclude_none=True))
+        retry_request_payload = freeze_user_message_context(MindmapAiTemplateService.frozen_request_payload(request_model))
         context_parent_id = _json_loads(retried_job.request_json, {}).get('contextParentJobId')
         if isinstance(context_parent_id, str) and context_parent_id:
             # Retain only server-owned content ancestry, never the failed
@@ -5967,10 +6017,7 @@ class MindmapAiService:
         source = request_model.source
         source_mindmap_id = source.mindmap_id if source.type == 'cloud_document' else None
         content_has_document_lineage = source.type in {'local_snapshot', 'cloud_document'}
-        durable_request_payload = freeze_user_message_context(request_model.model_dump(
-            by_alias=True,
-            exclude_none=True,
-        ))
+        durable_request_payload = freeze_user_message_context(MindmapAiTemplateService.frozen_request_payload(request_model))
         # Route is orchestration metadata rather than Agent input. Persist it
         # beside the validated request so recovery workers make the same
         # release decision after a process restart.
@@ -6544,7 +6591,7 @@ class MindmapAiService:
                 'base_room_epoch': base_room_epoch,
                 'request_json': _json_dumps(_request_with_undo_baseline(
                     freeze_user_message_context({
-                        **request_model.model_dump(by_alias=True, exclude_none=True),
+                        **MindmapAiTemplateService.frozen_request_payload(request_model),
                         'contextParentJobId': str(content_parent.id),
                     }), undo_baseline,
                 )),
@@ -7083,7 +7130,10 @@ class MindmapAiService:
         max_node_count = AI_MAX_NODE_COUNT
         artifact_id = str(uuid.uuid4())
         artifact, summary = build_smm_artifact(
-            _restore_preview_document(request_model, preview['document']),
+            _restore_preview_document(
+                request_model, preview['document'],
+                template_profile=read_template_profile(_json_loads(job.request_json, {})),
+            ),
             title=job.title or _initial_session_title(request_model.prompt),
             agent_key=job.agent_key,
             adapter_version=job.adapter_version,
@@ -7504,6 +7554,7 @@ class MindmapAiService:
                 operations=operations,
                 artifact_document=artifact_document,
                 max_node_count=max_node_count,
+                template_profile=read_template_profile(_json_loads(job.request_json, {})),
             )
             verify_proposal_document_integrity(
                 base_document=base_document,
@@ -7512,6 +7563,7 @@ class MindmapAiService:
                 proposal_result_hash=proposal.result_hash,
                 manifest_document_hash=manifest.get('documentHash'),
                 max_node_count=max_node_count,
+                template_profile=read_template_profile(_json_loads(job.request_json, {})),
             )
         except (
             KeyError,
@@ -7541,6 +7593,7 @@ class MindmapAiService:
             'impact': _json_loads(proposal.impact_json, {}),
             'warnings': _json_loads(proposal.warnings_json, []),
             'artifact': artifact,
+            'templateProfile': public_template_profile(read_template_profile(_json_loads(job.request_json, {}))),
         }
 
     @classmethod
@@ -7615,6 +7668,7 @@ class MindmapAiService:
             await MindmapAiDao.update_proposal(db, proposal_id, {'status': 'expired'})
             await db.commit()
             proposal.status = 'expired'
+        proposal_job = await MindmapAiDao.get_job(db, proposal.job_id, user_id)
         return MindmapAiProposalModel(
             id=proposal.id,
             jobId=proposal.job_id,
@@ -7630,6 +7684,9 @@ class MindmapAiService:
             resultHash=proposal.result_hash,
             impact=_json_loads(proposal.impact_json, {}),
             warnings=_json_loads(proposal.warnings_json, []),
+            templateProfile=public_template_profile(read_template_profile(
+                _json_loads(getattr(proposal_job, 'request_json', None), {}),
+            )),
             status=proposal.status,
             appliedRevision=proposal.applied_revision,
             createdTime=proposal.created_time,
@@ -8176,6 +8233,7 @@ class MindmapAiService:
                     operations=operations,
                     artifact_document=artifact_document,
                     max_node_count=max_node_count,
+                    template_profile=read_template_profile(_json_loads(getattr(proposal_job, 'request_json', None), {})),
                 )
                 verify_proposal_document_integrity(
                     base_document=integrity_base_document,
@@ -8184,6 +8242,7 @@ class MindmapAiService:
                     proposal_result_hash=proposal.result_hash,
                     manifest_document_hash=manifest.get('documentHash'),
                     max_node_count=max_node_count,
+                    template_profile=read_template_profile(_json_loads(getattr(proposal_job, 'request_json', None), {})),
                 )
                 document = (
                     json.loads(json.dumps(artifact_document, ensure_ascii=False))
@@ -8193,6 +8252,7 @@ class MindmapAiService:
                         operations=operations,
                         artifact_document=artifact_document,
                         max_node_count=max_node_count,
+                        template_profile=read_template_profile(_json_loads(getattr(proposal_job, 'request_json', None), {})),
                     )
                 )
             except (

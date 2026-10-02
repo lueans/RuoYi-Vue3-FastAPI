@@ -6,15 +6,23 @@ Agent 只能通过本模块请求脑图领域操作；本模块不直接操作 O
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from exceptions.exception import ServiceException
 from module_mindmap.ai.change_summary import summarize_committed_node_changes
 from module_mindmap.ai.document import (
+    AI_ALLOWED_LAYOUTS,
+    MindmapArtifactError,
     compute_document_hash,
     document_from_mindmap_detail,
     normalize_ai_editable_source_document,
+)
+from module_mindmap.ai.template_profile import (
+    TEMPLATE_NODE_FORMAT_FIELDS,
+    validate_template_document_format,
+    validate_template_node_format,
 )
 from module_mindmap.entity.vo.mindmap_comment_vo import MindmapCommentCreateModel
 from module_mindmap.entity.vo.mindmap_vo import (
@@ -33,6 +41,27 @@ if TYPE_CHECKING:
 MAX_MUTATION_ID_LENGTH = 100
 MAX_COMMENT_CONTENT_LENGTH = 5_000
 MAX_NODE_TAGS = 50
+AI_NODE_MUTATION_FIELDS = frozenset({'text', 'note', 'hyperlink', 'tag', 'richText', 'expand'})
+
+
+@dataclass(frozen=True)
+class MindmapAiMutationConstraints:
+    """Trusted scope and format constraints from the same persisted request."""
+
+    scope: dict[str, Any] | None = None
+    template_profile: dict[str, Any] | None = None
+
+
+def _validate_node_format(
+    data: dict[str, Any],
+    template_profile: dict[str, Any] | None,
+    *,
+    previous_data: dict[str, Any] | None = None,
+) -> None:
+    try:
+        validate_template_node_format(data, template_profile, previous_data=previous_data)
+    except MindmapArtifactError as exc:
+        raise ServiceException(message=str(exc)) from exc
 
 
 async def _resolve_existing_tags(
@@ -336,6 +365,10 @@ def _effective_canonical_operations(
         effective.append(MindmapContentOperationModel(
             type='file.layout.update', payload={'layout': deepcopy(after.get('layout'))},
         ))
+    if before.get('theme') != after.get('theme'):
+        effective.append(MindmapContentOperationModel(
+            type='file.theme.update', payload={'theme': deepcopy(after.get('theme'))},
+        ))
     for uid, node in after_nodes.items():
         old_tags = (before_nodes.get(uid, {}).get('data') or {}).get('tag') or []
         next_tags = (node.get('data') or {}).get('tag') or []
@@ -410,7 +443,7 @@ class MindmapAiMutationGateway:
         user_id: int,
         *,
         mutation_id: str,
-        scope: dict[str, Any] | None = None,
+        constraints: MindmapAiMutationConstraints | None = None,
         user_name: str | None = None,
         expected_revision: int | None = None,
         commit: bool = True,
@@ -430,6 +463,9 @@ class MindmapAiMutationGateway:
         """
         if not commit and broadcast:
             raise ServiceException(message='延迟提交时必须同时关闭脑图广播')
+        constraints = constraints or MindmapAiMutationConstraints()
+        scope = constraints.scope
+        template_profile = constraints.template_profile
         if not operations:
             return {
                 'contentRevision': None,
@@ -462,6 +498,9 @@ class MindmapAiMutationGateway:
         deleted_in_batch: set[str] = set()
         tag_definitions: dict[int, dict[str, Any]] = {}
         owner_id = getattr(detail, 'owner_id', None)
+        allowed_node_fields = AI_NODE_MUTATION_FIELDS | (
+            TEMPLATE_NODE_FORMAT_FIELDS if template_profile else frozenset()
+        )
 
         for raw in operations:
             if not isinstance(raw, dict):
@@ -480,6 +519,9 @@ class MindmapAiMutationGateway:
                     raise ServiceException(message='AI 新增节点超出授权范围')
                 if str(data.get('uid') or '') != node_uid or node_uid in nodes:
                     raise ServiceException(message='AI 新增节点 UID 无效')
+                if set(data) - (allowed_node_fields | {'uid'}):
+                    raise ServiceException(message='AI 新增节点包含不允许的字段')
+                _validate_node_format(data, template_profile)
                 # A stable UID cannot describe both a deleted identity and a
                 # replacement in one batch; the net projector would conflate
                 # them. Require update/move, or a genuinely new UID instead.
@@ -512,9 +554,9 @@ class MindmapAiMutationGateway:
                 node = nodes[node_uid]
                 patch = deepcopy(payload.get('set')) if isinstance(payload.get('set'), dict) else {}
                 unset = payload.get('unset') if isinstance(payload.get('unset'), list) else []
-                allowed = {'text', 'note', 'hyperlink', 'tag', 'richText', 'expand'}
-                if set(patch) - allowed or any(str(key) not in allowed for key in unset):
+                if set(patch) - allowed_node_fields or any(str(key) not in allowed_node_fields for key in unset):
                     raise ServiceException(message='AI 更新节点包含不允许的字段')
+                previous_data = deepcopy(node.get('data') or {})
                 if 'tag' in patch:
                     patch['tag'] = await _resolve_existing_tags(
                         db, patch['tag'], user_id=user_id, owner_id=owner_id,
@@ -526,6 +568,7 @@ class MindmapAiMutationGateway:
                     node.setdefault('data', {}).pop(str(key), None)
                 if not node.get('data', {}).get('tag'):
                     node.get('data', {}).pop('tag', None)
+                _validate_node_format(node['data'], template_profile, previous_data=previous_data)
                 touched_uids[node_uid] = None
                 continue
 
@@ -604,8 +647,17 @@ class MindmapAiMutationGateway:
                 if str((scope or {}).get('type') or 'document') != 'document':
                     raise ServiceException(message='局部授权范围不能修改脑图元数据')
                 values = payload.get('set') if isinstance(payload.get('set'), dict) else {}
-                if 'layout' in values:
-                    tree['layout'] = deepcopy(values['layout'])
+                allowed_meta_fields = {'layout', 'theme'} if template_profile else {'layout'}
+                if set(values) - allowed_meta_fields or payload.get('unset'):
+                    raise ServiceException(message='AI 文档元数据包含不允许的字段')
+                if 'layout' in values and (
+                    not isinstance(values['layout'], str) or values['layout'] not in AI_ALLOWED_LAYOUTS
+                ):
+                    raise ServiceException(message='AI 脑图布局类型无效')
+                for field, value in values.items():
+                    if template_profile and value != template_profile[field]:
+                        raise ServiceException(message='文档格式与本轮可信模版不一致')
+                    tree[field] = deepcopy(value)
                 continue
 
             if op_type == 'add_comment':
@@ -663,6 +715,10 @@ class MindmapAiMutationGateway:
 
             raise ServiceException(message=f'AI 直写不支持操作: {op_type or "unknown"}')
 
+        try:
+            validate_template_document_format(tree, template_profile, previous_document=before_document)
+        except MindmapArtifactError as exc:
+            raise ServiceException(message=str(exc)) from exc
         canonical = _effective_canonical_operations(before_document, tree, touched_uids, structural_parents)
         change_summary = summarize_committed_node_changes([[
             operation.model_dump(by_alias=True, exclude_none=True)

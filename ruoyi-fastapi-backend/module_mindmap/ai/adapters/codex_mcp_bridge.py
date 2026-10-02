@@ -45,6 +45,7 @@ TAG_SUGGESTIONS_SCHEMA = {
     }, 'required': ['name', 'reason', 'nodeUids'], 'additionalProperties': False},
 }
 NODE_FIELDS = {
+    'templateRole': {'type': 'string', 'minLength': 1, 'maxLength': 200},
     'clientRef': {'type': 'string'},
     'parentUid': STRING,
     'text': STRING,
@@ -94,6 +95,7 @@ TOOL_DESCRIPTORS = {
         'inputSchema': _schema({
             'title': STRING,
             'layout': {'type': 'string'},
+            'templateRole': {'type': 'string', 'minLength': 1, 'maxLength': 200},
         }, ['title']),
     },
     'add_nodes': {

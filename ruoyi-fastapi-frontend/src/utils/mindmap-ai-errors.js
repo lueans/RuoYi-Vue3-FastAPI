@@ -31,7 +31,7 @@ const MINDMAP_AI_ERROR_MESSAGES = Object.freeze({
   AI_UNDO_SNAPSHOT_INVALID: 'AI 撤销快照不可用，请人工核对脑图',
   AI_SANDBOX_VIOLATION: 'Agent 尝试执行未授权操作，任务已被安全终止',
   AI_PROVIDER_AUTH_FAILED: 'AI 供应商认证失败，请联系管理员检查 Connector',
-  AI_MODEL_CONFIG_INVALID: '所选模型配置无效，请到 AI 模型管理检查提供商、模型编码和 Base URL',
+  AI_MODEL_CONFIG_INVALID: '所选模型配置无效，请到 AI 模型管理检查提供商、模型编码、Base URL 和温度等参数',
   AI_RATE_LIMITED: 'AI 服务当前请求过多，请稍后重试',
   AI_TASK_CANCELLED: 'AI 任务已取消，可新建任务重新生成',
   AI_ARTIFACT_EXPIRED: 'AI 结果已过期，请重新生成',

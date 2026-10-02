@@ -28,6 +28,7 @@ function compile(scope, names) {
   scope.agentSwitchPending ??= ref(false)
   scope.readPersistedAttempts ??= () => ({})
   scope.continuationPrompt ??= ref('')
+  scope.draftFreshnessMessage ??= ref('')
   names = [...new Set([...names, 'consumeSubmittedComposerDraft'])]
   return new Function('scope', `with(scope) { ${names.map(functionSource).join('\n')} return { ${names.join(', ')} }; }`)(scope)
 }

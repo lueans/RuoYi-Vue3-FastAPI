@@ -5,7 +5,7 @@ import { mergeMindmapAiJobSnapshot } from './mindmap-ai-stream.js'
 // Terminal result hydration must not own this poll: it can finish long before
 // the executor closes. Identity/epoch/account changes invalidate every callback.
 export function useMindmapExecutionStop({ job, ownerId, loadJob, onUpdated = () => {},
-  intervalMs = 1000, maxPolls = 30 }) {
+  enabled = () => true, intervalMs = 1000, maxPolls = 30 }) {
   const checking = ref(false)
   const error = ref('')
   const blocked = computed(() => isMindmapExecutionBlocked(job.value))
@@ -33,7 +33,7 @@ export function useMindmapExecutionStop({ job, ownerId, loadJob, onUpdated = () 
       }
       const check = () => {
         const snapshot = job.value
-        if (disposed || !id || !stillCurrent() || snapshot?.id !== id
+        if (disposed || !enabled() || !id || !stillCurrent() || snapshot?.id !== id
           || snapshot.executionEpoch !== epoch || ownerId() !== owner) return finish(false)
         if (snapshot.executionState === 'unconfirmed'
           || (snapshot.errorCode === 'AI_AGENT_CLEANUP_FAILED' && snapshot.executionState !== 'stopped')) return finish(false)
@@ -41,7 +41,7 @@ export function useMindmapExecutionStop({ job, ownerId, loadJob, onUpdated = () 
           && ['stopped', 'not_started'].includes(snapshot.executionState)) finish(true)
       }
       stopWaiters.add(finish)
-      unwatch = watch([job, ownerId, stillCurrent, isRunning, () => job.value?.executionEpoch,
+      unwatch = watch([job, ownerId, enabled, stillCurrent, isRunning, () => job.value?.executionEpoch,
         () => job.value?.executionState, () => job.value?.errorCode], check, { flush: 'sync' })
       timeout = setTimeout(() => finish(false), timeoutMs)
       check()
@@ -58,7 +58,7 @@ export function useMindmapExecutionStop({ job, ownerId, loadJob, onUpdated = () 
   }
 
   async function refresh({ automatic = false } = {}) {
-    if (disposed || !blocked.value || checking.value || !job.value?.id) return false
+    if (disposed || !enabled() || !blocked.value || checking.value || !job.value?.id) return false
     if (!automatic) polls = 0
     const identity = generation
     const id = job.value.id
@@ -66,7 +66,7 @@ export function useMindmapExecutionStop({ job, ownerId, loadJob, onUpdated = () 
     const owner = ownerId()
     const request = new AbortController()
     controller = request
-    const current = () => !disposed && generation === identity && job.value?.id === id
+    const current = () => !disposed && enabled() && generation === identity && job.value?.id === id
       && job.value.executionEpoch === epoch && ownerId() === owner
     checking.value = true
     error.value = ''
@@ -99,11 +99,11 @@ export function useMindmapExecutionStop({ job, ownerId, loadJob, onUpdated = () 
   // Compare each identity field, not a newly allocated array on every snapshot.
   // Otherwise a running receipt restarts this immediate watcher recursively,
   // bypassing the poll interval/budget and starving rendering and cancellation.
-  watch([() => job.value?.id, () => job.value?.executionEpoch, ownerId, () => blocked.value], () => {
+  watch([() => job.value?.id, () => job.value?.executionEpoch, ownerId, enabled, () => blocked.value], () => {
     cancel()
     polls = 0
     error.value = ''
-    if (blocked.value) void refresh({ automatic: true })
+    if (enabled() && blocked.value) void refresh({ automatic: true })
   }, { immediate: true })
   onScopeDispose(() => {
     disposed = true

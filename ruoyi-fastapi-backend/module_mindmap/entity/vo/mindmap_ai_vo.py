@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 from pydantic.alias_generators import to_camel
 
 from module_mindmap.ai.document import AI_ALLOWED_LAYOUTS
@@ -21,6 +21,8 @@ AI_INTENTS = frozenset({
 })
 MAX_MODEL_REF_LENGTH = 128
 MAX_RETENTION_DAYS = 365
+MAX_SELECTED_NODE_COUNT = 200
+MAX_ATTACHMENT_TOTAL_TEXT_LENGTH = 100_000
 ASCII_CONTROL_END = 32
 ASCII_FIRST_VISIBLE = ASCII_CONTROL_END + 1
 ASCII_DELETE = 127
@@ -134,7 +136,7 @@ class MindmapAiScopeModel(BaseModel):
 
     type: Literal['document', 'branch', 'selectedNodes'] = 'document'
     root_uid: str | None = Field(default=None, min_length=1, max_length=64)
-    node_uids: list[MindmapNodeUid] | None = Field(default=None, min_length=1, max_length=200)
+    node_uids: list[MindmapNodeUid] | None = Field(default=None, min_length=1, max_length=MAX_SELECTED_NODE_COUNT)
 
     @model_validator(mode='after')
     def validate_scope(self) -> MindmapAiScopeModel:
@@ -235,8 +237,15 @@ class MindmapAiParametersModel(BaseModel):
         return normalized
 
 
+class MindmapAiTemplateSourceModel(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra='forbid')
+
+    mindmap_id: int = Field(gt=0, strict=True)
+    content_revision: int = Field(ge=0, strict=True)
+
+
 class MindmapAiAttachmentModel(BaseModel):
-    """Client-extracted text is reference data, never an authorized map source."""
+    """Client-extracted reference/template data never authorizes a map source."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra='forbid')
 
@@ -245,6 +254,24 @@ class MindmapAiAttachmentModel(BaseModel):
     size: int = Field(ge=0, le=10 * 1024 * 1024, strict=True)
     media_type: str = Field(max_length=128)
     text: str = Field(min_length=1, max_length=50_000)
+    purpose: Literal['reference', 'template'] = 'reference'
+    template_source: MindmapAiTemplateSourceModel | None = None
+
+    @model_validator(mode='after')
+    def validate_template_source(self) -> MindmapAiAttachmentModel:
+        if self.template_source is not None and self.purpose != 'template':
+            raise ValueError('只有模版附件可以引用模版脑图')
+        return self
+
+    @model_serializer(mode='wrap')
+    def omit_absent_template_source(self, handler: Any) -> dict[str, Any]:
+        result = handler(self)
+        if 'purpose' not in self.model_fields_set:
+            result.pop('purpose', None)
+        if self.template_source is None:
+            result.pop('templateSource', None)
+            result.pop('template_source', None)
+        return result
 
     @field_validator('id', 'name', 'text')
     @classmethod
@@ -264,14 +291,19 @@ class MindmapAiAttachmentsModel(BaseModel):
     @field_validator('attachments')
     @classmethod
     def validate_attachments(cls, value: list[MindmapAiAttachmentModel]) -> list[MindmapAiAttachmentModel]:
-        if sum(len(item.text) for item in value) > 100_000:
+        if sum(len(item.text) for item in value) > MAX_ATTACHMENT_TOTAL_TEXT_LENGTH:
             raise ValueError('附件正文合计不能超过 100000 字符')
         if len({item.id for item in value}) != len(value):
             raise ValueError('附件标识不能重复')
+        if sum(item.purpose == 'template' for item in value) > 1:
+            raise ValueError('每轮最多添加一个模版')
         return value
 
 
 class MindmapAiJobCreateModel(MindmapAiAttachmentsModel):
+    # Populated only by the server after cloud authorization, never deserialized
+    # from public request fields or inherited from a previous conversation turn.
+    _template_profile: dict[str, Any] | None = PrivateAttr(default=None)
     agent_key: str = Field(default='native_mindmap', min_length=1, max_length=64)
     device_id: DeviceId | None = None
     model_id: int | None = Field(default=None, gt=0)
@@ -553,6 +585,7 @@ class MindmapAiProposalModel(BaseModel):
     result_hash: str
     impact: dict[str, Any]
     warnings: list[dict[str, Any]]
+    template_profile: dict[str, Any] | None = None
     status: str
     applied_revision: int | None = None
     created_time: datetime

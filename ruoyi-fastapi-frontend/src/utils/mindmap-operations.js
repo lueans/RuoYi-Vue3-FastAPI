@@ -793,15 +793,18 @@ function immediateChildUids(node) {
     .filter(Boolean)
 }
 
-function subtreeNodeUids(node) {
+function subtreeNodeUids(node, nodeSnapshots = new Map()) {
   const result = []
   const pending = [node]
-  const visited = new WeakSet()
+  const visited = new Set()
   while (pending.length) {
-    const current = pending.pop()
-    if (!current || typeof current !== 'object' || visited.has(current)) continue
-    visited.add(current)
+    let current = pending.pop()
+    if (!current || typeof current !== 'object') continue
     const uid = current.data?.uid || current.uid
+    const key = uid ? String(uid) : current
+    if (visited.has(key)) continue
+    visited.add(key)
+    current = nodeSnapshots.get(key) || current
     if (uid) result.push(String(uid))
     const children = Array.isArray(current.children) ? current.children : []
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -826,13 +829,30 @@ export function buildMindmapContentOperations(detailList, nodeRevisions = new Ma
   const details = detailList || []
   const deleteSubtreeUids = new Map()
   const deletedDescendantUids = new Set()
+  const deletedNodeSnapshots = new Map()
   for (const detail of details) {
     if (detail?.action !== 'delete') continue
     const nodeUid = detailNodeUid(detail)
-    const deletedUids = subtreeNodeUids(detail.oldData || detail.data)
-    deleteSubtreeUids.set(detail, deletedUids)
-    for (const uid of deletedUids) {
-      if (uid !== String(nodeUid || '')) deletedDescendantUids.add(uid)
+    if (nodeUid) deletedNodeSnapshots.set(String(nodeUid), detail.oldData || detail.data)
+  }
+  // Visit each deleted forest once, even when the core emits a detail for
+  // every descendant. Resolve shallow legacy records through their own detail
+  // so deletion conflict payloads still include the complete baseline subtree.
+  const visitedDeletedNodes = new Set()
+  for (const root of deletedNodeSnapshots.values()) {
+    const pending = [{ node: root, isRoot: true }]
+    while (pending.length) {
+      const { node, isRoot } = pending.pop()
+      if (!node || typeof node !== 'object') continue
+      const uid = node.data?.uid || node.uid
+      const key = uid ? String(uid) : node
+      if (!isRoot && uid) deletedDescendantUids.add(String(uid))
+      if (visitedDeletedNodes.has(key)) continue
+      visitedDeletedNodes.add(key)
+      const source = deletedNodeSnapshots.get(key) || node
+      for (const child of (Array.isArray(source.children) ? source.children : [])) {
+        pending.push({ node: child, isRoot: false })
+      }
     }
   }
   for (const detail of details) {
@@ -844,6 +864,12 @@ export function buildMindmapContentOperations(detailList, nodeRevisions = new Ma
     // Command 会为子树内每个消失节点各发一条 delete 明细。祖先操作已经
     // 原子覆盖整个子树，省略后代重复删除可避免大分支产生平方级请求载荷。
     if (action === 'delete' && deletedDescendantUids.has(String(nodeUid))) continue
+    if (action === 'delete') {
+      deleteSubtreeUids.set(detail, subtreeNodeUids(
+        detail.oldData || detail.data,
+        deletedNodeSnapshots,
+      ))
+    }
     const rawCurrentData = stripCrossNodeData(
       normalizePersistedNodeData(detail.data?.data || {}),
     )

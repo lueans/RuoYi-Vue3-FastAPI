@@ -218,6 +218,7 @@ class Render {
       return false
     }
     if (nodeData?.data?.expand !== false) return true
+    if (this.outlineExpandedNodeUids?.has(String(nodeData?.data?.uid))) return true
     if (this.aiPresentationExpandedNodeUids?.has(String(nodeData?.data?.uid))) return true
     if (this.transientVisibleNodeUids === null) return false
     const children = Array.isArray(nodeData?.children) ? nodeData.children : []
@@ -239,7 +240,7 @@ class Render {
   }
 
   // 为本次视图变化创建新会话，确保旧会话不会继续写入 SVG。
-  startPerformanceRender() {
+  startPerformanceRender({ emitEvents = true } = {}) {
     if (
       this.destroyed ||
       this.isRendering ||
@@ -251,8 +252,8 @@ class Render {
     this.cancelPerformanceRender()
     const session = createAsyncRenderSession()
     this.performanceRenderSession = session
-    this.performanceRenderEventActive = true
-    this.mindMap.emit('node_tree_render_start')
+    this.performanceRenderEventActive = emitEvents
+    if (emitEvents) this.mindMap.emit('node_tree_render_start')
     // start 事件监听器可能同步销毁实例或触发另一轮渲染。
     if (
       this.destroyed ||
@@ -272,7 +273,7 @@ class Render {
         }
         this.performanceRenderSession = null
         this.performanceRenderEventActive = false
-        this.mindMap.emit('node_tree_render_end')
+        if (emitEvents) this.mindMap.emit('node_tree_render_end')
       },
       false,
       true,
@@ -347,8 +348,10 @@ class Render {
         if (!opt.openPerformance) {
           this.onViewDataChange.cancel()
           this.cancelPerformanceRender()
+          this.forceLoadNode()
+        } else {
+          this.startPerformanceRender()
         }
-        this.forceLoadNode()
       }
       // 更新openRealtimeRenderOnNodeTextEdit配置
       if (
@@ -391,14 +394,14 @@ class Render {
   }
 
   // 强制渲染节点，不考虑是否在画布可视区域内
-  forceLoadNode(node) {
+  forceLoadNode(node, { emitEvents = true } = {}) {
     if (this.destroyed) return
     this.cancelPerformanceRender()
     node = node || this.root
     if (node) {
-      this.mindMap.emit('node_tree_render_start')
+      if (emitEvents) this.mindMap.emit('node_tree_render_start')
       node.render(() => {
-        this.mindMap.emit('node_tree_render_end')
+        if (emitEvents) this.mindMap.emit('node_tree_render_end')
       }, true)
     }
   }
@@ -2224,13 +2227,15 @@ class Render {
   }
 
   // 定位到指定节点
-  goTargetNode(node, callback = () => {}) {
+  goTargetNode(node, callback = () => {}, isCurrent = () => true) {
     let uid = typeof node === 'string' ? node : node.getData('uid')
     if (!uid) return
     this.expandToNodeUid(uid, () => {
+      if (this.destroyed || !isCurrent()) return
       let targetNode = this.findNodeByUid(uid)
       if (targetNode) {
         targetNode.active()
+        if (!isCurrent()) return
         this.moveNodeToCenter(targetNode)
         callback(targetNode)
       }

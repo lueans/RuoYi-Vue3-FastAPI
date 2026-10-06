@@ -113,53 +113,50 @@ test('late business and HTTP 401s from an old credential cannot expire a newly l
     const pending = deferred()
     h.respond(() => pending.promise)
     const request = h.service.get('/mindmap/130')
+    const rejected = assert.rejects(request, expiry.isAuthExpiredError)
     await tick()
     const oldConfig = h.requests[0]
     h.auth.setToken('session-b')
+    h.user.token = 'session-b'
     if (httpError) {
       pending.reject(new axios.AxiosError('unauthorized', 'ERR_BAD_REQUEST', oldConfig, {}, {
         ...response(oldConfig), status: 401,
       }))
     } else pending.resolve(response(oldConfig))
-    await assert.rejects(request, expiry.isAuthExpiredError)
+    await rejected
     assert.equal(h.prompts.length, 0)
     assert.equal(expiry.isAuthSessionExpired('session-b'), false)
     assert.equal(h.token, 'session-b')
   }
 })
 
-test('cookie disappearance before business or HTTP 401 protects the mounted owner and fences later requests', async t => {
-  for (const httpError of [false, true]) {
-    await t.test(httpError ? 'HTTP 401' : 'business 401', async t => {
-      const h = harness(t)
-      let cleanupCalls = 0
-      h.subscribe(() => {
-        assert.equal(expiry.isAuthSessionExpired(h.user.token), true)
-        cleanupCalls++
-      })
-      h.externalLogin(undefined)
-      h.respond(config => {
-        assert.equal(config.headers.Authorization, undefined, 'removed credentials must not be reused')
-        if (httpError) throw new axios.AxiosError('unauthorized', 'ERR_BAD_REQUEST', config, {}, {
-          ...response(config), status: 401,
-        })
-        return response(config)
-      })
-      await assert.rejects(h.service.get('/mindmap/130', { silentError: true }), expiry.isAuthExpiredError)
-      assert.equal(h.user.token, 'session-a', 'keep draft ownership until cleanup finishes')
-      assert.equal(cleanupCalls, 1)
-      assert.equal(h.prompts.length, 1)
-      h.prompts[0].reject('cancel')
-      await tick()
-      for (let attempt = 0; attempt < 3; attempt++) {
-        await assert.rejects(h.service.get('/mindmap/ai/jobs/current'), expiry.isAuthExpiredError)
-      }
-      assert.equal(h.requests.length, 1)
-      assert.equal(h.prompts.length, 1)
-      assert.equal(cleanupCalls, 1)
-      assert.equal(h.messages.length, 0)
-    })
+test('cookie disappearance protects the mounted owner before transport and fences later requests', async t => {
+  const h = harness(t)
+  let cleanupCalls = 0
+  h.subscribe(() => {
+    assert.equal(expiry.isAuthSessionExpired(h.user.token), true)
+    cleanupCalls++
+  })
+  h.externalLogin(undefined)
+  h.respond(config => {
+    assert.equal(config.headers.Authorization, undefined, 'removed credentials must not be reused')
+    assert.fail('a missing-cookie request must not reach transport')
+  })
+  await assert.rejects(h.service.get('/mindmap/130', { silentError: true }), error => (
+    expiry.isAuthExpiredError(error) && error.authSessionChanged === true
+  ))
+  assert.equal(h.user.token, 'session-a', 'keep draft ownership until cleanup finishes')
+  assert.equal(cleanupCalls, 1)
+  assert.equal(h.prompts.length, 1)
+  h.prompts[0].reject('cancel')
+  await tick()
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await assert.rejects(h.service.get('/mindmap/ai/jobs/current'), expiry.isAuthExpiredError)
   }
+  assert.equal(h.requests.length, 0, 'removed credentials must be fenced before transport')
+  assert.equal(h.prompts.length, 1)
+  assert.equal(cleanupCalls, 1)
+  assert.equal(h.messages.length, 0)
 })
 
 test('missing-cookie relogin confirmation and inline action wait for the same draft cleanup', async t => {
@@ -189,11 +186,12 @@ test('removing a cookie while its request is in flight still expires the matchin
   h.subscribe(() => { cleaned = true })
   h.respond(() => pending.promise)
   const request = h.service.get('/mindmap/130')
+  const rejected = assert.rejects(request, expiry.isAuthExpiredError)
   await tick()
   assert.equal(h.requests[0].headers.Authorization, 'Bearer session-a')
   h.externalLogin(undefined)
   pending.resolve(response(h.requests[0]))
-  await assert.rejects(request, expiry.isAuthExpiredError)
+  await rejected
   assert.equal(expiry.isAuthSessionExpired(h.user.token), true)
   assert.equal(cleaned, true)
   assert.equal(h.prompts.length, 1)
@@ -219,14 +217,18 @@ test('credential-free late 401 cannot pause a newer cookie or a new mounted owne
   for (const newCookie of ['session-b', undefined]) {
     const h = harness(t)
     const pending = deferred()
+    h.user.token = ''
     h.externalLogin(undefined)
     h.respond(() => pending.promise)
     const request = h.service.get('/mindmap/130')
+    const rejected = assert.rejects(request, expiry.isAuthExpiredError)
     await tick()
+    assert.equal(h.requests.length, 1, 'the request starts without a cookie or mounted owner')
+    assert.equal(h.requests[0].headers.Authorization, undefined)
     h.user.token = 'session-b'
     h.externalLogin(newCookie)
     pending.resolve(response(h.requests[0]))
-    await assert.rejects(request, expiry.isAuthExpiredError)
+    await rejected
     assert.equal(h.prompts.length, 0)
     assert.equal(expiry.hasAuthExpiredSession(), false)
     assert.equal(h.user.token, 'session-b')
@@ -246,41 +248,35 @@ test('explicit anonymous requests and a genuinely logged-out page do not expire 
   assert.equal(expiry.hasAuthExpiredSession(), false)
 })
 
-test('a rejected cross-tab cookie pauses the actual Vue owner and protects its drafts before relogin', async t => {
-  for (const httpError of [false, true]) {
-    await t.test(httpError ? 'HTTP 401' : 'business 401', async t => {
-      const h = harness(t)
-      const backup = deferred()
-      const draftOwners = []
-      const expired = mountAuthPanel(t, h, () => {
-        draftOwners.push({ id: h.user.id, token: h.user.token })
-        return backup.promise
-      })
-      h.externalLogin('session-b')
-      h.respond(config => {
-        if (httpError) throw new axios.AxiosError('unauthorized', 'ERR_BAD_REQUEST', config, {}, {
-          ...response(config), status: 401,
-        })
-        return response(config)
-      })
-      await assert.rejects(h.service.get('/mindmap/130', { silentError: true }), expiry.isAuthExpiredError)
-      assert.equal(expired.value, true)
-      assert.equal(expiry.isAuthSessionExpired('session-a'), true)
-      assert.equal(expiry.isAuthSessionExpired('session-b'), true)
-      assert.deepEqual(draftOwners, [{ id: 42, token: 'session-a' }])
-      h.prompts[0].resolve('confirm')
-      await tick()
-      assert.equal(h.location.href, '')
-      assert.equal(h.user.token, 'session-a')
-      await assert.rejects(h.service.post('/mindmap/130/changes', { text: 'old-owner draft' }), expiry.isAuthExpiredError)
-      assert.equal(h.requests.length, 1, 'old-owner drafts must not be sent using the replacement cookie')
-      const login = h.requestAuthLogin()
-      backup.resolve()
-      assert.equal(await login, true)
-      assert.equal(h.location.href, '/mindmap/edit?id=130#node')
-      assert.deepEqual(h.logouts, ['session-b'])
-    })
-  }
+test('a cross-tab cookie change pauses the old Vue owner and protects its drafts without rejecting the new cookie', async t => {
+  const h = harness(t)
+  const backup = deferred()
+  const draftOwners = []
+  const expired = mountAuthPanel(t, h, () => {
+    draftOwners.push({ id: h.user.id, token: h.user.token })
+    return backup.promise
+  })
+  h.externalLogin('session-b')
+  h.respond(() => assert.fail('an old-owner request must not reach transport with the replacement cookie'))
+  await assert.rejects(h.service.get('/mindmap/130', { silentError: true }), error => (
+    expiry.isAuthExpiredError(error) && error.authSessionChanged === true
+  ))
+  assert.equal(expired.value, true)
+  assert.equal(expiry.isAuthSessionExpired('session-a'), true)
+  assert.equal(expiry.isAuthSessionExpired('session-b'), false)
+  assert.deepEqual(draftOwners, [{ id: 42, token: 'session-a' }])
+  h.prompts[0].resolve('confirm')
+  await tick()
+  assert.equal(h.location.href, '')
+  assert.equal(h.user.token, 'session-a')
+  await assert.rejects(h.service.post('/mindmap/130/changes', { text: 'old-owner draft' }), expiry.isAuthExpiredError)
+  assert.equal(h.requests.length, 0, 'old-owner drafts must not be sent using the replacement cookie')
+  const login = h.requestAuthLogin()
+  backup.resolve()
+  assert.equal(await login, true)
+  assert.equal(h.location.href, '/mindmap/edit?id=130#node')
+  assert.equal(h.token, 'session-b', 'reloading the old page must preserve the replacement cookie')
+  assert.deepEqual(h.logouts, [])
 })
 
 test('an old Vue owner stays fenced after another fresh cookie arrives without expiring that new credential', async t => {
@@ -290,10 +286,12 @@ test('an old Vue owner stays fenced after another fresh cookie arrives without e
   const expired = mountAuthPanel(t, h, () => { cleanupCalls++; return backup.promise })
   h.externalLogin('session-b')
   h.respond(config => response(config))
-  await assert.rejects(h.service.get('/mindmap/130'), expiry.isAuthExpiredError)
+  await assert.rejects(h.service.get('/mindmap/130'), error => (
+    expiry.isAuthExpiredError(error) && error.authSessionChanged === true
+  ))
   h.externalLogin('session-c')
   await assert.rejects(h.service.post('/mindmap/130/changes', { text: 'old-owner draft' }), expiry.isAuthExpiredError)
-  assert.equal(h.requests.length, 1)
+  assert.equal(h.requests.length, 0)
   assert.equal(expired.value, true)
   assert.equal(cleanupCalls, 1)
   assert.equal(expiry.isAuthSessionExpired('session-c'), false, 'a local fence is not a server rejection')
@@ -308,24 +306,29 @@ test('an old Vue owner stays fenced after another fresh cookie arrives without e
   assert.equal(h.location.href, '/mindmap/edit?id=130#node')
 })
 
-test('late cross-tab-cookie 401 cannot pause a newly logged-in Vue owner', async t => {
+test('an in-flight 401 after a cross-tab switch cannot pause a newly logged-in Vue owner', async t => {
   const h = harness(t)
   const pending = deferred()
   let cleanupCalls = 0
   const expired = mountAuthPanel(t, h, () => { cleanupCalls++ })
-  h.externalLogin('session-b')
   h.respond(() => pending.promise)
   const request = h.service.get('/mindmap/130')
+  const rejected = assert.rejects(request, expiry.isAuthExpiredError)
   await tick()
+  const oldConfig = h.requests[0]
+  assert.equal(h.requests.length, 1)
+  assert.equal(oldConfig.headers.Authorization, 'Bearer session-a')
+  h.externalLogin('session-b')
   h.auth.setToken('session-c')
   h.user.token = 'session-c'
-  pending.resolve(response(h.requests[0]))
-  await assert.rejects(request, expiry.isAuthExpiredError)
+  pending.resolve(response(oldConfig))
+  await rejected
   assert.equal(expired.value, false)
   assert.equal(cleanupCalls, 0)
   assert.equal(expiry.hasAuthExpiredSession(), false)
   assert.equal(h.prompts.length, 0)
   assert.equal(h.token, 'session-c')
+  assert.deepEqual(h.logouts, [])
 })
 
 test('login, anonymous reads and explicit logout bypass expiry, and actual setToken resets the latch', async t => {
@@ -340,6 +343,7 @@ test('login, anonymous reads and explicit logout bypass expiry, and actual setTo
   assert.equal(h.requests.length, 3)
   assert.equal(h.prompts.length, 0)
   h.auth.setToken('session-b')
+  h.user.token = 'session-b'
   assert.equal(expiry.isAuthSessionExpired('session-a'), false)
   await h.service.get('/mindmap/130')
   assert.equal(h.requests[3].headers.Authorization, 'Bearer session-b')
@@ -395,6 +399,7 @@ test('a newer login survives an old relogin confirmation waiting on backup', asy
   expiry.markAuthSessionExpired(h.token)
   const login = h.requestAuthLogin()
   h.auth.setToken('session-b')
+  h.user.token = 'session-b'
   backup.resolve()
   assert.equal(await login, false)
   assert.equal(h.token, 'session-b')
@@ -453,12 +458,13 @@ test('expiry while request encryption is pending fences the adapter and immediat
   const encryption = deferred()
   const h = harness(t, { encrypt: async config => { await encryption.promise; return config } })
   const request = h.service.get('/mindmap/130')
+  const rejected = assert.rejects(request, expiry.isAuthExpiredError)
   await tick()
   expiry.markAuthSessionExpired(h.token)
   let notified = false
   h.subscribe(event => { notified = event.kind === 'expired'; assert.equal(Object.hasOwn(event, 'token'), false) })
   assert.equal(notified, true)
   encryption.resolve()
-  await assert.rejects(request, expiry.isAuthExpiredError)
+  await rejected
   assert.equal(h.requests.length, 0)
 })

@@ -65,7 +65,7 @@ test('编辑命令以内嵌模式进入单层工作台并在窄屏提供可访�
     readFile(editorSourceUrl, 'utf8'),
   ])
 
-  assert.match(editorPage, /<Toolbar embedded class="header-command-toolbar" \/>/)
+  assert.match(editorPage, /<Toolbar embedded class="header-command-toolbar" :mindmap-id="mindmapId" \/>/)
   assert.match(editorPage, /class="header-utility-group" aria-label="文档工具"/)
   assert.match(editorPage, /class="header-action-label">搜索<\/span>/)
   assert.match(editorPage, /class="header-action-label">历史<\/span>/)

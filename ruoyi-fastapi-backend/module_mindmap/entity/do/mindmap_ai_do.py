@@ -1,7 +1,7 @@
 """AI 脑图任务、Artifact、Proposal 与事件表。"""
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, Numeric, String, Text, select
+from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, Numeric, String, Text, exists, select
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import column_property
 
@@ -219,6 +219,31 @@ MindmapAiJob.execution_state_json = column_property(
     .correlate_except(MindmapAiJobEvent)
     .scalar_subquery(),
     expire_on_flush=False,
+)
+
+# Recover the saved destination for both existing and new jobs from the durable
+# receipt. Keep it separate from the source: changing the source would invalidate
+# the original task's scope and recovery checks.
+MindmapAiJob.result_event_json = column_property(
+    select(MindmapAiJobEvent.payload_json)
+    .where(
+        MindmapAiJobEvent.job_id == MindmapAiJob.id,
+        MindmapAiJobEvent.event_type == 'cloud_file_created',
+    )
+    .order_by(MindmapAiJobEvent.sequence.desc())
+    .limit(1)
+    .correlate_except(MindmapAiJobEvent)
+    .scalar_subquery(),
+    expire_on_flush=False,
+)
+
+MindmapAiJob.task_acknowledged = column_property(
+    exists().where(
+        MindmapAiJobEvent.job_id == MindmapAiJob.id,
+        MindmapAiJobEvent.event_type == ('task_seen_' + MindmapAiJob.status),
+    ).correlate_except(MindmapAiJobEvent),
+    expire_on_flush=False,
+    deferred=True,
 )
 
 

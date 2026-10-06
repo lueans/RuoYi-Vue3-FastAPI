@@ -3171,6 +3171,7 @@ export class YjsMindmapSync {
     let crossNodeStateDelta = null
     let crossNodeDeltaSafe = true
     let transactionCompleted = false
+    const capturedTagNodes = new WeakSet()
     this._localYjsChange = true
     try {
       this._pendingStructuredPatch = this._buildStructuredPatch(detailList)
@@ -3205,7 +3206,7 @@ export class YjsMindmapSync {
 
           switch (detail.action) {
             case 'create': {
-              this._captureTagDefinitions(detail.data, true)
+              this._captureTagDefinitions(detail.data, true, capturedTagNodes)
               const yNode = new Y.Map()
               // 先接入 Y.Doc，再读写嵌套类型。未接入文档的 Y.Map 不可读取，
               // 否则 Yjs 会告警且创建节点的结构化状态可能处于半初始化状态。
@@ -3228,7 +3229,7 @@ export class YjsMindmapSync {
             }
 
             case 'update': {
-              this._captureTagDefinitions(detail.data, true)
+              this._captureTagDefinitions(detail.data, true, capturedTagNodes)
               const yNode = this.yNodes.get(uid)
               if (yNode) {
                 const yData = yNode.get('data')
@@ -5142,11 +5143,10 @@ export class YjsMindmapSync {
     return true
   }
 
-  _captureTagDefinitions(root, syncYjs = false) {
+  _captureTagDefinitions(root, syncYjs = false, visited = new WeakSet()) {
     root = root?.root || root
     const captured = new Map()
     const pending = [root]
-    const visited = new WeakSet()
     while (pending.length) {
       const node = pending.pop()
       if (!node || typeof node !== 'object' || visited.has(node)) continue

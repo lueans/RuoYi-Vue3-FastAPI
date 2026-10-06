@@ -8,15 +8,21 @@ const MAX_RECORD = 150_000
 export function composerDraftScopeKey(scope) {
   if (!scope || !normalizeNumericOwnerUserId(scope.ownerId)
     || !isBoundedText(scope.documentKey, 256)
-    || !/^(cloud|local):.+/.test(scope.documentKey)
+    || !/^(cloud|local|task):.+/.test(scope.documentKey)
     || (scope.sessionId !== null && !isBoundedText(scope.sessionId, 128))) return ''
   return JSON.stringify([String(scope.ownerId), scope.documentKey, scope.sessionId])
 }
 
-export function resolveMindmapComposerDraftScope({ ownerId, context, sessionId = null, routeMindmapId, job } = {}) {
+export function resolveMindmapComposerDraftScope({ ownerId, context, sessionId = null, routeMindmapId, job, standalone = false } = {}) {
   const owner = normalizeNumericOwnerUserId(ownerId)
-  if (!owner || !context?.document?.root) return null
+  if (!owner) return null
   if (job && (!isBoundedText(job.sessionId, 128) || sessionId !== job.sessionId)) return null
+  if (standalone) {
+    if (!job || job.sourceMindmapId || !['none', 'uploaded_artifact', 'local_snapshot'].includes(job.sourceType)) return null
+    const scope = { ownerId: owner, documentKey: `task:${job.sessionId}`, sessionId }
+    return composerDraftScopeKey(scope) ? scope : null
+  }
+  if (!context?.document?.root) return null
   if (job?.sourceType === 'cloud_document'
     && String(job.sourceMindmapId || '') !== String(context.mindmapId || '')) return null
   let documentKey

@@ -11,6 +11,7 @@ from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
 from common.enums import BusinessType
 from common.router import APIRouterPro
 from common.vo import DataResponseModel, ResponseBaseModel
+from exceptions.exception import ServiceException
 from module_admin.entity.vo.user_vo import CurrentUserModel
 from module_mindmap.entity.vo.mindmap_tag_vo import (
     MAX_MINDMAP_TAG_BATCH_IDS_TEXT_LENGTH,
@@ -21,7 +22,7 @@ from module_mindmap.entity.vo.mindmap_tag_vo import (
     MINDMAP_TAG_SEARCH_KEYWORD_PATTERN,
     MindmapTagArchiveResultModel,
     MindmapTagCategoryCreateResultModel,
-    MindmapTagCategoryListItemModel,
+    MindmapTagCategoryListResponseModel,
     MindmapTagCategoryMutationModel,
     MindmapTagCategoryReorderModel,
     MindmapTagModel,
@@ -48,16 +49,22 @@ mindmap_tag_controller = APIRouterPro(
     '/categories',
     summary='获取标签分组列表',
     description='获取全局分组 + 当前用户私有分组',
-    response_model=DataResponseModel[list[MindmapTagCategoryListItemModel]],
+    response_model=MindmapTagCategoryListResponseModel,
     dependencies=[UserInterfaceAuthDependency('mindmap:tag:query')],
 )
 async def get_tag_categories(
     request: Request,
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    mindmap_id: Annotated[int | None, Query(alias='mindmapId', gt=0, description='编辑中的脑图ID；不传表示标签管理或本地脑图')] = None,
 ) -> Response:
-    result = await MindmapTagService.get_categories(query_db, current_user.user.user_id)
-    return ResponseUtil.success(data=result)
+    scope_id = await MindmapTagService.resolve_editor_tag_scope(
+        query_db, current_user.user.user_id, mindmap_id,
+    )
+    result = await MindmapTagService.get_categories(query_db, scope_id)
+    return ResponseUtil.success(data=result, dict_content={
+        'canCreatePrivateTag': scope_id == current_user.user.user_id,
+    })
 
 
 @mindmap_tag_controller.put(
@@ -305,6 +312,7 @@ async def get_tag_list(
     owner_scope: Annotated[str | None, Query(description='范围:all/mine/global', alias='ownerScope')] = 'all',
     page_num: Annotated[int, Query(description='页码', alias='pageNum')] = 1,
     page_size: Annotated[int, Query(description='每页数量', alias='pageSize')] = 20,
+    mindmap_id: Annotated[int | None, Query(alias='mindmapId', gt=0, description='编辑中的脑图ID')] = None,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
@@ -312,7 +320,10 @@ async def get_tag_list(
         categoryId=category_id, status=status, keyword=keyword,
         ownerScope=owner_scope, pageNum=page_num, pageSize=page_size,
     )
-    result = await MindmapTagService.get_tag_list(query_db, query, current_user.user.user_id)
+    result = await MindmapTagService.get_tag_list(
+        query_db, query, current_user.user.user_id,
+        **({'mindmap_id': mindmap_id} if mindmap_id is not None else {}),
+    )
     return ResponseUtil.success(model_content=result)
 
 
@@ -333,12 +344,14 @@ async def get_tag_suggestions(
             pattern=MINDMAP_TAG_SEARCH_KEYWORD_PATTERN,
         ),
     ] = None,
+    mindmap_id: Annotated[int | None, Query(alias='mindmapId', gt=0, description='编辑中的脑图ID')] = None,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
     query = MindmapTagSuggestionQueryModel(keyword=keyword)
     result = await MindmapTagService.get_suggestions(
         query_db, current_user.user.user_id, query.keyword,
+        **({'mindmap_id': mindmap_id} if mindmap_id is not None else {}),
     )
     return ResponseUtil.success(data=result)
 
@@ -374,7 +387,14 @@ async def add_tag(
     model: MindmapTagModel,
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    mindmap_id: Annotated[int | None, Query(alias='mindmapId', gt=0, description='编辑中的脑图ID')] = None,
 ) -> Response:
+    if mindmap_id is not None:
+        scope_id = await MindmapTagService.resolve_editor_tag_scope(
+            query_db, current_user.user.user_id, mindmap_id, require_edit=True,
+        )
+        if scope_id != current_user.user.user_id:
+            raise ServiceException(message='共享脑图只能添加全局标签，不能新建并绑定个人私有标签')
     result = await MindmapTagService.add_tag(
         query_db, model, current_user.user.user_id, current_user.user.user_name,
     )

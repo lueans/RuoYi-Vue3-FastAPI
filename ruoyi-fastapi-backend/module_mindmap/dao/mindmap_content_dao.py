@@ -163,15 +163,6 @@ class MindmapContentDao:
             await db.execute(insert(MindmapNodeTag), values)
 
     @classmethod
-    async def has_nodes(cls, db: AsyncSession, file_id: int) -> bool:
-        return (await db.execute(
-            select(MindmapNode.id).where(
-                MindmapNode.file_id == file_id,
-                MindmapNode.is_deleted == 0,
-            ).limit(1)
-        )).first() is not None
-
-    @classmethod
     async def get_node_revisions(
         cls,
         db: AsyncSession,

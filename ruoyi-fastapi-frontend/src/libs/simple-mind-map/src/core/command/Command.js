@@ -305,6 +305,11 @@ class Command {
         const data = JSON.parse(dataStr)
         const lastDataObj = transformTreeDataToObject(lastData)
         const dataObj = transformTreeDataToObject(data)
+        // Keep the public nested-subtree detail shape while sharing immutable
+        // descendants within each snapshot. Bulk edits then allocate O(N)
+        // records instead of copying the same subtree for every changed node.
+        const lastSubtrees = new Map()
+        const currentSubtrees = new Map()
         const res = []
         // 找出新增的或修改的
         Object.keys(dataObj).forEach(uid => {
@@ -312,13 +317,13 @@ class Command {
           if (!lastDataObj[uid]) {
             res.push({
               action: 'create',
-              data: materializeObjectSubtree(dataObj, uid)
+              data: materializeObjectSubtree(dataObj, uid, currentSubtrees)
             })
           } else if (!isSameObject(lastDataObj[uid], dataObj[uid])) {
             res.push({
               action: 'update',
-              oldData: materializeObjectSubtree(lastDataObj, uid),
-              data: materializeObjectSubtree(dataObj, uid)
+              oldData: materializeObjectSubtree(lastDataObj, uid, lastSubtrees),
+              data: materializeObjectSubtree(dataObj, uid, currentSubtrees)
             })
           }
         })
@@ -327,7 +332,7 @@ class Command {
           if (!dataObj[uid]) {
             res.push({
               action: 'delete',
-              data: materializeObjectSubtree(lastDataObj, uid)
+              data: materializeObjectSubtree(lastDataObj, uid, lastSubtrees)
             })
           }
         })

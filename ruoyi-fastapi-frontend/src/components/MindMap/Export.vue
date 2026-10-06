@@ -3,17 +3,17 @@
     class="nodeExportDialog"
     :class="{ isDark: isDark }"
     v-model="dialogVisible"
-    width="760px"
+    width="min(760px, calc(100vw - 32px))"
     modal-class="nodeExportOverlay"
     :show-close="false"
     :close-on-click-modal="!isExporting"
-    :close-on-press-escape="!isExporting"
+    :close-on-press-escape="true"
     append-to-body
   >
     <div class="xmindExportShell" :class="{ isDark: isDark }">
       <section class="exportPreviewPane" aria-label="当前脑图预览">
         <div ref="previewRef" class="previewCanvas"></div>
-        <span v-if="!hasPreview" class="previewPlaceholder">正在生成预览…</span>
+        <span v-if="!hasPreview" class="previewPlaceholder">{{ previewError || '正在生成预览…' }}</span>
       </section>
 
       <section class="exportSettingsPane" aria-labelledby="mindmapExportTitle">
@@ -59,13 +59,16 @@
           </div>
 
           <div v-if="!noOptions" class="settingsDivider"></div>
+          <p v-if="exportError" class="exportError" role="alert">{{ exportError }}</p>
 
           <div v-if="['smm', 'json'].includes(exportType)" class="settingGroup">
             <div class="switchRow">
-              <span>包含主题、结构等配置数据</span>
+              <span>包含主题、结构、水印和间距等文档配置</span>
               <el-switch v-model="widthConfig" :disabled="isExporting" />
             </div>
+            <p v-if="!widthConfig" class="exportFormatHint">仅导出节点树，不包含文档配置。完整备份请开启此选项。</p>
           </div>
+          <p v-if="['txt', 'md'].includes(exportType)" class="exportFormatHint">文本格式仅用于阅读和交换内容，不能完整保存样式、图片和关联线；完整备份请选择 JSON 或 SMM。</p>
 
           <div v-if="['svg', 'png', 'pdf'].includes(exportType)" class="settingGroup">
             <label class="settingRow">
@@ -132,7 +135,7 @@
 
         <footer class="dialogFooter">
           <span class="exportStatus" role="status" aria-live="polite">{{ exportStatusText }}</span>
-          <el-button :disabled="isExporting" @click="cancel">取消</el-button>
+          <el-button @click="cancel">取消</el-button>
           <el-button
             class="exportButton"
             :loading="isExporting"
@@ -150,6 +153,7 @@ import { ElMessage } from 'element-plus'
 import bus from './useEventBus'
 import { store } from './useStore'
 import { downTypeList } from './config'
+import { abortableExport, captureAfterMindmapRender, exportAbortError } from '@/libs/simple-mind-map/src/utils/exportSession'
 import {
   normalizeMindmapExportPadding,
   validateMindmapExportName,
@@ -168,9 +172,13 @@ const extraText = ref('')
 const isFitBg = ref(true)
 const isExporting = ref(false)
 const exportStatusText = ref('')
+const exportError = ref('')
 const previewRef = ref(null)
 const hasPreview = ref(false)
+const previewError = ref('')
 let exportRequestId = 0
+let previewController = null
+let exportController = null
 
 const filteredTypeList = computed(() => {
   return downTypeList.filter(item => {
@@ -199,28 +207,42 @@ const normalizedFileName = computed(() => (
 ))
 const fileNameError = computed(() => normalizedFileName.value.error)
 
-function refreshPreview() {
+async function refreshPreview() {
+  previewController?.abort()
+  const controller = new AbortController()
+  previewController = controller
+  const mindMap = store.mindMap
   hasPreview.value = false
+  previewError.value = ''
   previewRef.value?.replaceChildren()
   if (!previewRef.value || !store.mindMap?.getSvgData) return
   try {
-    const { svg, rect } = store.mindMap.getSvgData({
-      paddingX: 16,
-      paddingY: 16,
-      ignoreWatermark: true,
-    })
+    const { svg, rect } = await captureAfterMindmapRender(mindMap, () => {
+      if (!dialogVisible.value || store.mindMap !== mindMap) throw exportAbortError()
+      return store.mindMap.getSvgData({
+        paddingX: 16,
+        paddingY: 16,
+        ignoreWatermark: true,
+      })
+    }, { signal: controller.signal })
+    if (!dialogVisible.value || controller.signal.aborted || previewController !== controller || store.mindMap !== mindMap) return
     if (!svg?.node || !rect?.width || !rect?.height) return
     svg.node.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`)
     svg.node.setAttribute('preserveAspectRatio', 'xMidYMid meet')
     previewRef.value.replaceChildren(svg.node)
     hasPreview.value = true
   } catch (error) {
+    if (controller.signal.aborted || previewController !== controller) return
+    previewError.value = error?.message || '预览暂不可用，请稍后重试'
     console.warn('生成导出预览失败:', error)
+  } finally {
+    if (previewController === controller) previewController = null
   }
 }
 
 async function handleShowExport() {
   exportStatusText.value = ''
+  exportError.value = ''
   dialogVisible.value = true
   await nextTick()
   refreshPreview()
@@ -232,21 +254,31 @@ function onPaddingChange() {
 }
 
 function cancel() {
-  if (isExporting.value) return
+  cancelPendingExport()
   dialogVisible.value = false
 }
 
+function cancelPendingExport() {
+  exportRequestId += 1
+  previewController?.abort(exportAbortError())
+  exportController?.abort(exportAbortError())
+  previewController = null
+  exportController = null
+  isExporting.value = false
+}
+
 function requestExport(payload) {
-  return new Promise((resolve, reject) => {
+  return abortableExport(new Promise((resolve, reject) => {
     const handled = bus.emit('exportRequest', { ...payload, resolve, reject })
     if (!handled) reject(new Error('导出服务尚未就绪'))
-  })
+  }), payload.signal)
 }
 
 function createExportArgs(type, name, footerText = '') {
   const base = {
     type,
     name,
+    signal: exportController?.signal,
     config: {
       exportPaddingX: paddingX.value,
       exportPaddingY: paddingY.value,
@@ -269,7 +301,10 @@ async function confirm() {
   const name = normalizedFileName.value.name
   const footerText = extraText.value
   const requestId = ++exportRequestId
+  const controller = new AbortController()
+  exportController = controller
   isExporting.value = true
+  exportError.value = ''
   exportStatusText.value = type === 'pdf' || type === 'xmind'
     ? '正在加载导出组件并生成文件…'
     : '正在生成文件…'
@@ -284,18 +319,28 @@ async function confirm() {
     if (requestId !== exportRequestId) return
     console.error('导出失败:', error)
     exportStatusText.value = error?.message || '导出失败，请重试'
+    exportError.value = exportStatusText.value
     ElMessage.error(exportStatusText.value)
   } finally {
     if (requestId === exportRequestId) isExporting.value = false
+    if (exportController === controller) exportController = null
   }
 }
+
+watch(dialogVisible, visible => {
+  if (!visible) cancelPendingExport()
+})
+
+watch(() => store.mindMap, (mindMap, previous) => {
+  if (mindMap !== previous && dialogVisible.value) cancel()
+})
 
 onMounted(() => {
   bus.on('showExport', handleShowExport)
 })
 
 onBeforeUnmount(() => {
-  exportRequestId += 1
+  cancelPendingExport()
   bus.off('showExport', handleShowExport)
 })
 </script>
@@ -469,6 +514,21 @@ onBeforeUnmount(() => {
     color: var(--el-color-danger);
     font-size: 12px;
     line-height: 16px;
+  }
+
+  .exportError {
+    padding: 10px 12px;
+    border: 1px solid var(--el-color-danger);
+    border-radius: 6px;
+    color: var(--el-color-danger);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .exportFormatHint {
+    font-size: 12px;
+    line-height: 1.6;
+    opacity: 0.85;
   }
 
   .settingsDivider {

@@ -525,7 +525,7 @@ async def test_create_job_runs_only_one_unknown_health_preflight() -> None:
         pytest.raises(RuntimeError) as stopped,
     ):
         await MindmapAiService.create_job(
-            SimpleNamespace(),
+            SimpleNamespace(commit=AsyncMock()),
             request,
             user_id=7,
             idempotency_key='connector-preflight-once',
@@ -621,7 +621,8 @@ async def test_job_runtime_preserves_creation_admission_and_frozen_columns(  # n
         with pytest.raises(ServiceException):
             await create()
         insert.assert_not_awaited()
-        database.commit.assert_not_awaited()
+        # Only the preflight read snapshot ended; no job was persisted.
+        database.commit.assert_awaited_once()
         concurrency.assert_not_awaited()
         schedule.assert_not_called()
         assert events == ['static-check', 'locked-preflight']
@@ -641,7 +642,7 @@ async def test_job_runtime_preserves_creation_admission_and_frozen_columns(  # n
             'max_budget_usd': 2.5, 'timeout_seconds': 120, 'max_nodes': 40, 'max_depth': 5, 'retention_days': 20,
             'intent': 'discuss', 'target': 'message', 'source_type': 'none',
         }
-        database.commit.assert_awaited_once()
+        assert database.commit.await_count == EXPECTED_CONNECTOR_CHECKS  # preflight reads, then job creation
         assert events == ['static-check', 'locked-preflight', 'job-write']
         if entry == 'waiting':
             assert values['status'] == 'waiting_turn'

@@ -9,7 +9,7 @@ test('节点标签弹窗按分组规则展示统一标签选择入口', async ()
 
   assert.match(source, /class="mindmap-node-tag-dialog"/)
   assert.match(source, /aria-label="搜索标签"/)
-  assert.match(source, /getTagSuggestions\(keyword\.value \|\| undefined\)/)
+  assert.match(source, /getTagSuggestions\(keyword\.value \|\| undefined, props\.mindmapId\)/)
   assert.match(source, /class="suggestionTag"[\s\S]*:aria-pressed="isSelected\(tag\.id\)"/)
   assert.match(source, /function toggleSuggestion\(tag\)/)
   assert.match(source, /placement: style\.placement/)
@@ -33,7 +33,7 @@ test('统一标签选择器使用左侧分组、右侧标签的主从布局并�
   assert.match(source, /name: '未分组'/)
   assert.match(source, /tag\.categoryId == null/)
   assert.match(source, /选择规则暂不可用/)
-  assert.match(source, /listTags\(\{ pageNum, pageSize: 100 \}\)/)
+  assert.match(source, /listTags\(\{ pageNum, pageSize: 100, mindmapId: props\.mindmapId \|\| undefined \}\)/)
 })
 
 test('统一标签搜索和创建具备防抖、竞态与重复提交保护', async () => {

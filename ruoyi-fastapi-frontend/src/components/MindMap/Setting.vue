@@ -2,7 +2,7 @@
   <Sidebar ref="sidebarRef" title="设置" open-on-mount>
     <div class="sidebarContent" :class="{ isDark: isDark }">
       <div v-if="isReadonly" class="readonlyHint" role="status">
-        当前文件为只读状态，水印和间距等文件展示设置不可修改；个人浏览偏好仍可调整。
+        当前文件为只读状态，水印和间距等文件展示设置不可修改；富文本模式不可切换，个人浏览偏好仍可调整。
       </div>
       <!-- 水印 -->
       <div class="title noTop">水印</div>
@@ -62,7 +62,7 @@
       </div>
       <div class="row">
         <div class="rowItem">
-          <el-switch :model-value="enableRichText" aria-label="开启富文本编辑" @change="toggleRichText" />
+          <el-switch :model-value="enableRichText" aria-label="开启富文本编辑" :disabled="isReadonly" @change="toggleRichText" />
           <span class="name" style="margin-left: 10px">开启富文本编辑</span>
         </div>
       </div>
@@ -200,11 +200,16 @@ function initWatermark() {
 }
 
 function toggleRichText(val) {
+  if (isReadonly.value) return
   actions.setLocalConfig({ openNodeRichText: val })
 }
 
 function updateConfig(prop) {
-  props.mindMap?.updateConfig({ [prop]: config[prop] })
+  const patch = { [prop]: config[prop] }
+  if (prop === 'openPerformance') {
+    patch.openRealtimeRenderOnNodeTextEdit = !config.openPerformance
+  }
+  props.mindMap?.updateConfig(patch)
   actions.storeConfig({ [prop]: config[prop] })
 }
 
@@ -258,6 +263,20 @@ watch(() => props.documentData, () => {
     initConfig()
     initWatermark()
   }
+})
+
+function onRuntimeConfigChange() {
+  initConfig()
+}
+
+watch(() => props.mindMap, (current, previous) => {
+  previous?.off?.('after_update_config', onRuntimeConfigChange)
+  current?.on?.('after_update_config', onRuntimeConfigChange)
+  initConfig()
+}, { immediate: true })
+
+onBeforeUnmount(() => {
+  props.mindMap?.off?.('after_update_config', onRuntimeConfigChange)
 })
 </script>
 

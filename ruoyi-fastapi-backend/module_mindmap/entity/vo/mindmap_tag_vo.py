@@ -7,6 +7,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
+from common.vo import DataResponseModel
+
 MAX_MINDMAP_TAG_SEARCH_KEYWORD_LENGTH = 200
 MINDMAP_TAG_SEARCH_KEYWORD_PATTERN = r'^[^\x00-\x1f\x7f]*$'
 MAX_MINDMAP_TAG_KEY_LENGTH = 100
@@ -226,6 +228,12 @@ class MindmapTagCategoryListItemModel(MindmapTagCategoryModel):
     """标签分组列表项。"""
 
     tag_count: int = Field(default=0, ge=0, description='分组下的标签数量')
+
+
+class MindmapTagCategoryListResponseModel(DataResponseModel[list[MindmapTagCategoryListItemModel]]):
+    """保留 data 数组，并提供当前编辑上下文的新建策略。"""
+
+    can_create_private_tag: bool = Field(alias='canCreatePrivateTag', description='当前文件是否允许新建并绑定本人私有标签')
 
 
 class MindmapTagCategoryMutationModel(BaseModel):

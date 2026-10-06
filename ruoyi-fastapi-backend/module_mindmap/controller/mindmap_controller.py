@@ -575,9 +575,9 @@ async def query_detail_mindmap(
 async def get_version_list(
     request: Request,
     mindmap_id: Annotated[int, Path(description='脑图ID')],
-    version_type: Annotated[int | None, Query(description='版本类型: 0=草稿 1=正式')] = None,
-    page_num: Annotated[int, Query(description='页码')] = 1,
-    page_size: Annotated[int, Query(description='每页数量')] = 20,
+    version_type: Annotated[int | None, Query(alias='versionType', ge=0, le=1, description='版本类型: 0=草稿 1=正式')] = None,
+    page_num: Annotated[int, Query(alias='pageNum', ge=1, description='页码')] = 1,
+    page_size: Annotated[int, Query(alias='pageSize', ge=1, le=100, description='每页数量')] = 20,
     query_db: Annotated[AsyncSession, DBSessionDependency()] = ...,
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()] = ...,
 ) -> Response:
@@ -646,7 +646,7 @@ async def save_formal_version(
     result = await MindmapVersionService.create_formal_version(
         query_db, save_model, current_user.user.user_id, current_user.user.user_name,
     )
-    return ResponseUtil.success(msg=result.message)
+    return ResponseUtil.success(msg=result.message, data=result.result)
 
 
 @mindmap_controller.delete(

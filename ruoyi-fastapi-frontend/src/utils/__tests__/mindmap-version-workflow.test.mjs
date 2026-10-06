@@ -100,7 +100,7 @@ test('preview flushes the live mutation before pausing collaboration or replacin
 })
 
 test('version transitions gate every editor while allowing the frozen batch to flush', () => {
-  assert.match(source, /defineEmits\(\['change-tracking', 'editing-transition'\]\)/)
+  assert.match(source, /defineEmits\(\['change-tracking', 'editing-transition', 'document-data-preview'\]\)/)
   assert.match(source, /function beginEditingTransition[\s\S]*?emit\('editing-transition', true\)/)
   assert.match(source, /function endEditingTransition[\s\S]*?emit\('editing-transition', false\)/)
   assert.match(editorSource, /@editing-transition="onVersionEditingTransition"/)
@@ -308,7 +308,7 @@ test('version confirmations lock before dialogs and only act on current listed t
 })
 
 test('failed preview restores the captured live tree instead of resuming over partial history data', () => {
-  assert.match(source, /catch \(e\) \{[\s\S]*if \(isPreviewing\.value\) \{[\s\S]*await exitPreview\(\{ notify: false \}\)/)
+  assert.match(source, /catch \(e\) \{[\s\S]*if \(_previewSession === session && isPreviewing\.value\) \{[\s\S]*await exitPreview\(\{ notify: false \}\)/)
   assert.match(source, /_previewSession = session/)
 })
 

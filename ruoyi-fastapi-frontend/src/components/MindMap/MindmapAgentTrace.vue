@@ -47,16 +47,21 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { CircleCheck, Clock, List, Loading, VideoPause, Warning } from '@element-plus/icons-vue'
-import { projectRuntimeEvents } from '@/utils/mindmap-ai-runtime'
+import { createRuntimeEventProjector } from '@/utils/mindmap-ai-runtime'
 import { agentExecutionState, agentTurnExecutionState, agentPlanSummary, buildAgentTurnBlocks, sliceAgentExecutionRows } from '@/utils/mindmap-agent-presentation'
 import MindmapAgentFold from './MindmapAgentFold.vue'
 import MindmapAgentMarkdown from './MindmapAgentMarkdown.vue'
 import MindmapAgentTraceRows from './MindmapAgentTraceRows.vue'
-const props = defineProps({ events: { type: Array, default: () => [] }, running: Boolean, cancelled: Boolean, failed: Boolean, discussion: Boolean, finalContent: String, fallbackContent: String, nodeNavigation: Object })
+const props = defineProps({ events: { type: Array, default: () => [] }, eventVersion: Number, running: Boolean, cancelled: Boolean, failed: Boolean, discussion: Boolean, finalContent: String, fallbackContent: String, nodeNavigation: Object })
 const limit = ref(40)
 const recordLimit = ref(50)
 const planHistoryLimit = ref(10)
-const view = computed(() => projectRuntimeEvents(props.events, props))
+const projectEvents = createRuntimeEventProjector()
+const view = computed(() => {
+  // Stable event arrays carry an explicit append revision from the conversation.
+  void props.eventVersion
+  return projectEvents(props.events, props)
+})
 const planRevisions = computed(() => view.value.entries.filter(entry => entry.kind === 'plan').map((entry, index) => ({ ...entry, revision: index + 1 })))
 const planSummary = computed(() => agentPlanSummary(view.value.todos, props))
 const blocks = computed(() => buildAgentTurnBlocks(view.value.entries, props.finalContent, props))

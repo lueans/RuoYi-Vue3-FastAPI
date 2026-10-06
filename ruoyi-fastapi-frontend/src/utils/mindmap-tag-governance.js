@@ -236,8 +236,3 @@ export function isCompatibleTagReplacement(sourceTag, targetTag) {
   if (sourceOwnerId === 0) return targetOwnerId === 0
   return targetOwnerId === 0 || targetOwnerId === sourceOwnerId
 }
-
-export function getCreatedResourceId(response, fieldName) {
-  const value = Number(response?.data?.[fieldName])
-  return Number.isSafeInteger(value) && value > 0 ? value : null
-}

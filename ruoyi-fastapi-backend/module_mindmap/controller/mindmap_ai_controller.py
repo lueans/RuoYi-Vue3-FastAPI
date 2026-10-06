@@ -1,6 +1,5 @@
 """AI 脑图 Agent、任务、Artifact 与本地应用接口。"""
 
-import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -38,6 +37,7 @@ from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiCloudSaveModel,
     MindmapAiConnectorModel,
     MindmapAiConnectorUpdateModel,
+    MindmapAiExecutionRecoveryModel,
     MindmapAiJobCreateModel,
     MindmapAiJobModel,
     MindmapAiJobRetryModel,
@@ -48,6 +48,7 @@ from module_mindmap.entity.vo.mindmap_ai_vo import (
     MindmapAiResponseModel,
 )
 from module_mindmap.permissions import mindmap_permissions
+from module_mindmap.service.mindmap_ai_event_feed import mindmap_ai_event_feeds
 from module_mindmap.service.mindmap_ai_metrics import record_mindmap_ai_event
 from module_mindmap.service.mindmap_ai_service import (
     AI_DRAFT_PREVIEW_MAX_VERSION,
@@ -228,6 +229,28 @@ async def list_mindmap_ai_connectors(
     return ResponseUtil.success(data=await MindmapAiService.list_connectors(query_db))
 
 
+@mindmap_ai_admin_controller.get('/jobs/{job_id}/execution-recovery', summary='查询执行退出恢复信息')
+async def get_mindmap_ai_execution_recovery(
+    job_id: Annotated[str, Path(min_length=36, max_length=36)],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    return ResponseUtil.success(data=await MindmapAiService.execution_recovery_detail(query_db, job_id))
+
+
+@mindmap_ai_admin_controller.post('/jobs/{job_id}/execution-recovery', summary='记录管理员核验的旧执行退出回执')
+@Log(title='AI 旧执行退出人工核验', business_type=BusinessType.UPDATE)
+async def confirm_mindmap_ai_execution_stopped(
+    request: Request,
+    job_id: Annotated[str, Path(min_length=36, max_length=36)],
+    model: MindmapAiExecutionRecoveryModel,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    return ResponseUtil.success(data=await MindmapAiService.confirm_execution_stopped(
+        query_db, job_id, model, current_user.user.user_id,
+    ))
+
+
 @mindmap_ai_admin_controller.patch(
     '/connectors/{agent_key}',
     summary='更新 AI 脑图 Agent Connector 配置',
@@ -373,6 +396,7 @@ async def list_mindmap_ai_sessions(
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     page: Annotated[int, Query(ge=1)] = 1,
+    task_center: Annotated[bool, Query(alias='taskCenter')] = False,
 ) -> Response:
     return ResponseUtil.success(
         data=await MindmapAiService.list_sessions(
@@ -380,6 +404,7 @@ async def list_mindmap_ai_sessions(
             current_user.user.user_id,
             page=page,
             limit=limit,
+            task_center=task_center,
         ),
         headers={'Cache-Control': 'private, no-store'},
     )
@@ -395,14 +420,47 @@ async def get_mindmap_ai_session_timeline(
     session_id: Annotated[str, Path(min_length=36, max_length=36)],
     query_db: Annotated[AsyncSession, DBSessionDependency()],
     current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    limit: Annotated[int | None, Query(ge=1, le=50)] = None,
+    before_turn_index: Annotated[int | None, Query(alias='beforeTurnIndex', ge=1)] = None,
+    focus_job_id: Annotated[str | None, Query(alias='focusJobId', min_length=36, max_length=36)] = None,
 ) -> Response:
+    # Existing API callers retain the full-history response. The UI opts into
+    # bounded pages explicitly; subsequent cursor requests use the same size.
+    page_limit = limit if limit is not None else (20 if before_turn_index is not None else None)
     return ResponseUtil.success(
         data=await MindmapAiService.get_session_timeline(
             query_db,
             session_id,
             current_user.user.user_id,
+            limit=page_limit, before_turn_index=before_turn_index,
+            focus_job_id=focus_job_id, event_limit=200 if page_limit is not None else None,
         ),
     )
+
+
+@mindmap_ai_controller.get('/jobs/{job_id}/history', summary='分页读取 AI 任务历史事件')
+async def get_mindmap_ai_job_event_history(
+    job_id: Annotated[str, Path(min_length=36, max_length=36)],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    before_sequence: Annotated[int | None, Query(alias='beforeSequence', ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> Response:
+    return ResponseUtil.success(data=await MindmapAiService.get_job_event_history(
+        query_db, job_id, current_user.user.user_id, before_sequence=before_sequence, limit=limit,
+    ))
+
+
+@mindmap_ai_controller.post('/jobs/{job_id}/acknowledge', summary='标记已查看 AI 任务通知')
+async def acknowledge_mindmap_ai_task(
+    job_id: Annotated[str, Path(min_length=36, max_length=36)],
+    expected_status: Annotated[str, Body(alias='expectedStatus', embed=True)],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    return ResponseUtil.success(data=await MindmapAiService.acknowledge_task(
+        query_db, job_id, current_user.user.user_id, expected_status,
+    ))
 
 
 @mindmap_ai_controller.get(
@@ -532,16 +590,29 @@ async def _event_stream(
     user_id: int,
     after_sequence: int,
 ) -> AsyncGenerator[str, None]:
-    cursor = after_sequence
-    idle_cycles = 0
-    while True:
-        if await request.is_disconnected():
-            return
+    access_job = None
+
+    async def authorize_delivery() -> None:
+        # Bound source/target identities are immutable for an existing job.
+        # Use a fresh short transaction so a buffered or slow subscriber never
+        # inherits the reader's old MySQL snapshot. Source-less tasks need no
+        # document permission query.
+        if access_job is not None and (
+            getattr(access_job, 'source_mindmap_id', None) is not None
+            or getattr(access_job, 'proposal_id', None)
+        ):
+            async with AsyncSessionLocal() as db:
+                await MindmapAiService.check_job_content_access(db, access_job, user_id)
+
+    async def read_page(cursor: int) -> tuple[list[tuple[int, str]], bool]:
+        nonlocal access_job
         chunks: list[tuple[int, str]] = []
         async with AsyncSessionLocal() as db:
             job = await MindmapAiDao.get_job(db, job_id, user_id)
             if job is None:
-                return
+                return [], True
+            await MindmapAiService.check_job_content_access(db, job, user_id)
+            access_job = job
             events = await MindmapAiDao.list_events(db, job_id, cursor)
             for event in events:
                 try:
@@ -569,20 +640,32 @@ async def _event_stream(
                     f'id: {event.sequence}\nevent: {event_type}\ndata: {encoded_data}\n\n',
                 ))
             terminal = job.status in TERMINAL_JOB_STATUSES
-        # Do not suspend the generator at a network-facing yield while a database
-        # session is open. A slow SSE client must not retain a pooled connection.
-        for sequence, chunk in chunks:
-            cursor = sequence
-            yield chunk
-        if terminal and not events:
-            return
-        if not events:
-            idle_cycles += 1
-            if idle_cycles % 30 == 0:
+        return chunks, terminal
+
+    cursor = after_sequence
+    async with mindmap_ai_event_feeds.subscribe(
+        job_id, user_id, cursor, read_page, authorize=authorize_delivery,
+    ) as feed:
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                chunks, terminal, revision = await feed.read(cursor)
+            except ServiceException:
+                # The stream was already opened. Close without sending any
+                # cached body; reconnect preflight will report denied access.
+                return
+            # Shared snapshots contain strings only; the read transaction has
+            # ended before network backpressure can suspend any subscriber.
+            if chunks:
+                cursor = chunks[-1][0]
+                # One authorized delivery batch, one network suspension. After
+                # backpressure resumes, the next batch must recheck access.
+                yield ''.join(chunk for _sequence, chunk in chunks)
+            if terminal and not chunks:
+                return
+            if not chunks and not await feed.wait(revision):
                 yield ': keepalive\n\n'
-            await asyncio.sleep(0.5)
-        else:
-            idle_cycles = 0
 
 
 @mindmap_ai_controller.get('/jobs/{job_id}/events', summary='订阅 AI 脑图任务事件')
@@ -597,6 +680,8 @@ async def stream_mindmap_ai_job_events(
     # 占用到整段长连接结束。
     async with AsyncSessionLocal() as db:
         job = await MindmapAiDao.get_job(db, job_id, user_id)
+        if job is not None:
+            await MindmapAiService.check_job_content_access(db, job, user_id)
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -187,6 +187,7 @@ async def test_recovery_uses_keyset_pages_without_legacy_500_job_cap() -> None:
 async def test_wake_waiting_followups_releases_only_the_oldest_queued_turn() -> None:
     parent = SimpleNamespace(
         id='queue-parent',
+        parent_job_id=None,
         session_id='queue-session',
         user_id=7,
         status='ready',
@@ -194,6 +195,7 @@ async def test_wake_waiting_followups_releases_only_the_oldest_queued_turn() -> 
     )
     first_child = SimpleNamespace(
         id='queue-child-1',
+        agent_key='native_mindmap',
         parent_job_id=parent.id,
         status='waiting_turn',
         turn_index=2,
@@ -203,6 +205,7 @@ async def test_wake_waiting_followups_releases_only_the_oldest_queued_turn() -> 
     )
     second_child = SimpleNamespace(
         id='queue-child-2',
+        agent_key='native_mindmap',
         parent_job_id=parent.id,
         status='waiting_turn',
         turn_index=3,
@@ -225,6 +228,11 @@ async def test_wake_waiting_followups_releases_only_the_oldest_queued_turn() -> 
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
             new=AsyncMock(return_value=[second_child, first_child]),
         ),
+        patch.object(MindmapAiDao, 'get_connector', new=AsyncMock(return_value=SimpleNamespace())),
+        patch.object(MindmapAiDao, 'count_active_jobs', new=AsyncMock(return_value=0)),
+        patch.object(MindmapAiDao, 'lock_jobs_for_session', new=AsyncMock(
+            return_value=[parent, first_child, second_child],
+        )),
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
             new=AsyncMock(),
@@ -324,6 +332,7 @@ async def test_direct_undo_wakes_followup_against_authoritative_document(existin
     """A direct receipt has no artifact, so an undone parent must still rebase its child."""
     parent = SimpleNamespace(
         id='direct-undone-parent',
+        parent_job_id=None,
         session_id='direct-session',
         user_id=7,
         status='undone',
@@ -341,6 +350,7 @@ async def test_direct_undo_wakes_followup_against_authoritative_document(existin
     }
     child = SimpleNamespace(
         id='direct-undone-child',
+        agent_key='native_mindmap',
         parent_job_id=parent.id,
         status='waiting_turn',
         turn_index=2,
@@ -389,6 +399,9 @@ async def test_direct_undo_wakes_followup_against_authoritative_document(existin
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.list_waiting_followups',
             new=AsyncMock(return_value=[child]),
         ),
+        patch.object(MindmapAiDao, 'get_connector', new=AsyncMock(return_value=SimpleNamespace())),
+        patch.object(MindmapAiDao, 'count_active_jobs', new=AsyncMock(return_value=0)),
+        patch.object(MindmapAiDao, 'lock_jobs_for_session', new=AsyncMock(return_value=[parent, child])),
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
             new=AsyncMock(),

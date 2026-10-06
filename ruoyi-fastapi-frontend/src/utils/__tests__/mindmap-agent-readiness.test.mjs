@@ -91,6 +91,7 @@ test('model refresh displays metadata loading without claiming authentication su
 
 test('a removed selected model remains unavailable until the user chooses another', () => {
   const scope = { computed, form: reactive({ agentKey: 'native_mindmap', modelId: 2 }), models: ref([{ modelId: 1 }]) }
+  scope.availableModels = scope.models
   const state = compile(['nativeModelConfigurationIssue'], scope)
   assert.match(state.nativeModelConfigurationIssue.value, /已不可用.*不会自动替换/)
   assert.equal(scope.form.modelId, 2)
@@ -281,6 +282,7 @@ test('device connection does not claim that the local CLI is authenticated', () 
 test('native model preflight accepts provider casing without skipping incompatible endpoint errors', () => {
   const scope = { computed, form: reactive({ agentKey: 'native_mindmap', modelId: 1 }),
     models: ref([{ modelId: 1, provider: ' anthropic ', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' }]) }
+  scope.availableModels = scope.models
   const state = compile(['nativeModelConfigurationIssue'], scope)
   assert.match(state.nativeModelConfigurationIssue.value, /兼容模式/)
   scope.models.value[0].provider = 'OpenAI'
@@ -306,7 +308,7 @@ test('composer shortcut matches displayed shortcut and does not send Chinese IME
 })
 
 test('content-size presets say what they control and preserve generation parameters', () => {
-  const scope = { taskConfigurationLocked: ref(false), form: {}, maxNodesCap: ref(1000), maxDepthCap: ref(20) }
+  const scope = { retryConfigurationLocked: ref(false), form: {}, maxNodesCap: ref(1000), maxDepthCap: ref(20) }
   const state = compile(['reasoningModes', 'setReasoningMode'], scope)
   assert.deepEqual(state.reasoningModes.map(mode => mode.label), ['简洁', '标准', '详细'])
   for (const mode of state.reasoningModes) assert.match(mode.description, /内容规模.*不调整模型思考强度/)

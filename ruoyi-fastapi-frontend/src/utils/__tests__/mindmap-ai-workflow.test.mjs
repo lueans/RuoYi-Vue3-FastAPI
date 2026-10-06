@@ -39,10 +39,6 @@ const connectorAdmin = await readFile(
   new URL('../../views/mindmap/ai-agents.vue', import.meta.url),
   'utf8',
 )
-const mindmapPreview = await readFile(
-  new URL('../../components/MindMap/index.vue', import.meta.url),
-  'utf8',
-)
 const contextmenu = await readFile(
   new URL('../../components/MindMap/Contextmenu.vue', import.meta.url),
   'utf8',
@@ -69,12 +65,12 @@ function declaration(source, name, { initializer = false } = {}) {
 }
 
 function executeFunction(name, bindings, source = dialog) {
-  bindings = { agentSwitchPending: { value: false }, ...bindings }
+  bindings = { props: { taskOnly: false }, agentSwitchPending: { value: false }, ...bindings }
   return new Function(...Object.keys(bindings), `${declaration(source, name)}; return ${name}`)(...Object.values(bindings))
 }
 
 function computedValue(name, bindings, source = dialog) {
-  bindings = { agentSwitchPending: { value: false }, ...bindings }
+  bindings = { props: { taskOnly: false }, agentSwitchPending: { value: false }, ...bindings }
   return new Function('computed', ...Object.keys(bindings), `return ${declaration(source, name, { initializer: true })}`)(getter => getter(), ...Object.values(bindings))
 }
 
@@ -84,7 +80,7 @@ test('restoring a completed discussion replays history without disabling follow-
   const snapshot = { id: 'discussion', sessionId: 'session', target: 'message', intent: 'discuss',
     status: 'completed_message', updateTime: '2026-09-26T13:23:00Z', turnIndex: 1 }
   const bindings = {
-    job: ref(snapshot), sessionTurns: ref([]), currentSessionTitle: ref(''), selectedTurnJobId: ref(''),
+    job: ref(snapshot), sessionTurns: ref([]), agentEvents: ref([]), currentSessionTitle: ref(''), selectedTurnJobId: ref(''),
     restoreGeneration: 0, timelineLoadGeneration: 0, timelineController: null,
     timelineLoading: ref(false), timelineError: ref(''), restoringJob: ref(true),
     handoffTimelineReceipt: ref(null), currentAiOwnerUserId: () => '7',
@@ -99,9 +95,12 @@ test('restoring a completed discussion replays history without disabling follow-
     isAbortError: () => false, formatMindmapAiError: error => { throw error },
   }
   bindings.upsertSessionTurn = executeFunction('upsertSessionTurn', bindings)
+  bindings.sortHistoricalEvents = executeFunction('sortHistoricalEvents', bindings)
   const restored = await executeFunction('restoreSessionTimeline', bindings)('session')
   assert.equal(restored.length, 1)
-  assert.deepEqual(bindings.handoffTimelineReceipt.value, { ownerId: '7', sessionId: 'session' })
+  assert.deepEqual(bindings.handoffTimelineReceipt.value, {
+    ownerId: '7', sessionId: 'session', hasEarlierTurns: false, beforeTurnIndex: undefined,
+  })
   assert.equal(bindings.job.value.status, 'completed_message')
   const parent = computedValue('followupParentJob', {
     selectedArtifactJob: ref(restored[0].job), isMindmapAiMessageJob, viewingHistoricalArtifact: ref(false),
@@ -279,7 +278,8 @@ test('AI 准备和生成期间右侧工具保持显示，写入锁解除后恢�
     editorState[flag].value = true
     assert.deepEqual(refreshTools(), tools)
     for (const item of tools) click(item)
-    assert.deepEqual(opened, [], '临时锁定不能通过保留的入口绕过写保护')
+    assert.deepEqual(opened, ['setting'], '临时锁定仅开放个人浏览设置，写入工具仍受保护')
+    opened.length = 0
     editorState[flag].value = false
   }
   assert.deepEqual(refreshTools(), tools)
@@ -287,10 +287,10 @@ test('AI 准备和生成期间右侧工具保持显示，写入锁解除后恢�
   assert.deepEqual(opened, ['baseStyle'])
 
   editorState.serverCanEdit.value = false
-  assert.deepEqual(refreshTools(), [], '真实无写权限仍隐藏编辑工具')
+  assert.deepEqual(refreshTools(), [tools[3]], '真实无写权限仅保留个人浏览设置')
   editorState.serverCanEdit.value = true
   editorState.props.readonly = true
-  assert.deepEqual(refreshTools(), [], '只读路由保持原有入口规则')
+  assert.deepEqual(refreshTools(), [tools[3]], '只读路由保留个人浏览设置')
   assert.match(editor, /<SidebarTrigger\b[^>]*:readonly="aiDialogReadonly"/)
   assert.match(sidebarTrigger, /:disabled="isReadonly && !isMindmapSidebarReadonlySafe\(item.value\)"/)
 })
@@ -573,24 +573,6 @@ test('生成进程重启时保留持久检查点并等待新帧恢复实时状�
   assert.match(dialog, /展示可见对话、思考摘要、工具详情和任务计划；不展示模型隐藏思维链/)
 })
 
-test('实时脑图逐帧应用外部 modelValue，只抑制组件自身发出的 v-model 回声', () => {
-  assert.match(mindmapPreview, /let applyingExternalModelValue = false/)
-  assert.match(mindmapPreview, /if \(applyingExternalModelValue\) return/)
-  assert.match(mindmapPreview, /val === lastEmittedModelValue \|\| toRaw\(val\) === lastEmittedModelValue/)
-  assert.match(mindmapPreview, /applyingExternalModelValue = true[\s\S]*mindMapInstance\.value\.setData\(val\)[\s\S]*flushPendingHistory[\s\S]*applyingExternalModelValue = false/)
-  assert.doesNotMatch(mindmapPreview, /dataVersion !== lastAppliedVersion/)
-})
-
-test('实时脑图画布跟随三栏响应式布局变更并在卸载时释放观察器', () => {
-  assert.match(mindmapPreview, /new ResizeObserver\(scheduleCanvasResize\)/)
-  assert.match(mindmapPreview, /containerResizeObserver\.observe\(containerRef\.value\)/)
-  assert.match(mindmapPreview, /const \{ width, height \} = container\.getBoundingClientRect\(\)/)
-  assert.match(mindmapPreview, /if \(width <= 0 \|\| height <= 0\) return/)
-  assert.match(mindmapPreview, /instance\.resize\(\)/)
-  assert.match(mindmapPreview, /containerResizeObserver\?\.disconnect\(\)/)
-  assert.match(mindmapPreview, /window\.cancelAnimationFrame\(resizeAnimationFrame\)/)
-})
-
 test('严格草稿复校验使用后端实际 snake_case 契约', () => {
   assert.match(api, /data: \{ artifact, require_passed: requirePassed \}/)
   assert.doesNotMatch(api, /data: \{ artifact, requirePassed \}/)
@@ -678,7 +660,7 @@ test('AI 抽屉展示安全会话与连接状态，脑图只在主编辑器流�
   assert.match(dialog, /role="status" aria-live="polite"/)
   assert.match(dialog, /clearInterval\(generationClockTimer\)/)
   assert.match(dialog, /今天想做点什么？/)
-  assert.match(dialog, /在右侧导图中选中节点，AI 会围绕你选中的部分来回答。/)
+  assert.match(dialog, /在导图中选中节点，AI 会围绕你选中的部分来回答。/)
   assert.match(dialog, /class="aiComposer"/)
   assert.match(dialog, /描述你想怎样修改当前脑图/)
   assert.match(dialog, /@media \(max-width: 760px\)/)
@@ -802,9 +784,9 @@ test('上下文菜单实时跟踪选择并对单分支执行精确基数校验',
 })
 
 test('最近会话菜单由服务端列表驱动并用恢复代次隔离切换', () => {
-  assert.match(api, /export function listMindmapAiSessions\(\{ limit = 20, signal \} = \{\}\)/)
-  assert.match(api, /url: '\/mindmap\/ai\/sessions'[\s\S]*params: \{ limit \}/)
-  assert.match(dialog, /@show="loadRecentSessions"/)
+  assert.match(api, /export function listMindmapAiSessions\(\{ limit = 20, page = 1, taskCenter = false, signal \} = \{\}\)/)
+  assert.match(api, /url: '\/mindmap\/ai\/sessions'[\s\S]*params: \{ limit, page,/)
+  assert.match(dialog, /@show="loadRecentSessions\(1\)"/)
   assert.match(dialog, /normalizeMindmapAiSessionList\(response\.data\)/)
   assert.match(dialog, /async function switchToSession[\s\S]*resetNewJob\(\{ clearStoredJob: false[\s\S]*generation = restoreGeneration[\s\S]*restoreActiveJob\(\{ generation/)
   assert.match(dialog, /function invalidateSessionList[\s\S]*sessionListController\?\.abort\(\)/)
@@ -846,7 +828,7 @@ test('任务恢复可取消且按代次隔离，临时失败保留指针并提�
   assert.match(restoreBlock, /generation !== restoreGeneration/)
   assert.match(restoreBlock, /restoreError\.value = formatMindmapAiError/)
   assert.doesNotMatch(restoreBlock, /catch \(error\) \{[\s\S]*clearStoredActiveJob\(\)/)
-  assert.match(dialog, /@click="retryStoredJobRecovery"/)
+  assert.match(dialog, /@click="props\.taskOnly \? openRequestedTask\(\) : retryStoredJobRecovery\(\)"/)
   assert.match(dialog, /@click="discardStoredJobRecovery"/)
   assert.match(dialog, /const composerCanSend = computed/)
   assert.match(dialog, /composerText\.value\.trim\(\)[\s\S]*&& !restoreError\.value/)
@@ -859,7 +841,7 @@ test('任务恢复可取消且按代次隔离，临时失败保留指针并提�
 
 test('会话记录恢复使用独立取消器、身份栅栏和内联重试', () => {
   assert.match(dialog, /const generation = \+\+timelineLoadGeneration/)
-  assert.match(dialog, /getMindmapAiSessionTimeline\(sessionId, \{ signal: controller\.signal \}\)/)
+  assert.match(dialog, /getMindmapAiSessionTimeline\(sessionId, \{ signal: controller\.signal, focusJobId: expectedJobId, limit: 20 \}\)/)
   assert.match(dialog, /job\.value\?\.id !== expectedJobId/)
   assert.match(dialog, /job\.value\?\.sessionId !== sessionId/)
   assert.match(dialog, /@click="retrySessionTimeline"/)
@@ -1166,7 +1148,7 @@ test('显式入口 preset 优先，recent 只补非显式默认值且 active 仍
 })
 
 test('继续生成 attempt 通过原 key、parent、session、turn 与已知 job 精确恢复', () => {
-  assert.match(dialog, /const ATTEMPTS_STORAGE_KEY = 'MINDMAP_AI_REQUEST_ATTEMPTS_V1'/)
+  assert.match(dialog, /const ATTEMPTS_STORAGE_KEY = `MINDMAP_AI_REQUEST_ATTEMPTS_V1\$\{taskStorageSuffix\}`/)
   assert.match(dialog, /async function hashAttemptFingerprint[\s\S]*return sha256Hex\(bytes\)/)
   assert.match(dialog, /async function resolveDurableAttempt[\s\S]*fingerprintHash/)
   assert.match(dialog, /metadata: \{[\s\S]*parentJobId,[\s\S]*parentTurnIndex,[\s\S]*sessionId: parentJob\.sessionId,[\s\S]*knownMaxTurnIndex:[\s\S]*knownJobIds:[\s\S]*requestPayload/)

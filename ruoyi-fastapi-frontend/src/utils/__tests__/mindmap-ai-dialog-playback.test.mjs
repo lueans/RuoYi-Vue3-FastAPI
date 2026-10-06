@@ -48,7 +48,7 @@ function harness(options = {}) {
     livePreviewEligible: ref(true), livePreviewError: ref(''), livePreviewFramesPending: ref(false),
     livePreviewRenderedVersion: ref(-1), latestPreviewEpoch: ref(1),
     livePreviewRenderedNodeCount: ref(0), livePreviewTargetNodeCount: ref(0), livePreviewChangeSummary: ref(null),
-    livePreviewApplyingJobId: '', livePreviewSuppressedJobId: '', directTerminalTargetJobId: '',
+    livePreviewApplyingJobId: '', livePreviewSuppressedJobId: '', directTerminalTargetJobId: ref(''),
     visible: ref(true), canApplyLiveCanvasDraft: ref(false),
     Date: { now: () => clock },
     setTimeout: (callback, delay) => {
@@ -154,7 +154,7 @@ test('单个长节点不会因为只有一个pending节点而恢复为56ms固定
 test('终态回源仍逐字补齐，减少延迟但不能直接安装最终全文', async () => {
   const h = harness()
   h.s.job.value.status = 'completed_direct'
-  h.s.directTerminalTargetJobId = 'job1'
+  h.s.directTerminalTargetJobId.value = 'job1'
   h.s.livePreviewEligible.value = false
   const target = { root: node('root', '根', [node('first', '最终正文')]) }
   h.queueLiveDraftPreview(target, 1, null, { authoritativeTerminal: true })
@@ -256,7 +256,7 @@ test('移除逐帧按钮禁用不绕过终态同步与操作权限保护', () =>
   h.s.livePreviewPlaybackAvailable.value = false
   assert.equal(h.toggleLivePreviewPlayback(true), false)
   h.s.livePreviewPlaybackAvailable.value = true
-  h.s.directTerminalTargetJobId = 'job1'
+  h.s.directTerminalTargetJobId.value = 'job1'
   assert.equal(h.toggleLivePreviewPlayback(true), false)
   assert.equal(h.s.livePreviewPaused.value, false)
 })

@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 STRUCTURED_MIGRATION = '20260817_mindmap_structured_content.sql'
 INCREMENTAL_MIGRATION = '20260817_mindmap_incremental_changes.sql'
 VERSION_MIGRATION = '20260817_mindmap_version_tag_snapshots.sql'
+VERSION_DOCUMENT_MIGRATION = '20261003_mindmap_release_upgrade.sql'
 FOLDER_MIGRATION = '20260818_mindmap_folder_lifecycle.sql'
 ARCHIVE_MIGRATION = '20260818_mindmap_archive_lifecycle.sql'
 CREATION_IDEMPOTENCY_MIGRATION = '20260819_mindmap_creation_idempotency.sql'
@@ -111,6 +112,7 @@ REQUIRED_COLUMNS = {
     ('mindmap_ws_state', 'content_revision'): INCREMENTAL_MIGRATION,
     ('mindmap_version', 'snapshot_schema_version'): VERSION_MIGRATION,
     ('mindmap_version', 'tag_snapshots'): VERSION_MIGRATION,
+    ('mindmap_version', 'document_data'): VERSION_DOCUMENT_MIGRATION,
     ('mindmap_folder', 'active_name'): FOLDER_MIGRATION,
     ('mindmap_tag_category', 'category_type'): UNIFIED_TAG_MIGRATION,
     ('mindmap_tag_category', 'show_on_home'): TAG_CATEGORY_HOME_MIGRATION,

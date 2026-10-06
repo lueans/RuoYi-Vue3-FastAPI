@@ -36,6 +36,7 @@ function task(id = 'old-job', status = 'completed_direct') {
 function harness({ initialJob = task(), storage = memoryStorage() } = {}) {
   const effects = []
   const scope = {
+    props: { taskOnly: false },
     componentAlive: true, requestedTaskSequence: 0, restoreGeneration: 1, restoreController: null,
     userId: '42', job: ref(initialJob), visible: ref(false), restoringJob: ref(false),
     sessionSwitching: ref(false), livePreviewCanvasMutationBlocked: ref(false),

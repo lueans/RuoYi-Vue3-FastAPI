@@ -87,11 +87,11 @@ function deletionHarness(target) {
     'proposal', 'proposalError', 'proposalLoading', 'diffConfirmed', 'continuationPrompt',
     'pendingFollowupPrompt', 'currentSessionTitle', 'contextPickerVisible', 'sessionMenuVisible',
     'sourceContext', 'sourceFingerprint',
-    'realtimeConnectionState']) s[key] = ref('')
+    'realtimeConnectionState', 'directTerminalTargetJobId']) s[key] = ref('')
   for (const key of ['pendingHandoffCanvasJobId', 'livePreviewPendingFrame', 'livePreviewOldestPendingAt',
     'livePreviewFlushTimer', 'livePreviewJobId', 'livePreviewEditorStarted', 'livePreviewRenderedDocument',
     'livePreviewBaselineDocument', 'livePreviewDirectSettlePromise', 'livePreviewDirectSettleJobId',
-    'directTerminalTargetJobId', 'monitoringSuspendedJobId', 'livePreviewSuppressedJobId',
+    'monitoringSuspendedJobId', 'livePreviewSuppressedJobId',
     'submitAttempt', 'saveCloudAttempt', 'followupAttempt', 'retryAttempt', 'queueAttempt',
     'realtimeReconnectTimer', 'pollTimer']) s[key] = null
   Object.defineProperty(s, 'running', { get: () => ref(s.job.value?.status === 'running') })

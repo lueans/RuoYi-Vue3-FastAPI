@@ -90,7 +90,7 @@ test('编辑器执行统一导出请求前会确保目标格式插件已就绪',
   assert.match(source, /bus\.on\('exportRequest', onExportRequest\)/)
   assert.match(source, /const activeMindMap = mindMap\.value/)
   assert.match(source, /await ensureExportPlugins\(activeMindMap, type\)/)
-  assert.match(source, /await activeMindMap\.export\(type, true, name, \.\.\.args\)/)
+  assert.match(source, /await activeMindMap\.export\(type, true, name, \.\.\.exportArgs\)/)
   assert.match(source, /activeMindMap !== mindMap\.value/)
   assert.match(source, /request\.reject\?\.\(error\)/)
 })

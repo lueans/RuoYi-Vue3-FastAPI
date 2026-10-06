@@ -140,13 +140,34 @@ async def _validate_marker_tag_mapping(
 class MindmapTagService:
     """标签服务层"""
 
+    @staticmethod
+    async def resolve_editor_tag_scope(
+        db: AsyncSession,
+        user_id: int,
+        mindmap_id: int | None = None,
+        *,
+        require_edit: bool = False,
+    ) -> int:
+        """取用户可见与文件可绑定的交集，不公开协作者的私有目录。"""
+        if mindmap_id is None:
+            return user_id
+        # 仅编辑器上下文需要文件访问校验，普通标签管理不加载脑图服务依赖。
+        from module_mindmap.service.mindmap_service import MindmapService  # noqa: PLC0415
+
+        mindmap = await MindmapService.check_mindmap_access(
+            db, mindmap_id, user_id, require_edit=require_edit,
+        )
+        return user_id if mindmap.owner_id == user_id else 0
+
     # ── 标签分组（兼容 category 命名） ──
 
     @classmethod
     async def get_categories(cls, db: AsyncSession, user_id: int) -> list[dict]:
         """获取分组列表（全局 + 当前用户私有）"""
         categories = await MindmapTagDao.get_categories(db, user_id)
-        counts = await MindmapTagDao.get_category_tag_counts(db, [category.id for category in categories])
+        counts = await MindmapTagDao.get_category_tag_counts(
+            db, [category.id for category in categories], visible_owner_id=user_id,
+        )
         result = []
         for category in categories:
             item = CamelCaseUtil.transform_result(category)
@@ -303,8 +324,10 @@ class MindmapTagService:
     @classmethod
     async def get_tag_list(
         cls, db: AsyncSession, query: MindmapTagQueryModel, user_id: int,
+        *, mindmap_id: int | None = None,
     ) -> PageModel:
         """获取标签列表"""
+        scope_id = await cls.resolve_editor_tag_scope(db, user_id, mindmap_id)
         result = await MindmapTagDao.get_tag_list(
             db, user_id,
             category_id=query.category_id,
@@ -313,6 +336,7 @@ class MindmapTagService:
             owner_scope=query.owner_scope or 'all',
             page_num=query.page_num,
             page_size=query.page_size,
+            **({'allowed_owner_id': scope_id} if mindmap_id is not None else {}),
         )
         return result
 
@@ -828,9 +852,11 @@ class MindmapTagService:
     @classmethod
     async def get_suggestions(
         cls, db: AsyncSession, user_id: int, keyword: str | None = None,
+        *, mindmap_id: int | None = None,
     ) -> list[dict]:
         """获取标签建议（编辑器自动补全）"""
-        tags = await MindmapTagDao.get_suggestions(db, user_id, keyword)
+        scope_id = await cls.resolve_editor_tag_scope(db, user_id, mindmap_id)
+        tags = await MindmapTagDao.get_suggestions(db, scope_id, keyword)
         return [CamelCaseUtil.transform_result(tag) for tag in tags]
 
     @staticmethod

@@ -8,8 +8,8 @@ class ExportXMind {
   }
 
   // 导出xmind
-  async xmind(data, name) {
-    const zipData = await xmind.transformToXmind(data, name)
+  async xmind(data, name, options) {
+    const zipData = await xmind.transformToXmind(data, name, options)
     return zipData
   }
 

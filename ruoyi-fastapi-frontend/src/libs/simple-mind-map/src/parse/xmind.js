@@ -10,6 +10,7 @@ import {
   validateXmindArchive
 } from './xmindImport'
 import { mapXmindTreeIterative } from './xmindTree'
+import { abortableExport, exportAbortError, throwIfExportAborted } from '../utils/exportSession'
 import {
   getSummaryText,
   getSummaryText2,
@@ -18,7 +19,7 @@ import {
   getElementsByType,
   addSummaryData,
   handleNodeImageFromXmind,
-  handleNodeImageToXmind,
+  handleNodeImageToXmind as exportNodeImage,
   getXmindContentXmlData,
   parseNodeGeneralizationToXmind
 } from '../utils/xmind'
@@ -193,7 +194,36 @@ const transformOldXmind = content => {
 
 // 数据转换为xmind文件
 // 直接转换为最新版本的xmind文件 2023.09.11172
-const transformToXmind = async (data, name) => {
+const generateXmindBlob = (zip, signal) => new Promise((resolve, reject) => {
+  let chunks = []
+  let settled = false
+  const stream = zip.generateInternalStream({ type: 'uint8array', streamFiles: true })
+  const finish = (error, result) => {
+    if (settled) return
+    settled = true
+    stream.pause()
+    chunks = []
+    signal?.removeEventListener('abort', abort)
+    if (error) reject(error)
+    else resolve(result)
+  }
+  const abort = () => finish(signal.reason || exportAbortError())
+  stream.on('data', chunk => { if (!settled) chunks.push(chunk) })
+  stream.on('error', error => finish(error))
+  stream.on('end', () => {
+    if (!settled) {
+      try { finish(null, new Blob(chunks, { type: 'application/zip' })) }
+      catch (error) { finish(error) }
+    }
+  })
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) abort()
+  else stream.resume()
+})
+
+const transformToXmind = async (data, name, { signal } = {}) => {
+  throwIfExportAborted(signal)
+  const handleNodeImageToXmind = (...args) => exportNodeImage(...args, { signal })
   const id = 'simpleMindMap_' + Date.now()
   const imageList = []
   // 转换核心数据
@@ -265,7 +295,8 @@ const transformToXmind = async (data, name) => {
       return newChild
     }
   })
-  await Promise.all(waitLoadImageList)
+  await abortableExport(Promise.all(waitLoadImageList), signal)
+  throwIfExportAborted(signal)
   const contentData = [newTree]
   // 创建压缩包
   const zip = new JSZip()
@@ -291,7 +322,7 @@ const transformToXmind = async (data, name) => {
     })
   }
   zip.file('manifest.json', stringifyJsonValueIterative(manifestData))
-  const zipData = await zip.generateAsync({ type: 'blob' })
+  const zipData = await generateXmindBlob(zip, signal)
   return zipData
 }
 

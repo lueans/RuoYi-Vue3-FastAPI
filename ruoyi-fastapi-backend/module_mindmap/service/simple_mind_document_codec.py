@@ -11,7 +11,6 @@ from html import unescape
 from typing import Any
 
 SCHEMA_VERSION = 2
-ENGINE_NAME = 'simple-mind-map'
 ENGINE_VERSION = 'fc4f93a38ee2a2eaa8e9e6c8d4c73f2bdac060b1'
 MAX_NODE_COUNT = 20_000
 MAX_TREE_DEPTH = 256

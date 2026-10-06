@@ -77,6 +77,9 @@
         </button>
         <template #dropdown>
           <el-dropdown-menu>
+            <el-dropdown-item command="outline">节点大纲</el-dropdown-item>
+            <el-dropdown-item command="versionHistory">版本历史</el-dropdown-item>
+            <el-dropdown-item v-if="canManageCollaborators && !lockedReadonly" command="collaboratorManager">协作者管理</el-dropdown-item>
             <el-dropdown-item command="format" :disabled="isReadonly">
               <span class="iconfont iconzhuti"></span>
               格式
@@ -93,6 +96,7 @@
               <span class="iconfont iconshezhi"></span>
               编辑器设置
             </el-dropdown-item>
+            <el-dropdown-item command="help">脑图使用帮助</el-dropdown-item>
             <el-dropdown-item command="fitCanvas" :disabled="lockedReadonly">
               <span class="iconfont iconzhengli"></span>
               一键整理布局
@@ -124,6 +128,8 @@ const props = defineProps({
 
 const isDark = computed(() => store.localConfig.isDark)
 const isReadonly = computed(() => store.isReadonly)
+const canManageCollaborators = computed(() => store.canManageCollaborators)
+const router = useRouter()
 
 const openMiniMap = ref(false)
 const version = ref('0.0.0')
@@ -159,6 +165,15 @@ function toggleDark() {
 }
 
 function handleCommand(command) {
+  if (command === 'help') {
+    window.open(router.resolve('/help/mindmap').href, '_blank', 'noopener,noreferrer')
+    return
+  }
+  if (['outline', 'versionHistory', 'collaboratorManager'].includes(command)) {
+    if (command === 'collaboratorManager' && (!canManageCollaborators.value || props.lockedReadonly)) return
+    if (actions.setActiveSidebar(command)) nextTick(() => bus.emit('focusActiveSidebar'))
+    return
+  }
   if (command === 'format') {
     if (isReadonly.value) return
     const hasActiveNodes = (store.mindMap?.renderer?.activeNodeList || []).length > 0

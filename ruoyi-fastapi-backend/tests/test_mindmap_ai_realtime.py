@@ -536,32 +536,6 @@ def test_recovery_checkpoint_uses_historical_maxima_after_legacy_regression() ->
 
 
 @pytest.mark.asyncio
-async def test_deleting_draft_preview_removes_latest_and_versioned_frames() -> None:
-    redis = _FakeRedis()
-    MindmapAiTaskManager.configure_redis(redis)
-    try:
-        await _publish_execution('job-delete')
-        await MindmapAiTaskManager._store_draft_preview(
-            'job-delete',
-            _document(),
-            operation_cursor=2,
-            expected_execution_epoch=1,
-        )
-        await MindmapAiTaskManager.delete_draft_preview('job-delete', 1)
-    finally:
-        MindmapAiTaskManager._redis = None
-
-    assert MindmapAiTaskManager._draft_preview_key('job-delete') not in redis.values
-    assert (
-        MindmapAiTaskManager._draft_preview_version_key('job-delete', 2)
-        not in redis.values
-    )
-    assert redis.values[
-        MindmapAiTaskManager._draft_preview_execution_key('job-delete')
-    ] == '1'
-
-
-@pytest.mark.asyncio
 async def test_draft_frame_cache_evicts_old_versions_at_count_limit() -> None:
     redis = _FakeRedis()
     MindmapAiTaskManager.configure_redis(redis)
@@ -659,10 +633,6 @@ async def test_old_execution_epoch_cannot_write_delete_or_terminalize_new_cache(
             expected_execution_epoch=1,
         )
         await _publish_execution('job-epoch-cas', 2)
-        stale_delete_before_first_frame = await MindmapAiTaskManager.delete_draft_preview(
-            'job-epoch-cas',
-            1,
-        )
         stale_terminal_before_first_frame = await MindmapAiTaskManager.mark_draft_terminal(
             'job-epoch-cas',
             1,
@@ -684,10 +654,6 @@ async def test_old_execution_epoch_cannot_write_delete_or_terminalize_new_cache(
             operation_cursor=3,
             expected_execution_epoch=1,
         )
-        stale_delete = await MindmapAiTaskManager.delete_draft_preview(
-            'job-epoch-cas',
-            1,
-        )
         stale_terminal = await MindmapAiTaskManager.mark_draft_terminal(
             'job-epoch-cas',
             1,
@@ -701,11 +667,9 @@ async def test_old_execution_epoch_cannot_write_delete_or_terminalize_new_cache(
     finally:
         MindmapAiTaskManager._redis = None
 
-    assert stale_delete_before_first_frame is False
     assert stale_terminal_before_first_frame is False
     assert stale_publish is False
     assert stale_write is False
-    assert stale_delete is False
     assert stale_terminal is False
     assert latest is not None
     assert latest['executionEpoch'] == 2  # noqa: PLR2004

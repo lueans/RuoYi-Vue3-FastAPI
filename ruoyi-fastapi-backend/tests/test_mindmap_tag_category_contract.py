@@ -220,7 +220,7 @@ class MindmapTagCategoryServiceTest(unittest.IsolatedAsyncioTestCase):
             result = await MindmapTagService.get_categories(SimpleNamespace(), user_id=42)
 
         self.assertEqual([item['tagCount'] for item in result], [3, 0])
-        count_mock.assert_awaited_once_with(ANY, [7, 8])
+        count_mock.assert_awaited_once_with(ANY, [7, 8], visible_owner_id=42)
 
     async def test_reorder_updates_a_complete_single_owner_scope(self) -> None:
         categories = [

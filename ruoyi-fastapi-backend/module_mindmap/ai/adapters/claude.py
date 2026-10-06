@@ -56,7 +56,7 @@ from module_mindmap.ai.credentials import (
     CLAUDE_CREDENTIAL_ENV_ALLOWLIST,
     CLAUDE_DIRECT_CREDENTIAL_ENV,
 )
-from module_mindmap.ai.document import MindmapArtifactError
+from module_mindmap.ai.document import AI_MAX_FILE_BYTES, MindmapArtifactError
 from module_mindmap.ai.runtime_catalog import claude_cli_options
 from module_mindmap.ai.runtime_trace import RuntimeTrace, detail_text, normalize_todos
 from module_mindmap.ai.tool_contract import SEARCH_TAGS_SCHEMA, TAG_REFERENCE_SCHEMA, TAG_SUGGESTIONS_SCHEMA
@@ -724,10 +724,7 @@ def _resolve_claude_environment(credential_env: dict[str, Any]) -> dict[str, str
 
 
 def _has_environment_auth(environment: dict[str, str]) -> bool:
-    return (
-        any(environment.get(name) for name in CLAUDE_DIRECT_CREDENTIAL_ENV)
-        or environment.get('CLAUDE_CODE_USE_BEDROCK', '').lower() in {'1', 'true'}
-    )
+    return any(environment.get(name) for name in CLAUDE_DIRECT_CREDENTIAL_ENV) or _uses_bedrock(environment)
 
 
 def _isolated_claude_environment(
@@ -1143,6 +1140,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
             ClaudeAgentOptions,
             MirrorErrorMessage,
             ResultMessage,
+            ToolAnnotations,
             create_sdk_mcp_server,
         )
         from claude_agent_sdk import (  # noqa: PLC0415
@@ -1164,7 +1162,9 @@ class ClaudeMindmapAdapter(AgentAdapter):
         tool_event: ContextVar[dict | None] = ContextVar('mindmap_tool_event', default=None)
         tool_step = 0
 
-        def tool(name: str, description: str, schema: dict[str, Any]) -> Any:
+        def tool(
+            name: str, description: str, schema: dict[str, Any], *, annotations: Any = None,
+        ) -> Any:
             def decorate(handler: Any) -> Any:
                 @wraps(handler)
                 async def traced(args: dict[str, Any]) -> dict[str, Any]:
@@ -1173,7 +1173,7 @@ class ClaudeMindmapAdapter(AgentAdapter):
                         return await handler(args)
                     finally:
                         tool_arguments.reset(token)
-                return sdk_tool(name, description, schema)(traced)
+                return sdk_tool(name, description, schema, annotations=annotations)(traced)
             return decorate
 
         original_tools = context.tool_service
@@ -1331,11 +1331,17 @@ class ClaudeMindmapAdapter(AgentAdapter):
                 await emit_required('tool_completed', completed_payload)
                 return _tool_response(value)
 
-        @tool('read_projection', '读取当前授权的候选脑图', {})
+        # Keep bounded document reads inline. The CLI otherwise spills large
+        # results to a file, but this adapter deliberately disables Read.
+        @tool('read_projection', '读取当前授权的候选脑图', {}, annotations=ToolAnnotations(
+            readOnlyHint=True, maxResultSizeChars=AI_MAX_FILE_BYTES,
+        ))
         async def read_projection(_args: dict[str, Any]) -> dict[str, Any]:
             return await execute_tool('read_projection', tools.read_projection)
 
-        @tool('read_document_detail', '读取授权脑图详情', {})
+        @tool('read_document_detail', '读取授权脑图详情', {}, annotations=ToolAnnotations(
+            readOnlyHint=True, maxResultSizeChars=AI_MAX_FILE_BYTES,
+        ))
         async def read_document_detail(_args: dict[str, Any]) -> dict[str, Any]:
             return await execute_tool('read_document_detail', tools.read_document_detail)
 

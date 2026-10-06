@@ -577,124 +577,140 @@ class MindMap {
     node
   } = {}) {
     const { watermarkConfig, openPerformance } = this.opt
-    // 如果开启了性能模式，那么需要先渲染所有节点
-    if (openPerformance) {
-      this.renderer.forceLoadNode(node)
-    }
-    const { cssTextList, header, headerHeight, footer, footerHeight } =
-      handleGetSvgDataExtraContent({
-        addContentToHeader,
-        addContentToFooter
-      })
     const svg = this.svg
     const draw = this.draw
-    // 保存原始信息
     const origWidth = svg.width()
     const origHeight = svg.height()
     const origTransform = draw.transform()
-    const elRect = this.elRect
-    // 去除放大缩小的变换效果
-    draw.scale(1 / origTransform.scaleX, 1 / origTransform.scaleY)
-    // 获取变换后的位置尺寸信息，其实是getBoundingClientRect方法的包装方法
-    const rect = draw.rbox()
-    // 需要裁减的区域
-    let clipData = null
-    if (node) {
-      clipData = getNodeTreeBoundingRect(
-        node,
-        rect.x,
-        rect.y,
-        paddingX,
-        paddingY
-      )
-    }
-    // 内边距
-    const fixHeight = 0
-    rect.width += paddingX * 2
-    rect.height += paddingY * 2 + fixHeight + headerHeight + footerHeight
-    draw.translate(paddingX, paddingY)
-    // 将svg设置为实际内容的宽高
-    svg.size(rect.width, rect.height)
-    // 把实际内容变换
-    draw.translate(-rect.x + elRect.left, -rect.y + elRect.top)
-    // 克隆一份数据
-    let clone = svg.clone()
-    // 是否存在水印
-    const hasWatermark = this.watermark && this.watermark.hasWatermark()
-    if (!ignoreWatermark && hasWatermark) {
-      this.watermark.isInExport = true
-      // 是否是仅导出时需要水印
-      const { onlyExport } = watermarkConfig
-      // 是否需要重新绘制水印
-      const needReDrawWatermark =
-        rect.width > origWidth || rect.height > origHeight
-      // 如果实际图形宽高超出了屏幕宽高，且存在水印的话需要重新绘制水印，否则会出现超出部分没有水印的问题
-      if (needReDrawWatermark) {
-        this.width = rect.width
-        this.height = rect.height
-        this.watermark.onResize()
-        clone = svg.clone()
-        this.width = origWidth
-        this.height = origHeight
-        this.watermark.onResize()
-      } else if (onlyExport) {
-        // 如果是仅导出时需要水印，那么需要进行绘制
-        this.watermark.onResize()
-        clone = svg.clone()
+    const origViewWidth = this.width
+    const origViewHeight = this.height
+    let snapshotStarted = false
+    try {
+      // 如果开启了性能模式，那么需要先渲染所有节点
+      if (openPerformance) {
+        snapshotStarted = true
+        this.renderer.forceLoadNode(node, { emitEvents: false })
       }
-      // 如果是仅导出时需要水印，需要清除
-      if (onlyExport) {
-        this.watermark.clear()
+      const { cssTextList, header, headerHeight, footer, footerHeight } =
+        handleGetSvgDataExtraContent({
+          addContentToHeader,
+          addContentToFooter
+        })
+      const elRect = this.elRect
+      // 去除放大缩小的变换效果
+      draw.scale(1 / origTransform.scaleX, 1 / origTransform.scaleY)
+      // 获取变换后的位置尺寸信息，其实是getBoundingClientRect方法的包装方法
+      const rect = draw.rbox()
+      // 需要裁减的区域
+      let clipData = null
+      if (node) {
+        clipData = getNodeTreeBoundingRect(
+          node,
+          rect.x,
+          rect.y,
+          paddingX,
+          paddingY
+        )
       }
-      this.watermark.isInExport = false
-    }
-    // 添加必要的样式
-    [this.joinCss(), ...cssTextList].forEach(s => {
-      clone.add(SVG(`<style>${s}</style>`))
-    })
-    // 附加内容
-    if (header && headerHeight > 0) {
-      clone.findOne('.smm-container').translate(0, headerHeight)
-      header.width(rect.width)
-      header.y(paddingY)
-      clone.add(header, 0)
-    }
-    if (footer && footerHeight > 0) {
-      footer.width(rect.width)
-      footer.y(rect.height - paddingY - footerHeight)
-      clone.add(footer)
-    }
-    // 修正defs里定义的元素的id，因为clone时defs里的元素的id会继续递增，导致和内容中引用的id对不上
-    const defs = svg.find('defs')
-    const defs2 = clone.find('defs')
-    defs.forEach((def, defIndex) => {
-      const def2 = defs2[defIndex]
-      if (!def2) return
-      const children = def.children()
-      const children2 = def2.children()
-      for (let i = 0; i < children.length; i++) {
-        const child = children[i]
-        const child2 = children2[i]
-        if (child && child2) {
-          child2.attr('id', child.attr('id'))
+      // 内边距
+      const fixHeight = 0
+      rect.width += paddingX * 2
+      rect.height += paddingY * 2 + fixHeight + headerHeight + footerHeight
+      draw.translate(paddingX, paddingY)
+      // 将svg设置为实际内容的宽高
+      svg.size(rect.width, rect.height)
+      // 把实际内容变换
+      draw.translate(-rect.x + elRect.left, -rect.y + elRect.top)
+      // 克隆一份数据
+      let clone = svg.clone()
+      // 是否存在水印
+      const hasWatermark = this.watermark && this.watermark.hasWatermark()
+      if (!ignoreWatermark && hasWatermark) {
+        this.watermark.isInExport = true
+        // 是否是仅导出时需要水印
+        const { onlyExport } = watermarkConfig
+        // 是否需要重新绘制水印
+        const needReDrawWatermark =
+          rect.width > origWidth || rect.height > origHeight
+        // 如果实际图形宽高超出了屏幕宽高，且存在水印的话需要重新绘制水印，否则会出现超出部分没有水印的问题
+        if (needReDrawWatermark) {
+          this.width = rect.width
+          this.height = rect.height
+          this.watermark.onResize()
+          clone = svg.clone()
+          this.width = origWidth
+          this.height = origHeight
+          this.watermark.onResize()
+        } else if (onlyExport) {
+          // 如果是仅导出时需要水印，那么需要进行绘制
+          this.watermark.onResize()
+          clone = svg.clone()
         }
+        // 如果是仅导出时需要水印，需要清除
+        if (onlyExport) {
+          this.watermark.clear()
+        }
+        this.watermark.isInExport = false
       }
-    })
-    // 恢复原先的大小和变换信息
-    svg.size(origWidth, origHeight)
-    draw.transform(origTransform)
-    return {
-      svg: clone, // 思维导图图形的整体svg元素，包括：svg（画布容器）、g（实际的思维导图组）
-      svgHTML: clone.svg(), // svg字符串
-      clipData,
-      rect: {
-        ...rect, // 思维导图图形未缩放时的位置尺寸等信息
-        ratio: rect.width / rect.height // 思维导图图形的宽高比
-      },
-      origWidth, // 画布宽度
-      origHeight, // 画布高度
-      scaleX: origTransform.scaleX, // 思维导图图形的水平缩放值
-      scaleY: origTransform.scaleY // 思维导图图形的垂直缩放值
+      // 添加必要的样式
+      [this.joinCss(), ...cssTextList].forEach(s => {
+        clone.add(SVG(`<style>${s}</style>`))
+      })
+      // 附加内容
+      if (header && headerHeight > 0) {
+        clone.findOne('.smm-container').translate(0, headerHeight)
+        header.width(rect.width)
+        header.y(paddingY)
+        clone.add(header, 0)
+      }
+      if (footer && footerHeight > 0) {
+        footer.width(rect.width)
+        footer.y(rect.height - paddingY - footerHeight)
+        clone.add(footer)
+      }
+      // 修正defs里定义的元素的id，因为clone时defs里的元素的id会继续递增，导致和内容中引用的id对不上
+      const defs = svg.find('defs')
+      const defs2 = clone.find('defs')
+      defs.forEach((def, defIndex) => {
+        const def2 = defs2[defIndex]
+        if (!def2) return
+        const children = def.children()
+        const children2 = def2.children()
+        for (let i = 0; i < children.length; i++) {
+          const child = children[i]
+          const child2 = children2[i]
+          if (child && child2) {
+            child2.attr('id', child.attr('id'))
+          }
+        }
+      })
+      return {
+        svg: clone, // 思维导图图形的整体svg元素，包括：svg（画布容器）、g（实际的思维导图组）
+        svgHTML: clone.svg(), // svg字符串
+        clipData,
+        rect: {
+          ...rect, // 思维导图图形未缩放时的位置尺寸等信息
+          ratio: rect.width / rect.height // 思维导图图形的宽高比
+        },
+        origWidth, // 画布宽度
+        origHeight, // 画布高度
+        scaleX: origTransform.scaleX, // 思维导图图形的水平缩放值
+        scaleY: origTransform.scaleY // 思维导图图形的垂直缩放值
+      }
+    } finally {
+      // 截图是临时投影，成功和异常都恢复主画布视图及视口裁剪。
+      svg.size(origWidth, origHeight)
+      draw.transform(origTransform)
+      this.width = origViewWidth
+      this.height = origViewHeight
+      if (this.watermark?.isInExport) {
+        this.watermark.isInExport = false
+        this.watermark.onResize()
+      }
+      if (snapshotStarted) {
+        // 裁剪不代表文档变更，不触发小地图/大纲的下一次截图刷新。
+        this.renderer.startPerformanceRender({ emitEvents: false })
+      }
     }
   }
 

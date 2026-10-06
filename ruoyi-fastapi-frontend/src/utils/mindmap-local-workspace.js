@@ -10,7 +10,6 @@ export const MINDMAP_LOCAL_WORKSPACE_SCHEMA_VERSION = 2
 export const MINDMAP_LOCAL_WORKSPACE_LEGACY_SCHEMA_VERSION = 1
 export const MINDMAP_LOCAL_WORKSPACE_MAX_BYTES = 2 * 1024 * 1024
 
-const DEFAULT_LAYOUT = 'logicalStructure'
 const DEFAULT_THEME_TEMPLATE = 'default'
 const ALLOWED_LAYOUTS = new Set(layoutValueList)
 const WORKSPACE_FIELDS = [
@@ -211,13 +210,4 @@ export function serializeMindmapLocalWorkspaceRecord(
     throw error
   }
   return serialized
-}
-
-export function getDefaultMindmapLocalWorkspace() {
-  return {
-    layout: DEFAULT_LAYOUT,
-    theme: { template: DEFAULT_THEME_TEMPLATE, config: {} },
-    view: null,
-    documentData: {},
-  }
 }

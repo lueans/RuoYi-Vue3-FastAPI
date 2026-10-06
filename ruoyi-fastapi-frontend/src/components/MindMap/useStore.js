@@ -22,6 +22,7 @@ const STORAGE_KEY_LOCAL_CONFIG = 'MIND_MAP_LOCAL_CONFIG'
 const STORAGE_KEY_AI_RECOVERY = 'MIND_MAP_AI_RECOVERY_V1'
 
 const READONLY_SAFE_SIDEBARS = new Set([
+  'setting',
   'outline',
   'shortcutKey',
   'versionHistory',

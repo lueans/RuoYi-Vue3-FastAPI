@@ -896,12 +896,6 @@ watch(isWriteBlocked, (blocked) => {
       }
     }
   }
-
-  .tab {
-    flex-grow: 0;
-    flex-shrink: 0;
-    padding: 0 20px;
-  }
 }
 
 .tipBox {
@@ -1260,29 +1254,6 @@ watch(isWriteBlocked, (blocked) => {
       margin-bottom: 0;
     }
 
-    &.textSettingsRow {
-      flex-wrap: wrap;
-
-      .fontFamilyItem {
-        flex: 1 0 100%;
-        width: 100%;
-      }
-
-      .alignItem {
-        margin-left: auto;
-      }
-    }
-
-    &.colorPaletteRow {
-      align-items: center;
-
-      > .name {
-        color: #646a73;
-        font-size: 12px;
-        white-space: nowrap;
-      }
-    }
-
     .btnGroup {
       width: 100%;
       display: flex;
@@ -1342,14 +1313,6 @@ watch(isWriteBlocked, (blocked) => {
 
       &.i {
         font-style: italic;
-      }
-
-      .colorShow {
-        position: absolute;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        height: 2px;
       }
     }
 

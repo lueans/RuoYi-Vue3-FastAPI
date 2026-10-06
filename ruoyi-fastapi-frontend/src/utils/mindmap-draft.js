@@ -641,39 +641,3 @@ export async function removeMindmapDraft(
     await removeMindmapDraftRecord(draftKey, beforeUpdatedAt)
   }
 }
-
-/**
- * 清理同一文件已经失活的恢复草稿，同时保护仍由其他标签页持有的会话。
- *
- * “使用云端版本”只能代表当前窗口放弃可恢复的崩溃草稿，不能替另一个仍在
- * 编辑的窗口撤销其本地保护副本。逐条按稳定 key 删除也保留 updatedAt 条件，
- * 避免检查会话状态期间的新写入被旧清理任务覆盖。
- */
-export async function removeInactiveMindmapDrafts(
-  userId,
-  mindmapId,
-  { beforeUpdatedAt } = {},
-) {
-  const hasCutoff = Number.isFinite(Number(beforeUpdatedAt))
-  const drafts = (await listMindmapDrafts(userId)).filter(record => (
-    String(record.mindmapId) === String(mindmapId)
-    && (!hasCutoff || Number(record.updatedAt || 0) <= Number(beforeUpdatedAt))
-  ))
-  const removedKeys = []
-  const preservedKeys = []
-  for (const record of drafts) {
-    const sessionActive = record.sessionId
-      ? await isMindmapDraftSessionActive(userId, mindmapId, record.sessionId)
-      : false
-    if (sessionActive) {
-      preservedKeys.push(record.key)
-      continue
-    }
-    await removeMindmapDraft(userId, mindmapId, {
-      key: record.key,
-      beforeUpdatedAt,
-    })
-    removedKeys.push(record.key)
-  }
-  return { removedKeys, preservedKeys }
-}

@@ -108,7 +108,7 @@ test('actual Dialog event ingestion restores suggestions without focusing or mut
   assert.deepEqual(turns.map(turn => turn.tagSuggestions.items[0].name), ['历史建议', '当前建议'])
   assert.equal(s.latestEventSequence.value, 3)
   assert.deepEqual(collectMindmapAiTagSuggestions([], 'new-job'), { items: [], truncated: false })
-  assert.match(source, /tagSuggestions: collectMindmapAiTagSuggestions\(turn\.events, turn\.job\.id\)/)
+  assert.match(source, /tagSuggestions: collectMindmapAiTagSuggestions\(turn\.tagEvents \|\| turn\.events, turn\.job\.id\)/)
 })
 
 test('actual historical restoration shares the one sanitizer boundary with SSE before aggregation', async () => {

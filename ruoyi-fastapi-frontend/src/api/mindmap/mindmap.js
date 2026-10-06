@@ -233,6 +233,15 @@ export function listMindmapAiConnectors() {
   })
 }
 
+export function getMindmapAiExecutionRecovery(jobId) {
+  return request({ url: `/mindmap/ai/admin/jobs/${jobId}/execution-recovery`, method: 'get', silentError: true })
+}
+
+export function confirmMindmapAiExecutionStopped(jobId, data) {
+  return request({ url: `/mindmap/ai/admin/jobs/${jobId}/execution-recovery`, method: 'post', data,
+    headers: { repeatSubmit: false }, silentError: true })
+}
+
 export function updateMindmapAiConnector(agentKey, data) {
   return request({
     url: `/mindmap/ai/admin/connectors/${agentKey}`,
@@ -297,20 +306,28 @@ export function getMindmapAiJobDraft(jobId, { signal, version } = {}) {
   })
 }
 
-export function getMindmapAiSessionTimeline(sessionId, { signal } = {}) {
+export function getMindmapAiSessionTimeline(sessionId, { signal, beforeTurnIndex, focusJobId, limit } = {}) {
   return request({
     url: `/mindmap/ai/sessions/${sessionId}`,
     method: 'get',
+    params: { beforeTurnIndex, focusJobId, limit },
     signal,
     silentError: true,
   })
 }
 
-export function listMindmapAiSessions({ limit = 20, signal } = {}) {
+export function getMindmapAiJobEventHistory(jobId, { signal, beforeSequence, limit = 200 } = {}) {
+  return request({
+    url: `/mindmap/ai/jobs/${jobId}/history`, method: 'get',
+    params: { beforeSequence, limit }, signal, silentError: true,
+  })
+}
+
+export function listMindmapAiSessions({ limit = 20, page = 1, taskCenter = false, signal } = {}) {
   return request({
     url: '/mindmap/ai/sessions',
     method: 'get',
-    params: { limit },
+    params: { limit, page, ...(taskCenter ? { taskCenter: true } : {}) },
     signal,
     silentError: true,
   })
@@ -323,6 +340,11 @@ export function deleteMindmapAiSession(sessionId) {
     headers: { repeatSubmit: false },
     silentError: true,
   })
+}
+
+export function acknowledgeMindmapAiTask(jobId, expectedStatus) {
+  return request({ url: `/mindmap/ai/jobs/${jobId}/acknowledge`, method: 'post',
+    data: { expectedStatus }, headers: { repeatSubmit: false }, silentError: true })
 }
 
 export function continueMindmapAiJob(jobId, data, idempotencyKey, { signal } = {}) {

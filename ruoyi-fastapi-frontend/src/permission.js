@@ -4,7 +4,7 @@ import NProgress from 'nprogress'
 import 'nprogress/nprogress.css'
 import { getToken } from '@/utils/auth'
 import { isHttp, isPathMatch } from '@/utils/validate'
-import { isRelogin } from '@/utils/request'
+import { isRelogin, assertCurrentAuthSession } from '@/utils/request'
 import useUserStore from '@/store/modules/user'
 import useSettingsStore from '@/store/modules/settings'
 import usePermissionStore from '@/store/modules/permission'
@@ -21,6 +21,11 @@ const isWhiteList = (path) => {
 
 router.beforeEach((to, from, next) => {
   NProgress.start()
+  try { assertCurrentAuthSession() } catch {
+    next(false)
+    NProgress.done()
+    return
+  }
   if (getToken()) {
     to.meta.title && useSettingsStore().setTitle(to.meta.title)
     /* has token*/
@@ -36,7 +41,7 @@ router.beforeEach((to, from, next) => {
         // 判断当前用户是否已拉取完user_info信息
         userStore.getInfo().then(() => {
           isRelogin.show = false
-          usePermissionStore().generateRoutes().then(accessRoutes => {
+          return usePermissionStore().generateRoutes().then(accessRoutes => {
             // 根据roles权限生成可访问的路由表
             accessRoutes.forEach(route => {
               if (!isHttp(route.path)) {
@@ -46,6 +51,12 @@ router.beforeEach((to, from, next) => {
             next({ ...to, replace: true }) // hack方法 确保addRoutes已完成
           })
         }).catch(err => {
+          if (err?.authSessionChanged) {
+            isRelogin.show = false
+            next(false)
+            NProgress.done()
+            return
+          }
           if (isAuthExpiredError(err)) {
             const expiredToken = userStore.token
             recoverExpiredBootstrap({

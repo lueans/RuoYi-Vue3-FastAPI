@@ -5,6 +5,16 @@ export const deviceAgentName = key => ({ device_claude: 'Claude', device_codex: 
 export const CODEX_DEVICE_BUDGET_NOTICE = 'Codex 预算按已回报用量估算，可能超额，不是硬费用上限，也不代表订阅账单。'
 export const KIMI_DEVICE_BUDGET_NOTICE = 'Kimi 不执行金额预算上限，仅限制时间与工具次数；使用此电脑的登录和模型额度。'
 export const deviceBudgetNotice = key => ({ device_codex: CODEX_DEVICE_BUDGET_NOTICE, device_kimi: KIMI_DEVICE_BUDGET_NOTICE })[key] || ''
+export function agentBudgetNotice(agent = {}) {
+  const key = String(agent.agentKey || '').replace(/^device_/, '')
+  const amount = Number(agent.maxBudgetUsd)
+  const budget = Number.isFinite(amount) && amount > 0 ? `$${amount}` : '平台配置金额'
+  if (key === 'kimi') return 'Kimi 仅限制时间与工具次数，不执行金额预算上限；费用以供应商账单为准。'
+  if (key === 'codex') return `Codex 按回报用量估算预算 ${budget}，可能超额；不是硬费用上限，也不代表订阅账单。`
+  if (key === 'native_mindmap') return `模型费用在回报用量后按 ${budget} 校验；未回报费用时无法核验，不是调用前的硬费用上限。`
+  if (key === 'claude') return `Claude SDK 使用 ${budget} 任务预算；调用可能产生费用，实际费用以供应商账单为准。`
+  return '费用与限额由所选执行器和供应商决定，请先检查任务设置。'
+}
 export const deviceExecutionCommand = key => `mindmap-agent-bridge run --execute ${DEVICE_AGENT_RUNTIMES[key] || 'claude'}${key === 'device_codex' ? ' --accept-estimated-budget' : key === 'device_kimi' ? ' --accept-unmetered-budget' : ''}`
 
 export function createAgentRequestScope() {

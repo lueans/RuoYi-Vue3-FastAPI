@@ -28,7 +28,7 @@
         trigger="click"
         popper-class="mindmapAiSessionPopper"
         :disabled="running || actionBusy || livePreviewCanvasMutationBlocked || executionStopBlocked"
-        @show="loadRecentSessions"
+        @show="loadRecentSessions(1)"
       >
         <template #reference>
           <button
@@ -46,6 +46,7 @@
         </template>
         <div class="sessionMenu" role="menu" aria-label="AI 对话历史" @keydown.esc="closeSessionMenu">
           <button
+            v-if="!props.taskOnly"
             type="button"
             class="sessionNewAction"
             role="menuitem"
@@ -56,12 +57,12 @@
             <span><strong>新建对话</strong><small>开始一个独立的 AI 任务</small></span>
           </button>
           <div class="sessionMenuHeading">
-            <span>最近对话</span>
+            <span>历史对话</span>
             <button
               v-if="sessionListError"
               type="button"
               :disabled="sessionListLoading"
-              @click="loadRecentSessions"
+              @click="loadRecentSessions(sessionPage)"
             >重试</button>
           </div>
           <div v-if="sessionListLoading" class="sessionMenuState">正在加载最近对话…</div>
@@ -78,7 +79,7 @@
               :title="livePreviewCanvasMutationBlocked
                 ? '请先采纳或不采纳当前 AI 实时预览'
                 : sessionUnavailableReason(session) || session.title"
-              @click="switchToSession(session)"
+              @click="props.taskOnly ? router.push({ path: '/mindmap/ai-task', query: { aiJobId: session.currentJob.id } }) : switchToSession(session)"
             >
               <span class="sessionListCopy">
                 <strong>{{ session.title }}</strong>
@@ -87,6 +88,11 @@
               <time v-if="session.updateTime" :datetime="session.updateTime">{{ formatSessionTime(session.updateTime) }}</time>
             </button>
           </div>
+          <nav v-if="sessionTotal > 20" class="sessionPagination" aria-label="AI 对话历史分页">
+            <el-button size="small" :disabled="sessionListLoading || sessionPage <= 1" @click="loadRecentSessions(sessionPage - 1)">上一页</el-button>
+            <span>第 {{ sessionPage }} / {{ Math.ceil(sessionTotal / 20) }} 页</span>
+            <el-button size="small" :disabled="sessionListLoading || sessionPage * 20 >= sessionTotal" @click="loadRecentSessions(sessionPage + 1)">下一页</el-button>
+          </nav>
         </div>
       </el-popover>
       <div class="aiPanelHeaderActions">
@@ -127,8 +133,11 @@
       role="status"
     >
       <p>已生成的结果与执行器状态分别保留。确认退出前不能发送下一轮、重试或切换 Agent。</p>
+      <p v-if="job?.executionState === 'unconfirmed'">请联系管理员在执行主机核验旧 Agent 进程和清理任务已退出，再到 AI Agent 管理记录核验回执。租约过期不代表执行已停止。</p>
       <p v-if="executionStop.error.value">{{ executionStop.error.value }}</p>
       <el-button text :loading="executionStop.checking.value" @click="executionStop.refresh()">刷新停止状态</el-button>
+      <el-button text @click="copyExecutionDiagnostic">复制诊断信息</el-button>
+      <el-button v-if="canManageAiExecution" text @click="openExecutionRecovery">管理员核验入口</el-button>
     </el-alert>
     <div ref="chatScrollRef" class="aiDialogBody" v-loading="loadingAgents || restoringJob" @scroll.passive="onChatScroll">
       <aside
@@ -201,6 +210,10 @@
         <p v-if="job" class="mindmapAiSrOnly" role="status" aria-live="polite" aria-atomic="true">
           第 {{ job.turnIndex || 1 }} 轮 · {{ statusLabel }}
         </p>
+        <el-button v-if="handoffTimelineReceipt?.hasEarlierTurns" text size="small"
+          :loading="historyLoading === 'turns'" :disabled="Boolean(historyLoading) || timelineLoading"
+          @click="loadEarlierConversationTurns">加载更早的对话</el-button>
+        <p v-if="historyError" class="planNote" role="status">{{ historyError }}</p>
         <ol
           v-if="conversationTurns.length"
           ref="activityTimelineRef"
@@ -223,8 +236,12 @@
               </div>
               <p v-if="isDeviceAgent(turn.job.agentKey)" class="agentExecutionLocation">{{ agentExecutionLocation(turn.job, deviceCatalog.devices) }}</p>
               <MindmapAgentAttachmentRecords :attachments="turn.userMessage?.attachments || []" />
+              <el-button v-if="turn.hasEarlierEvents" text size="small"
+                :loading="historyLoading === String(turn.job.id)" :disabled="Boolean(historyLoading) || timelineLoading"
+                @click="loadEarlierTurnEvents(turn)">加载更早的执行记录</el-button>
               <MindmapAgentTrace
                 :events="turn.events"
+                :event-version="turn.eventVersion"
                 :discussion="isMindmapAiMessageJob(turn.job)"
                 :running="turn.job.id === job?.id && running"
                 :cancelled="turn.job.status === 'cancelled'"
@@ -309,7 +326,7 @@
             closable
             @close="pendingAttemptNotice = ''"
           />
-          <div v-if="cloudMutationRecoveryError" class="restoreFailure">
+          <div v-if="!props.taskOnly && cloudMutationRecoveryError" class="restoreFailure">
             <el-alert
               :title="cloudMutationRecoveryError"
               type="warning"
@@ -350,7 +367,7 @@
                 plain
                 :loading="restoringJob"
                 :disabled="restoringJob || (livePreviewCanvasMutationBlocked && !directCanvasRecoveryJobId)"
-                @click="retryStoredJobRecovery"
+                @click="props.taskOnly ? openRequestedTask() : retryStoredJobRecovery()"
               >重试恢复任务</el-button>
               <el-button
                 size="small"
@@ -394,6 +411,9 @@
               text
               @click="toggleLivePreviewPlayback()"
             >{{ livePreviewPaused ? '继续显示' : '暂停显示' }}</el-button>
+            <el-button v-if="canShowFinalLivePreview" size="small" text @click="showFinalLivePreview">
+              立即显示最终结果
+            </el-button>
           </div>
           <p
             v-if="livePreviewAccessibleAnnouncement"
@@ -480,7 +500,7 @@
               <el-icon><Share /></el-icon>
             </div>
             <h2>今天想做点什么？</h2>
-            <p class="aiWelcomeDescription">在右侧导图中选中节点，AI 会围绕你选中的部分来回答。</p>
+            <p class="aiWelcomeDescription">在导图中选中节点，AI 会围绕你选中的部分来回答。</p>
             <div class="starterGrid">
               <button
                 v-for="starter in starterItems"
@@ -586,16 +606,27 @@
             />
             <ul v-if="resultImpactForDisplay?.changes?.length" class="diffList">
               <li
-                v-for="(change, index) in resultImpactForDisplay.changes.slice(0, 12)"
+                v-for="(change, index) in pagedProposalChanges"
                 :key="`${change.type}:${change.nodeUid || index}`"
               >
                 {{ changeTypeLabel(change.type) }} · {{ change.path || change.fromPath || '文档设置' }}
                 <span v-if="change.subtreeSize">（子树 {{ change.subtreeSize }} 个节点）</span>
+                <details class="diffChangeDetail">
+                  <summary>查看变更内容</summary>
+                  <p v-if="change.fromPath">原位置：{{ change.fromPath }}</p>
+                  <p v-if="change.fields?.length">修改字段：{{ change.fields.join('、') }}</p>
+                  <template v-if="'beforeValues' in change"><strong>变更前</strong><pre>{{ change.beforeValues == null ? '此历史记录缺少原始内容；请勿将摘要视为完整差异。' : formatDiffValue(change.beforeValues) }}</pre></template>
+                  <template v-if="'afterValues' in change"><strong>变更后</strong><pre>{{ formatDiffValue(change.afterValues) }}</pre></template>
+                  <p v-if="change.removedFields?.length">移除字段：{{ change.removedFields.join('、') }}</p>
+                  <p v-if="change.type === 'move_node'">新位置：{{ change.path }}</p>
+                </details>
               </li>
             </ul>
-            <div v-if="resultImpactForDisplay?.changes?.length > 12" class="fieldHint">
-              另有 {{ resultImpactForDisplay.changes.length - 12 }} 项变化未展开。
-            </div>
+            <nav v-if="proposalChangePageCount > 1" class="diffPagination" aria-label="提案差异分页">
+              <el-button size="small" :disabled="proposalChangePage <= 1" @click="proposalChangePage--">上一页</el-button>
+              <span>第 {{ proposalChangePage }} / {{ proposalChangePageCount }} 页 · 共 {{ resultImpactForDisplay.changes.length }} 项变化</span>
+              <el-button size="small" :disabled="proposalChangePage >= proposalChangePageCount" @click="proposalChangePage++">下一页</el-button>
+            </nav>
             <el-checkbox
               v-if="!proposalReviewFinalized && canApplyCurrentProposal"
               ref="proposalConfirmationRef"
@@ -614,7 +645,7 @@
             下载 .smm
           </el-button>
           <el-button
-            v-if="!viewingHistoricalArtifact && job?.artifactId && ['ready', 'needs_review'].includes(job.status)"
+            v-if="!props.taskOnly && !viewingHistoricalArtifact && job?.artifactId && ['ready', 'needs_review'].includes(job.status)"
             size="small"
             plain
             :loading="openingLocal"
@@ -649,6 +680,10 @@
             :title="livePreviewCanvasMutationBlocked ? '请先采纳或不采纳当前 AI 实时预览' : undefined"
             @click="saveCloud"
           >保存为云端脑图</el-button>
+          <el-button v-if="job?.resultMindmapId" size="small" type="primary" plain
+            :disabled="actionBusy || livePreviewCanvasMutationBlocked" @click="openSavedCloudResult">
+            打开已保存的脑图
+          </el-button>
         </div>
         </template>
         <template #actions>
@@ -683,11 +718,13 @@
             @click="rejectLiveDraft"
           >不采纳本轮</el-button>
           <el-button
+            v-if="!props.taskOnly"
             type="primary"
             :loading="applying"
             :disabled="actionBusy"
             @click="applyProposal()"
           >查看差异并采纳</el-button>
+          <span v-if="props.taskOnly">请回到原脑图编辑器确认并采纳修改；也可下载完整结果。</span>
         </div>
 
         <div
@@ -703,12 +740,14 @@
         </div>
 
         <div v-if="canUndoCurrentProposal" class="primaryResultAction">
+          <p v-if="undoUnavailableReason" class="fieldHint" role="status">{{ undoUnavailableReason }}</p>
+          <p v-else-if="proposal?.expiresTime" class="fieldHint">撤销记录保留至 {{ formatSessionTime(proposal.expiresTime) }}；你或协作者后续修改后将无法整体撤销。</p>
           <el-button
             v-if="canUndoCurrentProposal"
             type="warning"
             plain
             :loading="undoing"
-            :disabled="actionBusy && !undoing"
+            :disabled="Boolean(undoUnavailableReason) || (actionBusy && !undoing)"
             @click="undoProposal"
           >撤销 AI 结果</el-button>
         </div>
@@ -965,7 +1004,7 @@
     @closed="finishTaskSettings"
   >
     <section ref="advancedSettingsRef" tabindex="-1" aria-label="任务与 Agent 设置">
-      <p class="settingsIntro">{{ taskConfigurationLocked ? '内容设置沿用当前任务；完成后可选择画布节点作为下一轮编辑范围。' : '调整模型与生成偏好，修改要求统一在对话框中输入。' }}</p>
+      <p class="settingsIntro">{{ retryAvailable ? '这些设置用于下一次重试，不改变已结束轮次的记录。' : taskConfigurationLocked ? '内容设置沿用当前任务；完成后可选择画布节点作为下一轮编辑范围。' : '调整模型与生成偏好，修改要求统一在对话框中输入。' }}</p>
       <div class="settingsContextSummary"><span>{{ currentContextLabel }}</span><span>{{ composerWriteModeLabel }}</span></div>
       <el-form label-position="top" :model="form" @submit.prevent>
         <div class="formGrid">
@@ -1005,7 +1044,8 @@
                 <span>{{ selectedAgent.dataRegion || '区域由供应商连接决定' }}</span>
                 <span>{{ selectedAgent.retentionPolicy || '结果按平台保留策略处理' }}</span>
                 <span>{{ selectedAgent.networkAllowed ? '需要访问所选 AI 供应商' : 'Agent 本身无外部工具网络权限' }}</span>
-                <span>单任务 {{ selectedAgent.timeoutSeconds }} 秒 / ${{ selectedAgent.maxBudgetUsd }}</span>
+                <span>单任务时长上限 {{ selectedAgent.timeoutSeconds }} 秒</span>
+                <span>{{ selectedAgentBudgetNotice }}</span>
                 <span>最多 {{ selectedAgent.maxNodes }} 节点、{{ selectedAgent.maxDepth }} 层</span>
               </div>
             </details>
@@ -1019,6 +1059,8 @@
               popper-class="mindmapAiSelectPopper"
               :disabled="agentSelectionLocked || executionStopBlocked || modelRecovery.loading.value"
             >
+              <el-option v-if="form.modelId != null && !availableModels.some(model => String(model.modelId) === String(form.modelId))"
+                :value="form.modelId" :label="`此前模型 #${form.modelId} · 当前不可用`" disabled />
               <el-option
                 v-for="model in availableModels"
                 :key="model.modelId"
@@ -1071,7 +1113,7 @@
               v-model="form.language"
               class="fullWidth"
               popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked"
+              :disabled="retryConfigurationLocked"
             >
               <el-option
                 v-for="item in outputLanguageOptions"
@@ -1086,7 +1128,7 @@
               v-model="form.layout"
               class="fullWidth"
               popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked || targetLayoutLocked || templateLayoutLocked"
+              :disabled="retryConfigurationLocked || targetLayoutLocked || templateLayoutLocked"
             >
               <el-option
                 v-for="item in aiLayoutOptions"
@@ -1108,7 +1150,7 @@
                 type="button"
                 :class="{ 'is-active': reasoningMode === mode.value }"
                 :aria-pressed="reasoningMode === mode.value"
-                :disabled="taskConfigurationLocked"
+                :disabled="retryConfigurationLocked"
                 :title="mode.description"
                 @click="setReasoningMode(mode.value)"
               >{{ mode.label }}</button>
@@ -1119,7 +1161,7 @@
               v-model="form.generationMode"
               class="fullWidth"
               popper-class="mindmapAiSelectPopper"
-              :disabled="taskConfigurationLocked"
+              :disabled="retryConfigurationLocked"
             >
               <el-option
                 v-for="item in generationModeOptions"
@@ -1136,7 +1178,7 @@
               :min="5"
               :max="maxNodesCap"
               :step="10"
-              :disabled="taskConfigurationLocked"
+              :disabled="retryConfigurationLocked"
             />
             <div class="fieldHint">编辑现有脑图时表示本次最多新增节点，不包含范围外历史节点。</div>
           </el-form-item>
@@ -1145,7 +1187,7 @@
               v-model="form.maxDepth"
               :min="2"
               :max="maxDepthCap"
-              :disabled="taskConfigurationLocked"
+              :disabled="retryConfigurationLocked"
             />
           </el-form-item>
         </div>
@@ -1200,6 +1242,7 @@ import {
   getMindmapAiJobDraft,
   getMindmapAiProposal,
   getMindmapAiSessionTimeline,
+  getMindmapAiJobEventHistory,
   getMindmapAiTemplate,
   listMindmapAiSessions,
   listMindmapAiTemplates,
@@ -1280,7 +1323,7 @@ import {
   writeMindmapAiOwnerSessionItem,
 } from '@/utils/mindmap-ai-owner-session'
 import {
-  buildMindmapAiConversationTurns,
+  createMindmapAiConversationProjector,
   deriveMindmapAiSessionTitle,
   isMindmapAiMessageJob,
   normalizeMindmapAiSessionList,
@@ -1306,10 +1349,11 @@ import MindmapAgentResizeHandle from './MindmapAgentResizeHandle.vue'
 import MindmapAgentPanel from './MindmapAgentPanel.vue'
 import MindmapAgentModeSwitch from './MindmapAgentModeSwitch.vue'
 import { useMindmapAgentLayout } from '@/utils/use-mindmap-agent-layout'
-import { agentExecutionLocation, deviceExecutionIssue, isDeviceAgent, deviceAgentName, deviceBudgetNotice } from '@/utils/mindmap-agent-devices'
+import { agentExecutionLocation, deviceExecutionIssue, isDeviceAgent, deviceAgentName, deviceBudgetNotice, agentBudgetNotice } from '@/utils/mindmap-agent-devices'
 import { useMindmapAgentDevices } from '@/utils/use-mindmap-agent-devices'
 import { isMindmapExecutionBlocked } from '@/utils/mindmap-execution-state'
 import { useMindmapExecutionStop } from '@/utils/use-mindmap-execution-stop'
+import { copyMindmapText } from '@/utils/mindmap-clipboard'
 import { modelRepairLocation } from '@/utils/mindmap-model-recovery'
 import { useMindmapModelRecovery } from '@/utils/use-mindmap-model-recovery'
 import { resolveMindmapComposerDraftScope } from '@/utils/mindmap-agent-composer-storage'
@@ -1321,6 +1365,7 @@ import { actions, store } from './useStore'
 
 const props = defineProps({
   readonly: { type: Boolean, default: false },
+  taskOnly: { type: Boolean, default: false },
 })
 const route = useRoute()
 const router = useRouter()
@@ -1388,7 +1433,7 @@ const uncertainCanvasCreation = shallowRef(null)
 // while the dialog retains the parent owner until the child's latest checkpoint
 // is known. Teardown must detach the actual editor owner in that interval.
 let pendingHandoffCanvasJobId = ''
-let directTerminalTargetJobId = ''
+const directTerminalTargetJobId = ref('')
 const submissionStartedAt = ref(0)
 // The unsent continuation belongs to this conversation, not to a run status.
 // Completion/cancellation may change the send route, never the user's text.
@@ -1402,7 +1447,6 @@ const applying = ref(false)
 const rejectingReview = ref(false)
 const continuing = ref(false)
 const retrying = ref(false)
-const parsingFile = ref(false)
 const openingLocal = ref(false)
 const replacingLocal = ref(false)
 const insertingLocal = ref(false)
@@ -1471,6 +1515,7 @@ const chatFollowing = ref(true)
 let chatResizeObserver = null
 const proposalConfirmationRef = ref(null)
 const proposalReviewRef = ref(null)
+const proposalChangePage = ref(1)
 const livePreviewNoticeRef = ref(null)
 const uploadedFileName = ref('')
 const uploadedFileArtifact = ref(null)
@@ -1484,6 +1529,8 @@ const livePreviewRecovering = ref(false)
 const proposalError = ref('')
 const timelineLoading = ref(false)
 const timelineError = ref('')
+const historyLoading = ref('')
+const historyError = ref('')
 const restoreError = ref('')
 const pendingAttemptNotice = ref('')
 const cloudMutationRecoveryError = ref('')
@@ -1511,6 +1558,8 @@ const sessionMenuVisible = ref(false)
 const contextTriggerRef = ref(null)
 const sessionTriggerRef = ref(null)
 const recentSessions = ref([])
+const sessionPage = ref(1)
+const sessionTotal = ref(0)
 const sessionListLoading = ref(false)
 const sessionListError = ref('')
 const sessionSwitching = ref(false)
@@ -1591,9 +1640,12 @@ let generationClockTimer = null
 const agentEventKeys = new Set()
 const agentEventEnvelopeKeys = new Set()
 const jobEventSequences = new Map()
-const ACTIVE_JOB_STORAGE_KEY = 'MINDMAP_AI_ACTIVE_JOB_V1'
-const RECENT_JOB_STORAGE_KEY = 'MINDMAP_AI_RECENT_JOB_V1'
-const ATTEMPTS_STORAGE_KEY = 'MINDMAP_AI_REQUEST_ATTEMPTS_V1'
+// Standalone recovery must not replace an editor's durable local-document
+// identity or replay a pending request from another canvas.
+const taskStorageSuffix = props.taskOnly ? `:task:${getRequestedAiJobId()}` : ''
+const ACTIVE_JOB_STORAGE_KEY = `MINDMAP_AI_ACTIVE_JOB_V1${taskStorageSuffix}`
+const RECENT_JOB_STORAGE_KEY = `MINDMAP_AI_RECENT_JOB_V1${taskStorageSuffix}`
+const ATTEMPTS_STORAGE_KEY = `MINDMAP_AI_REQUEST_ATTEMPTS_V1${taskStorageSuffix}`
 const LIVE_PREVIEW_SUPPRESSION_STORAGE_KEY = 'MINDMAP_AI_LIVE_PREVIEW_SUPPRESSION_V1'
 const STORED_JOB_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const ATTEMPT_TTL_MS = 24 * 60 * 60 * 1000
@@ -1639,7 +1691,7 @@ const form = reactive({
   deviceId: '',
   modelId: null,
   intent: 'create',
-  sourceMode: 'current',
+  sourceMode: props.taskOnly ? 'new' : 'current',
   scopeType: 'document',
   prompt: '',
   language: 'zh-CN',
@@ -1751,9 +1803,9 @@ const starterItems = computed(() => {
   const hasEditor = Boolean(editorContext.value?.document?.root)
   const hasEditableSelection = hasEditor && !editorReadonly.value && selectedNodeUids.value.length > 0
   return [
-    { type: 'research', label: hasEditableSelection ? '围绕当前分支调研并总结' : '调研一个主题并总结要点', icon: Search },
+    { type: 'research', label: hasEditableSelection ? '围绕当前分支分析并总结' : '分析一个主题并总结要点', icon: Search },
     { type: 'plan', label: '把一个项目拆解成执行计划', icon: List },
-    { type: 'trends', label: '探索某个领域的最新趋势', icon: TrendCharts },
+    { type: 'trends', label: '梳理某个领域的趋势与问题', icon: TrendCharts },
     { type: hasEditor && editorReadonly.value ? 'analyze' : 'optimize',
       label: hasEditableSelection ? '分析并优化当前分支' : '分析并优化我的思维导图', icon: MagicStick },
   ]
@@ -1772,6 +1824,7 @@ const composerDraftPersistence = useMindmapComposerDraft({
   scope: () => userStore.token && userStore.roles.length ? resolveMindmapComposerDraftScope({
     ownerId: currentAiOwnerUserId(), context: editorContext.value,
     sessionId: job.value?.sessionId || null, routeMindmapId: route.query?.id, job: job.value,
+    standalone: props.taskOnly,
   }) : null,
   ready: () => visible.value && !restoringJob.value && !sessionSwitching.value
     && !loadingAgents.value && !submitting.value && !continuing.value && !retrying.value,
@@ -1804,6 +1857,10 @@ const composerEnabled = computed(() => Boolean(
 ))
 const composerDraftOnlyHint = computed(() => {
   if (!composerEditable.value) return ''
+  if (props.taskOnly && followupParentJob.value?.sourceType === 'local_snapshot'
+    && ['applied', 'undone', 'completed_direct'].includes(followupParentJob.value.status)) {
+    return '继续修改需要原本地脑图的最新内容，请回到原编辑器。这里可以查看结果或编写草稿。'
+  }
   if (authExpired.value) return '登录已过期，暂不能发送。可继续编写草稿，已选附件仍保留在当前页面。'
   if (agentSwitchPending.value) return `${agentSwitchPhase.value || '正在切换 Agent'}。可继续写草稿，切换完成后再发送；不会自动发送。`
   if (executionStopBlocked.value) return '旧 Agent 尚未确认停止。可继续写草稿，确认停止后再发送；不会自动发送。'
@@ -1856,6 +1913,7 @@ const submissionStageDescription = computed(() => {
 })
 const composerPreflightText = computed(() => {
   if (running.value) return ''
+  if (props.taskOnly) return '在此查看和继续 AI 对话，结果可下载或另存为云端脑图。'
   if (discussionMode.value) {
     return form.sourceMode === 'current'
       ? '只讨论当前脑图，不会修改画布。'
@@ -1989,13 +2047,14 @@ const selectedTurn = computed(() => (
   sessionTurns.value.find(turn => String(turn?.job?.id || '') === selectedTurnJobId.value)
   || null
 ))
-const conversationTurns = computed(() => buildMindmapAiConversationTurns({
+const projectConversationTurns = createMindmapAiConversationProjector()
+const conversationTurns = computed(() => projectConversationTurns({
   sessionTurns: sessionTurns.value,
   currentJob: job.value,
   events: agentEvents.value,
 }).map(turn => ({
   ...turn,
-  tagSuggestions: collectMindmapAiTagSuggestions(turn.events, turn.job.id),
+  tagSuggestions: collectMindmapAiTagSuggestions(turn.tagEvents || turn.events, turn.job.id),
 })))
 const artifactTurns = computed(() => sessionTurns.value.filter(turn => turn?.job?.artifactId))
 const selectedArtifactJob = computed(() => selectedTurn.value?.job || job.value)
@@ -2035,6 +2094,8 @@ const needsInputQuestions = computed(() => {
 })
 const followupAvailable = computed(() => Boolean(
   followupParentJob.value
+  && !(props.taskOnly && followupParentJob.value.sourceType === 'local_snapshot'
+    && ['applied', 'undone', 'completed_direct'].includes(followupParentJob.value.status))
   && !running.value
   && (
     followupParentJob.value.status !== 'needs_input'
@@ -2050,6 +2111,9 @@ const canSwitchInteractionMode = computed(() => Boolean(
   && !livePreviewCanvasMutationBlocked.value
 ))
 const taskConfigurationLocked = computed(() => restoringJob.value || Boolean(job.value))
+const retryConfigurationLocked = computed(() => restoringJob.value || actionBusy.value
+  || executionStopBlocked.value || livePreviewCanvasMutationBlocked.value
+  || Boolean(job.value && !retryAvailable.value))
 // A submitted turn is immutable, but its completed conversation may prepare a
 // new scope for the next turn. Historical artifacts and unfinished reviews
 // cannot silently become a request against the current canvas.
@@ -2101,6 +2165,11 @@ const livePreviewPlaybackAvailable = computed(() => Boolean(
   && (running.value || livePreviewCatchingUp.value)
   && !actionBusy.value
   && !livePreviewReverting.value
+))
+const canShowFinalLivePreview = computed(() => Boolean(
+  !authExpired.value && livePreviewActive.value && livePreviewFramesPending.value
+  && isTerminalStatus(job.value?.status) && !livePreviewError.value
+  && directTerminalTargetJobId.value === String(job.value?.id || '')
 ))
 const livePreviewCanvasMutationBlocked = computed(() => Boolean(
   livePreviewActive.value || livePreviewReverting.value || preparingCanvas.value || directCanvasOwned.value
@@ -2230,10 +2299,47 @@ const canUndoCurrentProposal = computed(() => Boolean(
 const selectedAgent = computed(() => (
   agents.value.find(item => item.agentKey === form.agentKey) || null
 ))
+const undoUnavailableReason = computed(() => {
+  if (editorReadonly.value) return '当前脑图只读，不能撤销 AI 修改。'
+  if (!proposal.value || proposal.value.id !== job.value?.proposalId) return '正在读取撤销记录，请稍后重试。'
+  if (['blocked', 'expired', 'rejected', 'undone'].includes(proposal.value.status)) return '此轮撤销记录已失效或不可用；当前脑图保持不变。'
+  const expires = Date.parse(proposal.value.expiresTime || '')
+  if (Number.isFinite(expires) && expires <= generationClockNow.value) return '此轮撤销记录已过期，不能自动撤销。'
+  const revision = Number(editorContext.value?.revision)
+  const appliedRevision = Number(proposal.value.appliedRevision)
+  if (sourceContext.value?.mindmapId && editorContext.value?.revision != null
+    && proposal.value.appliedRevision != null && Number.isSafeInteger(revision) && revision >= 0
+    && Number.isSafeInteger(appliedRevision) && appliedRevision >= 0 && revision !== appliedRevision) {
+    return 'AI 应用后脑图已有新修改，整体撤销不可用；可通过版本历史核对或手动调整。'
+  }
+  return ''
+})
+const selectedAgentBudgetNotice = computed(() => agentBudgetNotice(selectedAgent.value || {}))
+const canManageAiExecution = computed(() => (userStore.permissions || []).some(
+  permission => permission === '*:*:*' || permission === 'mindmap:ai:admin',
+))
+async function copyExecutionDiagnostic() {
+  try {
+    await copyMindmapText(JSON.stringify({
+      jobId: job.value?.id, agentKey: job.value?.agentKey,
+      status: job.value?.status, executionState: job.value?.executionState,
+      executionEpoch: job.value?.executionEpoch, deviceId: job.value?.deviceId || form.deviceId || null,
+    }, null, 2))
+    ElMessage.success('已复制任务与执行轮次信息，请交给管理员核验。')
+  } catch (error) { ElMessage.warning(error?.message || '复制失败') }
+}
+function openExecutionRecovery() {
+  if (!canManageAiExecution.value || !job.value?.id) return
+  const target = router.resolve({ name: 'MindmapAiAgents', query: { recoveryJobId: job.value.id } })
+  window.open(target.href, '_blank', 'noopener,noreferrer')
+}
 const nativeModelConfigurationIssue = computed(() => {
   if (form.agentKey !== 'native_mindmap') return ''
   const model = models.value.find(item => String(item.modelId) === String(form.modelId))
   if (!model) return form.modelId ? '此前选择的模型已不可用；请手动选择其他模型，系统不会自动替换。' : ''
+  if (!availableModels.value.some(item => String(item.modelId) === String(form.modelId))) {
+    return '此前选择的模型已不在此 Agent 的允许列表中；请选择其他模型，系统不会自动替换。'
+  }
   if (
     String(model.provider || '').trim().toLowerCase() === 'anthropic'
     && /\/compatible-mode\//i.test(String(model.baseUrl || ''))
@@ -2375,6 +2481,14 @@ const resultImpactForDisplay = computed(() => {
   }))
 })
 const resultChangeCounts = computed(() => mindmapResultChangeCounts(resultImpactForDisplay.value))
+const proposalChangePageCount = computed(() => Math.max(1, Math.ceil((resultImpactForDisplay.value?.changes?.length || 0) / 12)))
+const pagedProposalChanges = computed(() => (resultImpactForDisplay.value?.changes || [])
+  .slice((proposalChangePage.value - 1) * 12, proposalChangePage.value * 12))
+watch(() => [proposal.value?.id, resultImpactForDisplay.value], () => { proposalChangePage.value = 1 })
+
+function formatDiffValue(value) {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+}
 const resultImpactSummaryAvailable = computed(() => Boolean(resultChangeCounts.value))
 const currentResultState = computed(() => mindmapAgentResultState({
   job: job.value,
@@ -2399,7 +2513,8 @@ const resultCardVisible = computed(() => Boolean(
   )
 ))
 const canApplyCurrentProposal = computed(() => Boolean(
-  !viewingHistoricalArtifact.value
+  !props.taskOnly
+  && !viewingHistoricalArtifact.value
   && !messageModeActive.value
   && !sourceBaselineMismatch.value
   && currentProposalSourceAvailable.value
@@ -2812,6 +2927,8 @@ function invalidateRestoreOperations({ clearError = true } = {}) {
   timelineController = null
   restoringJob.value = false
   timelineLoading.value = false
+  historyLoading.value = ''
+  historyError.value = ''
   if (clearError) restoreError.value = ''
 }
 
@@ -2956,7 +3073,7 @@ function restoreJobConfiguration(snapshot, saved = {}) {
     const restoredModel = availableModels.value.find(model => (
       String(model.modelId) === String(restoredModelRef ?? '')
     ))
-    form.modelId = restoredModel?.modelId ?? null
+    form.modelId = restoredModel?.modelId ?? restoredModelRef ?? null
   }
   // 展示任务实际使用的不可变限制，即使管理员之后收紧了 Connector 上限；
   // 继续生成仍由服务端按原任务参数与最新策略做最终校验。
@@ -3057,10 +3174,12 @@ function formatUsageCost(value) {
 }
 
 function visibleTurnEvents(turn) {
+  if (Array.isArray(turn?.auditEvents)) return turn.auditEvents.slice(-20)
   return Array.isArray(turn?.events) ? turn.events.filter(event => !['assistant_delta', 'thinking_summary', 'thinking_state', 'todo_updated', 'tool_started', 'tool_completed', 'tool_failed'].includes(event.eventType)).slice(-20) : []
 }
 
 function turnAuditEventCount(turn) {
+  if (Array.isArray(turn?.auditEvents)) return turn.auditEvents.length
   return (turn?.events || []).filter(event => !['assistant_delta', 'thinking_summary', 'thinking_state', 'todo_updated', 'tool_started', 'tool_completed', 'tool_failed'].includes(event.eventType)).length
 }
 
@@ -3284,7 +3403,7 @@ function assistantMessageText(turn) {
     const count = Number.isSafeInteger(nodeCount) && nodeCount >= 0 ? `，共 ${nodeCount} 个节点` : ''
     return `${title}已生成${count}；应用与保存状态请查看本轮结果。`
   }
-  const latestEvent = [...(turn?.events || [])].reverse()[0]
+  const latestEvent = turn?.events?.at(-1)
   return latestEvent ? eventDescription(latestEvent, turnJob) : 'AI 正在准备本轮任务…'
 }
 
@@ -3296,6 +3415,7 @@ function sessionStatusLabel(session) {
 function sessionUnavailableReason(session) {
   const sessionJob = session?.currentJob
   if (!sessionJob?.id) return '该会话缺少可恢复的任务'
+  if (session.mindmapAccessible === false) return '当前账号已无法访问这张脑图'
   if (
     sessionJob.sourceType === 'cloud_document'
     && Number(sessionJob.sourceMindmapId) !== Number(editorContext.value?.mindmapId)
@@ -3623,7 +3743,7 @@ function resetNewJob({ clearStoredJob = true, preserveForm = true, detach = fals
     livePreviewBaselineDocument = null
     livePreviewDirectSettlePromise = null
     livePreviewDirectSettleJobId = ''
-    directTerminalTargetJobId = ''
+    directTerminalTargetJobId.value = ''
   }
   monitoringSuspendedJobId = ''
   directCanvasRecoveryJobId.value = ''
@@ -3664,7 +3784,7 @@ function resetNewJob({ clearStoredJob = true, preserveForm = true, detach = fals
   if (!preserveForm) {
     form.prompt = ''
     form.intent = 'create'
-    form.sourceMode = editorContext.value ? 'current' : 'new'
+    form.sourceMode = props.taskOnly ? 'new' : 'current'
     form.language = 'zh-CN'
     form.layout = normalizedSourceLayout(editorContext.value?.document)
   }
@@ -3672,7 +3792,7 @@ function resetNewJob({ clearStoredJob = true, preserveForm = true, detach = fals
   return true
 }
 
-function appendAgentEvent(jobId, event) {
+function appendAgentEvent(jobId, event, { focus = true } = {}) {
   const sequence = Number(event?.data?.sequence ?? event?.id)
   if (!Number.isInteger(sequence) || sequence < 1) return false
   const key = `server:${jobId}:${sequence}`
@@ -3699,7 +3819,7 @@ function appendAgentEvent(jobId, event) {
     payload,
     createdTime: event?.data?.createdTime || new Date().toISOString(),
   }
-  agentEvents.value = [...agentEvents.value, record]
+  agentEvents.value.push(record)
   // Keep the canvas centered on the node changed by each AI draft update.
   // Edit.vue retries until a newly-created node has been rendered.
   const affectedUids = [
@@ -3712,7 +3832,7 @@ function appendAgentEvent(jobId, event) {
   // well would center the old layout first and the new layout a moment later,
   // which is perceived as a flash. Keep this event only as a fallback when
   // the current job has no canvas preview.
-  if (affectedUids.length && !livePreviewEligible.value) {
+  if (focus && affectedUids.length && !livePreviewEligible.value && !props.taskOnly) {
     bus.emit('focusAiNode', {
       jobId: String(jobId),
       focusKey: `${String(jobId)}:${sequence}:${affectedUids.at(-1)}`,
@@ -3726,14 +3846,14 @@ function appendClientPrompt(jobId, prompt, turnIndex = 1, createdTime = new Date
   const key = `client:${jobId}:prompt`
   if (agentEventKeys.has(key)) return
   agentEventKeys.add(key)
-  agentEvents.value = [...agentEvents.value, {
+  agentEvents.value.push({
     key,
     jobId,
     sequence: 0,
     eventType: 'user_prompt',
     payload: { message: String(prompt || ''), turnIndex },
     createdTime,
-  }]
+  })
 }
 
 function resetCurrentJobCursor(jobId) {
@@ -3764,6 +3884,7 @@ function scheduleLivePreviewFlush(delay = livePreviewFrameDelay()) {
 }
 
 function emitAiCanvasPreviewEvent(payload) {
+  if (props.taskOnly) return
   if (!payload?.jobId) return
   void emitEditorRequest('aiDraftPreview', payload).catch(() => {})
 }
@@ -3771,7 +3892,7 @@ function emitAiCanvasPreviewEvent(payload) {
 function toggleLivePreviewPlayback(paused = !livePreviewPaused.value) {
   if (!livePreviewPlaybackAvailable.value) return false
   const nextPaused = Boolean(paused)
-  if (nextPaused && directTerminalTargetJobId === String(job.value?.id || '')) return false
+  if (nextPaused && directTerminalTargetJobId.value === String(job.value?.id || '')) return false
   if (livePreviewPaused.value === nextPaused) return true
   livePreviewPaused.value = nextPaused
   clearTimeout(livePreviewFlushTimer)
@@ -3782,6 +3903,22 @@ function toggleLivePreviewPlayback(paused = !livePreviewPaused.value) {
     // back to an older server frame.
     scheduleLivePreviewFlush(0)
   }
+  return true
+}
+
+async function showFinalLivePreview() {
+  if (!canShowFinalLivePreview.value) return false
+  const jobId = String(job.value?.id || '')
+  const generation = livePreviewGeneration
+  if (livePreviewFlushInFlight) await livePreviewFlushPromise
+  if (!componentAlive || authExpired.value || generation !== livePreviewGeneration || job.value?.id !== jobId
+    || directTerminalTargetJobId.value !== jobId || !isTerminalStatus(job.value?.status)
+    || !livePreviewPendingFrame || livePreviewPendingFrame.jobId !== jobId) return false
+  livePreviewPendingFrame = { ...livePreviewPendingFrame, showFinalResult: true }
+  livePreviewPaused.value = false
+  clearTimeout(livePreviewFlushTimer)
+  livePreviewFlushTimer = null
+  scheduleLivePreviewFlush(0)
   return true
 }
 
@@ -3836,7 +3973,14 @@ async function flushLiveDraftPreview() {
       }
       // Terminal events use the same node-by-node, character-by-character
       // planner as running updates; completion never skips queued characters.
-      const nextFrame = nextMindmapAiDraftFrame(livePreviewRenderedDocument, document)
+      // Only an explicit user action on this authoritative terminal target can
+      // skip cosmetic playback. The renderer ACK and target-token commit below
+      // remain mandatory; this never releases canvas ownership itself.
+      const nextFrame = frame.showFinalResult === true
+        && directTerminalTargetJobId.value === jobId && isTerminalStatus(job.value?.status)
+        ? { document: { ...livePreviewRenderedDocument, root: document.root }, remaining: 0,
+          nodeCount: countMindmapAiDraftNodes(document.root), change: { kind: 'update', uid: String(document.root.data.uid) } }
+        : nextMindmapAiDraftFrame(livePreviewRenderedDocument, document)
       const changeSummary = frame.changeSummary || summarizeMindmapAiDraftChanges(
         livePreviewBaselineDocument?.root,
         document?.root,
@@ -3938,12 +4082,19 @@ async function flushLiveDraftPreview() {
 function queueLiveDraftPreview(document, operationCursor, targetNodeCount = null, { authoritativeTerminal = false } = {}) {
   const jobId = String(job.value?.id || '')
   if (!jobId) return
-  if (directTerminalTargetJobId === jobId && !authoritativeTerminal) return
+  if (directTerminalTargetJobId.value === jobId && !authoritativeTerminal) return
   if (livePreviewApplyingJobId === jobId) return
-  if (livePreviewSuppressedJobId !== jobId && readLivePreviewSuppression(jobId)) {
-    livePreviewSuppressedJobId = jobId
+  // A stored suppression only says an earlier editor displayed this result.
+  // A restored direct task owns a new canvas session and must still paint and
+  // acknowledge its authoritative target. Do not promote that historical
+  // marker into the in-memory receipt used to skip direct settlement retries.
+  if (!authoritativeTerminal) {
+    if (livePreviewSuppressedJobId !== jobId && readLivePreviewSuppression(jobId)) {
+      if (!isDirectExecutionJob()) livePreviewSuppressedJobId = jobId
+      return
+    }
+    if (livePreviewSuppressedJobId === jobId) return
   }
-  if (livePreviewSuppressedJobId === jobId) return
   if ((!livePreviewEligible.value && !authoritativeTerminal) || !document?.root || !job.value?.id) return
   const generation = livePreviewGeneration
   if (!livePreviewActive.value) {
@@ -4186,6 +4337,8 @@ function settleDirectLiveDraftPreview(jobId = job.value?.id) {
   const normalizedJobId = String(jobId || '')
   if (!normalizedJobId || job.value?.id !== normalizedJobId
     || !isTerminalStatus(job.value?.status)) return Promise.resolve(false)
+  // For direct tasks this in-memory marker is set only after this editor's
+  // commit ACK; persisted preview suppression cannot release canvas ownership.
   if (livePreviewSuppressedJobId === normalizedJobId && !directCanvasOwned.value) return Promise.resolve(true)
   if (livePreviewSuppressedJobId === normalizedJobId && directCanvasOwnerId.value === normalizedJobId) {
     return completeDirectCanvasHandoff(normalizedJobId)
@@ -4213,7 +4366,7 @@ function settleDirectLiveDraftPreview(jobId = job.value?.id) {
         phase: 'authoritative-target', jobId: normalizedJobId,
       })
       if (!isCurrent()) return false
-      directTerminalTargetJobId = normalizedJobId
+      directTerminalTargetJobId.value = normalizedJobId
       queueLiveDraftPreview(terminal.document, latestPreviewVersion.value, null, { authoritativeTerminal: true })
       // Internal draining is not a user playback action. In particular a
       // cancel request intentionally disables the pause/resume controls.
@@ -4259,7 +4412,7 @@ function settleDirectLiveDraftPreview(jobId = job.value?.id) {
     }
     if (!isCurrent()) return false
     finishLiveDraftPreviewAfterApply(normalizedJobId)
-    directTerminalTargetJobId = ''
+    directTerminalTargetJobId.value = ''
     return completeDirectCanvasHandoff(normalizedJobId)
   })()
   livePreviewDirectSettlePromise = settlement
@@ -4517,30 +4670,31 @@ function onAgentChange() {
   form.maxNodes = Math.min(form.maxNodes, maxNodesCap.value)
   form.maxDepth = Math.min(form.maxDepth, maxDepthCap.value)
   if (form.agentKey !== 'native_mindmap') return
-  const selectedModelAvailable = availableModels.value.some(model => model.modelId === form.modelId)
-  if (!selectedModelAvailable) form.modelId = availableModels.value[0]?.modelId || null
+  // Only an unconfigured new conversation may choose an initial model. A
+  // catalogue refresh must never replace the user's provider/model choice.
+  if (form.modelId == null && !job.value) form.modelId = availableModels.value[0]?.modelId || null
 }
 
 function usePromptStarter(type) {
   const starters = {
-    research: { intent: 'discuss', prompt: '围绕这个主题进行调研，提炼关键事实、主要观点和可以继续展开的分支。' },
+    research: { intent: 'discuss', prompt: '基于当前脑图和参考资料分析这个主题，提炼主要观点、待核实事实和可以继续展开的分支。不要把未检索的信息描述为最新事实。' },
     plan: { intent: 'create', prompt: '把这个项目拆解成一张可执行的计划脑图，包含阶段、任务、负责人建议和关键里程碑。' },
-    trends: { intent: 'discuss', prompt: '分析这个领域的重要趋势、驱动因素、潜在影响和接下来值得关注的方向。' },
+    trends: { intent: 'discuss', prompt: '基于当前脑图和参考资料梳理这个领域的趋势、驱动因素和待验证的问题；区分已有信息与推测，不声称已检索最新资料。' },
     optimize: { intent: 'expand', prompt: '分析并优化当前思维导图，补齐薄弱分支，整理重复内容，并让层级与表达更清晰。' },
     analyze: { intent: 'discuss', prompt: '分析当前脑图的结构、重点和薄弱处，给出可以直接执行的改进建议。' },
   }
   const starter = starters[type]
   if (!starter) return
-  form.intent = starter.intent
+  form.intent = starter.intent === 'discuss' ? 'create' : starter.intent
   form.prompt = starter.prompt
-  form.sourceMode = editorContext.value ? 'current' : 'new'
+  form.sourceMode = props.taskOnly ? 'new' : 'current'
   discussionMode.value = starter.intent === 'discuss'
   onIntentChange(form.intent)
   void nextTick(() => composerInputRef.value?.focus?.())
 }
 
 function setReasoningMode(mode) {
-  if (taskConfigurationLocked.value) return
+  if (retryConfigurationLocked.value) return
   if (mode === 'quick') {
     form.density = 'concise'
     form.maxNodes = Math.min(60, maxNodesCap.value)
@@ -4732,7 +4886,9 @@ async function confirmCancelFromKeyboard() {
 }
 
 async function requestEditorContext({ previewJobId = '' } = {}) {
-  const context = await new Promise((resolve, reject) => {
+  const context = props.taskOnly
+    ? { mindmapId: null, documentId: null, document: null, readonly: true, selectedNodeUids: [] }
+    : await new Promise((resolve, reject) => {
     const handled = bus.emit('requestAiMindmapContext', { previewJobId, resolve, reject })
     if (!handled) reject(new Error('脑图编辑器尚未就绪'))
   })
@@ -5030,7 +5186,6 @@ async function onSourceFileChange(event) {
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
-  parsingFile.value = true
   try {
     const parsed = await parseMindmapFile(file)
     const artifact = await buildMindmapAiArtifactFromDocument(parsed.document, {
@@ -5047,8 +5202,6 @@ async function onSourceFileChange(event) {
     uploadedFileArtifact.value = null
     uploadedFileName.value = ''
     ElMessage.error(formatMindmapAiError(error, 'AI 输入文件解析失败'))
-  } finally {
-    parsingFile.value = false
   }
 }
 
@@ -5084,8 +5237,9 @@ function persistJobPointer(pointer, status) {
 async function restoreSessionTimeline(sessionId, {
   expectedJobId = job.value?.id,
   recoveryGeneration = restoreGeneration,
+  canRestore = () => true,
 } = {}) {
-  if (!sessionId) return false
+  if (!sessionId || !canRestore()) return false
   const generation = ++timelineLoadGeneration
   timelineController?.abort()
   const controller = new AbortController()
@@ -5093,20 +5247,24 @@ async function restoreSessionTimeline(sessionId, {
   timelineLoading.value = true
   timelineError.value = ''
   try {
-    const response = await getMindmapAiSessionTimeline(sessionId, { signal: controller.signal })
+    const response = await getMindmapAiSessionTimeline(sessionId, { signal: controller.signal, focusJobId: expectedJobId, limit: 20 })
     if (
       generation !== timelineLoadGeneration
       || recoveryGeneration !== restoreGeneration
       || job.value?.id !== expectedJobId
       || job.value?.sessionId !== sessionId
+      || !canRestore()
     ) return false
     const turns = Array.isArray(response.data?.turns) ? response.data.turns : []
     handoffTimelineReceipt.value = Array.isArray(response.data?.turns)
-      ? { ownerId: currentAiOwnerUserId(), sessionId } : null
+      ? { ownerId: currentAiOwnerUserId(), sessionId,
+        hasEarlierTurns: response.data.hasEarlierTurns === true, beforeTurnIndex: response.data.beforeTurnIndex } : null
     currentSessionTitle.value = resolveMindmapAiSessionTitle(response.data?.title, turns)
-    sessionTurns.value = turns
+    const existingTurns = sessionTurns.value.filter(turn => turn?.job?.sessionId === sessionId)
+    sessionTurns.value = [...new Map([...existingTurns, ...turns]
       .filter(turn => turn?.job?.id)
-      .map(turn => cloneRuntimeValue(turn))
+      .map(turn => [String(turn.job.id), turn])).values()]
+      .map(turn => existingTurns.includes(turn) ? turn : cloneRuntimeValue(turn))
       .sort((left, right) => Number(left.job?.turnIndex || 0) - Number(right.job?.turnIndex || 0))
     let restoredCurrentJob = job.value
     const currentTurnJob = turns.find(turn => String(turn?.job?.id || '') === String(expectedJobId || ''))?.job
@@ -5134,12 +5292,15 @@ async function restoreSessionTimeline(sessionId, {
             createdTime: event.createdTime,
           },
         }
-        appendAgentEvent(turnJobId, normalizedEvent)
+        appendAgentEvent(turnJobId, normalizedEvent, { focus: false })
         if (turnJobId === String(expectedJobId || '')) {
           restoredCurrentJob = mergeMindmapAiJobEventSnapshot(restoredCurrentJob, normalizedEvent)
         }
       }
     }
+    // SSE may have delivered newer events while this history page was loading.
+    // Reorder once after the batch so incremental projections replay causally.
+    sortHistoricalEvents()
     if (restoredCurrentJob !== job.value) {
       job.value = restoredCurrentJob
       upsertSessionTurn(job.value)
@@ -5162,6 +5323,7 @@ async function restoreSessionTimeline(sessionId, {
       && generation === timelineLoadGeneration
       && recoveryGeneration === restoreGeneration
       && job.value?.id === expectedJobId
+      && canRestore()
     ) {
       timelineError.value = formatMindmapAiError(error, '无法恢复完整会话记录')
     }
@@ -5169,6 +5331,76 @@ async function restoreSessionTimeline(sessionId, {
   } finally {
     if (timelineController === controller) timelineController = null
     if (generation === timelineLoadGeneration) timelineLoading.value = false
+  }
+}
+
+function appendHistoricalEvents(jobId, events, { sort = true } = {}) {
+  for (const event of events || []) appendAgentEvent(jobId, {
+    eventType: event.eventType,
+    data: { sequence: event.sequence, payload: event.payload, createdTime: event.createdTime },
+  }, { focus: false })
+  // Prepending history must not change causal order within a turn. Publish one
+  // array after the batch, retaining server keys and the live SSE high-water mark.
+  if (sort) sortHistoricalEvents()
+}
+
+function sortHistoricalEvents() {
+  agentEvents.value = [...agentEvents.value].sort((left, right) => (
+    String(left.jobId).localeCompare(String(right.jobId)) || left.sequence - right.sequence
+  ))
+}
+
+async function loadEarlierConversationTurns() {
+  const receipt = handoffTimelineReceipt.value
+  if (historyLoading.value || timelineLoading.value || !receipt?.hasEarlierTurns || !receipt.beforeTurnIndex) return
+  const sessionId = job.value?.sessionId
+  const ownerId = currentAiOwnerUserId()
+  const generation = restoreGeneration
+  historyLoading.value = 'turns'
+  historyError.value = ''
+  const isCurrent = () => componentAlive && !authExpired.value && generation === restoreGeneration
+    && ownerId === currentAiOwnerUserId() && sessionId === job.value?.sessionId
+  try {
+    const response = await getMindmapAiSessionTimeline(sessionId, { beforeTurnIndex: receipt.beforeTurnIndex })
+    if (!isCurrent()) return
+    const turns = (response.data?.turns || []).filter(turn => turn?.job?.id)
+    for (const turn of turns) appendHistoricalEvents(String(turn.job.id), turn.events, { sort: false })
+    sortHistoricalEvents()
+    // Current/live snapshots win if the requested page overlaps an explicitly
+    // restored old turn or an active queued child.
+    sessionTurns.value = [...new Map([...turns, ...sessionTurns.value].map(turn => [String(turn.job.id), turn])).values()]
+      .sort((left, right) => Number(left.job.turnIndex || 0) - Number(right.job.turnIndex || 0))
+    handoffTimelineReceipt.value = { ...receipt, hasEarlierTurns: response.data?.hasEarlierTurns === true,
+      beforeTurnIndex: response.data?.beforeTurnIndex }
+  } catch (error) {
+    if (isCurrent()) historyError.value = formatMindmapAiError(error, '无法加载更早的对话，请重试')
+  } finally {
+    if (isCurrent()) historyLoading.value = ''
+  }
+}
+
+async function loadEarlierTurnEvents(turn) {
+  if (historyLoading.value || timelineLoading.value || !turn.hasEarlierEvents || !turn.beforeEventSequence) return
+  const jobId = String(turn.job.id)
+  const sessionId = job.value?.sessionId
+  const ownerId = currentAiOwnerUserId()
+  const generation = restoreGeneration
+  historyLoading.value = jobId
+  historyError.value = ''
+  const isCurrent = () => componentAlive && !authExpired.value && generation === restoreGeneration
+    && ownerId === currentAiOwnerUserId() && sessionId === job.value?.sessionId
+  try {
+    const response = await getMindmapAiJobEventHistory(jobId, { beforeSequence: turn.beforeEventSequence })
+    if (!isCurrent()) return
+    appendHistoricalEvents(jobId, response.data?.events)
+    sessionTurns.value = sessionTurns.value.map(item => String(item.job.id) === jobId ? {
+      ...item, hasEarlierEvents: response.data?.hasEarlierEvents === true,
+      beforeEventSequence: response.data?.beforeEventSequence,
+    } : item)
+  } catch (error) {
+    if (isCurrent()) historyError.value = formatMindmapAiError(error, '无法加载更早的执行记录，请重试')
+  } finally {
+    if (isCurrent()) historyLoading.value = ''
   }
 }
 
@@ -5435,7 +5667,7 @@ function invalidateSessionList() {
   sessionListLoading.value = false
 }
 
-async function loadRecentSessions() {
+async function loadRecentSessions(page = sessionPage.value) {
   if (authExpired.value) return
   if (!visible.value || sessionListLoading.value) return false
   const generation = ++sessionListGeneration
@@ -5445,13 +5677,17 @@ async function loadRecentSessions() {
   sessionListLoading.value = true
   sessionListError.value = ''
   try {
-    const response = await listMindmapAiSessions({ limit: 20, signal: controller.signal })
+    const requestedPage = Math.max(1, Number.isSafeInteger(page) ? page : 1)
+    const response = await listMindmapAiSessions({ limit: 20, page: requestedPage, signal: controller.signal })
     if (
       generation !== sessionListGeneration
       || sessionListController !== controller
       || !visible.value
     ) return false
-    recentSessions.value = normalizeMindmapAiSessionList(response.data).items
+    const normalized = normalizeMindmapAiSessionList(response.data)
+    recentSessions.value = normalized.items
+    sessionPage.value = requestedPage
+    sessionTotal.value = normalized.total
     return true
   } catch (error) {
     if (!isAbortError(error) && generation === sessionListGeneration) {
@@ -5556,6 +5792,7 @@ async function switchToSession(session, { authoritativeJob = null } = {}) {
 async function restoreActiveJob({
   generation = restoreGeneration,
   allowRecent = true,
+  canRestore = () => true,
 } = {}) {
   let saved
   let controller = null
@@ -5564,6 +5801,7 @@ async function restoreActiveJob({
   let reconciledFollowupAttemptKey = ''
   let reconciledRetryAttemptKey = ''
   try {
+    if (!canRestore()) return false
     const ownerUserId = currentAiOwnerUserId()
     const active = JSON.parse(
       readMindmapAiOwnerSessionItem(ACTIVE_JOB_STORAGE_KEY, ownerUserId) || 'null',
@@ -5624,6 +5862,7 @@ async function restoreActiveJob({
       !componentAlive
       || generation !== restoreGeneration
       || restoreController !== controller
+      || !canRestore()
     ) return false
     if (reconcilingCreateAttempt && createAttempt.requestPayload?.executionMode === 'direct') {
       // Restore the request fence before contacting a task that may still be
@@ -5669,6 +5908,7 @@ async function restoreActiveJob({
           !componentAlive
           || generation !== restoreGeneration
           || restoreController !== controller
+          || !canRestore()
         ) return false
         // 404 是“该 key 尚未创建任务”，不是恢复故障。保留 attempt，用户再次提交
         // 相同 payload 时会复用同一个 key；网络/服务暂错则进入显式重试入口。
@@ -5686,6 +5926,7 @@ async function restoreActiveJob({
       !componentAlive
       || generation !== restoreGeneration
       || restoreController !== controller
+      || !canRestore()
     ) return false
     if (!response.data?.id) throw new Error('AI 任务恢复响应缺少任务标识')
     job.value = response.data
@@ -5727,6 +5968,7 @@ async function restoreActiveJob({
           !componentAlive
           || generation !== restoreGeneration
           || restoreController !== controller
+          || !canRestore()
         ) return false
         if (recoveredChild) {
           job.value = recoveredChild
@@ -5760,6 +6002,7 @@ async function restoreActiveJob({
           !componentAlive
           || generation !== restoreGeneration
           || restoreController !== controller
+          || !canRestore()
         ) return false
         if (recoveredRetry) {
           job.value = recoveredRetry
@@ -5776,12 +6019,14 @@ async function restoreActiveJob({
     await restoreSessionTimeline(job.value.sessionId, {
       expectedJobId: job.value.id,
       recoveryGeneration: generation,
+      canRestore,
     })
     if (
       !componentAlive
       || generation !== restoreGeneration
       || restoreController !== controller
       || job.value?.id !== initialJobId
+      || !canRestore()
     ) return false
     const latestTurn = latestSessionTurn()
     if (latestTurn?.job?.id && latestTurn.job.id !== initialJobId) {
@@ -5790,6 +6035,7 @@ async function restoreActiveJob({
         !componentAlive
         || generation !== restoreGeneration
         || restoreController !== controller
+        || !canRestore()
       ) return false
       if (latestResponse.data?.sessionId !== response.data?.sessionId) return false
       job.value = latestResponse.data
@@ -5798,6 +6044,7 @@ async function restoreActiveJob({
     selectedTurnJobId.value = String(job.value.id)
     restoreJobSourceState(job.value, saved)
     await reconcileRestoredSourceBaseline(job.value, saved)
+    if (!componentAlive || generation !== restoreGeneration || !canRestore()) return false
     if (!persistActiveJob() && (reconciledFollowupAttemptKey || reconciledRetryAttemptKey)) {
       throw new Error('浏览器无法保存新轮次任务恢复指针，请重试')
     }
@@ -5817,6 +6064,7 @@ async function restoreActiveJob({
       || generation !== restoreGeneration
       || restoreController !== controller
       || !job.value?.id
+      || !canRestore()
     ) return false
     if (isTerminalStatus(job.value.status)) {
       realtimeConnectionState.value = 'completed'
@@ -5828,6 +6076,7 @@ async function restoreActiveJob({
         || generation !== restoreGeneration
         || restoreController !== controller
         || !job.value?.id
+        || !canRestore()
       ) return false
     } else if (isDirectExecutionJob(job.value)) {
       return await resumeRestoredDirectJob(job.value.id, { generation, signal: controller.signal })
@@ -5841,6 +6090,7 @@ async function restoreActiveJob({
       && componentAlive
       && generation === restoreGeneration
       && (saved?.jobId || reconcilingCreateAttempt)
+      && canRestore()
     ) {
       restoreError.value = formatMindmapAiError(
         error,
@@ -5944,8 +6194,16 @@ function startNewJob() {
   form.prompt = ''
   discussionMode.value = false
   showAdvancedSettings.value = false
+  // A new conversation in the editor starts from the whole current document,
+  // not the previous conversation's standalone/file source or selected branch.
+  // Apply explicit entry-point presets afterwards so a requested branch wins.
+  form.sourceMode = props.taskOnly ? 'new' : 'current'
+  form.scopeType = 'document'
   applyDialogPreset(pendingDialogPreset)
   pendingDialogPreset = null
+  if (form.sourceMode === 'current' && form.scopeType === 'document') {
+    clearComposerSelection()
+  }
   reconcileAgentSelection()
   return true
 }
@@ -6030,9 +6288,17 @@ async function showDialog(preset = {}) {
     if (generation !== restoreGeneration) return
     await recoverLocalApplyAckFromContext(context)
     if (generation !== restoreGeneration) return
-  } catch {
+  } catch (error) {
+    if (generation !== restoreGeneration || !componentAlive) return false
     selectedNodeUids.value = []
-    form.sourceMode = 'new'
+    selectedNodeLabels.value = {}
+    // Loading/saving failures do not mean the current document is absent.
+    // Keep its source identity; reopening or submitting retries the context
+    // read. Explicit standalone/file requests do not require this context.
+    if (!authExpired.value && !isAbortError(error)
+      && (explicitPreset?.sourceMode || form.sourceMode) === 'current') {
+      ElMessage.warning(formatMindmapAiError(error, '当前脑图暂时无法读取，请稍后重试'))
+    }
   }
   const restoredRecentDefaults = applyRecentJobDefaults(explicitPreset)
   applyDialogPreset(explicitPreset)
@@ -6142,10 +6408,14 @@ async function restoreRequestedAiJob(explicitJobId = '') {
     const response = await getMindmapAiJob(requestedJobId)
     if (!isCurrent() || generation !== restoreGeneration) return false
     const requestedJob = response?.data
+    const sourceMatches = props.taskOnly
+      ? ['none', 'uploaded_artifact', 'local_snapshot'].includes(requestedJob?.sourceType)
+        && !requestedJob?.sourceMindmapId
+      : requestedJob?.sourceType === 'cloud_document'
+        && Number(context?.mindmapId) === Number(requestedJob.sourceMindmapId)
     if (
       String(requestedJob?.id || '') !== requestedJobId
-      || requestedJob.sourceType !== 'cloud_document'
-      || Number(context?.mindmapId) !== Number(requestedJob.sourceMindmapId)
+      || !sourceMatches
     ) {
       restoreError.value = '这个 AI 任务不属于当前脑图，已停止自动打开。'
       return false
@@ -6156,7 +6426,7 @@ async function restoreRequestedAiJob(explicitJobId = '') {
       currentJob: requestedJob,
     }, { authoritativeJob: requestedJob })
     if (!isCurrent()) return false
-    if (restored && getRequestedAiJobId() === requestedJobId) {
+    if (restored && !props.taskOnly && getRequestedAiJobId() === requestedJobId) {
       const query = { ...route.query }
       delete query.aiJobId
       await router.replace({ path: route.path, query })
@@ -6168,6 +6438,42 @@ async function restoreRequestedAiJob(explicitJobId = '') {
     }
     return false
   }
+}
+
+async function openRequestedTask() {
+  visible.value = true
+  if (props.taskOnly && restoreError.value && job.value?.id) {
+    // A partial restore already owns a validated task and durable pointer.
+    // Reopening the same id is normally a no-op, but explicit recovery must
+    // resume its pending requests and successor lookup without clearing drafts.
+    if (!componentAlive || actionBusy.value || !currentAiOwnerUserId()) return false
+    const requestedJobId = getRequestedAiJobId()
+    if (!requestedJobId || taskStorageSuffix !== `:task:${requestedJobId}`) return false
+    if (job.value.sourceMindmapId
+      || !['none', 'uploaded_artifact', 'local_snapshot'].includes(job.value.sourceType)) return false
+    const pointer = readUsableStoredJob(ACTIVE_JOB_STORAGE_KEY)
+      || readUsableStoredJob(RECENT_JOB_STORAGE_KEY)
+    if (!pointer || pointer.sourceMindmapId
+      || !['none', 'uploaded_artifact', 'local_snapshot'].includes(pointer.sourceType)) {
+      restoreError.value = '任务恢复记录已失效，请刷新页面后重新打开任务。'
+      return false
+    }
+    const openingContext = taskOpenContextKey()
+    const canRestore = () => componentAlive && !authExpired.value
+      && openingContext === taskOpenContextKey()
+    requestedTaskSequence += 1
+    invalidateRestoreOperations()
+    stopRealtime('idle')
+    stopPolling()
+    clearTimeout(terminalHydrationRetryTimer)
+    terminalHydrationRetryTimer = null
+    const generation = restoreGeneration
+    const restored = await restoreActiveJob({ generation, allowRecent: true, canRestore })
+    if (!canRestore() || generation !== restoreGeneration) return false
+    if (!restored && !restoreError.value) restoreError.value = '所选会话暂时无法恢复，请重试。'
+    return restored
+  }
+  return restoreRequestedAiJob()
 }
 
 async function onDeepLinkedAiTask(event) {
@@ -6760,7 +7066,8 @@ async function pollJob({ jobId = job.value?.id, force = false } = {}) {
     persistActiveJob()
     if (isTerminalStatus(job.value.status)) {
       return await finalizeTerminalJob(jobId, { retry: force, refresh: false })
-    } else if (!isMindmapAiMessageJob(job.value)) {
+    } else if (!isMindmapAiMessageJob(job.value)
+      && (realtimeConnectionState.value !== 'connected' || draftFreshness.value !== 'fresh')) {
       await refreshDraftPreview(jobId)
     }
     if (!componentAlive || job.value?.id !== jobId || jobId === monitoringSuspendedJobId) return
@@ -7326,6 +7633,7 @@ async function activateRetryJob(nextJob, {
     agentKey: requestPayload.agentKey,
     deviceId: requestPayload.deviceId || '',
     modelId: requestPayload.modelId,
+    ...(requestPayload.parameters || {}),
     maxNodes: nextJob.maxNodes ?? jobConfiguration.value?.maxNodes,
     maxDepth: nextJob.maxDepth ?? jobConfiguration.value?.maxDepth,
   })
@@ -7419,9 +7727,12 @@ async function retryJob() {
       prompt: continuationPrompt.value.trim() || undefined,
       attachments: captureComposerAttachments(),
       parameters: {
-        language: jobConfiguration.value?.language || form.language,
-        layout: jobConfiguration.value?.layout || form.layout,
-        generationMode: jobConfiguration.value?.generationMode || form.generationMode,
+        language: form.language,
+        layout: form.layout,
+        generationMode: form.generationMode,
+        maxNodes: form.maxNodes,
+        maxDepth: form.maxDepth,
+        density: form.density,
       },
     }
     const knownMaxTurnIndex = Math.max(
@@ -7455,6 +7766,7 @@ async function retryJob() {
             agentKey: requestPayload.agentKey,
             deviceId: requestPayload.deviceId || '',
             modelId: requestPayload.modelId,
+            ...requestPayload.parameters,
           }),
         },
       },
@@ -8021,7 +8333,7 @@ async function saveCloud() {
     assertActionIdentity(identity)
     clearDurableAttempt('save', attemptKey)
     saveCloudAttempt = null
-    job.value = { ...job.value, status: 'completed_file', progress: 100 }
+    job.value = { ...job.value, status: response.data.jobStatus ?? 'completed_file', progress: 100, resultMindmapId: response.data.id }
     upsertSessionTurn(job.value)
     persistActiveJob()
     await refreshTimelineAfterSideEffect(identity)
@@ -8042,7 +8354,14 @@ async function saveCloud() {
   }
 }
 
+async function openSavedCloudResult() {
+  const id = Number(job.value?.resultMindmapId)
+  if (!Number.isSafeInteger(id) || id <= 0 || actionBusy.value || livePreviewCanvasMutationBlocked.value) return
+  await router.push({ path: '/mindmap/edit', query: { id } })
+}
+
 function emitEditorRequest(event, payload, options = {}) {
+  if (props.taskOnly) return Promise.reject(new Error('请回到原脑图编辑器执行画布操作'))
   return new Promise((resolve, reject) => {
     const handled = bus.emit(event, payload, { ...options, resolve, reject })
     if (!handled) reject(new Error('脑图编辑器尚未就绪'))
@@ -8232,6 +8551,7 @@ async function executeCloudMutationWithRecovery(intent) {
 }
 
 function updateCloudMutationRecoveryNotice(failures = []) {
+  if (props.taskOnly) return
   const ownerUserId = currentAiOwnerUserId()
   const intents = ownerUserId
     ? listMindmapAiCloudMutationIntents(ownerUserId)
@@ -8256,6 +8576,7 @@ function updateCloudMutationRecoveryNotice(failures = []) {
 }
 
 function flushPendingCloudMutationIntents({ allowDuringLivePreview = false } = {}) {
+  if (props.taskOnly) return Promise.resolve({ settled: [], failures: [], deferred: true })
   if (authExpired.value) return Promise.resolve({ settled: [], failures: [], deferred: true })
   const ownerUserId = currentAiOwnerUserId()
   if (!ownerUserId) {
@@ -8427,6 +8748,7 @@ function scheduleLocalAckRetry() {
 }
 
 async function flushLocalApplyAcks() {
+  if (props.taskOnly) return { sent: 0, pending: 0, discarded: 0 }
   if (authExpired.value) return { sent: 0, pending: 0, discarded: 0 }
   clearLocalAckRetryTimer()
   const ownerUserId = currentAiOwnerUserId()
@@ -8985,6 +9307,7 @@ async function applyProposal({ automatic = false } = {}) {
 
 async function undoProposal() {
   if (actionBusy.value || !canUndoCurrentProposal.value) return false
+  if (undoUnavailableReason.value) { ElMessage.info(undoUnavailableReason.value); return false }
   const jobId = job.value.id
   const proposalId = job.value.proposalId
   const sourceMindmapId = sourceContext.value?.mindmapId
@@ -8993,7 +9316,7 @@ async function undoProposal() {
   try {
     await ElMessageBox.confirm(
       sourceContext.value?.mindmapId
-        ? '只有 AI 应用后没有其他协作者修改时才能撤销。'
+        ? '只有撤销记录仍有效，且 AI 应用后你或协作者都没有新修改时才能整体撤销。'
         : '将通过单条组合历史恢复 AI 应用前的本地脑图。',
       '撤销本次 AI 应用',
       { type: 'warning', confirmButtonText: '确认撤销' },
@@ -9158,6 +9481,7 @@ watch(() => form.scopeType, (scopeType) => {
 
 watch(discussionMode, () => {
   if (job.value && !canSwitchInteractionMode.value) return
+  if (!discussionMode.value && !intentOptions.some(item => item.value === form.intent)) form.intent = 'create'
   reconcileAgentSelection()
 })
 
@@ -9174,6 +9498,8 @@ watch(() => userStore.id, (nextUserId, previousUserId) => {
   agentPreferences.value = readAgentPreferences(nextUserId)
   invalidateSessionList()
   recentSessions.value = []
+  sessionPage.value = 1
+  sessionTotal.value = 0
   sessionListError.value = ''
   clearLocalAckRetryTimer()
   resetNewJob({ clearStoredJob: false, preserveForm: false, detach: true })
@@ -9230,7 +9556,11 @@ watch(activityTimelineRef, element => {
   chatResizeObserver.observe(element)
 })
 
-watch(() => job.value?.sessionId, () => { chatFollowing.value = true })
+watch(() => job.value?.sessionId, () => {
+  chatFollowing.value = true
+  historyLoading.value = ''
+  historyError.value = ''
+})
 onBeforeUnmount(() => chatResizeObserver?.disconnect())
 
 watch(() => !authExpired.value && (running.value || submitting.value), (active) => {
@@ -9247,6 +9577,7 @@ watch(() => !authExpired.value && (running.value || submitting.value), (active) 
 }, { immediate: true })
 
 function emitAiEditingState() {
+  if (props.taskOnly) return
   const aiCanvasTask = Boolean(
     job.value?.id
     && form.sourceMode === 'current'
@@ -9296,10 +9627,11 @@ watch(visible, value => {
   if (!value) showAdvancedSettings.value = false
   agentSwitchGeneration += 1
   agentSwitchPending.value = false
-  bus.emit('aiPanelVisibilityChange', value === true)
+  if (!props.taskOnly) bus.emit('aiPanelVisibilityChange', value === true)
 }, { immediate: true })
 
 watch(() => store.activeSidebar, sidebarName => {
+  if (props.taskOnly) return
   if (
     visible.value
     && sidebarName
@@ -9348,6 +9680,7 @@ function onNetworkOffline() {
 }
 
 defineExpose({
+  openRequestedTask,
   agentEvents,
   draftDocument,
   realtimeConnectionState,
@@ -9358,15 +9691,17 @@ defineExpose({
 })
 
 onMounted(() => {
-  bus.on('showAiMindmap', showDialog)
-  bus.on('hideAiMindmap', requestDialogClose)
-  bus.on('mindmapEditorReady', restoreActiveJobWhenEditorReady)
-  bus.on('aiCanvasDraftAction', onAiCanvasDraftAction)
-  bus.on('aiAcceptedUndoRequested', onAiAcceptedUndoRequested)
-  bus.on('aiCloudMutationRecoveryReady', onCloudMutationRecoveryReady)
-  bus.on('aiLocalJournalRecovered', onLocalAiJournalRecovered)
-  bus.on('aiEditingStateRequest', emitAiEditingState)
-  bus.on('node_active', onEditorNodeActive)
+  if (!props.taskOnly) {
+    bus.on('showAiMindmap', showDialog)
+    bus.on('hideAiMindmap', requestDialogClose)
+    bus.on('mindmapEditorReady', restoreActiveJobWhenEditorReady)
+    bus.on('aiCanvasDraftAction', onAiCanvasDraftAction)
+    bus.on('aiAcceptedUndoRequested', onAiAcceptedUndoRequested)
+    bus.on('aiCloudMutationRecoveryReady', onCloudMutationRecoveryReady)
+    bus.on('aiLocalJournalRecovered', onLocalAiJournalRecovered)
+    bus.on('aiEditingStateRequest', emitAiEditingState)
+    bus.on('node_active', onEditorNodeActive)
+  }
   window.addEventListener('online', onNetworkOnline)
   window.addEventListener('offline', onNetworkOffline)
   window.addEventListener('mindmap-ai-open-task', onDeepLinkedAiTask)
@@ -9435,7 +9770,6 @@ onBeforeUnmount(() => {
 
 .activityHeader,
 .activityHeaderActions,
-.agentOption,
 .resultSummary {
   display: flex;
   align-items: center;
@@ -9606,46 +9940,9 @@ onBeforeUnmount(() => {
 
 .aiSourceFileInput { display: none; }
 
-.sourceFileRow {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 10px;
-
-  span {
-    overflow: hidden;
-    color: var(--el-text-color-regular);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
-.agentOption small,
 .fieldHint {
   color: var(--el-text-color-secondary);
   font-size: 12px;
-}
-
-.agentOption {
-  min-width: 0;
-
-  > span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  > small {
-    flex: 0 1 auto;
-    max-width: 58%;
-    overflow: hidden;
-    text-align: right;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  &.is-unavailable { color: var(--el-text-color-placeholder); }
 }
 
 .agentSelectionIssue {
@@ -10345,7 +10642,11 @@ onBeforeUnmount(() => {
   }
 }
 
-.mindmapAiDrawer .diffList { max-height: 138px; padding-left: 18px; font-size: 12px; }
+.mindmapAiDrawer .diffList { max-height: 320px; padding-left: 18px; font-size: 12px; }
+.diffChangeDetail { margin: 6px 0 12px; }
+.diffChangeDetail summary { cursor: pointer; }
+.diffChangeDetail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: 8px; background: var(--el-fill-color-light); }
+.diffPagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
 
 .panelFooter { display: grid; gap: 9px; }
 
@@ -10708,6 +11009,16 @@ button.contextChip {
 
   > button { justify-content: space-between; }
   time { color: var(--el-text-color-placeholder); font-size: 10px; white-space: nowrap; }
+}
+
+.sessionPagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
 }
 
 .sessionListCopy {

@@ -216,10 +216,10 @@ test('节点标记入口迁移到标签弹窗，其他懒挂载面板保留首�
     lazySidebarFiles.map(file => readFile(new URL(file, componentRoot), 'utf8')),
   )
   assert.equal(sources.every(source => source.includes('open-on-mount')), true)
-  assert.equal(sources.every(source => source.includes('{ immediate: true }')), true)
+  assert.equal(sources.every(source => /\{ immediate: true(?:, flush: 'sync')? \}/.test(source)), true)
   const nodeTagSidebar = sources[lazySidebarFiles.indexOf('NodeIconSidebar.vue')]
   assert.match(nodeTagSidebar, /listTags\(\{/)
-  assert.match(nodeTagSidebar, /listTagCategories\(\)/)
+  assert.match(nodeTagSidebar, /listTagCategories\(props\.mindmapId\)/)
   assert.match(nodeTagSidebar, /category\.showOnHome/)
   assert.match(nodeTagSidebar, /category\.selectionMode/)
   assert.match(nodeTagSidebar, /removeMindmapSingleSelectionPeers/)

@@ -480,9 +480,13 @@ def _validated_generated_result(
         ):
             raise WorkerFailure('AI_OUTPUT_INVALID')
         return generated
-    if completion_state != 'needs_input' or set(generated) != {
-        'completionState', 'title', 'questions',
-    } or generated.get('title') is not None:
+    # Match the shared string/null schema; the parent discards this title
+    # and validates the clarification questions before persisting them.
+    if (
+        completion_state != 'needs_input'
+        or set(generated) != {'completionState', 'title', 'questions'}
+        or (generated.get('title') is not None and not isinstance(generated['title'], str))
+    ):
         raise WorkerFailure('AI_OUTPUT_INVALID')
     questions = generated.get('questions')
     if (

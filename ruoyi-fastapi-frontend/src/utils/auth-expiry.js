@@ -8,6 +8,43 @@ export const AUTH_EXPIRED_CODE = 401
 let expiredSession = null
 const expirySubscribers = new Set()
 const expiryEvent = Object.freeze({ kind: 'expired' })
+let identityContext = null
+
+// Configure once after Pinia is installed. Transports outside Axios (SSE and
+// collaboration sockets) use the same mounted-owner boundary without importing
+// the application store or request client into these low-level utilities.
+export function configureAuthSessionIdentity(context) {
+  identityContext = context
+  return () => { if (identityContext === context) identityContext = null }
+}
+
+export function captureAuthSessionIdentity(context = identityContext) {
+  return context ? {
+    token: context.getToken() || null,
+    ownerToken: context.getOwnerToken() || null,
+  } : null
+}
+
+export function assertAuthSessionIdentity(snapshot, context = identityContext) {
+  if (!snapshot || !context) return
+  const current = captureAuthSessionIdentity(context)
+  const changed = snapshot.token !== current.token
+    || snapshot.ownerToken !== current.ownerToken
+    || Boolean(current.ownerToken && current.token !== current.ownerToken)
+  if (!changed) return
+  // A late response for an old mounted owner must not pause a new owner. When
+  // only the cookie changed, protect the old owner's drafts and stop its work,
+  // but never expire, remove or log out the replacement credential.
+  if (snapshot.ownerToken && snapshot.ownerToken === current.ownerToken
+      && current.ownerToken !== current.token) {
+    markAuthSessionExpired(current.ownerToken)
+  }
+  const error = createAuthExpiredError('登录账号已在其他页面切换，请重新载入当前页面后继续')
+  error.authSessionChanged = true
+  error.authExpiryHandled = true
+  context.onChanged?.(error)
+  throw error
+}
 
 export function isAuthSessionExpired(token) {
   return typeof token === 'string' && Boolean(token) && Boolean(expiredSession && (

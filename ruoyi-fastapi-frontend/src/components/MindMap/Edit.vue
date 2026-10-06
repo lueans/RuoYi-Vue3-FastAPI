@@ -12,6 +12,10 @@
       <span><strong>登录已失效，编辑与同步已暂停。</strong> {{ authenticationRecoveryMessage }}</span>
       <el-button size="small" type="primary" @click="requestAuthLogin">重新登录</el-button>
     </div>
+    <div v-else-if="terminalRecoveryBlocked" class="authExpiryBanner" role="alert">
+      <span><strong>编辑已结束，但未保存内容尚未备份。</strong> 请保留本页，重试备份成功后再离开。</span>
+      <el-button size="small" type="primary" :loading="terminalRecoveryBusy" @click="retryTerminalRecovery">重试备份</el-button>
+    </div>
     <div
       class="mindMapContainer"
       id="mindMapContainer"
@@ -46,6 +50,7 @@
     <NodeTagSidebar
       v-if="mindMap && activeSidebar === 'nodeTagSidebar'"
       :mindMap="mindMap"
+      :mindmap-id="props.mindmapId"
     />
     <CommentSidebar v-if="mindMap && props.mindmapId" :mindMap="mindMap" :mindmapId="props.mindmapId" />
     <Search v-if="mindMap" :mindMap="mindMap" :mindmapId="props.mindmapId" />
@@ -82,6 +87,8 @@
         :fence-authoritative-write="fenceAuthoritativeVersionWrite"
         :apply-authoritative-document="applyRestoredVersionData"
         :authoritative-reset-generation="authoritativeResetGeneration"
+        :document-data="documentData"
+        @document-data-preview="onVersionDocumentDataPreview"
         @editing-transition="onVersionEditingTransition"
         @change-tracking="onVersionChangeTracking"
       />
@@ -135,6 +142,7 @@ import { requestAuthLogin } from '@/utils/request'
 import { createMindmapCanvasResize } from '@/utils/mindmap-canvas-resize'
 import { createMindmapAiCamera } from '@/utils/mindmap-ai-camera'
 import {
+  bindMindmapPerformanceOptions,
   countMindmapNodes,
   resolveMindmapPerformanceOptions,
 } from '@/utils/mindmap-performance'
@@ -194,6 +202,7 @@ import {
   startMindmapDraftSessionLease,
 } from '@/utils/mindmap-draft'
 import { downloadMindmapBackup } from '@/utils/mindmap-backup'
+import { saveFormalVersion } from '@/api/mindmap/version'
 import { isMindmapContentWritable } from '@/utils/mindmap-content-state'
 import { flushPendingMindmapChanges } from '@/utils/mindmap-save-lifecycle'
 import {
@@ -274,7 +283,7 @@ import CollaboratorManager from './CollaboratorManager.vue'
 import CommentSidebar from './CommentSidebar.vue'
 
 // Register all plugins and themes
-registerPlugins('full')
+registerPlugins()
 Themes.init(MindMap)
 
 const props = defineProps({
@@ -345,6 +354,8 @@ const aiDialogReadonly = computed(() => (
   || (Boolean(props.mindmapId) && serverCanEdit.value !== true)
 ))
 let terminalState = ''
+const terminalRecoveryBlocked = ref(false)
+const terminalRecoveryBusy = ref(false)
 const authenticationExpired = ref(false)
 const authenticationRecoveryMessage = ref('正在保护本地未保存内容…')
 let unsubscribeAuthExpiry = null
@@ -2710,6 +2721,9 @@ onMounted(async () => {
   window.addEventListener('offline', handleNetworkOffline)
   window.addEventListener('focus', handleWindowFocus)
   emit('ready')
+  // AI recovery requests editor context through the bus, so announce readiness
+  // only after those handlers and the first canvas render are available.
+  bus.emit('mindmapEditorReady')
 })
 
 onBeforeUnmount(() => {
@@ -3064,6 +3078,7 @@ async function initMindMap(signal) {
   })
 
   mindMap.value = mm
+  bindMindmapPerformanceOptions(mm, { savedConfig })
   actions.setMindMap(mm)
   actions.setIsReadonly(isReadonly.value)
   mm.command?.addExecutionGuard?.((name) => guardLocalAiHistoryBack(name, mm))
@@ -4001,7 +4016,7 @@ async function saveToBackend() {
     || !mindMap.value
     || !canFlushCloudChangesDuringEditingTransition()
   ) return
-  if (isChangeTrackingSuspended()) return false
+  if (isChangeTrackingSuspended({ allowImportPersistence: true })) return false
   // 节点租约必须覆盖“最终文本已进入可发送 Yjs”这一线性化点。保存请求
   // 在途会暂时关闭新实时批次，所以现有编辑结束前不能冻结 HTTP mutation。
   if (
@@ -4678,17 +4693,24 @@ function terminateEditingSession(eventName, data) {
     fallbackBaseRevision: contentRevision,
     fallbackContentChangeVersion: draftProtection.getChangeVersion(),
   })
+  const documentBeforeEditorCommit = mindMap.value ? getCurrentDocument() : null
   const activeEditorChangesCommitted = commitActiveEditorsBeforeTermination()
+  const documentAfterEditorCommit = mindMap.value ? getCurrentDocument() : null
+  // Plain/RichText 插件可能在 hide 内部提前 flush 掉历史任务，外层再次
+  // flush 返回 false 并不表示没有最后输入。终止时以完整快照比较兜底。
+  const activeEditorDocumentChanged = Boolean(documentBeforeEditorCommit && documentAfterEditorCommit)
+    && !areMindmapDraftDocumentsEqual(documentBeforeEditorCommit, documentAfterEditorCommit)
   // terminatingSession 会阻止浮层关闭事件再进入普通保存队列，所以仅依赖
   // hasUnsavedChanges 会漏掉刚从 DOM 同步进模型的最后输入。
   const needsLocalBackup = Boolean(mindMap.value) && (
-    hasUnsavedChanges() || activeEditorChangesCommitted
+    hasUnsavedChanges() || activeEditorChangesCommitted || activeEditorDocumentChanged
   )
+  terminalRecoveryBlocked.value = needsLocalBackup
   let localBackupCreated = false
   let localDraftPreserved = false
   const terminalDraftEntries = []
   if (needsLocalBackup) {
-    const fullData = getCurrentDocument()
+    const fullData = documentAfterEditorCommit
     const runtimeDiffersFromFrozenMutation = Boolean(
       frozenMutationSnapshot
       && !areMindmapDraftDocumentsEqual(frozenMutationSnapshot.document, fullData),
@@ -4724,7 +4746,14 @@ function terminateEditingSession(eventName, data) {
       })
     }
     for (const entry of terminalDraftEntries) {
-      entry.fallbackSaved = saveMindmapDraftFallbackSync(entry.options)
+      try {
+        // 本地工作区没有云端文件 ID，草稿键创建本身也可能抛错；必须继续
+        // 尝试完整 JSON 备份并结束编辑，不能留在半终止状态绕过重试。
+        entry.fallbackSaved = saveMindmapDraftFallbackSync(entry.options)
+      } catch (error) {
+        console.warn('终止会话的同步草稿未能保存，将尝试 JSON 备份:', error)
+        entry.fallbackSaved = false
+      }
     }
     localDraftPreserved = terminalDraftEntries.length > 0
       && terminalDraftEntries.every(entry => entry.fallbackSaved)
@@ -4768,6 +4797,7 @@ function terminateEditingSession(eventName, data) {
       ...data, localBackupCreated, localDraftPreserved: draftPreserved, needsLocalBackup,
       localRecoveryProtected: terminalDraftEntries.every(entry => entry.fallbackSaved || entry.downloaded),
     }
+    terminalRecoveryBlocked.value = result.needsLocalBackup && !result.localRecoveryProtected
     if (!terminalEventEmitted) {
       terminalEventEmitted = true
       emit(eventName, result)
@@ -4785,12 +4815,13 @@ function terminateEditingSession(eventName, data) {
     const durableDraftResults = terminalDraftEntries.map(entry => (
       enqueueDraftOperation(() => saveMindmapDraft(entry.options)).then(result => {
         entry.fallbackSaved ||= result?.saved === true
+      }).catch(() => {}).then(() => {
         // A user-triggered relogin retries only backups that previously failed.
         if (!entry.fallbackSaved && !entry.downloaded) {
           entry.downloaded = downloadConflictBackup(entry.document, entry.downloadPrefix)
         }
         return entry.fallbackSaved
-      }).catch(() => entry.fallbackSaved)
+      })
     ))
     terminalCleanupPending = Promise.all(durableDraftResults).then((results) => {
       localDraftPreserved ||= results.every(Boolean)
@@ -4800,6 +4831,26 @@ function terminateEditingSession(eventName, data) {
     return terminalCleanupPending
   }
   return terminalCleanup()
+}
+
+async function retryTerminalRecovery() {
+  if (terminalRecoveryBusy.value) return false
+  terminalRecoveryBusy.value = true
+  try {
+    const result = await terminalCleanup?.()
+    if (result?.localRecoveryProtected) {
+      ElMessage.success('未保存内容已备份，现在可以安全返回列表')
+      return true
+    }
+    ElMessage.error('备份仍未完成，请保留本页后重试')
+    return false
+  } catch (error) {
+    console.error('重试终止会话备份失败:', error)
+    ElMessage.error('备份仍未完成，请保留本页后重试')
+    return false
+  } finally {
+    terminalRecoveryBusy.value = false
+  }
 }
 
 function commitActiveEditorsBeforeTermination() {
@@ -5216,8 +5267,9 @@ function handleBeforeUnload(event) {
   commitActiveEditorsBeforeTermination()
   if (viewSaveRequested) void flushPendingViewSave()
   if (
-    hasRealWritePermission()
-    && (hasUnsavedChanges() || viewSaveRequested || viewSaveInProgress)
+    terminalRecoveryBlocked.value
+    || (hasRealWritePermission()
+      && (hasUnsavedChanges() || viewSaveRequested || viewSaveInProgress))
   ) {
     // version/import transition 只临时冻结交互，不能把仍在途的保存伪装成
     // 真正只读会话。即使 pagehide 的草稿写入失败，浏览器也必须保留原生
@@ -5317,28 +5369,43 @@ function onExecCommand(...args) {
   mindMap.value?.execCommand(...args)
 }
 
+const exportConfigOwners = new WeakMap()
+
 async function onExportRequest(request = {}) {
   const activeMindMap = mindMap.value
   const signal = sessionController?.signal
+  const controller = new AbortController()
+  const cancel = () => controller.abort(new Error('导出已取消或脑图会话已经变化'))
+  signal?.addEventListener('abort', cancel, { once: true })
+  request.signal?.addEventListener('abort', cancel, { once: true })
+  if (signal?.aborted || request.signal?.aborted) cancel()
   let previousConfig = null
   let runtimeConfigApplied = false
+  let configOwner = null
   try {
-    if (!activeMindMap || sessionCancelled(signal)) throw new Error('脑图实例尚未就绪')
+    if (!activeMindMap || sessionCancelled(signal) || controller.signal.aborted) throw new Error('脑图实例尚未就绪或导出已取消')
     const { type, name, args = [], config, resolve } = request
     if (!type || typeof resolve !== 'function') throw new Error('导出请求无效')
     await ensureExportPlugins(activeMindMap, type)
-    if (sessionCancelled(signal) || activeMindMap !== mindMap.value) {
+    if (sessionCancelled(signal) || activeMindMap !== mindMap.value || controller.signal.aborted) {
       throw new Error('脑图会话已经变化，请重新导出')
     }
     const runtimeConfig = normalizeMindmapExportRuntimeConfig(config)
-    previousConfig = {
+    previousConfig = exportConfigOwners.get(activeMindMap)?.previousConfig || {
       exportPaddingX: activeMindMap.getConfig('exportPaddingX'),
       exportPaddingY: activeMindMap.getConfig('exportPaddingY'),
       addContentToFooter: activeMindMap.getConfig('addContentToFooter'),
     }
+    configOwner = { previousConfig }
+    exportConfigOwners.set(activeMindMap, configOwner)
     activeMindMap.updateConfig(runtimeConfig)
     runtimeConfigApplied = true
-    const result = await activeMindMap.export(type, true, name, ...args)
+    commitActiveEditorsBeforeTermination()
+    const exportArgs = ['smm', 'json'].includes(type) && args[0] !== false
+      ? [true, getCurrentDocument()]
+      : [...args]
+    exportArgs.push({ exportOptions: { signal: controller.signal } })
+    const result = await activeMindMap.export(type, true, name, ...exportArgs)
     if (!result) throw new Error('导出组件未生成文件')
     if (sessionCancelled(signal) || activeMindMap !== mindMap.value) {
       throw new Error('脑图会话已经变化，导出结果已丢弃')
@@ -5348,13 +5415,19 @@ async function onExportRequest(request = {}) {
     console.error('导出失败:', error)
     request.reject?.(error)
   } finally {
+    signal?.removeEventListener('abort', cancel)
+    request.signal?.removeEventListener('abort', cancel)
     if (
       runtimeConfigApplied
       && previousConfig
+      && exportConfigOwners.get(activeMindMap) === configOwner
       && !sessionCancelled(signal)
       && activeMindMap === mindMap.value
     ) {
       activeMindMap.updateConfig(previousConfig)
+    }
+    if (configOwner && exportConfigOwners.get(activeMindMap) === configOwner) {
+      exportConfigOwners.delete(activeMindMap)
     }
   }
 }
@@ -5472,6 +5545,30 @@ async function onSetData(data, request = {}) {
       // 会在下一次远端增量或检查点中重新出现；先无检查点地关闭，等 HTTP
       // 快照提交及权威回源后再由 onYjsReinit 建立新 lineage。
       protectedDocumentBeforeImportApply = getCurrentDocument()
+      if (!aiLocalApply && !aiArtifactApply) {
+        const recoveryRevision = contentRevision
+        await saveFormalVersion({
+          mindmapId: props.mindmapId,
+          name: `导入前恢复点 ${new Date().toLocaleString()}`,
+          expectedRevision: recoveryRevision,
+        })
+        if (
+          activeMindMap !== mindMap.value
+          || sessionCancelled(sessionController?.signal)
+          || props.readonly
+          || serverCanEdit.value !== true
+          || contentRevision !== recoveryRevision
+          || draftProtection.getChangeVersion() !== importBoundaryChangeVersion
+          || hasUnsavedChanges()
+          || pendingRemoteDocumentReset
+          || authoritativeReloadRequired
+          || authoritativeReloadInProgress
+          || authoritativeRecoveryEditingBlocked.value
+          || aiEditingBlocked.value
+          || viewSaveRequested
+          || viewSaveInProgress
+        ) throw new Error('创建恢复点期间画布发生变化，已取消导入，请重试')
+      }
       collaborationRestartDeferredUntilSave = true
       importCollaborationStopped = stopCurrentCollaborationSource()
       documentMetaBuffer.clear()
@@ -5482,6 +5579,12 @@ async function onSetData(data, request = {}) {
       await nextTick()
       if (activeMindMap !== mindMap.value || isReadonly.value) {
         throw new Error('脑图会话已经变化，请重新导入')
+      }
+      if (!aiLocalApply && !aiArtifactApply) {
+        const beforeImport = cloneRequestPayload(getCurrentDocument())
+        if (!downloadConflictBackup(beforeImport, 'mindmap-before-import')) {
+          throw new Error('导入前 JSON 备份创建失败，已取消替换')
+        }
       }
       if (aiLocalApply || aiArtifactApply) {
         protectedDocumentBeforeImportApply = cloneRequestPayload(getCurrentDocument())
@@ -6659,6 +6762,11 @@ function applyRestoredVersionData(serverData, options = {}) {
   })
 }
 
+function onVersionDocumentDataPreview(data) {
+  documentData.value = normalizeMindmapDocumentData(data)
+  applyMindmapDocumentConfig(mindMap.value, documentData.value)
+}
+
 /** 销毁旧的 Yjs 连接，用已经应用到画布的权威数据创建新的同步实例。 */
 function onYjsReinit(_restoredRoot, revision) {
   if (!props.mindmapId) return
@@ -6699,11 +6807,11 @@ function isContentDetailTrackingSuspended() {
     ))
 }
 
-function isChangeTrackingSuspended() {
+function isChangeTrackingSuspended({ allowImportPersistence = false } = {}) {
   return Boolean(terminalState)
     || terminatingSession
     || aiEditingBlocked.value
-    || importTransitionEditingBlocked.value
+    || (importTransitionEditingBlocked.value && !allowImportPersistence)
     || authoritativeRecoveryEditingBlocked.value
     || protectingActiveEditorFromRemoteDelete
     || applyingServerTree
@@ -6838,6 +6946,8 @@ defineExpose({
   isCollaborationSynced: () => yjsSyncRef.value?.isSynced.value === true,
   retryCollaboration: () => yjsSyncRef.value?.retryConnection?.() === true,
   isLocalDraftProtected: () => draftProtection.isProtected(),
+  isTerminalRecoveryBlocked: () => terminalRecoveryBlocked.value,
+  retryTerminalRecovery,
   getLocalDraftProtectionState: () => draftProtection.getState(),
   hasUnsavedChanges,
   flushBeforeLeave,

@@ -20,28 +20,18 @@ import RichText from '@mind-map/src/plugins/RichText.js'
 import { MINDMAP_PREVIEW_FEATURES } from '@/utils/mindmap-preview'
 import { ensureMindmapFeaturePlugin } from '@/utils/mindmap-plugin-loader'
 
-const presets = {
-  minimal: [Drag, Select, KeyboardNavigation],
-  standard: [
-    Drag, Select, KeyboardNavigation,
-    MiniMap, Export, NodeImgAdjust, TouchEvent,
-    ScrollbarPlugin, Search, AssociativeLine
-  ],
-  full: [
-    Drag, Select, KeyboardNavigation,
-    MiniMap, Export,
-    NodeImgAdjust, TouchEvent,
-    Search, AssociativeLine,
-    Painter, RainbowLines, Demonstrate,
-    OuterFrame, MindMapLayoutPro, Watermark,
-    NodeBase64ImageStorage
-  ]
-}
+const editorPlugins = [
+  Drag, Select, KeyboardNavigation,
+  MiniMap, Export,
+  NodeImgAdjust, TouchEvent,
+  Search, AssociativeLine,
+  Painter, RainbowLines, Demonstrate,
+  OuterFrame, MindMapLayoutPro, Watermark,
+  NodeBase64ImageStorage
+]
 
-export function registerPlugins(preset = 'standard', extraPlugins = []) {
-  const plugins = presets[preset] || presets.standard
-  const all = [...plugins, ...extraPlugins]
-  all.forEach(plugin => {
+export function registerPlugins() {
+  editorPlugins.forEach(plugin => {
     if (MindMap.hasPlugin(plugin) === -1) {
       MindMap.usePlugin(plugin)
     }
@@ -85,5 +75,4 @@ export async function ensureExportPlugins(mindMap, type) {
   if (!mindMap[plugin.instanceName]) mindMap.addPlugin(plugin)
 }
 
-export { presets, RichText, ScrollbarPlugin }
-export default registerPlugins
+export { RichText, ScrollbarPlugin }

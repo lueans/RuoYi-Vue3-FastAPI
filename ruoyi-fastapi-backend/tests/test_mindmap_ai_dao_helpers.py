@@ -1,14 +1,17 @@
 """Shared AI DAO execution must preserve scopes, locking and deletion order."""
 
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import postgresql, sqlite
 
 from module_mindmap.dao.mindmap_ai_dao import MindmapAiDao
+from module_mindmap.entity.do.mindmap_ai_do import MindmapAiJob
 
 
 @pytest.mark.asyncio
@@ -169,7 +172,7 @@ async def test_latest_plan_read_is_owner_scoped_retained_and_bounded(owner: int)
 async def test_session_heads_prioritize_execution_then_earliest_waiting_then_latest_terminal() -> None:
     now = datetime(2026, 9, 25)
 
-    def job(session: str, uid: str, status: str, turn: int | None, age: int = 0) -> SimpleNamespace:
+    def job(session: str, uid: str, status: str, turn: int, age: int = 0) -> SimpleNamespace:
         return SimpleNamespace(session_id=session, id=uid, status=status, turn_index=turn, created_time=now + timedelta(seconds=age))
 
     jobs = [
@@ -179,16 +182,47 @@ async def test_session_heads_prioritize_execution_then_earliest_waiting_then_lat
         job('c', 'terminal-latest', 'completed_no_change', 9), job('c', 'terminal-old', 'failed', 1),
         job('d', 'active-b', 'queued', 1), job('d', 'active-a', 'validating', 1),
         job('e', 'later-time', 'running', 1, 1), job('e', 'earlier-time', 'preparing', 1),
-        job('f', 'null-turn', 'queued', None), job('f', 'first-turn', 'running', 1),
+        job('f', 'first-turn', 'queued', 1), job('f', 'second-turn', 'running', 2),
+        job('g', 'terminal-newer-a', 'failed', 2, 1), job('g', 'terminal-older', 'ready', 2),
+        job('g', 'terminal-newer-b', 'completed_message', 2, 1),
+        job('h', 'waiting-newer', 'waiting_turn', 2, 1), job('h', 'waiting-b', 'waiting_turn', 2),
+        job('h', 'waiting-a', 'waiting_turn', 2),
+        job('outside-page', 'outside-job', 'running', 1),
     ]
-    db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalars=lambda: jobs)))
-
-    heads = await MindmapAiDao.list_latest_jobs_for_sessions(db, ['a', 'b', 'c', 'd', 'e', 'f'])
-
-    assert {session: head.id for session, head in heads.items()} == {
+    expected = {
         'a': 'active-first', 'b': 'waiting-first', 'c': 'terminal-latest',
-        'd': 'active-a', 'e': 'earlier-time', 'f': 'null-turn',
+        'd': 'active-a', 'e': 'earlier-time', 'f': 'first-turn',
+        'g': 'terminal-newer-b', 'h': 'waiting-a',
     }
+    by_id = {item.id: item for item in jobs}
+    with closing(sqlite3.connect(':memory:')) as database:
+        database.executescript('''
+            CREATE TABLE mindmap_ai_session (id TEXT PRIMARY KEY);
+            CREATE TABLE mindmap_ai_job (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                status TEXT NOT NULL, turn_index INTEGER NOT NULL, created_time TEXT NOT NULL);
+        ''')
+        database.executemany('INSERT INTO mindmap_ai_session VALUES (?)',
+            [(session,) for session in [*expected, 'empty', 'outside-page']])
+        database.executemany('INSERT INTO mindmap_ai_job VALUES (?, ?, ?, ?, ?)', [
+            (item.id, item.session_id, item.status, item.turn_index, item.created_time.isoformat()) for item in jobs
+        ])
+
+        async def execute(statement: Any) -> SimpleNamespace:
+            # Execute the DAO's selection and ordering; omit only unrelated ORM
+            # payload projections so this fixture stays isolated and minimal.
+            query = statement.with_only_columns(MindmapAiJob.id, MindmapAiJob.session_id)
+            sql = str(query.compile(dialect=sqlite.dialect(), compile_kwargs={'literal_binds': True}))
+            rows = database.execute(sql).fetchall()
+            assert len(rows) == len(expected)
+            assert {session: uid for uid, session in rows} == expected
+            return SimpleNamespace(scalars=lambda: (by_id[uid] for uid, _ in rows))
+
+        db = SimpleNamespace(execute=AsyncMock(side_effect=execute))
+        heads = await MindmapAiDao.list_latest_jobs_for_sessions(db, [*expected, 'empty', 'missing'])
+
+    assert {session: head.id for session, head in heads.items()} == expected
+    assert all(head is by_id[expected[session]] for session, head in heads.items())
+    db.execute.assert_awaited_once()
     sql = str(db.execute.await_args.args[0])
     assert 'mindmap_ai_job.session_id IN' in sql
     assert 'ORDER BY mindmap_ai_job.session_id ASC, mindmap_ai_job.turn_index DESC, mindmap_ai_job.created_time DESC' in sql

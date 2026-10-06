@@ -20,6 +20,7 @@ class MindmapVersionModel(BaseModel):
     view_data: dict[str, Any] | None = Field(default=None, description='视图状态')
     layout: str | None = Field(default=None, description='布局类型')
     theme: dict[str, Any] | None = Field(default=None, description='主题配置')
+    document_data: dict[str, Any] | None = Field(default=None, description='文档配置快照，null 表示旧版本未记录')
     snapshot_schema_version: int = Field(default=1, description='版本快照结构版本')
     tag_snapshots: dict[str, Any] | None = Field(default=None, description='历史标签定义快照')
     created_by: str | None = Field(default=None, description='创建者')
@@ -60,6 +61,7 @@ class MindmapVersionSaveModel(BaseModel):
 
     mindmap_id: int = Field(description='脑图ID')
     name: str | None = Field(default=None, description='版本名称')
+    expected_revision: int | None = Field(default=None, ge=1, description='创建恢复点时要求匹配的正文修订号')
 
 
 class MindmapVersionRestoreModel(BaseModel):

@@ -29,6 +29,7 @@ function compile(scope, names) {
   scope.readPersistedAttempts ??= () => ({})
   scope.continuationPrompt ??= ref('')
   scope.draftFreshnessMessage ??= ref('')
+  scope.draftFreshness ??= ref('')
   names = [...new Set([...names, 'consumeSubmittedComposerDraft'])]
   return new Function('scope', `with(scope) { ${names.map(functionSource).join('\n')} return { ${names.join(', ')} }; }`)(scope)
 }
@@ -44,7 +45,7 @@ function harness() {
     livePreviewActive: ref(true), livePreviewReverting: ref(false), livePreviewPaused: ref(true),
     livePreviewError: ref(''), livePreviewJobId: 'job1', livePreviewSuppressedJobId: '',
     livePreviewGeneration: 1, livePreviewDirectSettlePromise: null, livePreviewDirectSettleJobId: '',
-    directTerminalTargetJobId: '', livePreviewApplyingJobId: '', livePreviewRenderedDocument: null,
+    directTerminalTargetJobId: ref(''), livePreviewApplyingJobId: '', livePreviewRenderedDocument: null,
     livePreviewFlushInFlight: false, livePreviewPendingFrame: null, livePreviewFlushTimer: null,
     latestPreviewVersion: ref(4), livePreviewRenderedNodeCount: ref(2), livePreviewTargetNodeCount: ref(2),
     livePreviewChangeSummary: ref(null), LIVE_PREVIEW_FRAME_INTERVAL_MS: 1,
@@ -502,6 +503,7 @@ test('pending cancellation preserves its draft and polling without a canvas stat
 test('canvas editing locks remain active through preparation, playback and terminal ownership', () => {
   const events = []
   const s = {
+    props: { taskOnly: false },
     job: ref(null), form: { sourceMode: 'current' },
     messageModeActive: ref(false), viewingHistoricalArtifact: ref(false), sourceContext: ref({ readonly: false }),
     running: ref(false), livePreviewActive: ref(false), livePreviewRendering: ref(false),

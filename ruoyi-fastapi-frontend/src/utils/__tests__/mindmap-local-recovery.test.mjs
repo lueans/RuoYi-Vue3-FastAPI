@@ -10,7 +10,6 @@ import {
   getMindmapDraftSourceLabel,
   isMindmapDraftSessionActive,
   listMindmapDrafts,
-  removeInactiveMindmapDrafts,
   removeMindmapDraft,
   resolveMindmapDraftOpenMode,
   saveMindmapDraft,
@@ -285,48 +284,6 @@ test('云端退出清理同一脑图的旧窗口草稿但保留清理期间的�
     const drafts = await listMindmapDrafts(7)
     assert.deepEqual(drafts.map(item => item.name), ['清理期间的新草稿'])
   } finally {
-    globalThis.localStorage = previousStorage
-    globalThis.indexedDB = previousIndexedDb
-  }
-})
-
-test('使用云端版本只删除失活草稿并保护仍在编辑的其他窗口', async () => {
-  const previousStorage = globalThis.localStorage
-  const previousIndexedDb = globalThis.indexedDB
-  globalThis.localStorage = new MemoryStorage()
-  globalThis.indexedDB = undefined
-  let stopActiveSession
-  try {
-    await saveMindmapDraft({
-      userId: 7,
-      mindmapId: 127,
-      sessionId: 'active-window',
-      contentRevision: 3,
-      updatedAt: 100,
-      document: { root: { data: { text: '仍在编辑' }, children: [] } },
-    })
-    await saveMindmapDraft({
-      userId: 7,
-      mindmapId: 127,
-      sessionId: 'crashed-window',
-      contentRevision: 3,
-      updatedAt: 200,
-      document: { root: { data: { text: '崩溃草稿' }, children: [] } },
-    })
-    stopActiveSession = startMindmapDraftSessionLease(7, 127, 'active-window', {
-      lockManager: {},
-      setIntervalFn: () => 92,
-      clearIntervalFn: () => {},
-    })
-
-    const result = await removeInactiveMindmapDrafts(7, 127, { beforeUpdatedAt: 200 })
-    const drafts = await listMindmapDrafts(7)
-
-    assert.deepEqual(drafts.map(item => item.name), ['仍在编辑'])
-    assert.deepEqual(result.preservedKeys, [createMindmapDraftKey(7, 127, 'active-window')])
-    assert.deepEqual(result.removedKeys, [createMindmapDraftKey(7, 127, 'crashed-window')])
-  } finally {
-    stopActiveSession?.()
     globalThis.localStorage = previousStorage
     globalThis.indexedDB = previousIndexedDb
   }
@@ -726,7 +683,7 @@ test('终止编辑先提交所有活动编辑器，再备份并立即锁定只�
   )
   assert.match(
     editorSource,
-    /function isChangeTrackingSuspended\(\)[\s\S]*?\|\| terminatingSession/,
+    /function isChangeTrackingSuspended\(\{ allowImportPersistence = false \} = \{\}\)[\s\S]*?\|\| terminatingSession/,
   )
 })
 

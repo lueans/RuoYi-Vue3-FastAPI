@@ -7,6 +7,7 @@ import {
 } from './index'
 import { formatGetNodeGeneralization } from '../utils/index'
 import { findFirstXmindElementByName } from '../parse/xmindTree'
+import { throwIfExportAborted } from './exportSession'
 
 // 解析出新xmind的概要文本
 export const getSummaryText = (node, topicId) => {
@@ -129,7 +130,8 @@ export const handleNodeImageToXmind = async (
   node,
   newData,
   promiseList,
-  imageList
+  imageList,
+  { signal } = {}
 ) => {
   if (node.data.image) {
     // 处理异步逻辑
@@ -143,8 +145,9 @@ export const handleNodeImageToXmind = async (
       let imgData = node.data.image
       // base64之外的其他图片要先转换成data:url
       if (!/^data:/.test(node.data.image)) {
-        imgData = await imgToDataUrl(node.data.image)
+        imgData = await imgToDataUrl(node.data.image, false, { signal })
       }
+      throwIfExportAborted(signal)
       // 从data:url中解析出图片类型和ase64
       let dataUrlRes = parseDataUrl(imgData)
       imgName = 'image_' + imageList.length + '.' + dataUrlRes.type
@@ -159,7 +162,7 @@ export const handleNodeImageToXmind = async (
       }
       resolve()
     } catch (error) {
-      console.log(error)
+      if (!signal?.aborted) console.log(error)
       resolve()
     }
   }

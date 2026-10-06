@@ -193,16 +193,19 @@
       role="listbox"
       aria-label="节点搜索结果"
       :aria-busy="searching || loadingMore"
+      @scroll.passive="measureSearchViewport"
     >
       <div class="searchState" v-if="searching" role="status" aria-live="polite">
         <el-icon class="is-loading"><Loading /></el-icon>
         <span>正在搜索节点…</span>
       </div>
       <template v-else>
+        <div class="searchResultsSpacer" :style="{ height: `${searchResultList.length * SEARCH_RESULT_HEIGHT}px` }">
         <button
           class="searchResultItem"
-          v-for="(item, index) in searchResultList"
+          v-for="{ item, index, top } in visibleSearchResults"
           :key="item.id"
+          :style="{ top: `${top}px`, height: `${SEARCH_RESULT_HEIGHT}px` }"
           :id="getSearchResultOptionId(index)"
           :data-search-result-index="index"
           type="button"
@@ -224,6 +227,7 @@
           </div>
           <div v-if="item.pathText" class="resultPath" :title="item.pathText">{{ item.pathText }}</div>
         </button>
+        </div>
       </template>
       <div class="searchState error" v-if="!searching && searchError" role="alert">
         <span>{{ searchError }}</span>
@@ -342,7 +346,7 @@ const currentIndex = ref(0)
 const total = ref(0)
 const showSearchInfo = ref(false)
 const searchResultListHeight = ref(0)
-const searchResultList = ref([])
+const searchResultList = shallowRef([])
 const showSearchResultList = ref(false)
 const searchContainerRef = ref(null)
 const searchResultListRef = ref(null)
@@ -373,10 +377,62 @@ let activeServerCriteriaKey = ''
 let activeLocalKeyword = ''
 let searchPanelResizeObserver = null
 let liveSearchTimer = null
+let searchResultResizeObserver = null
+let localSearchTreeIndex = null
+const searchResultScrollTop = ref(0)
+const searchResultViewportHeight = ref(300)
+const searchResultCache = new Map()
 const filteredCanvasElements = new Set()
 
 const SERVER_SEARCH_PAGE_SIZE = 100
 const LIVE_SEARCH_DELAY = 220
+const SEARCH_RESULT_HEIGHT = 52
+const visibleSearchResults = computed(() => {
+  const list = searchResultList.value
+  const start = Math.max(0, Math.floor(searchResultScrollTop.value / SEARCH_RESULT_HEIGHT) - 5)
+  const end = Math.min(list.length, Math.ceil((searchResultScrollTop.value + searchResultViewportHeight.value) / SEARCH_RESULT_HEIGHT) + 5)
+  const indexes = Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset)
+  const focused = currentIndex.value - 1
+  // Preserve the focused result when scrolling; keyboard navigation can still
+  // continue from it without moving focus back to the document body.
+  if (focused >= 0 && focused < list.length && !indexes.includes(focused)) indexes.push(focused)
+  return indexes.map(index => ({ item: presentSearchResult(list[index]), index, top: index * SEARCH_RESULT_HEIGHT }))
+})
+
+function presentSearchResult(row) {
+  if (searchResultCache.has(row)) return searchResultCache.get(row)
+  let result = row
+  if (row.data) {
+    const item = row.data
+    const data = item?.data || item?.nodeData?.data || {}
+    const rawText = String(data.text ?? '')
+    const name = data.richText ? (getTextFromHtml(rawText) || '') : rawText
+    // Build the parent index only when a visible raw data node needs it.
+    if (!item.parent && !localSearchTreeIndex) localSearchTreeIndex = createDocumentTreeIndex(props.mindMap?.renderer?.renderTree)
+    const treeIndex = localSearchTreeIndex
+    result = { ...row, name, segments: buildMindmapSearchHighlightSegments(name, activeLocalKeyword, { caseSensitive: true }),
+      pathText: getMindmapNodePathText(item, treeIndex) }
+  } else if (!row.segments) {
+    result = { ...row, segments: buildMindmapSearchHighlightSegments(row.name, searchText.value) }
+  }
+  // Keep presentation memory bounded even after scrolling through a large map.
+  if (searchResultCache.size >= 256) searchResultCache.delete(searchResultCache.keys().next().value)
+  searchResultCache.set(row, result)
+  return result
+}
+
+function measureSearchViewport() {
+  const viewport = searchResultListRef.value
+  searchResultScrollTop.value = viewport?.scrollTop || 0
+  searchResultViewportHeight.value = viewport?.clientHeight || 300
+}
+
+function resetSearchPresentation() {
+  searchResultCache.clear()
+  localSearchTreeIndex = null
+  searchResultScrollTop.value = 0
+  if (searchResultListRef.value) searchResultListRef.value.scrollTop = 0
+}
 const hasMoreServerResults = computed(() => (
   serverSearchMode.value && searchResultList.value.length < total.value
 ))
@@ -427,6 +483,13 @@ function getSearchResultOptionId(index) {
 }
 
 function revealSearchResult(index, focus = false) {
+  const viewport = searchResultListRef.value
+  if (viewport) {
+    const top = index * SEARCH_RESULT_HEIGHT
+    if (top < viewport.scrollTop) viewport.scrollTop = top
+    else if (top + SEARCH_RESULT_HEIGHT > viewport.scrollTop + viewport.clientHeight) viewport.scrollTop = top + SEARCH_RESULT_HEIGHT - viewport.clientHeight
+    measureSearchViewport()
+  }
   nextTick(() => {
     if (!componentAlive || !show.value || index < 0) return
     const option = searchResultListRef.value?.querySelector?.(
@@ -1095,6 +1158,7 @@ async function runServerSearch(append) {
   if (append) {
     loadingMore.value = true
   } else {
+    resetSearchPresentation()
     searching.value = true
     searchResultList.value = []
     total.value = 0
@@ -1114,7 +1178,6 @@ async function runServerSearch(append) {
       id: item.nodeUid,
       nodeUid: item.nodeUid,
       name: String(item.text ?? ''),
-      segments: buildMindmapSearchHighlightSegments(item.text, sessionKeyword),
       pathText: String(item.pathText ?? ''),
     }))
     searchResultList.value = append ? [...searchResultList.value, ...rows] : rows
@@ -1175,6 +1238,7 @@ function doReplaceAll() {
 }
 
 function resetSearchResults(mindMap = props.mindMap, { preserveCanvasFilter = false } = {}) {
+  resetSearchPresentation()
   clearTimeout(liveSearchTimer)
   liveSearchTimer = null
   searchRequestId += 1
@@ -1241,29 +1305,17 @@ function onSearchMatchNodeListChange(list) {
   ) return
   searching.value = false
   searchError.value = ''
-  const treeIndex = createDocumentTreeIndex(props.mindMap?.renderer?.renderTree)
+  resetSearchPresentation()
   searchResultList.value = (Array.isArray(list) ? list : []).map((item, index) => {
     const data = item?.data || item?.nodeData?.data || {}
-    let name = String(data.text ?? '')
     const id = data.uid || `local-search-result-${index}`
-    if (data.richText) {
-      name = getTextFromHtml(name) || ''
-    }
-    const segments = buildMindmapSearchHighlightSegments(name, searchText.value, {
-      caseSensitive: true,
-    })
-    return {
-      data: item,
-      id,
-      segments,
-      name,
-      pathText: getMindmapNodePathText(item, treeIndex),
-    }
+    return { data: item, id }
   })
   total.value = searchResultList.value.length
   showSearchInfo.value = true
   if (searchResultList.value.length <= 0) currentIndex.value = 0
   reapplyCanvasFilter()
+  if (currentIndex.value > 0) nextTick(() => revealSearchResult(currentIndex.value - 1))
 }
 
 function setSearchResultListHeight() {
@@ -1272,6 +1324,7 @@ function setSearchResultListHeight() {
     window.innerHeight,
     panelBottom,
   )
+  measureSearchViewport()
 }
 
 function handleSearchPanelResize() {
@@ -1342,6 +1395,16 @@ watch([show, panelMode], ([visible, mode]) => {
   bus.emit('searchPanelVisibilityChange', visible && mode === 'search')
 }, { immediate: true })
 
+watch(searchResultListRef, viewport => {
+  searchResultResizeObserver?.disconnect()
+  searchResultResizeObserver = null
+  if (viewport && typeof ResizeObserver !== 'undefined') {
+    searchResultResizeObserver = new ResizeObserver(measureSearchViewport)
+    searchResultResizeObserver.observe(viewport)
+  }
+  measureSearchViewport()
+})
+
 onMounted(() => {
   setSearchResultListHeight()
   if (typeof ResizeObserver !== 'undefined' && searchContainerRef.value) {
@@ -1397,6 +1460,8 @@ onBeforeUnmount(() => {
   tagOptionsRequestId += 1
   searchPanelResizeObserver?.disconnect()
   searchPanelResizeObserver = null
+  searchResultResizeObserver?.disconnect()
+  searchResultCache.clear()
   restoreAutoEnterTextEdit()
   bus.off('show_search', showSearch)
   bus.off('hide_search', close)
@@ -1834,6 +1899,11 @@ onBeforeUnmount(() => {
     overflow-y: auto;
     padding: 4px 6px 8px;
 
+    .searchResultsSpacer {
+      position: relative;
+      width: 100%;
+    }
+
     .searchResultItem {
       width: 100%;
       border: 0;
@@ -1847,7 +1917,9 @@ onBeforeUnmount(() => {
       border-radius: 6px;
       font-size: 13px;
       cursor: pointer;
-      position: relative;
+      position: absolute;
+      left: 0;
+      box-sizing: border-box;
 
       &::before {
         content: '';

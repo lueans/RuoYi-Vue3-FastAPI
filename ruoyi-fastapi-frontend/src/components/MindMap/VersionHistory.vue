@@ -1,6 +1,6 @@
 <template>
   <Sidebar ref="sidebarRef" title="版本历史" open-on-mount>
-    <div class="versionHistoryContainer">
+    <div class="versionHistoryContainer" :class="{ isDark: store.localConfig.isDark }">
       <!-- 预览状态提示 -->
       <div v-if="isPreviewing" class="previewBanner">
         <el-icon><InfoFilled /></el-icon>
@@ -26,6 +26,14 @@
         <el-tab-pane label="正式版本" name="formal" :disabled="isPreviewing || isOperating || aiPreviewBlocked" />
         <el-tab-pane label="草稿版本" name="draft" :disabled="isPreviewing || isOperating || aiPreviewBlocked" />
       </el-tabs>
+      <p class="versionRetentionNote" role="note">
+        {{ activeTab === 'draft'
+          ? '自动草稿最多每分钟记录一次，仅保留最近 10 份，并非每次保存都创建版本。重要节点请保存正式版本。'
+          : '正式版本会持续保留，直到手动删除。可用于恢复脑图内容、主题和文档展示设置。' }}
+      </p>
+      <p v-if="versionList.some(item => Number(item.snapshotSchemaVersion || 1) < 3)" class="versionRetentionNote">
+        较早的版本未记录水印和间距设置，预览及恢复这些版本时会保留当前设置。
+      </p>
 
       <!-- 版本列表 -->
       <div class="versionList" v-loading="loading">
@@ -89,7 +97,8 @@
 <script setup>
 import Sidebar from './Sidebar.vue'
 import { ensureMindmapDocumentPlugins } from '@/utils/mindmap-plugin-loader'
-import { store, actions } from './useStore'
+import { normalizeMindmapDocumentData } from '@/utils/mindmap-document-config'
+import { store } from './useStore'
 import { listVersions, getVersionDetail, restoreVersion, saveFormalVersion, deleteVersion } from '@/api/mindmap/version'
 import { getMindmap } from '@/api/mindmap/mindmap'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -100,6 +109,7 @@ const props = defineProps({
   mindMap: { type: Object, default: null },
   mindmapId: { type: Number, default: null },
   yjsSync: { type: Object, default: null },
+  documentData: { type: Object, default: () => ({}) },
   flushChanges: { type: Function, default: null },
   getContentRevision: { type: Function, default: null },
   getContentChangeVersion: { type: Function, default: null },
@@ -110,7 +120,7 @@ const props = defineProps({
   aiPreviewActive: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['change-tracking', 'editing-transition'])
+const emit = defineEmits(['change-tracking', 'editing-transition', 'document-data-preview'])
 
 const { proxy } = getCurrentInstance()
 const sidebarRef = ref(null)
@@ -129,6 +139,7 @@ const isOperating = computed(() => Boolean(operationType.value))
 let loadRequestId = 0
 let componentActive = true
 let operationSequence = 0
+let pendingPreviewRequest = null
 
 // 预览前保存的状态，用于退出预览时恢复
 let _prePreviewState = null
@@ -180,15 +191,18 @@ function getSessionContentChangeVersion(session) {
   return Number.isSafeInteger(version) && version >= 0 ? version : null
 }
 
-async function settleSessionChanges(session, failureMessage) {
+async function settleSessionChanges(session, failureMessage, canContinue = () => true) {
+  const canSettle = () => isCurrentSession(session) && canContinue()
+  if (!canSettle()) return false
   closeSessionEditors(session)
   await nextTick()
-  if (!isCurrentSession(session)) return false
-  if (session.flushChanges && await session.flushChanges() === false) {
+  if (!canSettle()) return false
+  const flushed = session.flushChanges ? await session.flushChanges() : true
+  if (!canSettle()) return false
+  if (flushed === false) {
     ElMessage.warning(failureMessage)
     return false
   }
-  if (!isCurrentSession(session)) return false
 
   // flush 的网络等待期间理论上已由 editing-transition 门闩禁止新编辑。
   // 在最终暂停/替换边界仍再收一次所有编辑器；若这一收口推进了代际，
@@ -196,18 +210,19 @@ async function settleSessionChanges(session, failureMessage) {
   let settledVersion = getSessionContentChangeVersion(session)
   closeSessionEditors(session)
   await nextTick()
-  if (!isCurrentSession(session)) return false
+  if (!canSettle()) return false
   let boundaryVersion = getSessionContentChangeVersion(session)
   if (settledVersion !== null && boundaryVersion !== settledVersion) {
-    if (session.flushChanges && await session.flushChanges() === false) {
+    const flushedAgain = session.flushChanges ? await session.flushChanges() : true
+    if (!canSettle()) return false
+    if (flushedAgain === false) {
       ElMessage.warning(failureMessage)
       return false
     }
-    if (!isCurrentSession(session)) return false
     settledVersion = getSessionContentChangeVersion(session)
     closeSessionEditors(session)
     await nextTick()
-    if (!isCurrentSession(session)) return false
+    if (!canSettle()) return false
     boundaryVersion = getSessionContentChangeVersion(session)
     if (settledVersion !== null && boundaryVersion !== settledVersion) {
       ElMessage.warning('等待期间检测到新的本地修改，请重试当前操作')
@@ -267,6 +282,29 @@ function finishOperation(token) {
   if (token === operationSequence) operationType.value = ''
 }
 
+function isCurrentPreviewRequest(session, token) {
+  return pendingPreviewRequest?.token === token
+    && pendingPreviewRequest.session === session
+    && store.activeSidebar === 'versionHistory'
+    && isCurrentSession(session)
+}
+
+function cancelPendingPreviewRequest() {
+  const request = pendingPreviewRequest
+  if (!request) return
+  pendingPreviewRequest = null
+  const release = () => {
+    // 旧请求晚到时只能释放自己的门闩，不能清除重开侧栏后新操作的状态。
+    endEditingTransition(request.session)
+    finishOperation(request.token)
+  }
+  if (isPreviewing.value) {
+    void exitPreview({ notify: false }).finally(release)
+  } else {
+    release()
+  }
+}
+
 const parseTime = (time) => {
   return proxy.parseTime(time)
 }
@@ -277,13 +315,14 @@ watch(() => store.activeSidebar, (val) => {
     loadVersions()
     sidebarRef.value?.open()
   } else {
+    cancelPendingPreviewRequest()
     // 侧边栏关闭时，如果正在预览则退出预览恢复数据
     if (isPreviewing.value) {
       exitPreview()
     }
     sidebarRef.value?.close()
   }
-}, { immediate: true })
+}, { immediate: true, flush: 'sync' })
 
 function onTabChange() {
   pageNum.value = 1
@@ -365,7 +404,7 @@ async function handleSaveVersion() {
 }
 
 async function handlePreview(item) {
-  if (!props.mindMap || isOperating.value) return
+  if (!props.mindMap || isOperating.value || store.activeSidebar !== 'versionHistory') return
   if (aiPreviewBlocked.value) {
     ElMessage.info('请先采纳或不采纳当前 AI 实时预览，再查看历史版本')
     return
@@ -374,6 +413,8 @@ async function handlePreview(item) {
   if (!versionId) return
   const session = captureSession()
   const operationToken = beginOperation(`preview:${versionId}`)
+  pendingPreviewRequest = { token: operationToken, session }
+  const canPreview = () => isCurrentPreviewRequest(session, operationToken)
   let editingTransitionStarted = false
   try {
     // 如果已经在预览中，先退出上一次预览
@@ -381,11 +422,13 @@ async function handlePreview(item) {
       await exitPreview()
     }
     if (!isCurrentSession(session)) return
+    if (!canPreview()) return
     editingTransitionStarted = beginEditingTransition(session)
     if (!editingTransitionStarted) return
 
     const res = await getVersionDetail(versionId)
     if (!isCurrentSession(session)) return
+    if (!canPreview()) return
     const versionData = res.data
     if (versionData?.nodeTree && session.mindMap) {
       // 历史预览会暂停 Yjs 和自动保存。只有当前编辑批次已经完整落云后，
@@ -394,9 +437,12 @@ async function handlePreview(item) {
       if (!await settleSessionChanges(
         session,
         '当前修改尚未成功保存，暂不能预览历史版本',
+        canPreview,
       )) return
+      if (!canPreview()) return
       // 保存当前实时状态，用于退出预览时恢复
       _prePreviewState = session.mindMap.getData(true)
+      _prePreviewState.documentData = normalizeMindmapDocumentData(props.documentData)
       _previewSession = session
       _previewAuthoritativeResetGeneration = props.authoritativeResetGeneration
       _previewAuthoritativeRecoveryFenced = false
@@ -416,31 +462,35 @@ async function handlePreview(item) {
         layout: versionData.layout,
         theme: versionData.theme,
         view: versionData.viewData,
+        documentData: versionData.documentData ?? _prePreviewState.documentData,
       }, 1500, session.mindMap, () => (
         isCurrentSession(session)
+        && canPreview()
+        && _previewSession === session
         && _editingTransitionSession === session
         && !hasAuthoritativeResetSincePreview()
       ))
       if (previewApplied === false) {
-        await exitPreview({ notify: false })
+        if (_previewSession === session) await exitPreview({ notify: false })
         return
       }
-      if (!isCurrentSession(session)) return
+      if (!canPreview()) return
       ElMessage.info('正在预览版本，点击"退出预览"或关闭侧边栏可恢复')
     }
   } catch (e) {
-    if (isPreviewing.value && isCurrentSession(session)) {
+    if (_previewSession === session && isPreviewing.value && isCurrentSession(session)) {
       fencePreviewApplyFailure(session, e)
     }
-    if (isPreviewing.value) {
+    if (_previewSession === session && isPreviewing.value) {
       await exitPreview({ notify: false })
     }
-    if (isCurrentSession(session)) {
+    if (canPreview()) {
       console.error('预览版本失败:', e)
       ElMessage.error('预览版本失败')
     }
   } finally {
-    if (editingTransitionStarted && !isPreviewing.value) {
+    if (pendingPreviewRequest?.token === operationToken) pendingPreviewRequest = null
+    if (editingTransitionStarted && _previewSession !== session) {
       endEditingTransition(session)
     }
     finishOperation(operationToken)
@@ -471,6 +521,7 @@ async function applyFullDataAndWait(
     mindMap.on?.('node_tree_render_end', onRenderEnd)
     timer = setTimeout(() => finish(), timeout)
     try {
+      emit('document-data-preview', normalizeMindmapDocumentData(data.documentData))
       mindMap.setFullData(data)
     } catch (error) {
       finish(error)
@@ -543,6 +594,7 @@ function exitPreview({ notify = true } = {}) {
 
 onBeforeUnmount(() => {
   componentActive = false
+  cancelPendingPreviewRequest()
   loadRequestId += 1
   operationSequence += 1
   operationType.value = ''
@@ -688,18 +740,39 @@ async function handleDelete(item) {
 <style lang="scss" scoped>
 .versionHistoryContainer {
   padding: 12px;
+  color: var(--el-text-color-primary);
+
+  &.isDark {
+    --el-text-color-primary: #e5e6eb;
+    --el-text-color-regular: #c4c7ce;
+    --el-text-color-secondary: #b0b5bf;
+    --el-color-primary: #79b3ff;
+    --el-color-danger: #ff8585;
+    --el-color-primary-light-9: #263d5a;
+    --el-color-primary-light-5: #4c6f99;
+    --el-fill-color-light: #353940;
+    --el-fill-color: #484e59;
+    --el-border-color-light: #484e59;
+  }
+
+  .versionRetentionNote {
+    margin: 8px 0 12px;
+    color: var(--el-text-color-regular);
+    font-size: 12px;
+    line-height: 1.6;
+  }
 
   .previewBanner {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    background: #edf4ff;
-    border: 1px solid #b3ccff;
+    background: var(--el-color-primary-light-9);
+    border: 1px solid var(--el-color-primary-light-5);
     border-radius: 6px;
     margin-bottom: 12px;
     font-size: 12px;
-    color: #3370ff;
+    color: var(--el-color-primary);
 
     .el-button {
       margin-left: auto;
@@ -717,18 +790,18 @@ async function handleDelete(item) {
     }
     .el-tabs__nav-wrap::after {
       height: 1px;
-      background: #f0f1f3;
+      background: var(--el-border-color-light);
     }
     .el-tabs__item {
       font-size: 13px;
-      color: #646a73;
+      color: var(--el-text-color-regular);
       &.is-active {
-        color: #3370ff;
+        color: var(--el-color-primary);
         font-weight: 500;
       }
     }
     .el-tabs__active-bar {
-      background-color: #3370ff;
+      background-color: var(--el-color-primary);
       height: 2px;
     }
   }
@@ -741,14 +814,14 @@ async function handleDelete(item) {
       width: 4px;
     }
     &::-webkit-scrollbar-thumb {
-      background: #d4d6d9;
+      background: var(--el-fill-color);
       border-radius: 4px;
     }
   }
 
   .emptyTip {
     text-align: center;
-    color: #8f959e;
+    color: var(--el-text-color-regular);
     padding: 40px 0;
     font-size: 13px;
   }
@@ -763,7 +836,7 @@ async function handleDelete(item) {
     margin-bottom: 2px;
 
     &:hover {
-      background: #f5f6f7;
+      background: var(--el-fill-color-light);
     }
 
     .versionInfo {
@@ -773,7 +846,7 @@ async function handleDelete(item) {
       .versionName {
         font-size: 13px;
         font-weight: 500;
-        color: #1f2329;
+        color: var(--el-text-color-primary);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -781,7 +854,7 @@ async function handleDelete(item) {
 
       .versionMeta {
         font-size: 12px;
-        color: #8f959e;
+        color: var(--el-text-color-regular);
         margin-top: 4px;
         display: flex;
         gap: 8px;
@@ -791,12 +864,6 @@ async function handleDelete(item) {
     .versionActions {
       flex-shrink: 0;
       margin-left: 8px;
-      opacity: 0;
-      transition: opacity 0.15s;
-    }
-
-    &:hover .versionActions {
-      opacity: 1;
     }
   }
 

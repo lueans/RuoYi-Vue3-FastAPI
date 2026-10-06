@@ -42,6 +42,11 @@ class MindmapVersion(Base):
         nullable=True,
         comment='主题配置',
     )
+    document_data = Column(
+        mysql.JSON if DataBaseConfig.db_type == 'mysql' else postgresql.JSONB,
+        nullable=True,
+        comment='文档级扩展配置快照，NULL 表示旧版本未记录',
+    )
     snapshot_schema_version = Column(Integer, nullable=False, server_default='1', comment='版本快照结构版本')
     tag_snapshots = Column(
         mysql.JSON if DataBaseConfig.db_type == 'mysql' else postgresql.JSONB,

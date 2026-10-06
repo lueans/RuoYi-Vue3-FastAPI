@@ -8,6 +8,34 @@
       class="pageAlert"
     />
 
+    <section class="executionRecovery" aria-labelledby="executionRecoveryTitle">
+      <h2 id="executionRecoveryTitle">旧执行退出核验</h2>
+      <p>仅处理已结束但退出状态仍待确认的任务。管理员必须先在实际执行主机（设备任务需核验对应设备）确认旧 Agent 进程与清理任务已退出；租约过期、断网或页面关闭均不构成退出证据。</p>
+      <el-form label-position="top" @submit.prevent="queryExecutionRecovery">
+        <el-form-item label="任务 ID">
+          <el-input v-model="recoveryJobId" maxlength="36" placeholder="粘贴用户复制的 jobId" :disabled="recoverySaving" @input="clearRecoveryDetail" />
+        </el-form-item>
+        <el-button :loading="recoveryLoading" :disabled="recoverySaving || !validRecoveryJobId" @click="queryExecutionRecovery">查询退出状态</el-button>
+        <p v-if="recoveryError" role="alert" class="recoveryError">{{ recoveryError }}</p>
+        <template v-if="recoveryDetail">
+          <dl class="recoveryFacts">
+            <dt>任务 / Agent</dt><dd>{{ recoveryDetail.jobId }} / {{ recoveryDetail.agentKey }}</dd>
+            <dt>状态 / 退出状态 / 执行轮次</dt><dd>{{ recoveryDetail.status }} / {{ recoveryDetail.executionState }} / {{ recoveryDetail.executionEpoch }}</dd>
+            <dt>执行设备</dt><dd>{{ recoveryDetail.deviceId || '平台执行主机' }}</dd>
+          </dl>
+          <template v-if="recoveryDetail.canConfirm">
+            <el-form-item label="主机核验依据与处理原因（至少 10 字，不填写密钥）">
+              <el-input v-model="recoveryReason" type="textarea" :rows="3" :minlength="10" :maxlength="500" show-word-limit :disabled="recoverySaving" placeholder="记录核验主机/设备、退出依据、处理原因；不要仅填写租约过期" />
+            </el-form-item>
+            <el-checkbox v-model="recoveryConfirmed" :disabled="recoverySaving">我已在实际执行主机核验：旧 Agent 进程、子进程及清理任务均已退出</el-checkbox>
+            <p>此操作会递增执行轮次、记录管理员与核验原因。只解除退出待确认限制，不重启 AI 或自动发送当前草稿。</p>
+            <el-button type="warning" :loading="recoverySaving" :disabled="!recoveryConfirmed || recoveryReason.trim().length < 10 || recoveryLoading" @click="confirmExecutionRecovery">记录已核验的退出回执</el-button>
+          </template>
+          <p v-else role="status">该任务不满足“已结束且退出待确认”，无需或不能通过此入口处理。</p>
+        </template>
+      </el-form>
+    </section>
+
     <el-row :gutter="12" class="mb8">
       <el-col :span="1.5">
         <el-button type="primary" plain icon="Refresh" :loading="loading" @click="loadConnectors">
@@ -83,7 +111,8 @@
       </el-table-column>
       <el-table-column label="运行上限" min-width="210">
         <template #default="{ row }">
-          <div>${{ row.maxBudgetUsd }} / {{ row.timeoutSeconds }} 秒</div>
+          <div>{{ row.timeoutSeconds }} 秒</div>
+          <div class="muted">{{ agentBudgetNotice(row) }}</div>
           <div class="muted">{{ row.maxNodes }} 节点 · {{ row.maxDepth }} 层</div>
           <div class="muted">最多 {{ row.maxConcurrentJobs }} 个并发任务</div>
         </template>
@@ -154,7 +183,7 @@
           <el-form-item label="单任务预算">
             <el-input-number v-model="form.maxBudgetUsd" :min="0.0001" :max="1000" :precision="4" :step="0.5" />
             <span class="unit">美元</span>
-            <div class="fieldHint">SDK 支持硬预算时调用前限制；否则按回报用量做结果入库前校验。</div>
+            <div class="fieldHint">{{ agentBudgetNotice({ ...editingConnector, maxBudgetUsd: form.maxBudgetUsd }) }}</div>
           </el-form-item>
           <el-form-item label="任务超时">
             <el-input-number v-model="form.timeoutSeconds" :min="30" :max="900" :step="30" />
@@ -220,15 +249,89 @@
 </template>
 
 <script setup name="MindmapAiAgents">
-import { computed, getCurrentInstance, onMounted, reactive, ref } from 'vue'
+import { computed, getCurrentInstance, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { agentBudgetNotice } from '@/utils/mindmap-agent-devices'
+import useUserStore from '@/store/modules/user'
 import {
   conformanceMindmapAiConnector,
+  getMindmapAiExecutionRecovery,
+  confirmMindmapAiExecutionStopped,
   healthCheckMindmapAiConnector,
   listMindmapAiConnectors,
   updateMindmapAiConnector,
 } from '@/api/mindmap/mindmap'
 
 const { proxy } = getCurrentInstance()
+const route = useRoute()
+const userStore = useUserStore()
+const recoveryJobId = ref(String(route.query.recoveryJobId || ''))
+const recoveryDetail = ref(null)
+const recoveryLoading = ref(false)
+const recoverySaving = ref(false)
+const recoveryReason = ref('')
+const recoveryConfirmed = ref(false)
+const recoveryError = ref('')
+const validRecoveryJobId = computed(() => /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(recoveryJobId.value.trim()))
+let recoveryGeneration = 0
+let pageAlive = true
+function clearRecoveryDetail() {
+  recoveryGeneration += 1
+  recoveryLoading.value = false
+  recoveryDetail.value = null
+  recoveryConfirmed.value = false
+  recoveryReason.value = ''
+  recoveryError.value = ''
+}
+async function queryExecutionRecovery() {
+  if (!validRecoveryJobId.value || recoverySaving.value) return
+  const target = recoveryJobId.value.trim()
+  const generation = ++recoveryGeneration
+  const owner = userStore.id
+  const current = () => pageAlive && generation === recoveryGeneration && userStore.id === owner
+  recoveryLoading.value = true
+  recoveryDetail.value = null
+  recoveryConfirmed.value = false
+  recoveryReason.value = ''
+  recoveryError.value = ''
+  try {
+    const response = await getMindmapAiExecutionRecovery(target)
+    if (current()) recoveryDetail.value = response.data
+  } catch (error) {
+    if (current()) recoveryError.value = error?.message || '读取退出状态失败，请重新查询。'
+  } finally {
+    if (current()) recoveryLoading.value = false
+  }
+}
+async function confirmExecutionRecovery() {
+  const detail = recoveryDetail.value
+  if (recoverySaving.value || recoveryLoading.value || !detail?.canConfirm
+    || !recoveryConfirmed.value || recoveryReason.value.trim().length < 10) return
+  const owner = userStore.id
+  const generation = recoveryGeneration
+  const current = () => pageAlive && generation === recoveryGeneration && userStore.id === owner
+  const reason = recoveryReason.value.trim()
+  recoverySaving.value = true
+  recoveryError.value = ''
+  try {
+    await proxy.$modal.confirm('确认已在实际执行主机核验旧执行彻底退出？本操作将永久记录管理员身份与核验原因。')
+    if (!current()) return
+    const response = await confirmMindmapAiExecutionStopped(detail.jobId, {
+      expectedEpoch: detail.executionEpoch, confirmedStopped: true, reason,
+    })
+    if (!current()) return
+    recoveryDetail.value = { ...detail, ...response.data, canConfirm: false }
+    recoveryConfirmed.value = false
+    proxy.$modal.msgSuccess('退出核验回执已记录，请返回 AI 面板刷新停止状态。')
+  } catch (error) {
+    if (current() && error !== 'cancel' && error !== 'close') {
+      recoveryError.value = error?.message || '记录回执失败，限制仍保留；请重新查询核对。'
+    }
+  } finally {
+    if (pageAlive) recoverySaving.value = false
+  }
+}
+onBeforeUnmount(() => { pageAlive = false; recoveryGeneration += 1 })
 const loading = ref(false)
 const saving = ref(false)
 const batchChecking = ref(false)
@@ -420,6 +523,14 @@ onMounted(loadConnectors)
 <style scoped lang="scss">
 .agentAdminPage {
   .pageAlert { margin-bottom: 16px; }
+  .executionRecovery { margin-bottom: 24px; padding: 16px; border: 1px solid var(--el-border-color); border-radius: 8px; }
+  .executionRecovery h2 { margin: 0 0 12px; font-size: 17px; }
+  .executionRecovery p { line-height: 1.6; color: var(--el-text-color-secondary); }
+  .executionRecovery :deep(.el-checkbox) { height: auto; white-space: normal; }
+  .recoveryFacts { display: grid; grid-template-columns: minmax(120px, auto) 1fr; gap: 8px 16px; }
+  .recoveryFacts dd { margin: 0; overflow-wrap: anywhere; }
+  .executionRecovery .recoveryError { color: var(--el-color-danger); }
+  @media (max-width: 640px) { .recoveryFacts { grid-template-columns: 1fr; } }
   .agentName { font-weight: 600; margin-bottom: 4px; }
   .muted { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
   .rollout { margin-top: 4px; }

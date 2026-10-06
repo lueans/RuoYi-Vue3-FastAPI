@@ -9,10 +9,9 @@
     </template>
 
     <div class="right-menu">
+      <MindmapAiTaskCenter />
       <template v-if="appStore.device !== 'mobile'">
         <header-search id="header-search" class="right-menu-item" />
-
-        <MindmapAiTaskCenter />
 
         <el-tooltip content="源码地址" effect="dark" placement="bottom">
           <ruo-yi-git id="ruoyi-git" class="right-menu-item hover-effect" />
@@ -37,8 +36,12 @@
       </template>
 
       <el-dropdown @command="handleCommand" class="avatar-container right-menu-item hover-effect" trigger="hover">
-        <div class="avatar-wrapper">
-          <img :src="userStore.avatar" class="user-avatar" />
+        <div
+          class="avatar-wrapper"
+          :class="{ 'is-mobile': appStore.device === 'mobile' }"
+          :aria-label="`${userStore.nickName || userStore.name || '当前用户'}的账户菜单`"
+        >
+          <img :src="userStore.avatar" class="user-avatar" alt="" />
           <span class="user-nickname"> {{ userStore.nickName }} </span>
         </div>
         <template #dropdown>
@@ -255,16 +258,21 @@ async function toggleTheme(event) {
     }
 
     .avatar-container {
+      flex-shrink: 0;
       margin-right: 0px;
-      padding-right: 0px;
+      padding-right: 8px;
 
       .avatar-wrapper {
-        margin-top: 10px;
-        right: 8px;
-        position: relative;
+        display: flex;
+        align-items: center;
+        height: 100%;
+        max-width: 180px;
+        line-height: normal;
+        white-space: nowrap;
 
         .user-avatar {
           cursor: pointer;
+          flex-shrink: 0;
           width: 30px;
           height: 30px;
           margin-right: 8px;
@@ -274,11 +282,17 @@ async function toggleTheme(event) {
         }
 
         .user-nickname{
-          position: relative;
-          left: 0px;
-          // bottom: 10px;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
           font-size: 14px;
           font-weight: bold;
+        }
+
+        &.is-mobile {
+          .user-avatar { margin-right: 0; }
+          .user-nickname { display: none; }
         }
 
         i {

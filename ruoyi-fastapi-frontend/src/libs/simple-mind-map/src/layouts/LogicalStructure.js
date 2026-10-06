@@ -24,10 +24,11 @@ class LogicalStructure extends Base {
         this.computedTopValue()
       },
       () => {
-        this.adjustTopValue()
-      },
-      () => {
-        this.balanceChildBranches()
+        // Automatic layout already computes the final positions in one pass.
+        // The older ancestor/sibling propagation is only needed for a tree
+        // whose manually positioned nodes prevent automatic balancing.
+        const result = this.balanceChildBranches()
+        if (result.balancedParentCount === 0) this.adjustTopValue()
       },
       () => {
         callback(this.root)
@@ -172,7 +173,7 @@ class LogicalStructure extends Base {
   // 以直属子节点中心等距为约束，使用子树真实轮廓求最小安全间距。
   // 后序度量、前序落位均为线性遍历，避免逐层重复平移整棵后代树。
   balanceChildBranches() {
-    balanceTreeChildrenVertically(this.root, {
+    return balanceTreeChildrenVertically(this.root, {
       getChildren: node => (
         this.renderer.isNodeExpandedForLayout(node) ? node.children : []
       ),

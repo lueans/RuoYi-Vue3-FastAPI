@@ -1,12 +1,10 @@
 import {
   MIND_MAP_IMAGE_MAX_BYTES,
-  MIND_MAP_IMAGE_URL_MAX_LENGTH,
   normalizeMindMapImageUrl,
 } from '../libs/simple-mind-map/src/utils/image.js'
 
 export const MINDMAP_IMAGE_MAX_BYTES = MIND_MAP_IMAGE_MAX_BYTES
 export const MINDMAP_IMAGE_LOAD_TIMEOUT_MS = 10000
-export const MINDMAP_IMAGE_URL_MAX_LENGTH = MIND_MAP_IMAGE_URL_MAX_LENGTH
 
 function formatMegabytes(bytes) {
   return Math.max(1, Math.round(bytes / 1024 / 1024))

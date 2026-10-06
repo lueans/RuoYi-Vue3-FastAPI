@@ -1,3 +1,5 @@
+import { loadExportImage, throwIfExportAborted } from './exportSession'
+
 // 将以空格分隔的字符串值转换成成数字/单位/值数组
 const getNumberValueFromStr = value => {
   let arr = String(value).split(/\s+/)
@@ -279,76 +281,83 @@ const drawBackgroundImageToCanvas = (
   height,
   img,
   { backgroundSize, backgroundPosition, backgroundRepeat },
-  callback = () => {}
+  callback = () => {},
+  { signal } = {}
 ) => {
   // 画布的长宽比
   let canvasRatio = width / height
   // 加载图片
-  let image = new Image()
-  image.src = img
-  image.onload = () => {
-    // 图片的宽度及长宽比
-    let imgWidth = image.width
-    let imgHeight = image.height
-    let imageRatio = imgWidth / imgHeight
-    // 绘制图片
-    // drawImage方法的参数值
-    let drawOpt = {
-      sx: 0,
-      sy: 0,
-      swidth: imgWidth,
-      sheight: imgHeight,
-      x: 0,
-      y: 0,
-      width: imgWidth,
-      height: imgHeight
+  loadExportImage(img, signal).then(image => {
+    let failure
+    try {
+      throwIfExportAborted(signal)
+      // 图片的宽度及长宽比
+      let imgWidth = image.width
+      let imgHeight = image.height
+      let imageRatio = imgWidth / imgHeight
+      // 绘制图片
+      // drawImage方法的参数值
+      let drawOpt = {
+        sx: 0,
+        sy: 0,
+        swidth: imgWidth,
+        sheight: imgHeight,
+        x: 0,
+        y: 0,
+        width: imgWidth,
+        height: imgHeight
+      }
+      // 模拟background-size
+      handleBackgroundSize({
+        backgroundSize,
+        drawOpt,
+        imageRatio,
+        canvasWidth: width,
+        canvasHeight: height,
+        canvasRatio
+      })
+
+      if (![drawOpt.width, drawOpt.height].every(value => Number.isFinite(value) && value > 0)) {
+        throw new Error('背景图片尺寸无效')
+      }
+      // 模拟background-position
+      handleBackgroundPosition({
+        backgroundPosition,
+        drawOpt,
+        imgWidth: drawOpt.width,
+        imgHeight: drawOpt.height,
+        imageRatio,
+        canvasWidth: width,
+        canvasHeight: height,
+        canvasRatio
+      })
+
+      // 模拟background-repeat
+      let notNeedDraw = handleBackgroundRepeat({
+        ctx,
+        image,
+        backgroundRepeat,
+        drawOpt,
+        imgWidth: drawOpt.width,
+        imgHeight: drawOpt.height,
+        imageRatio,
+        canvasWidth: width,
+        canvasHeight: height,
+        canvasRatio
+      })
+
+      //  绘制图片
+      if (!notNeedDraw) {
+        drawImage(ctx, image, drawOpt)
+      }
+
+    } catch (error) {
+      failure = error
+    } finally {
+      image.src = ''
     }
-    // 模拟background-size
-    handleBackgroundSize({
-      backgroundSize,
-      drawOpt,
-      imageRatio,
-      canvasWidth: width,
-      canvasHeight: height,
-      canvasRatio
-    })
-
-    // 模拟background-position
-    handleBackgroundPosition({
-      backgroundPosition,
-      drawOpt,
-      imgWidth: drawOpt.width,
-      imgHeight: drawOpt.height,
-      imageRatio,
-      canvasWidth: width,
-      canvasHeight: height,
-      canvasRatio
-    })
-
-    // 模拟background-repeat
-    let notNeedDraw = handleBackgroundRepeat({
-      ctx,
-      image,
-      backgroundRepeat,
-      drawOpt,
-      imgWidth: drawOpt.width,
-      imgHeight: drawOpt.height,
-      imageRatio,
-      canvasWidth: width,
-      canvasHeight: height,
-      canvasRatio
-    })
-
-    //  绘制图片
-    if (!notNeedDraw) {
-      drawImage(ctx, image, drawOpt)
-    }
-
-    callback()
-  }
-  image.onerror = e => {
-    callback(e)
-  }
+    callback(failure)
+  }, error => callback(error))
 }
 
 export default drawBackgroundImageToCanvas

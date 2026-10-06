@@ -3,6 +3,7 @@
  * 支持连接后认证（token 不在 URL 中）
  */
 import { getToken } from './auth.js'
+import { assertAuthSessionIdentity, captureAuthSessionIdentity } from './auth-expiry.js'
 
 const WS_CAPABILITIES = [
   'structured-node-patch-v1',
@@ -85,6 +86,7 @@ export function resolveMindmapWsUrl(location, baseApi, mindmapId) {
 
 export class MindmapWsClient {
   constructor(mindmapId, handlers, options = {}) {
+    this.authIdentity = captureAuthSessionIdentity()
     this.mindmapId = mindmapId
     this.handlers = handlers || {}
     this.eventTarget = options.eventTarget ?? (typeof window !== 'undefined' ? window : null)
@@ -218,8 +220,20 @@ export class MindmapWsClient {
     this._scheduleReconnect()
   }
 
+  _hasCurrentAuthIdentity() {
+    try {
+      assertAuthSessionIdentity(this.authIdentity)
+      return true
+    } catch (error) {
+      this.disconnect()
+      this._setConnectionState('auth-error', error.message)
+      return false
+    }
+  }
+
   connect() {
     if (this.manualClose || this.connectionState === 'auth-error') return
+    if (!this._hasCurrentAuthIdentity()) return
     if (this._isSocketOpenOrConnecting()) return
     if (!this.onlineListenerBound) {
       this.eventTarget?.addEventListener?.('online', this._handleOnline)
@@ -243,6 +257,7 @@ export class MindmapWsClient {
 
     socket.onopen = () => {
       if (!this._isCurrentSocket(socket, generation)) return
+      if (!this._hasCurrentAuthIdentity()) return
       this._clearPhaseTimer()
       this._setConnectionState('authenticating')
       try {
@@ -261,6 +276,7 @@ export class MindmapWsClient {
 
     socket.onmessage = (event) => {
       if (!this._isCurrentSocket(socket, generation)) return
+      if (!this._hasCurrentAuthIdentity()) return
       let data
       try {
         data = parseMindmapWsMessage(event.data, this.maxServerMessageBytes)
@@ -330,6 +346,7 @@ export class MindmapWsClient {
   }
 
   send(data) {
+    if (!this._hasCurrentAuthIdentity()) return false
     const socket = this.ws
     const generation = this.socketGeneration
     if (socket?.readyState === 1 && this.isAuthenticated) {

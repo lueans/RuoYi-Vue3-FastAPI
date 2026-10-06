@@ -235,24 +235,6 @@ class MindmapDao:
         )
 
     @classmethod
-    async def delete_mindmap_dao(cls, db: AsyncSession, mindmap_id: int) -> None:
-        """软删除思维导图"""
-        await db.execute(
-            update(Mindmap)
-            .where(Mindmap.id == mindmap_id)
-            .values(del_flag='2')
-        )
-
-    @classmethod
-    async def batch_delete_mindmap_dao(cls, db: AsyncSession, mindmap_ids: list[int]) -> None:
-        """批量软删除思维导图"""
-        await db.execute(
-            update(Mindmap)
-            .where(Mindmap.id.in_(mindmap_ids))
-            .values(del_flag='2')
-        )
-
-    @classmethod
     async def move_to_trash(
         cls, db: AsyncSession, mindmap_ids: list[int], owner_id: int, update_by: str,
     ) -> int:
@@ -322,22 +304,6 @@ class MindmapDao:
             )
         )
         return int(result.rowcount or 0)
-
-    @classmethod
-    async def check_name_unique(
-        cls, db: AsyncSession, name: str, owner_id: int, exclude_id: int | None = None
-    ) -> bool:
-        """检查名称是否唯一（同一用户下）"""
-        conditions = [
-            Mindmap.name == name,
-            Mindmap.owner_id == owner_id,
-            Mindmap.del_flag == '0',
-        ]
-        if exclude_id:
-            conditions.append(Mindmap.id != exclude_id)
-
-        result = (await db.execute(select(Mindmap.id).where(*conditions))).first()
-        return result is None
 
     @classmethod
     async def increment_version_count(cls, db: AsyncSession, mindmap_id: int) -> None:

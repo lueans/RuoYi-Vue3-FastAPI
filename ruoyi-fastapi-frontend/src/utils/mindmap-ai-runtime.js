@@ -1,11 +1,7 @@
 // OpenDesign-style normalized runtime view. This module never changes the canvas.
-export function projectRuntimeEvents(events = [], { running = false, cancelled = false } = {}) {
-  const entries = []
-  const messages = new Map()
-  const calls = new Map()
-  let todos = []
-  let steps = new Map()
-  let currentStep = null
+function foldRuntimeEvents(events, { running = false, cancelled = false }, {
+  entries = [], messages = new Map(), calls = new Map(), todos = [], steps = new Map(), currentStep = null,
+} = {}) {
   const attachStep = entry => currentStep ? { ...entry, step: currentStep } : entry
   for (const event of events) {
     const payload = event?.payload || {}
@@ -76,13 +72,56 @@ export function projectRuntimeEvents(events = [], { running = false, cancelled =
       }
     }
   }
-  for (const entry of entries) {
-    if (entry.kind === 'thinking') entry.active = running && entry === entries.at(-1)
-    if (entry.kind === 'tool' && entry.status === 'running' && !running) {
-      entry.status = cancelled ? 'cancelled' : 'unknown'
+  return { entries, todos, messages, calls, steps, currentStep }
+}
+
+function runtimeView({ entries, todos }, { running = false, cancelled = false } = {}) {
+  const stepSnapshots = new Map()
+  return { entries: entries.map(entry => {
+    // The reducer mutates aggregates in place. Publish fresh props so child
+    // components invalidate computed tool details when a call is refined.
+    const snapshot = { ...entry }
+    if (entry.step) {
+      if (!stepSnapshots.has(entry.step)) stepSnapshots.set(entry.step, { ...entry.step })
+      snapshot.step = stepSnapshots.get(entry.step)
     }
+    if (entry.kind === 'thinking') snapshot.active = running && entry === entries.at(-1)
+    // Presentation status must not overwrite the reducer's pending call state:
+    // later provider refinements/completions still belong to that same call.
+    if (entry.kind === 'tool' && entry.status === 'running' && !running) {
+      snapshot.status = cancelled ? 'cancelled' : 'unknown'
+    }
+    return snapshot
+  }), todos }
+}
+
+export function projectRuntimeEvents(events = [], options = {}) {
+  return runtimeView(foldRuntimeEvents(events, options), options)
+}
+
+/** One projector per mounted turn; historical prepends rebuild exactly once. */
+export function createRuntimeEventProjector() {
+  let state
+  let count = 0
+  let first
+  let last
+  let mode
+  return (events = [], options = {}) => {
+    const nextMode = `${Boolean(options.running)}:${Boolean(options.cancelled)}`
+    if (mode !== nextMode || count > events.length
+      || (count && (events[0] !== first || events[count - 1] !== last))) {
+      state = undefined
+      count = 0
+    }
+    state = foldRuntimeEvents(events.slice(count), options, state)
+    count = events.length
+    first = events[0]
+    last = events.at(-1)
+    mode = nextMode
+    // Publish a new outer snapshot for Vue; only message/tool/plan aggregates
+    // are copied here, never the accumulated raw event stream.
+    return runtimeView(state, options)
   }
-  return { entries, todos }
 }
 
 export function readAgentPreferences(ownerId, storage = globalThis.localStorage) {

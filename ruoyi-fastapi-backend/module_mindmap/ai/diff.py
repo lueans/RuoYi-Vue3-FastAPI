@@ -21,6 +21,71 @@ MIN_BULK_UPDATE_COUNT = 5
 HALF_UPDATE_RATIO = 0.5
 
 
+def enrich_diff_for_review(
+    impact: dict[str, Any], operations: list[dict[str, Any]], before: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach readable evidence without changing the stored/applicable operations."""
+    result = clone_json_value(impact)
+    nodes, parents, _, _ = _index_document(before) if before and isinstance(before.get('root'), dict) else ({}, {}, {}, {})
+    deleted_values = _deleted_values_for_review(operations, nodes, parents)
+    by_node = {(operation.get('type'), operation.get('nodeUid')): operation.get('payload') or {}
+               for operation in operations}
+    for change in result.get('changes') or []:
+        kind, uid = change.get('type'), change.get('nodeUid')
+        payload = by_node.get((kind, uid), {})
+        if kind == 'update_node':
+            original = _node_data(nodes[uid]) if uid in nodes else None
+            change['beforeValues'] = ({field: original[field] for field in change.get('fields', [])
+                                       if field in original} if original is not None else None)
+            change['afterValues'] = payload.get('set', {})
+            change['removedFields'] = payload.get('unset', [])
+        elif kind == 'create_node':
+            change['afterValues'] = payload.get('data', {})
+        elif kind == 'delete_subtree':
+            # Flat actual deletions: moved-out survivors are not deleted and
+            # overlapping original subtrees must never duplicate O(N²) content.
+            change['beforeValues'] = deleted_values.get(uid) if before else None
+        elif kind == 'set_document_meta':
+            change['beforeValues'] = ({field: before[field] for field in change.get('fields', [])
+                                       if field in before} if before else None)
+            change['afterValues'] = payload.get('set', {})
+            change['removedFields'] = payload.get('unset', [])
+    return result
+
+
+def _deleted_values_for_review(
+    operations: list[dict[str, Any]], nodes: dict[str, dict[str, Any]], parents: dict[str, str | None],
+) -> dict[str, list[dict[str, Any]]]:
+    """Replay only parent edges; emit each deleted node's original data once."""
+    parents = dict(parents)
+    children: dict[str | None, set[str]] = {}
+    for uid, parent in parents.items():
+        children.setdefault(parent, set()).add(uid)
+    deleted: dict[str, list[dict[str, Any]]] = {}
+    for operation in operations:
+        uid, kind = operation.get('nodeUid'), operation.get('type')
+        payload = operation.get('payload') or {}
+        if kind in {'create_node', 'move_node'}:
+            children.get(parents.get(uid), set()).discard(uid)
+            parent = payload.get('parentUid')
+            parents[uid] = parent
+            children.setdefault(parent, set()).add(uid)
+        elif kind == 'delete_subtree':
+            values = []
+            pending = [uid]
+            while pending:
+                current = pending.pop()
+                if current not in parents:
+                    continue
+                parent = parents.pop(current)
+                children.get(parent, set()).discard(current)
+                pending.extend(sorted(children.pop(current, set()), reverse=True))
+                if current in nodes:
+                    values.append({'nodeUid': current, 'data': _node_data(nodes[current])})
+            deleted[uid] = values
+    return deleted
+
+
 def _index_document(document: dict[str, Any]) -> tuple[
     dict[str, dict[str, Any]],
     dict[str, str | None],

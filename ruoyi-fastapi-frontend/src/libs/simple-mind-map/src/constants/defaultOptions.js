@@ -419,6 +419,8 @@ export const defaultOpt = {
   handleBeingExportSvg: null,
   // 导出图片或pdf都是通过canvas将svg绘制出来，再导出，所以如果思维导图特别大，宽高可能会超出canvas支持的上限，所以会进行缩放，这个上限可以通过该参数设置，代表canvas宽和高的最大宽度
   maxCanvasSize: 16384,
+  // 导出位图最多 16M 像素（原始 RGBA 约 64MiB）；宽高限制仍同时生效。
+  maxExportImgPixels: 16 * 1024 * 1024,
 
   // 【AssociativeLine插件】
   // 关联线默认文字

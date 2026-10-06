@@ -36,6 +36,7 @@ from module_mindmap.entity.vo.mindmap_vo import (
     CROSS_NODE_OPERATION_PREFIXES,
     CROSS_NODE_OPERATION_TYPES,
     FILE_OPERATION_FIELDS,
+    MAX_MINDMAP_NAME_LENGTH,
     NODE_OPERATION_TYPES,
     NODE_TAG_OPERATION_TYPES,
     TREE_OPERATION_TYPES,
@@ -2414,6 +2415,7 @@ class MindmapService:
         layout: str | None,
         theme: dict[str, Any] | None,
         created_by: str,
+        document_data: dict[str, Any] | None = None,
     ) -> None:
         """在保存点内创建可选草稿，失败时不污染主内容保存事务。"""
         try:
@@ -2428,6 +2430,7 @@ class MindmapService:
                     layout=layout,
                     theme=theme,
                     created_by=created_by,
+                    document_data=document_data,
                 )
         except Exception as exc:
             logger.warning(f'创建脑图草稿版本失败，主内容保存继续: {exc}')
@@ -3159,6 +3162,7 @@ class MindmapService:
                     layout=effective_layout,
                     theme=effective_theme,
                     created_by=operator,
+                    document_data=effective_document_data,
                 )
                 await query_db.commit()
 
@@ -3540,6 +3544,7 @@ class MindmapService:
                     layout=effective_layout,
                     theme=effective_theme,
                     created_by=operator,
+                    document_data=effective_document_data,
                 )
             if commit:
                 await query_db.commit()
@@ -4294,11 +4299,20 @@ class MindmapService:
             target_owner_id=user_id,
         )
 
-        # Create copy with new name
+        # 本人文件保留有效目录；共享文件不得沿用另一所有者的私有目录。
+        folder_id = None
+        if source.owner_id == user_id and getattr(source, 'folder_id', None):
+            folder = await MindmapFolderDao.get_folder_by_id(
+                query_db, source.folder_id, user_id, for_update=True,
+            )
+            folder_id = folder.id if folder else None
+        suffix = ' (副本)'
+        copy_name = f'{source.name[:MAX_MINDMAP_NAME_LENGTH - len(suffix)]}{suffix}'
         copy_model = MindmapModel(
-            name=f'{source.name} (副本)',
+            name=copy_name,
             description=source.description,
             owner_id=user_id,
+            folder_id=folder_id,
             layout=source.layout,
             theme=source.theme,
             node_tree=source_tree,

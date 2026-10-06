@@ -16,7 +16,7 @@ import directive from './directive' // directive
 
 // 注册指令
 import plugins from './plugins' // plugins
-import { download } from '@/utils/request'
+import { download, startAuthSessionMonitor } from '@/utils/request'
 
 // svg图标
 import 'virtual:svg-icons-register'
@@ -69,8 +69,10 @@ app.component('RightToolbar', RightToolbar)
 app.component('Editor', Editor)
 app.component('UserSelect', UserSelect)
 
-app.use(router)
 app.use(store)
+const stopAuthSessionMonitor = startAuthSessionMonitor()
+if (import.meta.hot) import.meta.hot.dispose(stopAuthSessionMonitor)
+app.use(router)
 app.use(plugins)
 app.use(elementIcons)
 app.component('svg-icon', SvgIcon)

@@ -47,7 +47,7 @@
                 <span class="meta-save-status" :class="saveStatus" role="status" aria-live="polite" aria-atomic="true">
                   {{ saveStatusText }}
                 </span>
-                <el-tooltip :content="realtimeStatusDetail" placement="bottom" :show-after="300">
+                <el-tooltip :content="realtimeStatusDetail" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip">
                   <span
                     class="meta-realtime-status"
                     :class="realtimeStatusClass"
@@ -88,7 +88,7 @@
             <el-icon><Close /></el-icon>
           </button>
         </div>
-        <Toolbar embedded class="header-command-toolbar" />
+        <Toolbar embedded class="header-command-toolbar" :mindmap-id="mindmapId" />
       </div>
       <div class="header-right">
         <div
@@ -97,7 +97,7 @@
           :class="{ 'has-recovery-actions': !isReadonly && (canRetryRealtime || saveRecoveryAction) }"
         >
           <div v-if="!isReadonly && (canRetryRealtime || saveRecoveryAction)" class="header-recovery-actions">
-            <el-tooltip v-if="canRetryRealtime" content="立即重新连接实时协作" placement="bottom" :show-after="300">
+            <el-tooltip v-if="canRetryRealtime" content="立即重新连接实时协作" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip">
               <button
                 class="realtime-retry-btn"
                 type="button"
@@ -129,7 +129,7 @@
             class="header-collaborators"
           />
           <template v-if="serverIsOwner && !isReadonly">
-            <el-tooltip content="管理分享链接与访问权限" placement="bottom" :show-after="300">
+            <el-tooltip content="管理分享链接与访问权限" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip">
               <button class="header-icon-btn share-btn" @click="openShareDialog" type="button" aria-label="分享脑图">
                 <svg-icon icon-class="share" />
                 <span class="header-action-label">分享</span>
@@ -137,7 +137,7 @@
             </el-tooltip>
           </template>
           <div class="header-utility-group" aria-label="文档工具">
-            <el-tooltip content="编辑命令" placement="bottom" :show-after="300" v-if="!isReadonly">
+            <el-tooltip content="编辑命令" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip" v-if="!isReadonly">
               <button
                 ref="mobileCommandTriggerRef"
                 class="header-icon-btn mobile-command-trigger"
@@ -152,7 +152,7 @@
                 <span class="header-action-label">编辑</span>
               </button>
             </el-tooltip>
-            <el-tooltip content="立即保存（Ctrl / ⌘ + S）" placement="bottom" :show-after="300" v-if="!isReadonly">
+            <el-tooltip content="立即保存（Ctrl / ⌘ + S）" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip" v-if="!isReadonly">
               <button
                 class="header-icon-btn save-action-btn"
                 type="button"
@@ -166,14 +166,15 @@
               </button>
             </el-tooltip>
             <el-tooltip
-              v-if="isReadonly"
               :content="activeSidebar === 'outline' ? '关闭节点大纲' : '查看节点大纲'"
               placement="bottom"
               :show-after="300"
+              :enterable="false"
+              popper-class="mindmap-header-tooltip"
             >
               <button
                 class="header-icon-btn outline-action-btn"
-                :class="{ 'is-active': activeSidebar === 'outline' }"
+                :class="{ 'mobile-outline-action': !isReadonly, 'is-active': activeSidebar === 'outline' }"
                 type="button"
                 :aria-label="activeSidebar === 'outline' ? '关闭脑图大纲' : '打开脑图大纲'"
                 :aria-pressed="activeSidebar === 'outline'"
@@ -183,13 +184,13 @@
                 <span class="header-action-label">大纲</span>
               </button>
             </el-tooltip>
-            <el-tooltip content="搜索节点（Ctrl / ⌘ + F）" placement="bottom" :show-after="300">
+            <el-tooltip content="搜索节点（Ctrl / ⌘ + F）" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip">
               <button class="header-icon-btn search-action-btn" type="button" aria-label="搜索节点" @click="openSearch">
                 <el-icon><Search /></el-icon>
                 <span class="header-action-label">搜索</span>
               </button>
             </el-tooltip>
-            <el-tooltip content="仅显示符合条件的节点" placement="bottom" :show-after="300">
+            <el-tooltip content="仅显示符合条件的节点" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip">
               <button class="header-icon-btn filter-action-btn" type="button" aria-label="筛选画布节点" @click="openFilter">
                 <el-icon><Filter /></el-icon>
                 <span class="header-action-label">筛选</span>
@@ -199,6 +200,8 @@
               :content="activeSidebar === 'comments' ? '关闭评论' : '查看节点评论'"
               placement="bottom"
               :show-after="300"
+              :enterable="false"
+              popper-class="mindmap-header-tooltip"
             >
               <button
                 class="header-icon-btn comment-action-btn"
@@ -216,6 +219,8 @@
               :content="activeSidebar === 'versionHistory' ? '关闭版本历史' : '查看版本历史'"
               placement="bottom"
               :show-after="300"
+              :enterable="false"
+              popper-class="mindmap-header-tooltip"
             >
               <button
                 class="header-icon-btn history-action-btn"
@@ -229,7 +234,7 @@
                 <span class="header-action-label">历史</span>
               </button>
             </el-tooltip>
-            <el-tooltip content="协作者管理" placement="bottom" :show-after="300" v-if="serverIsOwner && !isReadonly">
+            <el-tooltip content="协作者管理" placement="bottom" :show-after="300" :enterable="false" popper-class="mindmap-header-tooltip" v-if="serverIsOwner && !isReadonly">
               <button
                 class="header-icon-btn collaborator-action-btn"
                 :class="{ 'is-active': activeSidebar === 'collaboratorManager' }"
@@ -752,6 +757,14 @@ async function onSessionEnded(data) {
 async function showTerminalDialog(title, message, data) {
   if (terminalDialogShown) return
   terminalDialogShown = true
+  if (data?.needsLocalBackup && !data?.localRecoveryProtected) {
+    await ElMessageBox.alert(
+      '当前编辑会话已结束，未同步修改尚未成功备份。画布会保留为只读，请勿刷新或关闭页面；使用画布上方的“重试备份”，成功后再返回列表。',
+      title,
+      { type: 'error', confirmButtonText: '留在此页保护内容', showClose: false, closeOnClickModal: false, closeOnPressEscape: false },
+    )
+    return
+  }
   const backupMessage = data?.localBackupCreated && data?.localDraftPreserved
     ? ' 未同步修改已下载为 JSON，并保留在本地草稿中心。'
     : data?.localBackupCreated
@@ -792,6 +805,10 @@ function handleMetadataUpdated(metadata) {
 }
 
 async function confirmEditorNavigation() {
+  if (editRef.value?.isTerminalRecoveryBlocked?.()) {
+    ElMessage.error('未保存内容尚未备份，请先在画布上方重试备份后再离开')
+    return false
+  }
   const aiFinished = await editRef.value?.finishCompletedAiGeneration?.()
   if (aiFinished === false) {
     ElMessage.warning('AI 结果尚未完成保存，请完成保存或撤销后再离开')
@@ -1574,7 +1591,10 @@ onBeforeUnmount(() => {
   }
 }
 
+.header-icon-btn.mobile-outline-action { display: none; }
+
 @media (max-width: 760px) {
+  .header-icon-btn.mobile-outline-action { display: inline-flex; }
   .mindmap-edit-page {
     --mindmap-shell-top: 60px;
     --mindmap-workspace-left: 0px;
@@ -1778,6 +1798,11 @@ onBeforeUnmount(() => {
 </style>
 
 <style lang="scss">
+// 顶栏提示会覆盖侧栏关闭按钮；提示只有说明文本，应让点击穿透至实际控件。
+.mindmap-header-tooltip.el-popper {
+  pointer-events: none;
+}
+
 // 根视口也需禁用横向越界导航，覆盖侧栏和挂载到 body 的浮层；离开编辑页即恢复。
 html.mindmap-detail-page-active,
 body.mindmap-detail-page-active {

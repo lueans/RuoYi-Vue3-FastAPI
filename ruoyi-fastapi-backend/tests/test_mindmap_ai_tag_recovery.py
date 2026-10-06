@@ -170,6 +170,7 @@ async def test_recovered_direct_worker_uses_latest_cloud_then_original_scope(
     })
     read = AsyncMock(return_value=SimpleNamespace(node_tree=authoritative['root']))
     monkeypatch.setattr('module_mindmap.service.mindmap_ai_service.MindmapAiMutationGateway.read_document', read)
+    monkeypatch.setattr('module_mindmap.service.mindmap_ai_service.MindmapService.check_mindmap_access', AsyncMock())
     recovered = await MindmapAiTaskManager._resolve_run_source_document(
         None, _job(), request, {'document': old} if has_checkpoint else None, has_draft_history=True,
     )

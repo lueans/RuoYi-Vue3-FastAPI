@@ -62,6 +62,7 @@ test('task center aborts an expired in-flight request and neither focus nor its 
   let requestOptions, calls = 0
   const s = {
     authExpired: ref(false), loading: ref(false), error: ref(''), rawSessions: ref([{ sessionId: 'retained' }]),
+    page: ref(1), pageSize: 20, total: ref(0), serverAttentionTotal: ref(null),
     componentAlive: true, requestController: null, refreshTimer: null,
     listMindmapAiSessions: options => { requestOptions = options; calls++; return request.promise },
     formatMindmapAiError: error => error.message,

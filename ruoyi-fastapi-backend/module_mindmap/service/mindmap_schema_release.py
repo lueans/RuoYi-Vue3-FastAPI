@@ -94,6 +94,11 @@ MINDMAP_SCHEMA_MIGRATIONS = (
         '建立 AI 脑图 Connector、任务、会话、不可变 Artifact、Proposal、事件和撤销记录，'
         '并附加 Agent 治理策略、到期清理索引、讨论模式文字结果与实时草稿加密检查点',
     ),
+    MindmapMigrationDefinition(
+        '20261003_mindmap_release_upgrade.sql',
+        '补齐脑图版本的文档配置快照，旧版本保持未记录语义；'
+        'MySQL 已转换库一并清理无引用的旧标签结构（执行前停写并备份）',
+    ),
 )
 
 POSTGRESQL_MIGRATION_OVERRIDES = {
@@ -112,6 +117,7 @@ POSTGRESQL_MIGRATION_OVERRIDES = {
         '20260828_mindmap_tag_category_selection_mode_postgresql.sql'
     ),
     '20260910_mindmap_ai_agent.sql': '20260910_mindmap_ai_agent_postgresql.sql',
+    '20261003_mindmap_release_upgrade.sql': '20261003_mindmap_version_document_data_postgresql.sql',
 }
 
 

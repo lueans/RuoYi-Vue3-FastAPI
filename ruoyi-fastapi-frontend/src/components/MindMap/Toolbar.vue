@@ -135,7 +135,7 @@
     <NodeImage :readonly="isReadonly" />
     <NodeHyperlink :readonly="isReadonly" />
     <NodeNote :readonly="isReadonly" />
-    <NodeTag :readonly="isReadonly" />
+    <NodeTag :readonly="isReadonly" :mindmap-id="props.mindmapId" />
     <ExportDialog />
     <ImportDialog ref="importRef" :readonly="isReadonly" />
   </div>
@@ -157,6 +157,7 @@ import { isCurrentMindmapEventSource } from '@/utils/mindmap-event'
 import { selectLargestFittingToolbarCount } from '@/utils/mindmap-toolbar-layout'
 
 const props = defineProps({
+  mindmapId: { type: Number, default: null },
   embedded: {
     type: Boolean,
     default: false,

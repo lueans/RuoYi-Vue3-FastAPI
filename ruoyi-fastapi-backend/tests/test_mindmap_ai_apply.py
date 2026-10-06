@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
 from pydantic import ValidationError
@@ -124,18 +124,33 @@ async def test_cloud_save_idempotency_binds_resolved_name_and_folder(
             new=AsyncMock(side_effect=emulate_idempotent_creation),
         ) as add_mindmap,
         patch(
-            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.update_job',
-            new=AsyncMock(),
-        ),
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job',
+            new=AsyncMock(side_effect=[
+                SimpleNamespace(status='ready'),
+                SimpleNamespace(status='completed_file'),
+            ]),
+        ) as get_job,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.has_cloud_file_receipt',
+            new=AsyncMock(side_effect=[False, True]),
+        ) as has_receipt,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.transition_job_status',
+            new=AsyncMock(return_value=True),
+        ) as transition,
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.extend_result_expiration',
             new=AsyncMock(),
-        ),
+        ) as extend_expiration,
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.add_event',
             new=AsyncMock(),
-        ),
-        patch('module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event'),
+        ) as add_event,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.mindmap_ai_event_feeds.publish',
+            new=AsyncMock(),
+        ) as publish,
+        patch('module_mindmap.service.mindmap_ai_service.record_mindmap_ai_event') as record_metric,
     ):
         first = await MindmapAiService.save_artifact_cloud(
             database,
@@ -172,6 +187,28 @@ async def test_cloud_save_idempotency_binds_resolved_name_and_folder(
         'name': '原始名称',
         'folderId': 11,
     }
+    assert first['jobStatus'] == replay['jobStatus'] == 'completed_file'
+    assert get_job.await_args_list == [
+        call(database, record.job_id, 7, for_update=True),
+        call(database, record.job_id, 7, for_update=True),
+    ]
+    transition.assert_awaited_once_with(
+        database, record.job_id, {'ready', 'completed_no_change'},
+        {'status': 'completed_file', 'progress': COMPLETED_PROGRESS, 'completed_time': ANY},
+    )
+    extend_expiration.assert_awaited_once_with(
+        database, job_id=record.job_id, artifact_id=artifact_id, expires_time=ANY,
+    )
+    add_event.assert_awaited_once_with(database, record.job_id, 'cloud_file_created', ANY)
+    receipt_payload = add_event.await_args.args[3]
+    assert json.loads(receipt_payload) == {'artifactId': artifact_id, 'mindmapId': CLOUD_SAVED_MINDMAP_ID}
+    assert has_receipt.await_args_list == [
+        call(database, record.job_id, receipt_payload),
+        call(database, record.job_id, receipt_payload),
+    ]
+    publish.assert_awaited_once_with(record.job_id)
+    record_metric.assert_called_once_with('cloud_saved')
+    assert database.commit.await_args_list == [call(), call()]
 
 
 class _SessionFactory:

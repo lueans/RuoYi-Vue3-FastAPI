@@ -53,6 +53,7 @@ function harness({ sourceType = 'cloud_document', status = 'completed_direct' } 
   const calls = { commands: [], sent: [], persisted: [], attempts: [], errors: [] }
   let attempts = {}
   const s = {
+    props: { taskOnly: false },
     computed, ref, watch, form: reactive({ agentKey: 'codex', deviceId: '', modelId: null,
       intent: 'expand', sourceMode: 'current', scopeType: 'document', language: 'zh-CN',
       layout: 'logicalStructure', density: 'standard', generationMode: 'balanced', maxNodes: 50, maxDepth: 5 }),

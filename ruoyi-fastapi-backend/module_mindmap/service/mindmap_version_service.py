@@ -113,6 +113,7 @@ class MindmapVersionService:
         cls, db: AsyncSession, mindmap_id: int, node_tree: dict,
         view_data: dict | None, layout: str | None, theme: dict | None,
         created_by: str,
+        document_data: dict | None = None,
     ) -> None:
         """创建草稿版本（自动保存时调用），清理超出上限的旧草稿"""
         latest_draft = await MindmapVersionDao.get_latest_draft(
@@ -147,7 +148,8 @@ class MindmapVersionService:
             'view_data': view_data,
             'layout': layout,
             'theme': theme,
-            'snapshot_schema_version': 2,
+            'document_data': document_data or {},
+            'snapshot_schema_version': 3,
             'tag_snapshots': tag_snapshots,
             'created_by': created_by,
             'created_time': datetime.now(),
@@ -165,6 +167,11 @@ class MindmapVersionService:
         """创建正式版本（Ctrl+S 手动保存时调用）"""
         # 编辑权限检查已锁定文件行，后续版本号分配和计数更新共享该锁。
         mindmap = await _check_version_access(db, model.mindmap_id, user_id, require_edit=True)
+        if model.expected_revision is not None and model.expected_revision != mindmap.content_revision:
+            raise ServiceWarning(
+                message='脑图已被其他窗口更新，未创建恢复点，请确认最新内容后重试',
+                data={'currentRevision': mindmap.content_revision, 'expectedRevision': model.expected_revision},
+            )
         version_number = await MindmapVersionDao.get_next_version_number(
             db,
             model.mindmap_id,
@@ -188,7 +195,7 @@ class MindmapVersionService:
         )
 
         try:
-            await MindmapVersionDao.add_version(db, {
+            version = await MindmapVersionDao.add_version(db, {
                 'mindmap_id': model.mindmap_id,
                 'version_number': version_number,
                 'version_type': 1,  # 正式
@@ -197,7 +204,8 @@ class MindmapVersionService:
                 'view_data': mindmap.view_data,
                 'layout': mindmap.layout,
                 'theme': mindmap.theme,
-                'snapshot_schema_version': 2,
+                'document_data': getattr(mindmap, 'document_data', None) or {},
+                'snapshot_schema_version': 3,
                 'tag_snapshots': tag_snapshots,
                 'created_by': user_name,
                 'created_time': datetime.now(),
@@ -205,8 +213,13 @@ class MindmapVersionService:
 
             # 递增主表 version_count
             await MindmapDao.increment_version_count(db, model.mindmap_id)
+            result = {
+                'id': version.id,
+                'versionNumber': version_number,
+                'contentRevision': mindmap.content_revision,
+            }
             await db.commit()
-            return CrudResponseModel(is_success=True, message='正式版本创建成功')
+            return CrudResponseModel(is_success=True, message='正式版本创建成功', result=result)
         except Exception as e:
             await db.rollback()
             raise e
@@ -324,12 +337,18 @@ class MindmapVersionService:
                 for_update=True,
             )
             restored_tree_str = json.dumps(restored_tree, ensure_ascii=False)
+            # 历史版本没有记录文档配置时保留当前配置；新快照中的 {} 则明确
+            # 表示当时没有水印或自定义间距，恢复时必须清除后续新增的配置。
+            restored_document_data = getattr(version, 'document_data', None)
+            if restored_document_data is None:
+                restored_document_data = getattr(mindmap, 'document_data', None) or {}
             await MindmapDao.edit_mindmap_dao(db, {
                 'id': mindmap_id,
                 'node_tree': restored_tree_str,
                 'view_data': version.view_data,
                 'layout': version.layout,
                 'theme': version.theme,
+                'document_data': restored_document_data,
                 'update_by': user_name,
                 'update_time': datetime.now(),
             })
@@ -389,7 +408,8 @@ class MindmapVersionService:
                 'view_data': version.view_data,
                 'layout': version.layout,
                 'theme': version.theme,
-                'snapshot_schema_version': 2,
+                'document_data': restored_document_data,
+                'snapshot_schema_version': 3,
                 'tag_snapshots': await MindmapDocumentService.get_tag_snapshots(db, mindmap_id),
                 'created_by': user_name,
                 'created_time': datetime.now(),

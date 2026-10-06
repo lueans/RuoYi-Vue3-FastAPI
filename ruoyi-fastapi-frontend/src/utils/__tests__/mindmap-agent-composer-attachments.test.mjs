@@ -295,7 +295,7 @@ test('production timeline restoration preserves historical context metadata inde
   ]
   const appended = []
   const s = {
-    job: ref({ id: 'current', sessionId: 'session', turnIndex: 2, status: 'running' }), sessionTurns: ref([]),
+    job: ref({ id: 'current', sessionId: 'session', turnIndex: 2, status: 'running' }), sessionTurns: ref([]), agentEvents: ref([]),
     restoreGeneration: 1, timelineLoadGeneration: 0, timelineController: null,
     timelineLoading: ref(false), timelineError: ref(''), handoffTimelineReceipt: ref(null), currentSessionTitle: ref(''),
     selectedTurnJobId: ref('current'), restoringJob: ref(false), currentAiOwnerUserId: () => 'owner',
@@ -306,7 +306,7 @@ test('production timeline restoration preserves historical context metadata inde
     formatMindmapAiError: error => error.message,
     jobConfiguration: ref({ sourceMode: 'current', scopeType: 'branch', contextNodes: [{ uid: 'later', label: '当前草稿' }] }),
   }
-  const api = compile(['restoreSessionTimeline', 'upsertSessionTurn'], s)
+  const api = compile(['restoreSessionTimeline', 'sortHistoricalEvents', 'upsertSessionTurn'], s)
   const restored = await api.restoreSessionTimeline('session')
   assert.ok(Array.isArray(restored), s.timelineError.value)
   assert.equal(s.timelineLoading.value, false)

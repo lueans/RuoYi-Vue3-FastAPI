@@ -85,9 +85,14 @@ const useUserStore = defineStore(
       },
       // 退出系统
       logOut() {
+        const token = this.token
         return new Promise((resolve, reject) => {
-          this.logOutRemote(this.token).then(() => {
-            this.resetToken()
+          this.logOutRemote(token).then(() => {
+            // A logout response belongs only to the captured login. Another
+            // tab may already have replaced its cookie while this was pending.
+            if (this.token === token && (getToken() || null) === (token || null)) {
+              this.resetToken()
+            }
             resolve()
           }).catch(error => {
             reject(error)

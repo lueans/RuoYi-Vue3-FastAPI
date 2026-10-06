@@ -14,7 +14,7 @@
       class="xmindCanvasSelectDialog"
       :class="{ isDark: isDark }"
       v-model="xmindCanvasSelectDialogVisible"
-      width="480px"
+      width="min(480px, calc(100vw - 32px))"
       modal-class="xmindCanvasSelectOverlay"
       :show-close="false"
       :close-on-click-modal="false"
@@ -48,6 +48,7 @@
 </template>
 
 <script setup>
+import { ElMessage, ElMessageBox } from 'element-plus'
 import bus from './useEventBus'
 import { actions, store } from './useStore'
 import { assertMindmapImportDocument } from '@/utils/mindmap-import-validation'
@@ -71,6 +72,7 @@ let fileFetchController = null
 let importRequestId = 0
 let componentAlive = true
 let parsingForAi = false
+let applyingImport = false
 
 const supportFileStr = '.xmind,.smm,.json,.md,.txt'
 const MAX_IMPORT_FILE_SIZE = 20 * 1024 * 1024
@@ -221,17 +223,28 @@ async function handleMd(file) {
 }
 
 async function handleTxt(file) {
-  const text = (await file.raw.text()).replace(/\r\n?/g, '\n').trim()
-  if (!text) throw new Error('TXT 文件内容为空')
-  const lines = text.split('\n').map(item => item.trim()).filter(Boolean)
+  const text = (await file.raw.text()).replace(/\r\n?/g, '\n')
+  const lines = text.split('\n').filter(item => item.trim()).map(item => ({
+    text: item.trim(),
+    indent: item.match(/^[\t ]*/)[0].replace(/\t/g, '   ').length,
+  }))
+  if (!lines.length) throw new Error('TXT 文件内容为空')
   const fallbackTitle = String(file.name || '文本脑图').replace(/\.txt$/i, '') || '文本脑图'
-  const rootText = lines.length > 1 ? fallbackTitle : lines[0]
-  const childLines = lines.length > 1 ? lines : []
+  const hasHierarchy = lines.some(line => line.indent > lines[0].indent)
+  const useFirstLineAsRoot = hasHierarchy || lines.length === 1
+  const root = {
+    data: { text: useFirstLineAsRoot ? lines[0].text : fallbackTitle },
+    children: [],
+  }
+  const stack = [{ node: root, indent: -1 }]
+  for (const line of lines.slice(useFirstLineAsRoot ? 1 : 0)) {
+    while (stack.length > 1 && stack[stack.length - 1].indent >= line.indent) stack.pop()
+    const node = { data: { text: line.text }, children: [] }
+    stack[stack.length - 1].node.children.push(node)
+    stack.push({ node, indent: line.indent })
+  }
   return {
-    root: {
-      data: { text: rootText },
-      children: childLines.map(line => ({ data: { text: line }, children: [] })),
-    },
+    root,
     layout: 'logicalStructure',
     theme: { template: 'default', config: {} },
     view: null,
@@ -266,10 +279,34 @@ async function executeImport(file, type) {
   try {
     const data = await parseImportFile(file, type)
     if (!isImportRequestCurrent(requestId)) return false
-    await new Promise((resolve, reject) => {
-      const handled = bus.emit('setData', data, { resolve, reject })
-      if (!handled) reject(new Error('脑图编辑器尚未就绪'))
-    })
+    progressMessage.close()
+    importStatusText.value = '等待确认导入…'
+    try {
+      await ElMessageBox.confirm(
+        '导入将替换当前整张脑图，并清空当前撤销记录。云端脑图会先保存“导入前恢复点”，本地脑图会先下载完整 JSON 备份；恢复点或备份创建失败时不会替换。' +
+          (type === 'txt' ? ' TXT 仅保留文本和缩进层级，不包含样式、图片或关联线。' : ''),
+        '确认替换当前脑图',
+        { type: 'warning', confirmButtonText: '创建恢复点并替换', cancelButtonText: '取消导入', distinguishCancelAndClose: true },
+      )
+    } catch {
+      const error = new Error('已取消导入')
+      error.code = 'IMPORT_CANCELLED'
+      throw error
+    }
+    if (!isImportRequestCurrent(requestId)) return false
+    importStatusText.value = '正在创建恢复点并导入…'
+    applyingImport = true
+    try {
+      await new Promise((resolve, reject) => {
+        const handled = bus.emit('setData', data, { resolve, reject })
+        if (!handled) reject(new Error('脑图编辑器尚未就绪'))
+      })
+    } finally {
+      // Edit 在 resolve 之后的 finally 解开临时只读门闩；等待该状态通过
+      // Vue props 传回，避免成功导入被迟一拍的 readonly 误判成失效。
+      await nextTick()
+      applyingImport = false
+    }
     if (!isImportRequestCurrent(requestId)) return false
     importStatusText.value = '导入成功'
     ElMessage.success('导入成功')
@@ -334,7 +371,9 @@ async function handleParseMindmapFile(file, request = {}) {
 }
 
 watch(() => props.readonly, (readonly) => {
-  if (readonly && !parsingForAi) invalidateImportSession('脑图已切换为只读，导入已取消')
+  // 整图应用本身会暂时锁定编辑器；应用阶段由 Edit 的权限及修订号栅栏
+  // 决定是否提交，不能把这次内部锁误认为用户已取消导入。
+  if (readonly && !parsingForAi && !applyingImport) invalidateImportSession('脑图已切换为只读，导入已取消')
 })
 
 onMounted(() => {

@@ -5,6 +5,9 @@
 -- 2. 为没有统一标签的字段选项创建标签，并物化最终展示样式；
 -- 3. 把节点绑定改写为 tag_id，按 (node_id, tag_id) 去重；
 -- 4. 删除 mindmap_tag_field、mindmap_tag_field_option 及节点关系上的旧列。
+-- 旧字段表可能使用 utf8mb4_general_ci，而统一标签表使用 utf8mb4_0900_ai_ci。
+-- 跨表文本匹配显式采用 MySQL 8 的 utf8mb4_0900_ai_ci，避免隐式校对规则冲突；
+-- 不修改任一业务表的字符集或排序规则。执行器必须遇错立即停止，禁止 --force。
 
 DROP PROCEDURE IF EXISTS `ensure_mindmap_tag_category_type`;
 DELIMITER $$
@@ -44,6 +47,20 @@ BEGIN
           AND c.`owner_id` <> 0
           AND global_category.`id` IS NULL;
     END IF;
+
+    -- 先补齐选择模式，才能在删除旧字段前保留其单选语义。待回填标记让
+    -- 后续 20260828 迁移仍能收敛系统标记分组；已有列和用户配置不改写。
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'mindmap_tag_category'
+          AND COLUMN_NAME = 'selection_mode'
+    ) THEN
+        ALTER TABLE `mindmap_tag_category`
+            ADD COLUMN `selection_mode` VARCHAR(20) NOT NULL DEFAULT 'multiple'
+            COMMENT 'migration_pending_20260828_selection_mode'
+            AFTER `category_type`;
+    END IF;
 END$$
 DELIMITER ;
 CALL `ensure_mindmap_tag_category_type`();
@@ -70,13 +87,15 @@ BEGIN
 
     IF v_has_fields > 0 THEN
         INSERT IGNORE INTO `mindmap_tag_category` (
-            `name`, `category_type`, `owner_id`, `sort_order`, `created_by`, `created_time`
+            `name`, `category_type`, `selection_mode`, `owner_id`, `sort_order`, `created_by`, `created_time`
         )
         SELECT
             f.`name`, IF(f.`owner_id` = 0, 'system', 'custom'),
+            IF(f.`select_mode` = 'single', 'single', 'multiple'),
             f.`owner_id`, COALESCE(f.`sort_order`, 0),
             f.`created_by`, COALESCE(f.`created_time`, NOW())
-        FROM `mindmap_tag_field` AS f;
+        FROM `mindmap_tag_field` AS f
+        ORDER BY f.`id`;
 
         -- 悬空标签或跨所有者错误关联不能继续复用，后续为该选项建立独立标签。
         UPDATE `mindmap_tag_field_option` AS o
@@ -91,7 +110,9 @@ BEGIN
         JOIN `mindmap_tag_field` AS f ON f.`id` = o.`field_id`
         JOIN `mindmap_tag` AS t
           ON t.`owner_id` = f.`owner_id`
-         AND t.`tag_key` = LEFT(CONCAT('field_', f.`field_key`, '_', o.`option_key`), 100)
+         AND t.`tag_key` = CONVERT(
+             LEFT(CONCAT('field_', f.`field_key`, '_', o.`option_key`), 100) USING utf8mb4
+         ) COLLATE utf8mb4_0900_ai_ci
         SET o.`tag_id` = t.`id`
         WHERE o.`tag_id` IS NULL;
 
@@ -118,14 +139,17 @@ BEGIN
         FROM `mindmap_tag_field_option` AS o
         JOIN `mindmap_tag_field` AS f ON f.`id` = o.`field_id`
         LEFT JOIN `mindmap_tag_category` AS c
-          ON c.`owner_id` = f.`owner_id` AND c.`name` = f.`name`
+          ON c.`owner_id` = f.`owner_id`
+         AND c.`name` = CONVERT(f.`name` USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
         WHERE o.`tag_id` IS NULL;
 
         UPDATE `mindmap_tag_field_option` AS o
         JOIN `mindmap_tag_field` AS f ON f.`id` = o.`field_id`
         JOIN `mindmap_tag` AS t
           ON t.`owner_id` = f.`owner_id`
-         AND t.`tag_key` = CONCAT('legacy_field_', f.`id`, '_option_', o.`id`)
+         AND t.`tag_key` = CONVERT(
+             CONCAT('legacy_field_', f.`id`, '_option_', o.`id`) USING utf8mb4
+         ) COLLATE utf8mb4_0900_ai_ci
         SET o.`tag_id` = t.`id`
         WHERE o.`tag_id` IS NULL;
 
@@ -148,7 +172,8 @@ BEGIN
         JOIN `mindmap_tag_field_option` AS o ON o.`id` = canonical.`option_id`
         JOIN `mindmap_tag_field` AS f ON f.`id` = o.`field_id`
         LEFT JOIN `mindmap_tag_category` AS c
-          ON c.`owner_id` = f.`owner_id` AND c.`name` = f.`name`
+          ON c.`owner_id` = f.`owner_id`
+         AND c.`name` = CONVERT(f.`name` USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
         SET
             t.`category_id` = COALESCE(t.`category_id`, c.`id`),
             t.`style` = JSON_MERGE_PATCH(

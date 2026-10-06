@@ -873,7 +873,9 @@ async def test_local_current_snapshot_rejects_document_identity_and_status_races
     assert error.value.data == {'errorCode': 'AI_FOLLOWUP_STATE_CHANGED'}
     observer['add_job'].assert_not_awaited()
     observer['add_event'].assert_not_awaited()
-    observer['database'].commit.assert_not_awaited()
+    # Admission ended the preflight read snapshot before rechecking the parent;
+    # the state race still produced no job or event writes.
+    observer['database'].commit.assert_awaited_once()
 
     bad_identity_observer: dict = {}
     with pytest.raises(ServiceException) as identity_error:

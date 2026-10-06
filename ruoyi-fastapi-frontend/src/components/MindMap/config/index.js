@@ -210,7 +210,9 @@ export const shortcutKeyList = [
       { icon: 'iconshanchu', name: '删除节点', value: 'Delete' },
       { icon: 'icontianjiazijiedian', name: '插入下级节点', value: 'Tab' },
       { icon: 'iconjiedian', name: '插入同级节点', value: enter },
-      { icon: 'icondodeparent', name: '上移一个层级', value: 'Shift + Tab' },
+      { icon: 'icondodeparent', name: '移到关闭按钮', value: 'Shift + Tab' },
+      { icon: 'iconshangyi', name: '编辑上一／下一节点', value: 'Alt + ↑ / ↓' },
+      { icon: 'iconshanchu', name: '关闭大纲编辑', value: 'Esc' },
     ]
   },
 ]

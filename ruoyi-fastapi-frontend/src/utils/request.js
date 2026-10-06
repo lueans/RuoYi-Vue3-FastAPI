@@ -22,6 +22,9 @@ import {
 import { getCurrentLoginReturnPath } from '@/utils/login-redirect'
 import {
   claimReloginPrompt,
+  assertAuthSessionIdentity,
+  captureAuthSessionIdentity,
+  configureAuthSessionIdentity,
   claimAuthExpiryPrompt,
   createAuthExpiredError,
   isAuthExpiredError,
@@ -42,7 +45,54 @@ function shouldHandleAuthExpired(config) {
   return config?.skipAuthExpiredHandler !== true
 }
 
+const authIdentityContext = {
+  getToken,
+  getOwnerToken: () => useUserStore().token,
+  onChanged: handleAuthSessionChanged,
+}
+
+function handleAuthSessionChanged() {
+  const ownerToken = useUserStore().token
+  if (!ownerToken || ownerToken === getToken() || !claimAuthExpiryPrompt(ownerToken)) return
+  if (!isRelogin.show) claimReloginPrompt(isRelogin)
+  activeAuthPromptToken = ownerToken
+  ElMessageBox.confirm(
+    '登录账号已在其他页面切换。当前页面已暂停操作，重新载入前会先保护原账号的编辑内容。',
+    '账号已切换',
+    { confirmButtonText: '重新载入', cancelButtonText: '暂留此页', type: 'warning' },
+  ).then(() => requestAuthLogin()).catch(() => undefined).finally(() => {
+    if (activeAuthPromptToken === ownerToken) {
+      activeAuthPromptToken = null
+      releaseReloginPrompt(isRelogin)
+    }
+  })
+}
+
+export function assertCurrentAuthSession() {
+  assertAuthSessionIdentity(captureAuthSessionIdentity(authIdentityContext), authIdentityContext)
+}
+
+export function startAuthSessionMonitor() {
+  const releaseContext = configureAuthSessionIdentity(authIdentityContext)
+  const check = () => { try { assertCurrentAuthSession() } catch {} }
+  window.addEventListener('focus', check)
+  document.addEventListener('visibilitychange', check)
+  // Cookies have no cross-tab change event. Also catch a switch while an old
+  // tab remains visible but no request/stream message happens to be arriving.
+  const timer = setInterval(check, 5000)
+  check()
+  return () => {
+    clearInterval(timer)
+    window.removeEventListener('focus', check)
+    document.removeEventListener('visibilitychange', check)
+    releaseContext()
+  }
+}
+
 function assertAuthSessionUsable(config) {
+  if (config?.__authIdentity) {
+    assertAuthSessionIdentity(config.__authIdentity, authIdentityContext)
+  }
   if ((isAuthSessionExpired(config?.__authSessionToken)
       || isAuthSessionExpired(config?.__authSessionOwnerToken))
     && shouldHandleAuthExpired(config)) {
@@ -166,8 +216,13 @@ service.interceptors.request.use(async config => {
   // Keep the mounted session's identity if its cookie disappeared. This is
   // only an expiry/cleanup fence: never reuse the removed token as a credential.
   // Explicitly anonymous requests (login, public shares, logout) stay exempt.
-  config.__authSessionOwnerToken = ownerToken
-  config.__authSessionToken = token || ownerToken
+  // Preserve the identity of a transport-key retry instead of silently
+  // resubmitting an old owner's mutation with a newer cookie.
+  if (!Object.hasOwn(config, '__authIdentity')) {
+    config.__authIdentity = isToken ? null : { token: token || null, ownerToken }
+    config.__authSessionOwnerToken = ownerToken
+    config.__authSessionToken = token || ownerToken
+  }
   assertAuthSessionUsable(config)
   if (token) {
     config.headers['Authorization'] = 'Bearer ' + token // 让每个请求携带自定义token 请根据实际情况自行修改
@@ -219,6 +274,9 @@ service.interceptors.response.use(async res => {
     res = await decryptTransportResponse(res)
     // 未设置状态码则默认成功状态
     const code = Number(res.data.code ?? 200);
+    // Reject stale successful JSON and blob responses before consumers can
+    // publish them into the previous account's UI or storage partition.
+    assertAuthSessionUsable(res.config)
     const silentError = res.config?.silentError === true
     // 获取错误信息
     const msg = errorCode[code] || res.data.msg || errorCode['default']
@@ -252,6 +310,7 @@ service.interceptors.response.use(async res => {
     }
   },
   async error => {
+    if (error?.authSessionChanged) return Promise.reject(error)
     // 主动取消属于调用方生命周期控制，不是网络或业务错误。直接透传，避免
     // 快速切换页面、文件或搜索条件时弹出误导性的 “canceled” 错误消息。
     if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') {
@@ -259,6 +318,7 @@ service.interceptors.response.use(async res => {
     }
     // 错误响应也可能是加密信封，先尝试解密再进入统一错误提示流程。
     error = await decryptTransportErrorResponse(error)
+    assertAuthSessionUsable(error.config || error.response?.config)
     // 若后端提示密钥失效，则清空本地公钥缓存并基于原始请求重试一次。
     if (shouldRetryTransportWithFreshKey(error) && error.config && !error.config.__transportRetried) {
       invalidateTransportKeyMeta()

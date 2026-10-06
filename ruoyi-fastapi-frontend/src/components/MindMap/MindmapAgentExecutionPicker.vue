@@ -10,6 +10,7 @@
       <span class="executionHint">{{ running ? '切换会先停止当前轮' : '下一轮执行 Agent' }}</span>
       <el-button text size="small" @click="$emit('manage')">管理 Agents</el-button>
     </div>
+    <p v-if="!isDeviceAgent(agentKey)" class="executionNotice" role="note">{{ budgetNotice }}</p>
     <template v-if="isDeviceAgent(agentKey)">
       <div class="executionDeviceBar">
         <el-icon aria-hidden="true"><Monitor /></el-icon>
@@ -29,10 +30,11 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { Cpu, Monitor, Refresh } from '@element-plus/icons-vue'
-import { agentExecutionLocation, deviceExecutionLabel, deviceExecutionIssue, deviceAgentName, isDeviceAgent, isDeviceCatalogFresh, deviceBudgetNotice } from '@/utils/mindmap-agent-devices'
+import { agentExecutionLocation, deviceExecutionLabel, deviceExecutionIssue, deviceAgentName, isDeviceAgent, isDeviceCatalogFresh, deviceBudgetNotice, agentBudgetNotice } from '@/utils/mindmap-agent-devices'
 const props = defineProps({ agentKey: String, deviceId: String, agents: { type: Array, default: () => [] }, canUseAgent: { type: Function, default: () => true }, disabled: Boolean, running: Boolean, currentJob: Object, catalog: { type: Object, required: true }, issue: String })
 defineEmits(['select', 'manage', 'refresh'])
 const agentSelect = ref(null)
+const budgetNotice = computed(() => agentBudgetNotice(props.agents.find(agent => agent.agentKey === props.agentKey)))
 defineExpose({ focus: () => agentSelect.value?.focus() })
 const deviceStateLabel = device => isDeviceCatalogFresh(props.catalog, props.catalog.now || Date.now())
   ? deviceExecutionLabel(device, props.agentKey) : '状态待确认'

@@ -31,6 +31,9 @@ function decodeOutlineHtmlEntities(value) {
 
 function normalizeOutlineText(data) {
   const rawText = String(data?.text ?? '')
+  // Explicit plain text wins over the legacy HTML heuristic: code examples
+  // such as <title> must match both the canvas and the outline editor.
+  if (data?.richText === false) return rawText
   if (!data?.richText && !/<\/?[a-z][^>]*>/i.test(rawText)) return rawText
   return decodeOutlineHtmlEntities(
     rawText

@@ -54,6 +54,7 @@
 </template>
 
 <script setup>
+import { ElMessage } from 'element-plus'
 import Sidebar from './Sidebar.vue'
 import bus from './useEventBus'
 import { store, actions } from './useStore'

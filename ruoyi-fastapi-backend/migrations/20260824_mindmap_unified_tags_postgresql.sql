@@ -53,17 +53,33 @@ BEGIN
           );
     END IF;
 
+    -- 在删除旧字段前保存选择模式；后续迁移通过列注释继续完成系统标记
+    -- 分组回填。已有统一分组的选择模式保持不变。
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'mindmap_tag_category'
+          AND column_name = 'selection_mode'
+    ) THEN
+        ALTER TABLE mindmap_tag_category
+            ADD COLUMN selection_mode VARCHAR(20) NOT NULL DEFAULT 'multiple';
+        COMMENT ON COLUMN mindmap_tag_category.selection_mode
+            IS 'migration_pending_20260828_selection_mode';
+    END IF;
+
     IF to_regclass('mindmap_tag_field') IS NOT NULL THEN
         IF to_regclass('mindmap_tag_field_option') IS NULL THEN
             RAISE EXCEPTION '统一标签迁移中止：标签字段选项表不存在';
         END IF;
 
         INSERT INTO mindmap_tag_category (
-            name, category_type, owner_id, sort_order, created_by, created_time
+            name, category_type, selection_mode, owner_id, sort_order, created_by, created_time
         )
         SELECT DISTINCT ON (field.owner_id, field.name)
             field.name,
             CASE WHEN field.owner_id = 0 THEN 'system' ELSE 'custom' END,
+            CASE WHEN field.select_mode = 'single' THEN 'single' ELSE 'multiple' END,
             field.owner_id,
             COALESCE(field.sort_order, 0),
             field.created_by,

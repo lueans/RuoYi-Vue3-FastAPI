@@ -90,7 +90,7 @@ function harness({ executionMode = 'direct', status = 'completed_direct', propos
     scheduleDefaultLivePreviewAcceptance: jobId => calls.push(`accept:${jobId}`),
     formatMindmapAiError: error => error.message,
   }
-  const names = ['restoreSessionTimeline', 'appendAgentEvent', 'applyRealtimeJobEvent', 'connectRealtime',
+  const names = ['restoreSessionTimeline', 'sortHistoricalEvents', 'appendAgentEvent', 'applyRealtimeJobEvent', 'connectRealtime',
     'pollJob', 'hydrateTerminalResources', 'loadProposal', 'terminalJobResourceKey', 'finalizeTerminalJob']
   const api = new Function('scope', `with(scope) { ${names.map(functionSource).join('\n')} return { ${names.join(', ')} }; }`)(s)
   const deliverTerminal = () => streams[0].options.onEvent({ eventType: terminalEvent.eventType, data: terminalEvent })

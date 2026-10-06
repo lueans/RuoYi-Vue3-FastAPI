@@ -27,6 +27,17 @@ import Layout from '@/layout'
 // 公共路由
 export const constantRoutes = [
   {
+    path: '/help',
+    component: Layout,
+    hidden: true,
+    children: [{
+      path: 'mindmap',
+      component: () => import('@/views/mindmap/help.vue'),
+      name: 'MindmapHelp',
+      meta: { title: '脑图使用帮助' },
+    }],
+  },
+  {
     path: '/redirect',
     component: Layout,
     hidden: true,
@@ -84,6 +95,17 @@ export const constantRoutes = [
   },
   // 标签管理（需要登录+权限）
   {
+    path: '/mindmap/ai-task',
+    component: Layout,
+    hidden: true,
+    children: [{
+      path: '',
+      component: () => import('@/views/mindmap/ai-task.vue'),
+      name: 'MindmapAiTask',
+      meta: { title: 'AI 脑图任务', noCache: true },
+    }],
+  },
+  {
     path: '/mindmap/tags',
     component: Layout,
     hidden: true,
@@ -104,7 +126,9 @@ export const constantRoutes = [
       {
         path: '/index',
         component: () => import('@/views/dashboard/index'),
-        name: 'Index',
+        // Dynamic menus commonly use the child path "index" as their route
+        // name. Keep the affixed home route distinct from those menu records.
+        name: 'WorkspaceHome',
         meta: { title: '首页', icon: 'dashboard', affix: true }
       }
     ]

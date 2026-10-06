@@ -18,6 +18,7 @@ function compile(names, scope) {
 
 function composer() {
   const scope = {
+    props: { taskOnly: false },
     ref, computed, form: reactive({ prompt: '' }), job: ref({ id: 'parent', status: 'running' }),
     followupAvailable: ref(false), actionBusy: ref(false), livePreviewCanvasMutationBlocked: ref(false),
     executionStopBlocked: ref(false), agentSwitchPending: ref(false), agentSwitchPhase: ref(''), restoreError: ref(''), selectedAgentReady: ref(true),

@@ -5,13 +5,13 @@
     :width="360"
     trigger="click"
     popper-class="mindmapAiTaskCenterPopper"
-    @show="refreshTasks"
+    @show="refreshTasks()"
   >
     <template #reference>
       <button
         type="button"
         class="mindmapAiTaskCenterTrigger right-menu-item hover-effect"
-        aria-label="打开 AI 任务中心"
+        :aria-label="attentionCount ? `打开 AI 任务中心，${attentionCount} 个运行中、待处理或未读会话` : '打开 AI 任务中心'"
         :aria-expanded="visible"
       >
         <el-icon aria-hidden="true"><Bell /></el-icon>
@@ -25,14 +25,14 @@
       <header class="mindmapAiTaskCenterHeader">
         <div>
           <strong>AI 任务中心</strong>
-          <span>跨脑图查看后台任务和待处理结果</span>
+          <span>红点统计运行中、待处理和未读结果</span>
         </div>
         <button
           type="button"
           class="mindmapAiTaskCenterRefresh"
           :disabled="loading || authExpired"
           aria-label="刷新 AI 任务"
-          @click="refreshTasks"
+          @click="refreshTasks()"
         >
           <el-icon :class="{ 'is-loading': loading }"><Refresh /></el-icon>
         </button>
@@ -44,7 +44,7 @@
       </div>
       <div v-else-if="error" class="mindmapAiTaskCenterState is-error" role="alert">
         <span>{{ error }}</span>
-        <button type="button" @click="refreshTasks">重试</button>
+        <button type="button" @click="refreshTasks()">重试</button>
       </div>
       <div v-else-if="loading && !tasks.length" class="mindmapAiTaskCenterState" role="status">
         正在同步任务…
@@ -59,7 +59,7 @@
             type="button"
             class="mindmapAiTaskItemButton"
             :disabled="!item.canOpen"
-            :title="item.canOpen ? `打开${item.documentLabel}` : item.unavailableReason"
+            :title="item.canOpen ? `打开${item.documentLabel} · ${item.summary}` : item.unavailableReason"
             @click="openTask(item)"
           >
             <span class="mindmapAiTaskStatus" :class="`is-${item.statusTone}`" aria-hidden="true">
@@ -72,8 +72,15 @@
             </span>
             <el-icon class="mindmapAiTaskArrow" aria-hidden="true"><ArrowRight /></el-icon>
           </button>
+          <button v-if="item.canAcknowledge" type="button" class="mindmapAiTaskRead"
+            :disabled="acknowledgingJobId === item.jobId" @click="acknowledgeTask(item)">标为已读</button>
         </li>
       </ol>
+      <nav v-if="total > pageSize" class="mindmapAiTaskPagination" aria-label="AI 任务分页">
+        <button type="button" :disabled="loading || page <= 1" @click="refreshTasks(page - 1)">上一页</button>
+        <span role="status">第 {{ page }} / {{ pageCount }} 页 · 共 {{ total }} 个会话</span>
+        <button type="button" :disabled="loading || page >= pageCount" @click="refreshTasks(page + 1)">下一页</button>
+      </nav>
       <footer v-if="tasks.length" class="mindmapAiTaskCenterFooter">
         <span>后台任务会继续运行，关闭入口不会停止任务。</span>
       </footer>
@@ -85,7 +92,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, Bell, Refresh } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
-import { listMindmapAiSessions } from '@/api/mindmap/mindmap'
+import { listMindmapAiSessions, acknowledgeMindmapAiTask } from '@/api/mindmap/mindmap'
 import { formatMindmapAiError } from '@/utils/mindmap-ai-errors'
 import useUserStore from '@/store/modules/user'
 import { requestRelogin } from '@/utils/request'
@@ -99,6 +106,12 @@ const visible = ref(false)
 const loading = ref(false)
 const error = ref('')
 const rawSessions = ref([])
+const pageSize = 20
+const page = ref(1)
+const total = ref(0)
+const serverAttentionTotal = ref(null)
+const acknowledgingJobId = ref('')
+const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 let refreshTimer = null
 let requestController = null
 let componentAlive = true
@@ -111,6 +124,7 @@ const ATTENTION_STATUSES = new Set([
   'cancelled', 'stale', 'expired',
   'rejected',
 ])
+const ACTION_REQUIRED_STATUSES = new Set(['ready', 'needs_review', 'needs_input'])
 const STATUS_LABELS = {
   queued: '已排队',
   waiting_turn: '等待上一轮结果确认保存',
@@ -144,7 +158,7 @@ const tasks = computed(() => rawSessions.value
     return String(right.updateTime || '').localeCompare(String(left.updateTime || ''))
   }))
 
-const attentionCount = computed(() => tasks.value.filter(item => (
+const attentionCount = computed(() => serverAttentionTotal.value ?? tasks.value.filter(item => (
   item.statusTone === 'active' || item.statusTone === 'attention'
 )).length)
 
@@ -154,60 +168,100 @@ function normalizeTask(session) {
   const status = String(job.status || session.status || '').trim()
   const sourceMindmapId = Number(job.sourceMindmapId)
   const hasMindmapId = Number.isSafeInteger(sourceMindmapId) && sourceMindmapId > 0
+  const resultMindmapId = Number(session.resultMindmapId ?? job.resultMindmapId)
+  const hasResultMindmapId = Number.isSafeInteger(resultMindmapId) && resultMindmapId > 0
+  const openResult = status === 'completed_file' && hasResultMindmapId
   const documentAccessible = session.mindmapAccessible !== false
-  const canOpen = hasMindmapId && documentAccessible
+  const standalone = !hasMindmapId && ['none', 'uploaded_artifact', 'local_snapshot'].includes(job.sourceType)
+  const canOpen = openResult
+    ? session.resultMindmapAccessible !== false
+    : documentAccessible && (hasMindmapId || standalone)
+  const destinationMindmapId = openResult ? resultMindmapId : sourceMindmapId
   const documentLabel = String(
-    session.mindmapName || (canOpen ? `脑图 #${sourceMindmapId}` : '当前浏览器脑图'),
+    (openResult ? session.resultMindmapName : session.mindmapName)
+      || (standalone && !openResult ? '独立 AI 脑图任务'
+        : canOpen ? `脑图 #${destinationMindmapId}` : openResult ? '无法访问的结果脑图' : '无法访问的脑图'),
   ).trim()
   const title = String(session.title || job.title || 'AI 对话').trim() || 'AI 对话'
   const statusTone = ACTIVE_STATUSES.has(status)
     ? 'active'
-    : ATTENTION_STATUSES.has(status) ? 'attention' : 'quiet'
+    : ATTENTION_STATUSES.has(status) && (ACTION_REQUIRED_STATUSES.has(status) || !session.taskAcknowledged) ? 'attention' : 'quiet'
   return {
     sessionId: String(session.sessionId),
     jobId: String(job.id || ''),
     sourceMindmapId: canOpen ? sourceMindmapId : null,
+    destinationMindmapId: canOpen ? destinationMindmapId : null,
+    openResult,
+    standalone,
     documentLabel,
     title,
     status,
     statusTone,
+    canAcknowledge: ATTENTION_STATUSES.has(status) && !ACTION_REQUIRED_STATUSES.has(status) && !session.taskAcknowledged,
     statusLabel: STATUS_LABELS[status] || status || '等待开始',
     summary: summarizeJob(job, status),
     updateTime: session.updateTime || job.updateTime || '',
     canOpen: canOpen && Boolean(job.id),
-    unavailableReason: !hasMindmapId
-      ? '本地脑图任务只能在原浏览器会话中恢复'
-      : documentAccessible ? '' : '当前账号已无法访问这张脑图',
+    unavailableReason: canOpen ? '' : '当前账号已无法访问这张脑图或任务缺少有效来源',
   }
 }
 
 function summarizeJob(job, status) {
+  const messageOnly = job.target === 'message' || job.intent === 'discuss'
+  const direct = job.executionMode === 'direct' && job.sourceType === 'cloud_document'
+  const fileResult = job.target === 'file' && !direct
+  const localProposal = job.sourceType === 'local_snapshot' && job.target === 'proposal'
   if (status === 'running' || status === 'validating') {
-    return status === 'validating' ? '正在校验已保存结果' : '正在持续运行'
+    if (messageOnly) return status === 'validating' ? '正在整理回复' : '正在生成回复'
+    return status === 'validating' ? '正在校验生成结果' : '正在持续运行'
   }
   if (status === 'waiting_turn') return '等待上一轮结果确认保存'
-  if (status === 'needs_review') return '结果已在当前脑图中，等待确认'
+  if (status === 'needs_review') {
+    return localProposal ? '请回到原本地脑图查看差异并确认' : '请查看差异后确认是否采纳'
+  }
   if (status === 'needs_input') return 'AI 正在等待你的回答'
   if (status === 'failed') {
-    const errorCode = String(job.errorCode || '').trim()
-    return errorCode ? `可重试或切换 Agent · ${errorCode}` : '可重试或切换 Agent'
+    return formatMindmapAiError({ errorCode: job.errorCode }, '可重试或切换 Agent')
   }
-  if (status === 'cancelled') return '已保留已生成内容，可继续调整'
-  if (status === 'rejected') return '高风险变更未采纳，当前脑图保持原内容'
+  if (status === 'cancelled') return '可查看本轮记录并重试'
+  if (status === 'rejected') return '本轮变更未采纳，可查看执行记录'
   if (status === 'completed_direct') return '权威正文已保存，页面关闭后任务也不会中断'
-  return status === 'ready' ? '可查看变更并撤销本轮' : '点击进入查看详情'
+  if (status === 'ready') {
+    if (fileResult || ['none', 'uploaded_artifact'].includes(job.sourceType)) {
+      return '结果已生成，可查看、下载或另存'
+    }
+    if (localProposal) return '可查看或下载结果；采纳修改请回到原本地脑图'
+    return direct ? '可打开脑图确认保存结果' : '可查看结果与变更，确认是否采纳'
+  }
+  return '点击进入查看详情'
 }
 
-async function refreshTasks() {
+async function refreshTasks(requestedPage = page.value) {
   if (!componentAlive || authExpired.value || loading.value) return
   const controller = new AbortController()
   requestController = controller
   loading.value = true
   error.value = ''
   try {
-    const response = await listMindmapAiSessions({ limit: 20, signal: controller.signal })
+    let targetPage = Number.isSafeInteger(requestedPage) ? Math.max(1, requestedPage) : page.value
+    let response = await listMindmapAiSessions({
+      limit: pageSize, page: targetPage, taskCenter: true, signal: controller.signal,
+    })
+    if (!componentAlive || authExpired.value || controller.signal.aborted) return
+    const lastPage = Math.max(1, Math.ceil((Number(response?.data?.total) || 0) / pageSize))
+    // A session may have been deleted in another tab while viewing the last page.
+    if (targetPage > lastPage) {
+      targetPage = lastPage
+      response = await listMindmapAiSessions({
+        limit: pageSize, page: targetPage, taskCenter: true, signal: controller.signal,
+      })
+    }
     if (!componentAlive || authExpired.value || controller.signal.aborted) return
     rawSessions.value = Array.isArray(response?.data?.items) ? response.data.items : []
+    page.value = targetPage
+    total.value = Math.max(0, Number(response?.data?.total) || 0)
+    const count = response?.data?.attentionTotal
+    serverAttentionTotal.value = Number.isSafeInteger(count) && count >= 0 ? count : null
   } catch (requestError) {
     if (!componentAlive || authExpired.value || controller.signal.aborted) return
     error.value = formatMindmapAiError(requestError, 'AI 任务暂时无法同步')
@@ -232,10 +286,38 @@ function onWindowFocus() {
   void refreshTasks()
 }
 
+async function acknowledgeTask(item) {
+  if (authExpired.value || !item?.canAcknowledge || acknowledgingJobId.value) return
+  const ownerId = String(userStore.id)
+  acknowledgingJobId.value = item.jobId
+  try {
+    await acknowledgeMindmapAiTask(item.jobId, item.status)
+    if (!componentAlive || ownerId !== String(userStore.id) || authExpired.value) return
+    rawSessions.value = rawSessions.value.map(session => session.currentJob?.id === item.jobId
+      && session.currentJob?.status === item.status ? { ...session, taskAcknowledged: true } : session)
+    await refreshTasks()
+  } catch (failure) {
+    if (componentAlive && ownerId === String(userStore.id)) error.value = formatMindmapAiError(failure, '未能标记已读，请刷新后重试')
+  } finally { if (ownerId === String(userStore.id)) acknowledgingJobId.value = '' }
+}
+
 function openTask(item) {
   if (authExpired.value || !item?.canOpen || !item.jobId) return
+  if (item.canAcknowledge) void acknowledgeTask(item)
   visible.value = false
   const currentMindmapId = Number(route.query?.id)
+  if (item.openResult) {
+    if (route.path !== '/mindmap/edit' || currentMindmapId !== item.destinationMindmapId) {
+      // The saved result is a different document from the task's source. Do not
+      // attach aiJobId: restoring that source-bound job here would reject its scope.
+      void router.push({ path: '/mindmap/edit', query: { id: String(item.destinationMindmapId) } })
+    }
+    return
+  }
+  if (item.standalone) {
+    void router.push({ path: '/mindmap/ai-task', query: { aiJobId: item.jobId } })
+    return
+  }
   if (route.path === '/mindmap/edit' && currentMindmapId === item.sourceMindmapId) {
     window.dispatchEvent(new CustomEvent('mindmap-ai-open-task', {
       detail: { jobId: item.jobId },
@@ -310,6 +392,8 @@ onBeforeUnmount(() => {
 .mindmapAiTaskCenter {
   color: #303133;
 }
+.mindmapAiTaskRead { margin: 0 12px 8px; padding: 4px 8px; border: 0; background: transparent; color: var(--el-color-primary); font: inherit; cursor: pointer; }
+.mindmapAiTaskRead:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
 
 .mindmapAiTaskCenterHeader {
   display: flex;
@@ -475,4 +559,29 @@ onBeforeUnmount(() => {
   border-top: 1px solid #ebeef5;
   line-height: 1.5;
 }
+
+.mindmapAiTaskPagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 0;
+  font-size: 12px;
+  color: #606266;
+
+  button {
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+    padding: 4px 6px;
+    background: #fff;
+    color: #409eff;
+    cursor: pointer;
+
+    &:disabled { color: #a8abb2; cursor: not-allowed; }
+  }
+}
+</style>
+
+<style>
+.mindmapAiTaskCenterPopper { max-width: calc(100vw - 24px); }
 </style>

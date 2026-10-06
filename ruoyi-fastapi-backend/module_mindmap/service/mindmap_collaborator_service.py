@@ -184,20 +184,6 @@ class MindmapCollaboratorService:
             await db.rollback()
             raise
 
-    @classmethod
-    async def check_collaborator_access(
-        cls, db: AsyncSession, mindmap_id: int, user_id: int, require_edit: bool = False,
-    ) -> bool:
-        """检查用户是否有协作者权限访问脑图
-
-        :param require_edit: True 则要求编辑权限，False 只需查看权限
-        :return: True=有权限, False=无权限
-        """
-        permission = await MindmapCollaboratorDao.get_collaborator_permission(db, mindmap_id, user_id)
-        if permission is None:
-            return False
-        return not (require_edit and permission < 1)
-
     @staticmethod
     async def _notify_access_revoked(
         mindmap_id: int,

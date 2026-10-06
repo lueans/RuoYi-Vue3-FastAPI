@@ -1,4 +1,5 @@
 import { getToken } from './auth.js'
+import { assertAuthSessionIdentity, captureAuthSessionIdentity, subscribeAuthExpiry } from './auth-expiry.js'
 import { isMindmapAiAbortError as isAbortError } from './mindmap-ai-errors.js'
 import { stableJsonValue } from './mindmap-ai-shared.js'
 import { compareMindmapAiPreviewCoordinates } from './mindmap-ai-live-preview.js'
@@ -351,16 +352,24 @@ export async function streamMindmapAiJobEvents(jobId, {
   baseUrl = import.meta.env?.VITE_APP_BASE_API || '',
 } = {}) {
   if (!jobId || typeof fetchImpl !== 'function') throw new Error('AI 事件流参数无效')
+  const identity = captureAuthSessionIdentity()
+  assertAuthSessionIdentity(identity)
+  // Explicit credentials must describe the same mounted session as well.
+  if (identity) assertAuthSessionIdentity({ ...identity, token: token || null })
   const headers = { Accept: 'text/event-stream' }
   if (token) headers.Authorization = `Bearer ${token}`
   if (Number(afterSequence) > 0) headers['Last-Event-ID'] = String(afterSequence)
   // Own only this GET's transport. A stale SSE must not abort a concurrent
   // draft fetch, cancel the Agent, or mutate the caller's monitoring signal.
   const transport = new AbortController()
+  const stopForExpiry = subscribeAuthExpiry(() => {
+    transport.abort(createStreamError('AI_AUTH_REQUIRED', '当前会话已暂停，请重新载入页面后继续'))
+  })
   const forwardAbort = () => transport.abort(signal.reason)
   if (signal?.aborted) forwardAbort()
   else signal?.addEventListener('abort', forwardAbort, { once: true })
   const readTransport = async read => {
+    assertAuthSessionIdentity(identity)
     transport.signal.throwIfAborted()
     let onAbort
     const aborted = new Promise((_, reject) => {
@@ -370,7 +379,11 @@ export async function streamMindmapAiJobEvents(jobId, {
     const timer = setTimeout(() => transport.abort(createStreamError(
       'AI_STREAM_TIMEOUT', 'AI 实时连接长时间没有响应，正在恢复原任务的实时记录',
     )), MINDMAP_AI_STREAM_IDLE_MS)
-    try { return await Promise.race([read(), aborted]) }
+    try {
+      const result = await Promise.race([read(), aborted])
+      assertAuthSessionIdentity(identity)
+      return result
+    }
     catch (error) {
       // Fetch body readers can reject with AbortError first. Preserve our
       // timeout reason so the monitor does not mistake it for user cleanup.
@@ -412,6 +425,7 @@ export async function streamMindmapAiJobEvents(jobId, {
       buffer = parsed.remainder
       for (const event of parsed.events) {
         transport.signal.throwIfAborted()
+        assertAuthSessionIdentity(identity)
         await onEvent?.(event)
       }
       if (done) {
@@ -420,6 +434,7 @@ export async function streamMindmapAiJobEvents(jobId, {
       }
     }
   } finally {
+    stopForExpiry()
     signal?.removeEventListener('abort', forwardAbort)
     if (!completed) {
       transport.abort()

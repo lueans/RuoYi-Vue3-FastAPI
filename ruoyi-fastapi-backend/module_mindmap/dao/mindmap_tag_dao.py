@@ -90,14 +90,19 @@ class MindmapTagDao:
         cls,
         db: AsyncSession,
         category_ids: list[int],
+        *,
+        visible_owner_id: int | None = None,
     ) -> dict[int, int]:
         if not category_ids:
             return {}
-        rows = (await db.execute(
+        query = (
             select(MindmapTag.category_id, func.count(MindmapTag.id))
             .where(MindmapTag.category_id.in_(category_ids))
             .group_by(MindmapTag.category_id)
-        )).all()
+        )
+        if visible_owner_id is not None:
+            query = query.where(MindmapTag.owner_id.in_({0, visible_owner_id}))
+        rows = (await db.execute(query)).all()
         return {int(category_id): int(count) for category_id, count in rows}
 
     @classmethod
@@ -148,9 +153,12 @@ class MindmapTagDao:
         keyword: str | None = None,
         owner_scope: str = 'all',
         page_num: int = 1, page_size: int = 20,
+        allowed_owner_id: int | None = None,
     ) -> PageModel:
         """获取标签列表"""
         query = select(MindmapTag)
+        if allowed_owner_id is not None:
+            query = query.where(MindmapTag.owner_id.in_({0, allowed_owner_id}))
 
         # 范围筛选
         if owner_scope == 'mine':

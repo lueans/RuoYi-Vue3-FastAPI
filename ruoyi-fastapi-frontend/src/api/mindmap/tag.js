@@ -2,10 +2,11 @@ import request from '@/utils/request'
 
 // ── 统一标签 API ──
 
-export function listTagCategories() {
+export function listTagCategories(mindmapId) {
   return request({
     url: '/mindmap/tag/categories',
-    method: 'get'
+    method: 'get',
+    params: mindmapId ? { mindmapId } : undefined,
   })
 }
 
@@ -103,11 +104,12 @@ export function replaceTag(tagId, targetTagId) {
   })
 }
 
-export function addTag(data) {
+export function addTag(data, mindmapId) {
   return request({
     url: '/mindmap/tag',
     method: 'post',
-    data: data
+    data: data,
+    params: mindmapId ? { mindmapId } : undefined,
   })
 }
 
@@ -127,10 +129,10 @@ export function deleteTags(tagIds, unbind = false) {
   })
 }
 
-export function getTagSuggestions(keyword) {
+export function getTagSuggestions(keyword, mindmapId) {
   return request({
     url: '/mindmap/tag/suggestions',
     method: 'get',
-    params: { keyword }
+    params: { keyword, ...(mindmapId ? { mindmapId } : {}) }
   })
 }

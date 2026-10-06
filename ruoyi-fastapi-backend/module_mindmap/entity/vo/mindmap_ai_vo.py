@@ -20,6 +20,7 @@ AI_INTENTS = frozenset({
     'discuss',
 })
 MAX_MODEL_REF_LENGTH = 128
+MIN_RECOVERY_REASON_LENGTH = 10
 MAX_RETENTION_DAYS = 365
 MAX_SELECTED_NODE_COUNT = 200
 MAX_ATTACHMENT_TOTAL_TEXT_LENGTH = 100_000
@@ -467,6 +468,29 @@ class MindmapAiJobRetryModel(MindmapAiAttachmentsModel):
         return normalized
 
 
+class MindmapAiExecutionRecoveryModel(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra='forbid')
+
+    expected_epoch: int = Field(ge=0, strict=True)
+    confirmed_stopped: Literal[True]
+    reason: str = Field(min_length=10, max_length=500)
+
+    @field_validator('confirmed_stopped', mode='before')
+    @classmethod
+    def validate_confirmation(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError('必须明确确认已在执行主机核验旧执行退出')
+        return value
+
+    @field_validator('reason')
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < MIN_RECOVERY_REASON_LENGTH:
+            raise ValueError('请填写至少 10 个字符的主机核验依据与处理原因')
+        return value
+
+
 class MindmapAiLocalApplyAckModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -539,6 +563,7 @@ class MindmapAiJobModel(BaseModel):
     cancel_requested_time: datetime | None = None
     source_type: str
     source_mindmap_id: int | None = None
+    result_mindmap_id: int | None = None
     base_revision: int | None = None
     base_hash: str | None = None
     base_room_epoch: str | None = None

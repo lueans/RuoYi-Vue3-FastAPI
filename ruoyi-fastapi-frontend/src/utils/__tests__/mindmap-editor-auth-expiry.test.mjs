@@ -24,6 +24,7 @@ function editorHarness() {
     componentMounted: true, terminalState: '', terminatingSession: false,
     isAuthSessionExpired: () => true, userStore: { token: 'test-session' },
     terminalCleanup: null, terminalCleanupPending: null,
+    terminalRecoveryBlocked: ref(false),
     authenticationExpired: ref(false), authenticationRecoveryMessage: ref(''),
     activeSaveMutation: null, contentRevision: 4, frozen: null,
     draftProtection: { getChangeVersion: () => 2 },

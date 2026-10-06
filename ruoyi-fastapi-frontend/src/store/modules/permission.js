@@ -33,23 +33,21 @@ const usePermissionStore = defineStore(
         this.sidebarRouters = routes
       },
       generateRoutes(roles) {
-        return new Promise(resolve => {
-          // 向后端请求路由数据
-          getRouters().then(res => {
-            const sdata = JSON.parse(JSON.stringify(res.data))
-            const rdata = JSON.parse(JSON.stringify(res.data))
-            const defaultData = JSON.parse(JSON.stringify(res.data))
-            const sidebarRoutes = filterAsyncRouter(sdata)
-            const rewriteRoutes = filterAsyncRouter(rdata, false, true)
-            const defaultRoutes = filterAsyncRouter(defaultData)
-            const asyncRoutes = filterDynamicRoutes(dynamicRoutes)
-            asyncRoutes.forEach(route => { router.addRoute(route) })
-            this.setRoutes(rewriteRoutes)
-            this.setSidebarRouters(constantRoutes.concat(sidebarRoutes))
-            this.setDefaultRoutes(sidebarRoutes)
-            this.setTopbarRoutes(defaultRoutes)
-            resolve(rewriteRoutes)
-          })
+        // Propagate rejected account/route requests to the navigation guard.
+        return getRouters().then(res => {
+          const sdata = JSON.parse(JSON.stringify(res.data))
+          const rdata = JSON.parse(JSON.stringify(res.data))
+          const defaultData = JSON.parse(JSON.stringify(res.data))
+          const sidebarRoutes = filterAsyncRouter(sdata)
+          const rewriteRoutes = filterAsyncRouter(rdata, false, true)
+          const defaultRoutes = filterAsyncRouter(defaultData)
+          const asyncRoutes = filterDynamicRoutes(dynamicRoutes)
+          asyncRoutes.forEach(route => { router.addRoute(route) })
+          this.setRoutes(rewriteRoutes)
+          this.setSidebarRouters(constantRoutes.concat(sidebarRoutes))
+          this.setDefaultRoutes(sidebarRoutes)
+          this.setTopbarRoutes(defaultRoutes)
+          return rewriteRoutes
         })
       }
     }

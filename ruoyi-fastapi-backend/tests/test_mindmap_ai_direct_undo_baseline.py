@@ -56,6 +56,7 @@ async def _job_with_baseline(state: SimpleNamespace) -> SimpleNamespace:
         id='10000000-0000-4000-8000-000000000001', user_id=7, proposal_id=None, source_type='cloud_document',
         source_mindmap_id=9, base_revision=revision, base_hash=document_hash,
         session_id='session', agent_key='codex', intent='expand', target='file', turn_index=1,
+        parent_job_id=None, created_time=datetime.now(),
         status='completed_direct',
         artifact_id=None, base_room_epoch='epoch',
         expires_time=datetime.now() + timedelta(days=1),
@@ -187,7 +188,10 @@ async def test_all_authoritative_source_entries_persist_server_only_raw_baseline
     monkeypatch.setattr(service.MindmapAiDao, 'get_job_by_idempotency', AsyncMock(return_value=None))
     monkeypatch.setattr(service.MindmapAiDao, 'get_job', AsyncMock(return_value=parent))
     monkeypatch.setattr(service.MindmapAiDao, 'get_session', AsyncMock(return_value=session))
-    monkeypatch.setattr(service.MindmapAiDao, 'lock_jobs_for_session', AsyncMock(return_value=[parent]))
+    monkeypatch.setattr(service.MindmapAiDao, 'lock_jobs_for_session', AsyncMock(
+        return_value=[parent, child] if entry == 'queued_release' else [parent],
+    ))
+    monkeypatch.setattr(service.MindmapAiDao, 'get_connector', AsyncMock(return_value=SimpleNamespace()))
     monkeypatch.setattr(service.MindmapAiDao, 'list_waiting_followups', AsyncMock(return_value=[child]))
     monkeypatch.setattr(service.MindmapAiDao, 'add_job', insert)
     monkeypatch.setattr(service.MindmapAiDao, 'update_job', updates)

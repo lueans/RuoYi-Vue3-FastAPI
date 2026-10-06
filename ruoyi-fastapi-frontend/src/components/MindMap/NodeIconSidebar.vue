@@ -77,6 +77,7 @@ import {
 
 const props = defineProps({
   mindMap: { type: Object, default: null },
+  mindmapId: { type: Number, default: null },
 })
 
 const sidebarRef = ref(null)
@@ -258,6 +259,7 @@ async function loadTagCatalog(requestId) {
     const response = await listTags({
       pageNum,
       pageSize: 100,
+      mindmapId: props.mindmapId || undefined,
     })
     if (!isHomeTagRequestCurrent(requestId)) return null
     const pageRows = response.rows || []
@@ -274,7 +276,7 @@ async function loadHomeTags() {
   loading.value = true
   loadError.value = ''
   try {
-    const categoryResponse = await listTagCategories()
+    const categoryResponse = await listTagCategories(props.mindmapId)
     const homeCategories = (categoryResponse.data || []).filter(category => (
       category?.id && category.showOnHome
     ))
@@ -326,6 +328,12 @@ function onManagedTagDefinitionChanged() {
   if (store.activeSidebar === 'nodeTagSidebar') void loadHomeTags()
 }
 
+watch(() => props.mindmapId, () => {
+  markerRequests.invalidate()
+  homeCategoryGroups.value = []
+  if (store.activeSidebar === 'nodeTagSidebar') void loadHomeTags()
+}, { flush: 'sync' })
+
 onMounted(() => {
   bus.on('managed_tag_definition_changed', onManagedTagDefinitionChanged)
 })
@@ -343,8 +351,7 @@ onBeforeUnmount(() => {
   padding: 0 12px 20px;
 
   &.isDark {
-    .group-title,
-    .section-heading strong {
+    .group-title {
       color: #f5f7fa;
     }
 

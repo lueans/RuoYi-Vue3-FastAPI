@@ -71,11 +71,10 @@ test('活动节点组合式能力统一订阅、切图清理和当前实例同�
 })
 
 test('保存、派生视图和演示状态只响应当前脑图的运行时事件', async () => {
-  const [editor, outline, navigator, count, demonstrate] = await Promise.all([
+  const [editor, outline, navigator, demonstrate] = await Promise.all([
     readComponent('Edit.vue'),
     readComponent('OutlineSidebar.vue'),
     readComponent('Navigator.vue'),
-    readComponent('Count.vue'),
     readComponent('Demonstrate.vue'),
   ])
 
@@ -95,7 +94,6 @@ test('保存、派生视图和演示状态只响应当前脑图的运行时事�
   assert.match(editor, /function onHideTextEdit\(\.\.\.args\)[\s\S]*isCurrentMindmapEventSource\(sourceMindMap, mindMap\.value\)/)
   assert.equal((outline.match(/isCurrentMindmapEventSource\(sourceMindMap, props\.mindMap\)/g) || []).length >= 2, true)
   assert.equal((navigator.match(/isCurrentMindmapEventSource\(sourceMindMap, props\.mindMap\)/g) || []).length >= 3, true)
-  assert.match(count, /function onDataChange\(data, sourceMindMap = null\)[\s\S]*isCurrentMindmapEventSource\(sourceMindMap, props\.mindMap\)/)
   assert.equal((demonstrate.match(/isCurrentMindmapEventSource\(sourceMindMap, props\.mindMap\)/g) || []).length >= 3, true)
   assert.match(demonstrate, /const el = mindMap\?\.el/)
 })

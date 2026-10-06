@@ -105,6 +105,7 @@ export function normalizeMindmapAiSessionList(payload) {
       turnCount: Math.max(0, safeNonNegativeInteger(raw.turnCount) ?? 0),
       updateTime: typeof raw.updateTime === 'string' ? raw.updateTime : '',
       expiresTime: typeof raw.expiresTime === 'string' ? raw.expiresTime : '',
+      ...(typeof raw.mindmapAccessible === 'boolean' ? { mindmapAccessible: raw.mindmapAccessible } : {}),
       currentJob,
     })
   }
@@ -114,55 +115,80 @@ export function normalizeMindmapAiSessionList(payload) {
   }
 }
 
-export function buildMindmapAiConversationTurns({
-  sessionTurns = [],
-  currentJob = null,
-  events = [],
-} = {}) {
-  const turnsByJobId = new Map()
-  for (const raw of Array.isArray(sessionTurns) ? sessionTurns : []) {
-    const jobId = String(raw?.job?.id || '')
-    if (!jobId) continue
-    turnsByJobId.set(jobId, {
-      ...raw,
-      job: { ...raw.job },
-      userMessage: raw.userMessage ? { ...raw.userMessage } : null,
-      assistantMessage: raw.assistantMessage ? { ...raw.assistantMessage } : null,
-    })
-  }
-  const currentJobId = String(currentJob?.id || '')
-  if (currentJobId) {
-    const existing = turnsByJobId.get(currentJobId)
-    turnsByJobId.set(currentJobId, {
-      ...(existing || {}),
-      job: { ...(existing?.job || {}), ...currentJob },
-      userMessage: existing?.userMessage || null,
-      assistantMessage: existing?.assistantMessage || null,
-    })
-  }
-  const eventsByJobId = new Map()
-  for (const event of Array.isArray(events) ? events : []) {
-    const jobId = String(event?.jobId || '')
-    if (!jobId) continue
-    const list = eventsByJobId.get(jobId) || []
-    list.push(event)
-    eventsByJobId.set(jobId, list)
-  }
-  for (const [jobId, turn] of turnsByJobId) {
-    const turnEvents = eventsByJobId.get(jobId) || []
-    const promptEvent = turnEvents.find(event => event?.eventType === 'user_prompt')
-    if (!turn.userMessage && typeof promptEvent?.payload?.message === 'string') {
-      turn.userMessage = {
-        content: promptEvent.payload.message,
-        createdTime: promptEvent.createdTime || '',
+/** One-shot callers share the live conversation's projection logic. */
+export function buildMindmapAiConversationTurns(options) {
+  return createMindmapAiConversationProjector()(options)
+}
+
+/** Keep completed turns stable while only the current turn receives output. */
+export function createMindmapAiConversationProjector() {
+  let source = null
+  let count = 0
+  let lastEvent = null
+  let buckets = new Map()
+  let cached = new Map()
+  return ({ sessionTurns = [], currentJob = null, events = [] } = {}) => {
+    sessionTurns = Array.isArray(sessionTurns) ? sessionTurns : []
+    events = Array.isArray(events) ? events : []
+    // History pagination publishes a new array. Live events append in place.
+    if (source !== events || count > events.length || (count && events[count - 1] !== lastEvent)) {
+      source = events
+      count = 0
+      buckets = new Map()
+      cached = new Map()
+    }
+    for (let index = count; index < events.length; index++) {
+      const event = events[index]
+      const id = String(event?.jobId || '')
+      if (!id) continue
+      let bucket = buckets.get(id)
+      if (!bucket) {
+        bucket = { events: [], tagEvents: [], auditEvents: [], prompt: null, usage: null, version: 0 }
+        buckets.set(id, bucket)
+      }
+      bucket.version += 1
+      if (event.eventType === 'user_prompt') {
+        bucket.prompt ||= event
+      } else {
+        bucket.events.push(event)
+        if (event.payload?.usage) bucket.usage = event.payload.usage
+        if (event.eventType === 'tag_suggestions') bucket.tagEvents.push(event)
+        if (!['assistant_delta', 'thinking_summary', 'thinking_state', 'todo_updated',
+          'tool_started', 'tool_completed', 'tool_failed'].includes(event.eventType)) bucket.auditEvents.push(event)
       }
     }
-    turn.events = turnEvents.filter(event => event?.eventType !== 'user_prompt')
-    const eventUsage = [...turn.events].reverse().find(event => event?.payload?.usage)?.payload?.usage
-    turn.usage = summarizeMindmapAiUsage(turn.job?.usage)
-      || summarizeMindmapAiUsage(eventUsage)
+    count = events.length
+    lastEvent = events.at(-1)
+    const rawTurns = new Map(sessionTurns.filter(turn => turn?.job?.id).map(turn => [String(turn.job.id), turn]))
+    const currentId = String(currentJob?.id || '')
+    if (currentId && !rawTurns.has(currentId)) rawTurns.set(currentId, null)
+    const turns = []
+    for (const [id, raw] of rawTurns) {
+      const active = id === currentId ? currentJob : null
+      const bucket = buckets.get(id)
+      const previous = cached.get(id)
+      if (previous && previous.raw === raw && previous.active === active && previous.version === bucket?.version) {
+        turns.push(previous.turn)
+        continue
+      }
+      const job = { ...raw?.job, ...active }
+      const prompt = bucket?.prompt
+      const turn = {
+        ...raw, job,
+        userMessage: raw?.userMessage ? { ...raw.userMessage }
+          : typeof prompt?.payload?.message === 'string'
+            ? { content: prompt.payload.message, createdTime: prompt.createdTime || '' } : null,
+        assistantMessage: raw?.assistantMessage ? { ...raw.assistantMessage } : null,
+        events: bucket?.events || [], tagEvents: bucket?.tagEvents || [], auditEvents: bucket?.auditEvents || [],
+        // Arrays stay stable; consumers use this revision to process new tail
+        // records without cloning/filtering all earlier deltas on every token.
+        eventVersion: bucket?.version || 0,
+        usage: summarizeMindmapAiUsage(job.usage) || summarizeMindmapAiUsage(bucket?.usage),
+      }
+      cached.set(id, { raw, active, version: bucket?.version, turn })
+      turns.push(turn)
+    }
+    for (const id of cached.keys()) if (!rawTurns.has(id)) cached.delete(id)
+    return turns.sort((left, right) => Number(left.job.turnIndex || 0) - Number(right.job.turnIndex || 0))
   }
-  return [...turnsByJobId.values()].sort((left, right) => (
-    Number(left?.job?.turnIndex || 0) - Number(right?.job?.turnIndex || 0)
-  ))
 }

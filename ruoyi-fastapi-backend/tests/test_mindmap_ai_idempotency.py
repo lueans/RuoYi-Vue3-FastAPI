@@ -197,27 +197,38 @@ async def test_reconcile_job_attempt_uses_owner_and_wakes_committed_queue() -> N
     existing = _persisted_job(_stable_create_fingerprint(request))
     existing.status = 'queued'
     lookup = AsyncMock(return_value=existing)
+    database = SimpleNamespace()
 
     with (
         patch(
             'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_job_by_idempotency',
             new=lookup,
         ),
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapAiDao.get_proposal',
+            new=AsyncMock(return_value=SimpleNamespace(target_mindmap_id=existing.source_mindmap_id)),
+        ) as get_proposal,
+        patch(
+            'module_mindmap.service.mindmap_ai_service.MindmapService.check_mindmap_access',
+            new=AsyncMock(return_value=SimpleNamespace()),
+        ) as check_access,
         patch.object(MindmapAiTaskManager, 'schedule', new=Mock(return_value=True)) as schedule,
     ):
         recovered = await MindmapAiService.reconcile_job_attempt(
-            SimpleNamespace(),
+            database,
             user_id=31,
             idempotency_key='mindmap-ai:lost-response',
         )
 
     lookup.assert_awaited_once_with(
-        SimpleNamespace(),
+        database,
         31,
         'mindmap-ai:lost-response',
     )
     assert recovered is not None
     assert recovered.id == existing.id
+    get_proposal.assert_awaited_once_with(database, existing.proposal_id, 31)
+    check_access.assert_awaited_once_with(database, existing.source_mindmap_id, 31, require_edit=False)
     schedule.assert_called_once_with(existing.id)
 
 

@@ -27,6 +27,7 @@ import {
   replaceDomTextNodes
 } from './domTree'
 import { sanitizeRichTextHtml } from './richText'
+import { abortableExport, exportAbortError, loadExportImage, throwIfExportAborted } from './exportSession'
 
 export { walk } from './treeWalk'
 export { bfsWalk } from './treeBfs'
@@ -187,35 +188,32 @@ export const copyNodeTree = (
 }
 
 //  图片转成dataURL
-export const imgToDataUrl = (src, returnBlob = false) => {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    // 跨域图片需要添加这个属性，否则画布被污染了无法导出图片
-    img.setAttribute('crossOrigin', 'anonymous')
-    img.onload = () => {
-      try {
-        let canvas = document.createElement('canvas')
-        canvas.width = img.width
-        canvas.height = img.height
-        let ctx = canvas.getContext('2d')
-        // 图片绘制到canvas里
-        ctx.drawImage(img, 0, 0, img.width, img.height)
-        if (returnBlob) {
-          canvas.toBlob(blob => {
-            resolve(blob)
-          })
-        } else {
-          resolve(canvas.toDataURL())
-        }
-      } catch (e) {
-        reject(e)
-      }
+export const imgToDataUrl = async (src, returnBlob = false, { signal } = {}) => {
+  const img = await loadExportImage(src, signal)
+  let canvas
+  const release = () => {
+    if (canvas) { canvas.width = 0; canvas.height = 0 }
+    img.src = ''
+  }
+  signal?.addEventListener('abort', release, { once: true })
+  try {
+    throwIfExportAborted(signal)
+    canvas = document.createElement('canvas')
+    canvas.width = img.width
+    canvas.height = img.height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('浏览器无法创建图片转换画布')
+    ctx.drawImage(img, 0, 0, img.width, img.height)
+    if (returnBlob) {
+      return await abortableExport(new Promise((resolve, reject) => {
+        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('图片转换失败')))
+      }), signal)
     }
-    img.onerror = e => {
-      reject(e)
-    }
-    img.src = src
-  })
+    return canvas.toDataURL()
+  } finally {
+    signal?.removeEventListener('abort', release)
+    release()
+  }
 }
 
 // 解析dataUrl
@@ -409,16 +407,37 @@ export const getTextFromHtml = html => {
 }
 
 // 将blob转成data:url
-export const readBlob = blob => {
+export const readBlob = (blob, { signal } = {}) => {
   return new Promise((resolve, reject) => {
-    let reader = new FileReader()
+    const reader = new FileReader()
+    const cleanup = () => {
+      signal?.removeEventListener('abort', abort)
+      reader.onload = null
+      reader.onerror = null
+      reader.onabort = null
+    }
+    const abort = () => {
+      cleanup()
+      reader.abort()
+      reject(signal?.reason || exportAbortError())
+    }
     reader.onload = evt => {
+      cleanup()
       resolve(evt.target.result)
     }
     reader.onerror = err => {
+      cleanup()
       reject(err)
     }
-    reader.readAsDataURL(blob)
+    reader.onabort = abort
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) return abort()
+    try {
+      reader.readAsDataURL(blob)
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 }
 

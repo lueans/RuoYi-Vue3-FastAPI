@@ -1116,21 +1116,11 @@ watch(isWriteBlocked, (blocked) => {
       margin-bottom: 5px;
     }
 
-    .btnGroup {
-      width: 100%;
-      display: flex;
-      justify-content: space-between;
-    }
-
     .rowItem {
       display: flex;
       align-items: center;
       min-width: 0;
       margin-bottom: 6px;
-
-      &.spaceBetween {
-        justify-content: space-between;
-      }
 
       .name {
         font-size: 12px;
@@ -1163,15 +1153,6 @@ watch(isWriteBlocked, (blocked) => {
           outline-offset: 2px;
         }
       }
-
-      .iconBtn {
-        cursor: pointer;
-        transition: all 0.3s;
-
-        &.top {
-          transform: rotateZ(-180deg);
-        }
-      }
     }
 
     > .rowItem:only-child {
@@ -1180,32 +1161,6 @@ watch(isWriteBlocked, (blocked) => {
 
     :deep(.el-slider) {
       max-width: 100%;
-    }
-
-    .styleBtn {
-      position: relative;
-      width: 50px;
-      height: 30px;
-      background: #fff;
-      border: 1px solid #eee;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      font-weight: bold;
-      cursor: pointer;
-      border-radius: 4px;
-
-      &.actived {
-        background-color: #eee;
-      }
-
-      .colorShow {
-        position: absolute;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        height: 2px;
-      }
     }
   }
 }

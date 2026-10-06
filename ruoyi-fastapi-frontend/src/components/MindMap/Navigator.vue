@@ -148,6 +148,7 @@ async function drawMiniMap() {
     !componentAlive
     || !showMiniMap.value
     || !activeMindMap?.miniMap
+    || activeMindMap.renderer?.isRendering
     || boxWidth.value <= 0
     || boxHeight.value <= 0
   ) return

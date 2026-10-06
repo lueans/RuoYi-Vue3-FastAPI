@@ -718,7 +718,10 @@ def normalize_agent_input_questions(value: Any) -> tuple[AgentInputQuestion, ...
             {'completionState', 'questions', 'title'},
         )
         or payload.get('completionState') != 'needs_input'
-        or ('title' in payload and payload.get('title') not in (None, ''))
+        # The shared completion schema permits a string title for every
+        # terminal state. It is unused for clarification: discard it rather
+        # than reject otherwise valid questions from a constrained provider.
+        or (payload.get('title') is not None and not isinstance(payload['title'], str))
     ):
         raise MindmapArtifactError(
             'Agent 补充信息请求不符合结构化合同',

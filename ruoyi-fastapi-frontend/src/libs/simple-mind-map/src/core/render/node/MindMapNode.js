@@ -647,12 +647,16 @@ class MindMapNode {
 
   // 判断节点是否可见
   checkIsInClient(padding = 0) {
-    const { left: nx, top: ny } = this.getNodePosInClient(this.left, this.top)
+    const { scaleX, scaleY, translateX, translateY } = this.mindMap.draw.transform()
+    const x1 = this.left * scaleX + translateX
+    const y1 = this.top * scaleY + translateY
+    const x2 = (this.left + this.width) * scaleX + translateX
+    const y2 = (this.top + this.height) * scaleY + translateY
     return (
-      nx + this.width > 0 - padding &&
-      ny + this.height > 0 - padding &&
-      nx < this.mindMap.width + padding &&
-      ny < this.mindMap.height + padding
+      Math.max(x1, x2) > -padding &&
+      Math.max(y1, y2) > -padding &&
+      Math.min(x1, x2) < this.mindMap.width + padding &&
+      Math.min(y1, y2) < this.mindMap.height + padding
     )
   }
 

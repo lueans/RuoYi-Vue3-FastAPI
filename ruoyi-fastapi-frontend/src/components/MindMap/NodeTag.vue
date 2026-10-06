@@ -20,6 +20,9 @@
     />
 
     <div class="sectionTitle">选择标签</div>
+    <p v-if="tagGroupsLoaded && props.mindmapId && !canCreatePrivateTag" class="groupLoadWarning" role="note">
+      共享脑图只能添加已有全局标签；已绑定标签可保留或移除。如需新的私有标签，请由脑图所有者添加。
+    </p>
     <el-input
       ref="inputRef"
       v-model="searchKeyword"
@@ -192,6 +195,7 @@ const tagColors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#00bc
 
 const props = defineProps({
   readonly: { type: Boolean, default: false },
+  mindmapId: { type: Number, default: null },
 })
 
 const userStore = useUserStore()
@@ -200,6 +204,7 @@ const searchKeyword = ref('')
 const suggestions = ref([])
 const tagGroups = ref([])
 const tagGroupsLoaded = ref(false)
+const canCreatePrivateTag = ref(false)
 const tagCatalog = ref([])
 const tagCatalogLoaded = ref(false)
 const activeGroupId = ref('')
@@ -276,7 +281,8 @@ const activeSuggestionGroup = computed(() => (
   || null
 ))
 const canCreate = computed(() => {
-  if (!selectionRulesReady.value) return false
+  if (!selectionRulesReady.value || !canCreatePrivateTag.value) return false
+  if (!userStore.permissions?.some(permission => ['*:*:*', 'mindmap:tag:add'].includes(permission))) return false
   const validation = validateMindmapTagDisplayName(searchKeyword.value)
   if (!validation.valid || tagArr.value.length >= MAX_NODE_TAG_COUNT) return false
   return !suggestions.value.some(tag => tag.name === validation.value)
@@ -327,7 +333,7 @@ async function loadSuggestions() {
   loading.value = true
   loadError.value = ''
   try {
-    const response = await getTagSuggestions(keyword.value || undefined)
+    const response = await getTagSuggestions(keyword.value || undefined, props.mindmapId)
     if (currentRequestId !== requestId.value || !dialogVisible.value) return
     suggestions.value = (response.data || []).filter(tag => tag?.id && tag.status === 0)
   } catch (error) {
@@ -345,14 +351,16 @@ async function loadTagGroups() {
   groupLoading.value = true
   groupLoadError.value = ''
   try {
-    const response = await listTagCategories()
+    const response = await listTagCategories(props.mindmapId)
     if (currentRequestId !== groupRequestId.value || !dialogVisible.value) return
     tagGroups.value = (response.data || []).filter(group => group?.id && group.name)
+    canCreatePrivateTag.value = response.canCreatePrivateTag === true
     tagGroupsLoaded.value = true
   } catch (error) {
     if (currentRequestId !== groupRequestId.value || !dialogVisible.value) return
     tagGroups.value = []
     tagGroupsLoaded.value = false
+    canCreatePrivateTag.value = false
     groupLoadError.value = error?.message || '标签分组加载失败'
   } finally {
     if (currentRequestId === groupRequestId.value) groupLoading.value = false
@@ -369,7 +377,7 @@ async function loadTagCatalog() {
   let total = 0
   try {
     do {
-      const response = await listTags({ pageNum, pageSize: 100 })
+      const response = await listTags({ pageNum, pageSize: 100, mindmapId: props.mindmapId || undefined })
       if (currentRequestId !== catalogRequestId.value || !dialogVisible.value) return
       const pageRows = (response.rows || []).filter(tag => tag?.id)
       rows.push(...pageRows)
@@ -461,6 +469,7 @@ function toggleSuggestion(tag) {
 
 async function createAndSelectTag() {
   if (isReadonly.value || creating.value) return
+  if (!canCreate.value) return
   const validation = validateMindmapTagDisplayName(searchKeyword.value)
   if (!validation.valid) {
     ElMessage.warning(validation.message)
@@ -485,7 +494,7 @@ async function createAndSelectTag() {
       ownerId: userStore.id,
       style: { fill: getTagColor(validation.value), color: '#ffffff' },
       status: 0,
-    })
+    }, props.mindmapId)
     if (!isCurrentDialogSession(sessionId)) return
     const tag = response.data
     if (!tag?.id) throw new Error('标签创建后未能读取')
@@ -519,6 +528,9 @@ function handleShow() {
   tagArr.value = [...(node.getData('tag') || [])]
   searchKeyword.value = ''
   activeGroupId.value = ''
+  tagGroupsLoaded.value = false
+  canCreatePrivateTag.value = false
+  tagCatalogLoaded.value = false
   dialogSessionId.value += 1
   dialogVisible.value = true
   void loadSuggestions()
@@ -611,6 +623,8 @@ function onManagedTagDefinitionChanged(data) {
 watch(isReadonly, (readonly) => {
   if (readonly && dialogVisible.value) dialogVisible.value = false
 })
+
+watch(() => props.mindmapId, invalidateTagDialogForMindMapChange, { flush: 'sync' })
 
 watch(groupedSuggestions, (groups) => {
   if (!groups.some(group => group.id === activeGroupId.value)) {

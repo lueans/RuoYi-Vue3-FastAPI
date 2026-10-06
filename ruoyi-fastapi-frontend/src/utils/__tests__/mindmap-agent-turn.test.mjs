@@ -6,7 +6,7 @@ import * as Vue from 'vue'
 import * as presentation from '../mindmap-agent-presentation.js'
 import { agentToolNodeTargets } from '../mindmap-agent-node-links.js'
 import { buildAgentTurnBlocks, agentTurnExecutionState, sliceAgentExecutionRows } from '../mindmap-agent-presentation.js'
-import { projectRuntimeEvents } from '../mindmap-ai-runtime.js'
+import { createRuntimeEventProjector, projectRuntimeEvents } from '../mindmap-ai-runtime.js'
 
 const flatten = rows => rows.flatMap(row => row.kind === 'step' ? row.entries : [row])
 const records = blocks => blocks.flatMap(block => block.kind === 'execution' ? flatten(block.rows) : [block])
@@ -125,7 +125,7 @@ const Fold = component('MindmapAgentFold')
 const Markdown = component('MindmapAgentMarkdown', presentation)
 const Tool = component('MindmapAgentToolRow', { ...presentation, MindmapAgentFold: Fold, agentToolNodeTargets })
 const Rows = component('MindmapAgentTraceRows', { ...presentation, MindmapAgentFold: Fold, MindmapAgentMarkdown: Markdown, MindmapAgentToolRow: Tool })
-const Trace = component('MindmapAgentTrace', { ...presentation, projectRuntimeEvents, MindmapAgentFold: Fold, MindmapAgentMarkdown: Markdown, MindmapAgentTraceRows: Rows })
+const Trace = component('MindmapAgentTrace', { ...presentation, createRuntimeEventProjector, MindmapAgentFold: Fold, MindmapAgentMarkdown: Markdown, MindmapAgentTraceRows: Rows })
 
 function mount(input = {}) {
   const node = (type, text = '') => ({ type, text, children: [], props: {} })

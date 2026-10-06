@@ -22,6 +22,7 @@
             <span>分组加载失败</span>
             <el-button link type="primary" @click="loadCategories">重试</el-button>
           </div>
+          <p v-if="canEditCategory" class="categoryOrderHint" id="category-order-help">拖动排序按钮，或聚焦后按 ↑ / ↓ 调整顺序。</p>
           <nav v-loading="categoryLoading" class="tagGroupNav" aria-label="标签分组">
             <button
               type="button"
@@ -56,8 +57,12 @@
                     type="button"
                     class="tagGroupDragHandle"
                     :disabled="!canReorderCategoryScope('global') || Boolean(categoryReordering)"
-                    :aria-label="`拖拽调整${category.name}的顺序`"
-                    title="按住拖拽排序"
+                    :aria-label="`调整分组 ${category.name} 的顺序`"
+                    aria-describedby="category-order-help"
+                    :data-category-order-id="category.id"
+                    title="拖动或按上下方向键排序"
+                    @keydown.up.prevent.stop="moveCategoryByKeyboard('global', category, -1, $event)"
+                    @keydown.down.prevent.stop="moveCategoryByKeyboard('global', category, 1, $event)"
                   >
                     <el-icon><Rank /></el-icon>
                   </button>
@@ -127,8 +132,12 @@
                     type="button"
                     class="tagGroupDragHandle"
                     :disabled="!canReorderCategoryScope('mine') || Boolean(categoryReordering)"
-                    :aria-label="`拖拽调整${category.name}的顺序`"
-                    title="按住拖拽排序"
+                    :aria-label="`调整分组 ${category.name} 的顺序`"
+                    aria-describedby="category-order-help"
+                    :data-category-order-id="category.id"
+                    title="拖动或按上下方向键排序"
+                    @keydown.up.prevent.stop="moveCategoryByKeyboard('mine', category, -1, $event)"
+                    @keydown.down.prevent.stop="moveCategoryByKeyboard('mine', category, 1, $event)"
                   >
                     <el-icon><Rank /></el-icon>
                   </button>
@@ -255,15 +264,18 @@
             <el-table-column label="标签" min-width="210" fixed="left">
               <template #default="{ row }">
                 <div class="tagCell">
-                  <span class="tagPreview" :style="tagStyle(row)">
-                    <span
-                      v-if="getMindmapMarkerTagIconKey(row)"
-                      class="tagMarkerIcon"
-                      aria-hidden="true"
-                      v-html="getMindmapMarkerIconMarkup(getMindmapMarkerTagIconKey(row))"
-                    />
-                    <span>{{ row.name }}</span>
-                  </span>
+                  <span class="tagName">{{ row.name }}</span>
+                  <div class="tagStylePreview" aria-hidden="true">
+                    <span class="tagStylePreviewLabel">样式</span>
+                    <span class="tagPreview" :style="tagStyle(row)" :title="row.name">
+                      <span
+                        v-if="getMindmapMarkerTagIconKey(row)"
+                        class="tagMarkerIcon"
+                        v-html="getMindmapMarkerIconMarkup(getMindmapMarkerTagIconKey(row))"
+                      />
+                      <span class="tagPreviewText">{{ row.name }}</span>
+                    </span>
+                  </div>
                   <span v-if="row.description" class="tagDescription" :title="row.description">{{ row.description }}</span>
                 </div>
               </template>
@@ -333,8 +345,13 @@
       destroy-on-close
     >
       <el-form label-width="88px">
-        <el-form-item label="名称"><el-input v-model="editDialog.name" :maxlength="MAX_MINDMAP_TAG_NAME_LENGTH" show-word-limit /></el-form-item>
-        <el-form-item label="Key"><el-input v-model="editDialog.tagKey" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="isEditingBuiltinMarker || (Boolean(editDialog.id) && !isAdmin)" /></el-form-item>
+        <el-form-item label="名称" required><el-input v-model="editDialog.name" :maxlength="MAX_MINDMAP_TAG_NAME_LENGTH" show-word-limit /></el-form-item>
+        <details class="tagAdvancedOptions">
+          <summary>高级选项：标签标识</summary>
+          <p>已自动生成，可直接创建。标识用于导入和引用；自定义时仅支持英文、数字、下划线和连字符。</p>
+          <el-form-item label="标签标识" required><el-input v-model="editDialog.tagKey" :maxlength="MAX_MINDMAP_TAG_KEY_LENGTH" :disabled="isEditingBuiltinMarker || (Boolean(editDialog.id) && !isAdmin)" aria-describedby="tag-identifier-hint" /></el-form-item>
+          <p id="tag-identifier-hint">已有标签标识修改受权限限制，不影响你调整显示名称。</p>
+        </details>
         <el-form-item v-if="isAdmin" label="范围">
           <el-radio-group v-model="editDialog.ownerScope" :disabled="isEditingBuiltinMarker">
             <el-radio value="mine">私有</el-radio>
@@ -419,7 +436,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="replaceDialog.visible" title="替换标签" width="520px" destroy-on-close>
+    <el-dialog v-model="replaceDialog.visible" title="替换标签" width="min(520px, calc(100vw - 24px))" destroy-on-close>
       <el-alert :title="`将替换 ${replaceDialog.nodeCount} 个节点中的「${replaceDialog.sourceName}」`" type="warning" :closable="false" show-icon />
       <el-form label-width="88px" class="replaceForm">
         <el-form-item label="目标标签">
@@ -493,7 +510,7 @@
 </template>
 
 <script setup name="TagManagement">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Delete, EditPen, Plus, Rank, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Draggable from 'vuedraggable'
@@ -688,6 +705,20 @@ function captureCategoryOrder(scope) {
   categoryOrderSnapshot[scope] = categoryRowsForScope(scope).map(item => Number(item.id))
 }
 
+async function moveCategoryByKeyboard(scope, category, direction, event) {
+  if (categoryReordering.value || !canReorderCategoryScope(scope)) return
+  const rows = categoryRowsForScope(scope)
+  const index = rows.findIndex(row => Number(row.id) === Number(category.id))
+  const target = index + direction
+  if (index < 0 || target < 0 || target >= rows.length) return
+  const button = event.currentTarget
+  captureCategoryOrder(scope)
+  rows.splice(target, 0, rows.splice(index, 1)[0])
+  await finishCategoryReorder(scope)
+  await nextTick()
+  if (button?.isConnected) button.focus()
+}
+
 async function finishCategoryReorder(scope) {
   const rows = categoryRowsForScope(scope)
   const categoryIds = rows.map(item => Number(item.id))
@@ -832,10 +863,15 @@ async function showImpact(row) {
   }
 }
 
+function createTagIdentifier() {
+  const unique = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`
+  return `custom_${unique}`
+}
+
 function openCreateTag() {
   const categoryId = Number(query.categoryId) > 0 ? query.categoryId : null
   Object.assign(editDialog, {
-    visible: true, id: null, name: '', tagKey: '', fill: '#409eff', color: '#ffffff',
+    visible: true, id: null, name: '', tagKey: createTagIdentifier(), fill: '#409eff', color: '#ffffff',
     fontSize: 12, radius: 3, paddingX: 8, placement: 'right', align: 'center', iconKey: '',
     ownerScope: 'mine', categoryId,
     description: '', status: 0, source: null, impact: null,
@@ -1468,6 +1504,12 @@ onBeforeUnmount(() => {
   }
 }
 
+.categoryOrderHint { margin: 0; padding: 8px 12px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
+.tagAdvancedOptions { margin: 0 0 18px 0; padding: 10px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; }
+.tagAdvancedOptions summary { cursor: pointer; color: var(--el-text-color-regular); }
+.tagAdvancedOptions p { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; }
+.tagAdvancedOptions summary:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
+
 .filterBar {
   flex-wrap: wrap;
   margin-bottom: 16px;
@@ -1512,6 +1554,35 @@ onBeforeUnmount(() => {
   gap: 5px;
 }
 
+.tagName {
+  max-width: 100%;
+  color: var(--el-text-color-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.tagStylePreview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.tagStylePreviewLabel {
+  flex: 0 0 auto;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+}
+
+.tagPreviewText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tagActionCell {
   display: flex;
   align-items: center;
@@ -1536,6 +1607,8 @@ onBeforeUnmount(() => {
 
 .tagPreview {
   display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: 6px;
   line-height: 1.5;

@@ -1,9 +1,16 @@
 <template>
-  <div class="app-container mindmap-index">
-    <splitpanes class="default-theme" style="height: calc(100vh - 84px);">
+  <div ref="listPageRef" class="app-container mindmap-index">
+    <button v-if="listScope === 'owned' && canUseFolders" type="button" class="mobile-folder-toggle"
+      :aria-expanded="mobileFoldersOpen" aria-controls="mindmap-folder-navigation" @click="mobileFoldersOpen = !mobileFoldersOpen">
+      <el-icon><Folder /></el-icon><span>目录 · {{ currentLocationText }}</span>
+      <span>{{ mobileFoldersOpen ? '收起' : '展开' }}</span>
+    </button>
+    <splitpanes class="default-theme" :class="{ 'has-mobile-folders': mobileFoldersOpen && listScope === 'owned' }" style="height: calc(100vh - 84px);">
       <!-- 左侧：文件夹目录树 -->
-      <pane size="20" min-size="16" max-size="30">
-        <div class="dir-tree-container">
+      <pane id="mindmap-folder-navigation" size="20" min-size="16" max-size="30">
+        <!-- Child actions may navigate before this click reaches Splitpanes'
+             pane handler. The page does not consume pane-click notifications. -->
+        <div class="dir-tree-container" @click.stop>
           <div class="dir-tree-header">
             <span class="dir-tree-title">脑图目录</span>
             <el-tooltip v-if="listScope === 'owned' && canCreateFolders" content="新建文件夹" placement="top">
@@ -106,7 +113,7 @@
                   <el-dropdown
                     v-if="canCreateFolders || canEditFolders || canRemoveFolders"
                     class="node-more"
-                    trigger="hover"
+                    trigger="click"
                     placement="bottom-end"
                     :disabled="isOperating"
                     @command="(cmd) => handleFolderCommand(cmd, data)"
@@ -153,7 +160,7 @@
 
       <!-- 右侧：脑图列表 -->
       <pane>
-        <div class="main-content">
+        <div class="main-content" @click.stop>
           <header class="content-overview">
             <div class="content-overview-copy">
               <div class="content-title-row">
@@ -526,7 +533,7 @@
     />
 
     <!-- 新建脑图对话框 -->
-    <el-dialog title="新建脑图" v-model="addDialogOpen" width="500px" append-to-body destroy-on-close :close-on-click-modal="!isOperating" :close-on-press-escape="!isOperating" :show-close="!isOperating">
+    <el-dialog title="新建脑图" v-model="addDialogOpen" width="min(500px, calc(100vw - 24px))" append-to-body destroy-on-close :close-on-click-modal="!isOperating" :close-on-press-escape="!isOperating" :show-close="!isOperating">
       <el-form ref="addFormRef" :model="addForm" :rules="addRules" label-width="80px" @submit.prevent="submitAdd">
         <el-form-item label="所属目录" prop="folderId">
           <el-tree-select
@@ -557,7 +564,7 @@
     </el-dialog>
 
     <!-- 新建/重命名文件夹对话框 -->
-    <el-dialog :title="folderDialogTitle" v-model="folderDialogOpen" width="500px" append-to-body destroy-on-close :close-on-click-modal="!isOperating" :close-on-press-escape="!isOperating" :show-close="!isOperating">
+    <el-dialog :title="folderDialogTitle" v-model="folderDialogOpen" width="min(500px, calc(100vw - 24px))" append-to-body destroy-on-close :close-on-click-modal="!isOperating" :close-on-press-escape="!isOperating" :show-close="!isOperating">
       <el-form ref="folderFormRef" :model="folderForm" :rules="folderRules" label-width="80px">
         <el-form-item label="上级目录" prop="parentId">
           <el-tree-select
@@ -588,7 +595,7 @@
     </el-dialog>
 
     <!-- 移动脑图对话框 -->
-    <el-dialog title="移动脑图到文件夹" v-model="moveDialogOpen" width="420px" append-to-body destroy-on-close :close-on-click-modal="!isOperating" :close-on-press-escape="!isOperating" :show-close="!isOperating">
+    <el-dialog title="移动脑图到文件夹" v-model="moveDialogOpen" width="min(420px, calc(100vw - 24px))" append-to-body destroy-on-close :close-on-click-modal="!isOperating" :close-on-press-escape="!isOperating" :show-close="!isOperating">
       <p class="move-dialog-hint">将 {{ moveMindmapIds.length }} 张脑图移动到：</p>
       <el-tree-select
         v-model="moveFolderId"
@@ -609,7 +616,7 @@
     <el-dialog
       v-model="localDraftDialogOpen"
       title="本地草稿中心"
-      width="680px"
+      width="min(680px, calc(100vw - 24px))"
       append-to-body
       class="mindmap-local-draft-dialog"
       @open="loadLocalDrafts"
@@ -782,7 +789,9 @@ const initialListRouteState = parseMindmapListRouteQuery(
 )
 
 // ─── 文件夹树 ───
+const listPageRef = ref(null)
 const folderTree = ref([])
+const mobileFoldersOpen = ref(false)
 const folderFilter = ref('')
 const folderTreeRef = ref(null)
 const folderTreeLoading = ref(false)
@@ -1063,6 +1072,7 @@ void getList()
 void loadLocalDrafts()
 
 onActivated(() => {
+  listPageRef.value?.removeAttribute('inert')
   void loadLocalDrafts()
 })
 
@@ -1087,6 +1097,9 @@ watch(() => route.query, (nextQuery) => {
 }, { deep: true })
 
 onBeforeUnmount(() => {
+  // The route leave transition retains DOM after Splitpanes removes its pane
+  // registry. Disable that outgoing DOM synchronously before children unmount.
+  listPageRef.value?.setAttribute('inert', '')
   listRequests.invalidate()
   tagRequests.invalidate()
   selectedTagRequests.invalidate()
@@ -1096,6 +1109,7 @@ onBeforeUnmount(() => {
 })
 
 onDeactivated(() => {
+  listPageRef.value?.setAttribute('inert', '')
   creationRequests.invalidate()
   metadataDialogRef.value?.close?.({ force: true })
   detailDrawerOpen.value = false
@@ -1794,10 +1808,28 @@ async function handleCopy(row) {
   operationType.value = `copy:${row.id}`
   const creationRequest = creationRequests.begin(`copy:${row.id}`)
   try {
-    await copyMindmap(row.id, creationRequest.idempotencyKey)
+    const response = await copyMindmap(row.id, creationRequest.idempotencyKey)
+    if (!creationRequests.isCurrent(creationRequest)) return
     creationRequests.complete(creationRequest)
-    ElMessage.success('复制成功')
-    await getList()
+    const navigation = await resolveCreatedMindmapNavigation({
+      response,
+      navigate: mindmapId => router.push({
+        path: '/mindmap/edit',
+        query: { id: mindmapId, ...(!canEditMindmaps.value ? { readonly: '1' } : {}), returnList: getListReturnState() },
+      }),
+      isCurrent: () => creationRequests.isCurrent(creationRequest),
+    })
+    if (navigation.reason === 'session-stale') return
+    if (navigation.opened) ElMessage.success('已创建并打开副本')
+    else {
+      listScope.value = 'owned'
+      selectedFolderKey.value = 'all'
+      queryParams.value = { ...queryParams.value, folderId: undefined, keyword: undefined, tagId: undefined, status: 0, pageNum: 1 }
+      sortKey.value = 'created-desc'
+      syncListRoute()
+      await getList()
+      ElMessage.warning('副本已创建，但未能自动打开。已切换到“我的脑图”，请从最近创建的文件中继续。')
+    }
   } catch (error) {
     ElMessage.error(getMindmapFileErrorMessage(error, '复制脑图失败'))
   } finally {
@@ -2643,9 +2675,28 @@ async function submitMove() {
   }
 }
 
+.mindmap-index.fade-transform-leave-active { pointer-events: none; }
+.mobile-folder-toggle { display: none; }
+
 @media (max-width: 900px) {
+  .mobile-folder-toggle {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 42px; margin-bottom: 8px;
+    padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 8px;
+    background: var(--el-bg-color); color: var(--el-text-color-primary); font: inherit; text-align: left;
+    span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    &:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
+  }
   .mindmap-index {
     padding: 8px;
+
+    :deep(.splitpanes) { flex-direction: column; height: calc(100dvh - 142px) !important; min-height: 360px; }
+
+    :deep(.has-mobile-folders > .splitpanes__pane:first-child) {
+      display: block; width: 100% !important; height: 240px !important; flex: 0 0 240px;
+      border-bottom: 1px solid var(--el-border-color);
+    }
+
+    .node-more { opacity: 1; visibility: visible; }
 
     :deep(.splitpanes__pane:first-child),
     :deep(.splitpanes__splitter) {
@@ -2654,6 +2705,7 @@ async function submitMove() {
 
     :deep(.splitpanes__pane:last-child) {
       width: 100% !important;
+      flex: 1; min-height: 0;
     }
   }
 

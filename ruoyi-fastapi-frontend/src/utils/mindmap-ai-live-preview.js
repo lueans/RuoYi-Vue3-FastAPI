@@ -246,8 +246,66 @@ function materializeFrame(currentRoot, targetRoot, current, target, selectedUid,
   return { root: materialize(rootUid), nodeCount: parents.size }
 }
 
+// Targets are immutable snapshots. Only a structural/retargeted frame needs
+// the full dependency planner. Subsequent characters keep the same ancestor
+// path, so do not rebuild both document indexes for every grapheme.
+const textFrameContinuations = new WeakMap()
+
+function textFramePath(root, uid) {
+  const nodes = []
+  const indexes = []
+  function visit(node) {
+    nodes.push(node)
+    if (uidOf(node) === uid) return true
+    for (const [index, child] of childrenOf(node).entries()) {
+      indexes.push(index)
+      if (visit(child)) return true
+      indexes.pop()
+    }
+    nodes.pop()
+    return false
+  }
+  return visit(root) ? { nodes, indexes } : null
+}
+
+function continueTextFrame(currentDocument, targetDocument, continuation) {
+  if (continuation.target !== targetDocument || continuation.targetRoot !== targetDocument.root) return null
+  const { nodes, indexes } = continuation.path
+  const currentNode = nodes.at(-1)
+  const text = nextRevealedText(textOf(currentNode), continuation.text,
+    continuation.richText, currentNode.data.richText === true)
+  let node = { ...currentNode, data: { ...currentNode.data, text } }
+  const nextNodes = nodes.slice()
+  nextNodes[nextNodes.length - 1] = node
+  for (let index = indexes.length - 1; index >= 0; index--) {
+    const parent = nodes[index]
+    const children = parent.children.slice()
+    children[indexes[index]] = node
+    node = { ...parent, children }
+    nextNodes[index] = node
+  }
+  const document = { ...currentDocument, root: node }
+  const pending = text !== continuation.text
+  const frame = {
+    document,
+    remaining: continuation.remaining - (pending ? 0 : 1),
+    nodeCount: continuation.nodeCount,
+    change: { kind: continuation.kind, uid: continuation.uid, text },
+    typewriterTarget: { uid: continuation.uid, text: continuation.text },
+  }
+  if (pending) textFrameContinuations.set(document, {
+    ...continuation, path: { nodes: nextNodes, indexes },
+  })
+  return frame
+}
+
 export function nextMindmapAiDraftFrame(currentDocument, targetDocument) {
   if (!currentDocument || !targetDocument) return { document: targetDocument, remaining: 0 }
+  const continuation = textFrameContinuations.get(currentDocument)
+  if (continuation) {
+    const frame = continueTextFrame(currentDocument, targetDocument, continuation)
+    if (frame) return frame
+  }
   // The presentation document and the authoritative target deliberately have
   // different lifetimes. Layout/theme/view metadata must never short-circuit
   // node playback: doing so exposes the complete cloud tree for one frame and
@@ -298,6 +356,14 @@ export function nextMindmapAiDraftFrame(currentDocument, targetDocument) {
   }
   if (selected) {
     frame.typewriterTarget = { uid: selected.uid, text: selectedText }
+  }
+  if (textStillPending) {
+    const path = textFramePath(document.root, selected.uid)
+    if (path) textFrameContinuations.set(document, {
+      target: targetDocument, targetRoot: targetDocument.root, path,
+      uid: selected.uid, text: selectedText, richText: selected.node.data.richText === true,
+      kind: 'update', nodeCount: frame.nodeCount, remaining: frame.remaining,
+    })
   }
   return frame
 }

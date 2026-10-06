@@ -72,11 +72,18 @@ export const transformObjectMapToTree = (data, cloneData = value => value) => {
 // Materialize one flat collaboration/history record as a nested subtree
 // without mutating the flat map. The returned records preserve protocol fields
 // such as isRoot while children become ordered node objects.
-export const materializeObjectSubtree = (data, rootUid) => {
+// A batch may share a cache for the same immutable flat snapshot. Its nested
+// records then form one tree instead of duplicating every ancestor's subtree.
+export const materializeObjectSubtree = (data, rootUid, cache = null) => {
   if (!data || typeof data !== 'object') return null
   if (!Object.prototype.hasOwnProperty.call(data, rootUid)) return null
+  if (cache?.has(rootUid)) return cache.get(rootUid)
 
-  const createNode = uid => ({ ...data[uid], children: [] })
+  const createNode = uid => {
+    const node = { ...data[uid], children: [] }
+    cache?.set(uid, node)
+    return node
+  }
   const root = createNode(rootUid)
   const visited = new Set([rootUid])
   const stack = [{ uid: rootUid, node: root }]
@@ -94,6 +101,10 @@ export const materializeObjectSubtree = (data, rootUid) => {
       if (visited.has(childUid)) continue
       visited.add(childUid)
 
+      if (cache?.has(childUid)) {
+        frame.node.children.push(cache.get(childUid))
+        continue
+      }
       const childNode = createNode(childUid)
       frame.node.children.push(childNode)
       childFrames.push({ uid: childUid, node: childNode })

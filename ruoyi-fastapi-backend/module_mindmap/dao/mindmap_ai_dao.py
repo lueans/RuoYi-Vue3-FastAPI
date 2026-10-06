@@ -5,8 +5,8 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from sqlalchemy import and_, delete, exists, func, or_, select, update
-from sqlalchemy.orm import aliased
+from sqlalchemy import and_, case, delete, exists, func, or_, select, update
+from sqlalchemy.orm import aliased, undefer
 
 from module_mindmap.entity.do.mindmap_ai_do import (
     MINDMAP_AI_EVENT_SEQUENCE_MAX,
@@ -42,7 +42,54 @@ MINDMAP_AI_POST_TRANSITION_EVENT_TYPES = frozenset({
     'message_ready',
     'direct_completed',
     'execution_state',
+    'task_seen_completed_message', 'task_seen_failed', 'task_seen_cancelled',
+    'task_seen_stale', 'task_seen_expired', 'task_seen_rejected',
 })
+
+MINDMAP_AI_TASK_ACTIVE_STATUSES = frozenset({
+    'queued', 'waiting_turn', 'preparing', 'running', 'validating', 'cancel_requested',
+})
+MINDMAP_AI_TASK_ATTENTION_STATUSES = frozenset({
+    'ready', 'needs_review', 'needs_input', 'completed_message', 'failed',
+    'cancelled', 'stale', 'expired', 'rejected',
+})
+MINDMAP_AI_TASK_QUIET_PRIORITY = 2
+MINDMAP_AI_TASK_ACTION_REQUIRED_STATUSES = frozenset({'ready', 'needs_review', 'needs_input'})
+MINDMAP_AI_TASK_ACKNOWLEDGEABLE_STATUSES = MINDMAP_AI_TASK_ATTENTION_STATUSES - MINDMAP_AI_TASK_ACTION_REQUIRED_STATUSES
+
+
+def _session_task_priority() -> Any:
+    """Match the task-center execution head before pagination, not its first page."""
+    pending = exists(select(MindmapAiJob.id).where(
+        MindmapAiJob.session_id == MindmapAiSession.id,
+        MindmapAiJob.user_id == MindmapAiSession.user_id,
+        MindmapAiJob.status.in_(MINDMAP_AI_TASK_ACTIVE_STATUSES),
+    )).correlate(MindmapAiSession)
+    latest_requires_attention = (
+        select(case(
+            (MindmapAiJob.status.in_(MINDMAP_AI_TASK_ACTION_REQUIRED_STATUSES), True),
+            (and_(MindmapAiJob.status.in_(MINDMAP_AI_TASK_ACKNOWLEDGEABLE_STATUSES),
+                  ~MindmapAiJob.task_acknowledged), True),
+            else_=False,
+        ))
+        .where(
+            MindmapAiJob.session_id == MindmapAiSession.id,
+            MindmapAiJob.user_id == MindmapAiSession.user_id,
+        )
+        .order_by(
+            MindmapAiJob.turn_index.desc(), MindmapAiJob.created_time.desc(), MindmapAiJob.id.desc(),
+        )
+        .limit(1)
+        .correlate(MindmapAiSession)
+        .scalar_subquery()
+    )
+    # A running execution head wins over a later waiting/message turn, exactly
+    # like list_latest_jobs_for_sessions. Across sessions, user action comes first.
+    return case(
+        (pending, 1),
+        (latest_requires_attention, 0),
+        else_=MINDMAP_AI_TASK_QUIET_PRIORITY,
+    )
 
 
 async def _select_first(
@@ -121,6 +168,7 @@ class MindmapAiDao:
         *,
         page: int,
         limit: int,
+        task_center: bool = False,
     ) -> tuple[list[MindmapAiSession], int]:
         safe_page = max(int(page), 1)
         safe_limit = min(max(int(limit), 1), 100)
@@ -129,14 +177,26 @@ class MindmapAiDao:
                 MindmapAiSession.user_id == user_id,
             )
         ) or 0)
+        ordering = [MindmapAiSession.update_time.desc(), MindmapAiSession.id.desc()]
+        if task_center:
+            ordering.insert(0, _session_task_priority())
         sessions = list((await db.execute(
             select(MindmapAiSession)
             .where(MindmapAiSession.user_id == user_id)
-            .order_by(MindmapAiSession.update_time.desc(), MindmapAiSession.id.desc())
+            .order_by(*ordering)
             .offset((safe_page - 1) * safe_limit)
             .limit(safe_limit)
         )).scalars())
         return sessions, total
+
+    @classmethod
+    async def count_attention_sessions(cls, db: AsyncSession, user_id: int) -> int:
+        return int(await db.scalar(
+            select(func.count(MindmapAiSession.id)).where(
+                MindmapAiSession.user_id == user_id,
+                _session_task_priority() < MINDMAP_AI_TASK_QUIET_PRIORITY,
+            )
+        ) or 0)
 
     @classmethod
     async def list_latest_jobs_for_sessions(
@@ -146,42 +206,53 @@ class MindmapAiDao:
     ) -> dict[str, MindmapAiJob]:
         if not session_ids:
             return {}
-        jobs = list((await db.execute(
+        active_statuses = {
+            'queued', 'preparing', 'running', 'validating', 'cancel_requested',
+        }
+        waiting_status = 'waiting_turn'
+        candidate = aliased(MindmapAiJob, name='head_candidate')
+        pending = candidate.status.in_((*active_statuses, waiting_status))
+        # Select one execution head per session before loading ORM projections
+        # (execution evidence and saved-file receipts) or long job request JSON.
+        # Correlate to the bounded session page, not every historical job. A
+        # scalar ORDER BY/LIMIT works on MySQL 5.7 as well as PostgreSQL, unlike
+        # window functions, and projects only the winning job's ID.
+        head_id = (
+            select(candidate.id)
+            .where(candidate.session_id == MindmapAiSession.id)
+            .order_by(
+                case(
+                    (candidate.status.in_(active_statuses), 0),
+                    (candidate.status == waiting_status, 1),
+                    else_=2,
+                ),
+                case((pending, candidate.turn_index)).asc(),
+                case((pending, candidate.created_time)).asc(),
+                case((pending, candidate.id)).asc(),
+                candidate.turn_index.desc(),
+                candidate.created_time.desc(),
+                candidate.id.desc(),
+            )
+            .limit(1)
+            .correlate(MindmapAiSession)
+            .scalar_subquery()
+        )
+        jobs = (await db.execute(
             select(MindmapAiJob)
-            .where(MindmapAiJob.session_id.in_(session_ids))
+            .options(undefer(MindmapAiJob.task_acknowledged))
+            .select_from(MindmapAiSession)
+            .join(MindmapAiJob, MindmapAiJob.id == head_id)
+            .where(
+                MindmapAiSession.id.in_(session_ids),
+                MindmapAiJob.session_id.in_(session_ids),
+            )
             .order_by(
                 MindmapAiJob.session_id.asc(),
                 MindmapAiJob.turn_index.desc(),
                 MindmapAiJob.created_time.desc(),
             )
-        )).scalars())
-        latest: dict[str, MindmapAiJob] = {}
-        active_statuses = {
-            'queued', 'preparing', 'running', 'validating', 'cancel_requested',
-        }
-        waiting_status = 'waiting_turn'
-        grouped: dict[str, list[MindmapAiJob]] = {}
-        for job in jobs:
-            grouped.setdefault(str(job.session_id), []).append(job)
-        for session_id, session_jobs in grouped.items():
-            # The latest turn is not always the turn currently executing: a
-            # later message can wait in the durable queue while its parent is
-            # still streaming. Surface the execution head so the task center
-            # opens on the live progress instead of a silent waiting card.
-            pending_jobs = [
-                job for job in session_jobs
-                if job.status in active_statuses or job.status == waiting_status
-            ]
-            latest[session_id] = min(
-                pending_jobs,
-                key=lambda job: (
-                    job.status == waiting_status,
-                    int(job.turn_index or 0),
-                    job.created_time,
-                    str(job.id),
-                ),
-            ) if pending_jobs else session_jobs[0]
-        return latest
+        )).scalars()
+        return {str(job.session_id): job for job in jobs}
 
     @classmethod
     async def count_turns_for_sessions(
@@ -214,6 +285,48 @@ class MindmapAiDao:
         if for_update:
             query = query.with_for_update().execution_options(populate_existing=True)
         return list((await db.execute(query)).scalars())
+
+    @classmethod
+    async def list_session_timeline_jobs(
+        cls, db: AsyncSession, session_id: str, *, limit: int,
+        before_turn_index: int | None = None, focus_job_id: str | None = None,
+    ) -> tuple[list[MindmapAiJob], bool, int | None]:
+        query = select(MindmapAiJob).where(MindmapAiJob.session_id == session_id)
+        if before_turn_index is not None:
+            query = query.where(MindmapAiJob.turn_index < before_turn_index)
+        page = list((await db.execute(query.order_by(
+            MindmapAiJob.turn_index.desc(), MindmapAiJob.id.desc(),
+        ).limit(limit + 1))).scalars())
+        has_earlier = len(page) > limit
+        page = page[:limit]
+        cursor = min((int(job.turn_index) for job in page), default=None)
+        # An old running turn can have many queued children. Keep execution
+        # ownership visible even when it falls outside the newest history page.
+        if before_turn_index is None:
+            visible = list((await db.execute(select(MindmapAiJob).where(
+                MindmapAiJob.session_id == session_id,
+                or_(MindmapAiJob.id == focus_job_id, MindmapAiJob.status.in_([
+                    'waiting_turn', 'queued', 'preparing', 'running', 'validating', 'cancel_requested',
+                ])),
+            ))).scalars())
+            by_id = {job.id: job for job in page}
+            by_id.update({job.id: job for job in visible})
+            page = list(by_id.values())
+        return sorted(page, key=lambda job: int(job.turn_index)), has_earlier, cursor
+
+    @classmethod
+    async def list_events_before(
+        cls, db: AsyncSession, job_id: str, *, limit: int = 200,
+        before_sequence: int | None = None,
+    ) -> tuple[list[MindmapAiJobEvent], bool]:
+        safe_limit = min(max(limit, 1), 500)
+        query = select(MindmapAiJobEvent).where(MindmapAiJobEvent.job_id == job_id)
+        if before_sequence is not None:
+            query = query.where(MindmapAiJobEvent.sequence < before_sequence)
+        rows = list((await db.execute(query.order_by(
+            MindmapAiJobEvent.sequence.desc(),
+        ).limit(safe_limit + 1))).scalars())
+        return list(reversed(rows[:safe_limit])), len(rows) > safe_limit
 
     @classmethod
     async def list_waiting_followups(
@@ -473,6 +586,28 @@ class MindmapAiDao:
             )
 
     @classmethod
+    async def has_task_acknowledgement(cls, db: AsyncSession, job_id: str, status: str) -> bool:
+        """Current read after the owning job lock, including concurrent receipts."""
+        return (await db.scalar(select(MindmapAiJobEvent.id).where(
+            MindmapAiJobEvent.job_id == job_id,
+            MindmapAiJobEvent.event_type == f'task_seen_{status}',
+        ).limit(1).with_for_update())) is not None
+
+    @classmethod
+    async def has_cloud_file_receipt(cls, db: AsyncSession, job_id: str, payload_json: str) -> bool:
+        """Called under the job lock; current-read the canonical result receipt.
+
+        The artifact/file pair identifies the side effect even when the caller
+        retries after file creation committed but before the AI receipt did.
+        Do not use a repeatable-read snapshot taken before waiting for the lock.
+        """
+        return (await db.scalar(select(MindmapAiJobEvent.id).where(
+            MindmapAiJobEvent.job_id == job_id,
+            MindmapAiJobEvent.event_type == 'cloud_file_created',
+            MindmapAiJobEvent.payload_json == payload_json,
+        ).limit(1).with_for_update())) is not None
+
+    @classmethod
     async def add_event(
         cls,
         db: AsyncSession,
@@ -481,7 +616,7 @@ class MindmapAiDao:
         payload_json: str,
     ) -> MindmapAiJobEvent | None:
         # 同一任务可能同时收到 Adapter 进度与取消请求。先锁任务行，确保
-        # MAX(sequence)+1 在 MySQL/PostgreSQL 中串行化且事件可稳定重放。
+        # 序号分配在 MySQL/PostgreSQL 中串行化且事件可稳定重放。
         locked_job_status = (await db.execute(
             select(MindmapAiJob.status)
             .where(MindmapAiJob.id == job_id)
@@ -497,8 +632,14 @@ class MindmapAiDao:
         ):
             return None
         latest = await db.scalar(
-            select(func.max(MindmapAiJobEvent.sequence)).where(MindmapAiJobEvent.job_id == job_id)
+            select(MindmapAiJobEvent.sequence)
+            .where(MindmapAiJobEvent.job_id == job_id)
+            .order_by(MindmapAiJobEvent.sequence.desc())
+            .limit(1)
+            .with_for_update()
         )
+        # MySQL REPEATABLE READ may already hold an older snapshot from auth or
+        # preflight. The locking read above sees the preceding writer's commit.
         next_sequence = int(latest or 0) + 1
         if next_sequence > MINDMAP_AI_EVENT_SEQUENCE_MAX:
             raise OverflowError('AI 脑图任务事件序号已达到数据库上限')

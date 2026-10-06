@@ -44,7 +44,7 @@ class MindmapVersionDao:
         if version_type is not None:
             query = query.where(MindmapVersion.version_type == version_type)
 
-        query = query.order_by(MindmapVersion.created_time.desc())
+        query = query.order_by(MindmapVersion.created_time.desc(), MindmapVersion.id.desc())
 
         return await PageUtil.paginate(db, query, page_num, page_size, True)
 
@@ -80,19 +80,6 @@ class MindmapVersionDao:
         await db.execute(
             delete(MindmapVersion).where(MindmapVersion.id == version_id)
         )
-
-    @classmethod
-    async def get_draft_count(cls, db: AsyncSession, mindmap_id: int) -> int:
-        """获取草稿版本数量"""
-        result = (await db.execute(
-            select(func.count())
-            .select_from(MindmapVersion)
-            .where(
-                MindmapVersion.mindmap_id == mindmap_id,
-                MindmapVersion.version_type == 0,
-            )
-        )).scalar_one()
-        return result
 
     @classmethod
     async def get_latest_draft(

@@ -26,6 +26,8 @@ class Search {
     this.notResetSearchText = false
     // 是否自动跳转下一个匹配节点
     this.isJumpNext = false
+    this.navigationGeneration = 0
+    this.destroyed = false
 
     this.bindEvent()
   }
@@ -33,13 +35,18 @@ class Search {
   bindEvent() {
     this.onDataChange = this.onDataChange.bind(this)
     this.onModeChange = this.onModeChange.bind(this)
+    this.onDocumentReplace = this.endSearch.bind(this)
     this.mindMap.on('data_change', this.onDataChange)
     this.mindMap.on('mode_change', this.onModeChange)
+    this.mindMap.on('before_set_data', this.onDocumentReplace)
+    this.mindMap.on('before_update_data', this.onDocumentReplace)
   }
 
   unBindEvent() {
     this.mindMap.off('data_change', this.onDataChange)
     this.mindMap.off('mode_change', this.onModeChange)
+    this.mindMap.off('before_set_data', this.onDocumentReplace)
+    this.mindMap.off('before_update_data', this.onDocumentReplace)
   }
 
   // 节点数据改变了，需要重新搜索
@@ -54,6 +61,7 @@ class Search {
       return
     }
     this.searchText = ''
+    this.navigationGeneration += 1
   }
 
   // 监听只读模式切换
@@ -63,7 +71,7 @@ class Search {
     if (
       !isReadonly &&
       this.isSearching &&
-      this.matchNodeList[this.currentIndex]
+      this.isNodeInstance(this.matchNodeList[this.currentIndex])
     ) {
       this.matchNodeList[this.currentIndex].closeHighlight()
     }
@@ -71,6 +79,7 @@ class Search {
 
   // 搜索
   search(text, callback = () => {}) {
+    if (this.destroyed) return
     if (isUndef(text)) return this.endSearch()
     text = String(text)
     this.isSearching = true
@@ -94,20 +103,21 @@ class Search {
 
   // 结束搜索
   endSearch() {
+    this.navigationGeneration += 1
     if (!this.isSearching) return
-    if (this.mindMap.opt.readonly && this.matchNodeList[this.currentIndex]) {
-      this.matchNodeList[this.currentIndex].closeHighlight()
-    }
+    this.clearHighlightOnReadonly()
     this.searchText = ''
     this.updateMatchNodeList([])
     this.currentIndex = -1
     this.notResetSearchText = false
+    this.isJumpNext = false
     this.isSearching = false
     this.emitEvent()
   }
 
   // 搜索匹配的节点
   doSearch() {
+    this.navigationGeneration += 1
     this.clearHighlightOnReadonly()
     this.updateMatchNodeList([])
     this.currentIndex = -1
@@ -179,7 +189,15 @@ class Search {
         this.currentIndex = 0
       }
     }
-    const { readonly } = this.mindMap.opt
+    const generation = ++this.navigationGeneration
+    const matchList = this.matchNodeList
+    const resultIndex = this.currentIndex
+    const keyword = this.searchText
+    const root = this.mindMap.renderer.renderTree
+    const isCurrent = () => !this.destroyed && this.isSearching
+      && generation === this.navigationGeneration
+      && matchList === this.matchNodeList && keyword === this.searchText
+      && resultIndex === this.currentIndex && root === this.mindMap.renderer.renderTree
     // 只读模式下需要清除之前节点的高亮
     this.clearHighlightOnReadonly()
     const currentNode = this.matchNodeList[this.currentIndex]
@@ -193,20 +211,22 @@ class Search {
     }
     const targetNode = this.mindMap.renderer.findNodeByUid(uid)
     this.mindMap.execCommand('GO_TARGET_NODE', uid, node => {
+      if (!isCurrent()) return
       if (!this.isNodeInstance(currentNode)) {
-        this.matchNodeList[this.currentIndex] = node
+        this.matchNodeList[resultIndex] = node
         this.updateMatchNodeList(this.matchNodeList)
       }
+      if (!isCurrent()) return
       callback()
       // 只读模式下节点无法激活，所以通过高亮的方式
-      if (readonly) {
+      if (isCurrent() && this.mindMap.opt.readonly) {
         node.highlight()
       }
       // 如果当前节点实例已经存在，则不会触发data_change事件，那么需要手动把标志复位
-      if (targetNode) {
+      if (isCurrent() && targetNode) {
         this.notResetSearchText = false
       }
-    })
+    }, isCurrent)
   }
 
   // 只读模式下清除现有匹配节点的高亮
@@ -325,12 +345,14 @@ class Search {
 
   // 插件被移除前做的事情
   beforePluginRemove() {
+    this.destroyed = true
+    this.endSearch()
     this.unBindEvent()
   }
 
   // 插件被卸载前做的事情
   beforePluginDestroy() {
-    this.unBindEvent()
+    this.beforePluginRemove()
   }
 }
 

@@ -89,7 +89,7 @@ function handleCloseSidebar() {
 }
 
 function focusWhenOpen() {
-  if (show.value) closeButtonRef.value?.focus()
+  if (show.value) closeButtonRef.value?.focus({ preventScroll: true })
 }
 
 function getEl() {
@@ -112,9 +112,9 @@ defineExpose({ show, open, close, bodyRef, getEl })
 
 <style lang="less" scoped>
 .sidebarContainer {
-  position: fixed;
+  position: absolute;
   right: calc(-1 * var(--mindmap-side-panel-width, 300px));
-  top: var(--mindmap-shell-top, 52px);
+  top: 0;
   bottom: var(--mindmap-workspace-bottom, 30px);
   width: var(--mindmap-side-panel-width, 300px);
   background-color: #fff;

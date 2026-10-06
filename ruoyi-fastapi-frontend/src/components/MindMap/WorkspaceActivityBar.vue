@@ -114,7 +114,7 @@ onBeforeUnmount(() => {
 <style lang="less" scoped>
 .workspaceActivityBar {
   position: absolute;
-  inset: 0 auto var(--mindmap-workspace-bottom, 30px) 0;
+  inset: 0 auto 0 0;
   z-index: 2002;
   width: var(--mindmap-activity-width, 44px);
   display: flex;

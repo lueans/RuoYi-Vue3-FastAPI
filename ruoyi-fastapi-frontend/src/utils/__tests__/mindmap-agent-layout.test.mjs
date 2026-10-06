@@ -16,10 +16,11 @@ test('the single transcript scroller never caps an overflowing history section o
   assert.match(css, /\.mindmapAiDrawer \.activitySidebar\s*\{[^}]*flex:\s*0 0 auto/)
 })
 
-test('latest-message control is an accessible icon overlay inside the activity sidebar, not the footer', () => {
+test('latest-message control is an accessible icon overlay outside the transcript scroller', () => {
   const source = readFileSync(new URL('../../components/MindMap/MindmapAiDialog.vue', import.meta.url), 'utf8')
   const sidebar = source.match(/<aside\b[\s\S]*?class="activitySidebar"[\s\S]*?<\/aside>/)?.[0] || ''
-  const control = sidebar.match(/<div class="chatJumpLatestOverlay">([\s\S]*?)<\/div>/)?.[1] || ''
+  const control = source.match(/<\/main>\s*<\/div>\s*<div v-if="job \|\| agentEvents.length" class="chatJumpLatestOverlay">([\s\S]*?)<\/div>/)?.[1] || ''
+  assert.doesNotMatch(sidebar, /chatJumpLatest/)
   assert.match(control, /v-if="!chatFollowing && conversationTurns.length"/)
   assert.match(control, /aria-label="回到最新消息"/)
   assert.match(control, /title="回到最新消息"/)
@@ -36,7 +37,10 @@ test('latest-message overlay has zero layout height and leaves non-button pointe
   const css = readFileSync(new URL('../../components/MindMap/styles/agent-chat.scss', import.meta.url), 'utf8')
   const overlay = css.match(/\.chatJumpLatestOverlay\s*\{([^}]+)\}/)?.[1] || ''
   const button = css.match(/\.chatJumpLatest\s*\{([^}]+)\}/)?.[1] || ''
-  assert.match(overlay, /position:\s*sticky/)
+  assert.match(css, /\.el-drawer__body\s*\{[^}]*position:\s*relative/)
+  assert.match(overlay, /position:\s*absolute/)
+  assert.match(overlay, /left:\s*0/)
+  assert.match(overlay, /right:\s*0/)
   assert.match(overlay, /bottom:\s*12px/)
   assert.match(overlay, /height:\s*0/)
   assert.match(overlay, /pointer-events:\s*none/)

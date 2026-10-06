@@ -35,7 +35,7 @@
       {{ aiCameraFollowing ? '暂停跟随 AI' : '跟随 AI 变更' }}
     </button>
     <WorkspaceActivityBar v-if="!isZenMode" />
-    <MindmapAiDialog ref="mindmapAiDialogRef" :readonly="aiDialogReadonly" />
+    <MindmapAiDialog ref="mindmapAiDialogRef" :readonly="aiDialogReadonly" embedded />
     <Navigator v-if="mindMap" :mindMap="mindMap" />
     <OutlineSidebar v-if="mindMap && activeSidebar === 'outline'" :mindMap="mindMap" />
     <AssociativeLineStyle v-if="mindMap" :mindMap="mindMap" />
@@ -2619,9 +2619,7 @@ function onMindMapContainerTransitionEnd(event) {
     event.target !== mindMapContainerRef.value
     || !['left', 'right'].includes(event.propertyName)
   ) return
-  // 侧栏和搜索面板通过 left/right 动画改变画布宽度。watch 中的 resize
-  // 发生在动画开始时，此处在最终尺寸落定后再次同步内部 SVG，避免关闭
-  // 侧栏后残留一个与侧栏等宽的空白（看起来像透明侧栏）。
+  // 右侧栏动画结束后再次同步 SVG，兼容不支持 ResizeObserver 的浏览器。
   handleResize()
 }
 
@@ -2921,6 +2919,7 @@ async function initMindMap(signal) {
     savedConfig,
   })
   const persistedDocumentConfig = getMindmapDocumentConfig(documentData.value)
+  const initialCanvasRect = container.getBoundingClientRect()
 
   // savedConfig 放在最前面，后续显式配置覆盖它，防止 localStorage 污染覆盖关键选项
   let noteContentMindMap = null
@@ -2971,7 +2970,8 @@ async function initMindMap(signal) {
     isLimitMindMapInCanvas: savedConfig.isLimitMindMapInCanvas !== false,
     useLeftKeySelectionRightKeyDrag: useLeftKeySelectionRightKeyDrag.value,
     customInnerElsAppendTo: null,
-    initRootNodePosition: ['center', 'center'],
+    // 初始居中后固定布局坐标，面板开关及后续编辑都不随视口宽度重排根节点。
+    initRootNodePosition: [initialCanvasRect.width / 2, initialCanvasRect.height / 2],
     customHandleMousewheel: (e) => {
       if (!mm) return
       const {
@@ -6116,7 +6116,11 @@ const canvasResize = createMindmapCanvasResize({
   getElement: () => mindMapContainerRef.value,
   getMindmap: () => mindMap.value,
 })
-function handleResize() { canvasResize.schedule() }
+function handleResize(entries) {
+  // ResizeObserver 在绘制前同步 SVG 尺寸，避免新容器内短暂显示旧视口。
+  if (Array.isArray(entries)) canvasResize.flush()
+  else canvasResize.schedule()
+}
 
 // --- Drag and drop import ---
 
@@ -7017,7 +7021,8 @@ defineExpose({
     background: #fff;
     border-radius: 10px;
     box-shadow: 0 0 0 1px rgba(31, 35, 41, 0.06), 0 2px 8px rgba(31, 35, 41, 0.025);
-    transition: left 0.2s ease, right 0.2s ease;
+    // 左侧面板开关只调整一次画布尺寸，避免逐帧重排与容器位移动画相互拉扯。
+    transition: right 0.2s ease;
   }
 
   &.isDark .mindMapContainer {

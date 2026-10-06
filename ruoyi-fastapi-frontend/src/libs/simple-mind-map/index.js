@@ -327,12 +327,13 @@ class MindMap {
   }
 
   //  容器尺寸变化，调整尺寸
-  resize() {
+  resize({ preserveLayout = false } = {}) {
     const oldWidth = this.width
     const oldHeight = this.height
     this.getElRectInfo()
     this.svg.size(this.width, this.height)
-    if (oldWidth !== this.width || oldHeight !== this.height) {
+    const sizeChanged = oldWidth !== this.width || oldHeight !== this.height
+    if (sizeChanged && !preserveLayout) {
       // 如果画布宽高改变了需要触发一次渲染
       if (this.demonstrate) {
         // 如果存在演示插件，并且正在演示中，那么不需要触发重新渲染，否则会冲突
@@ -344,6 +345,14 @@ class MindMap {
       }
     }
     this.emit('resize')
+    // 限界开启时 resize 已通过 view_data_change 刷新可见节点。
+    // 仅调整视口也必须补绘新进入可视区的节点，但无需重新计算布局。
+    if (
+      sizeChanged && preserveLayout && this.opt.openPerformance &&
+      !this.demonstrate?.isInDemonstrate && !this.view.checkNeedMindMapInCanvas()
+    ) {
+      this.renderer.startPerformanceRender()
+    }
   }
 
   //  监听事件

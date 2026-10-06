@@ -5,6 +5,7 @@
     class="mindmapAiDrawer"
     :class="{ isDark: settingsStore.isDark }"
     :width="agentPanelWidth"
+    :embedded="props.embedded"
     :z-index="2001"
     @escape="onPanelEscape"
     @closed="onDialogClosed"
@@ -297,16 +298,6 @@
           <span>提交要求后，这里会显示每轮提示词与安全审计事件。</span>
         </div>
         <details class="privacyNotice"><summary>关于过程记录</summary><p>展示可见对话、思考摘要、工具详情和任务计划；不展示模型隐藏思维链。工具结果为有界摘要。</p></details>
-        <div class="chatJumpLatestOverlay">
-          <button
-            v-if="!chatFollowing && conversationTurns.length"
-            type="button"
-            class="chatJumpLatest"
-            aria-label="回到最新消息"
-            title="回到最新消息"
-            @click="jumpToLatest"
-          ><el-icon aria-hidden="true"><ArrowDown /></el-icon></button>
-        </div>
       </aside>
 
       <main class="workspaceMain">
@@ -764,6 +755,16 @@
           </section>
         </section>
       </main>
+    </div>
+    <div v-if="job || agentEvents.length" class="chatJumpLatestOverlay">
+      <button
+        v-if="!chatFollowing && conversationTurns.length"
+        type="button"
+        class="chatJumpLatest"
+        aria-label="回到最新消息"
+        title="回到最新消息"
+        @click="jumpToLatest"
+      ><el-icon aria-hidden="true"><ArrowDown /></el-icon></button>
     </div>
 
     <template #footer>
@@ -1366,6 +1367,7 @@ import { actions, store } from './useStore'
 const props = defineProps({
   readonly: { type: Boolean, default: false },
   taskOnly: { type: Boolean, default: false },
+  embedded: { type: Boolean, default: false },
 })
 const route = useRoute()
 const router = useRouter()
@@ -10275,11 +10277,15 @@ onBeforeUnmount(() => {
 .mindmapAiDrawerOverlay {
   top: 52px !important;
   right: auto !important;
-  bottom: 30px !important;
+  bottom: 0 !important;
   left: 44px !important;
   width: calc(100% - 44px) !important;
   height: auto !important;
   pointer-events: none;
+
+  &.isEmbedded {
+    top: 0 !important;
+  }
 
   .mindmapAiDrawer {
     pointer-events: auto;

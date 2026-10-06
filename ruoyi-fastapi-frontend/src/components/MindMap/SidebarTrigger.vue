@@ -174,8 +174,8 @@ onBeforeUnmount(() => {
 
 <style lang="less" scoped>
 .sidebarTriggerContainer {
-  position: fixed;
-  top: var(--mindmap-shell-top, 52px);
+  position: absolute;
+  top: 0;
   bottom: var(--mindmap-workspace-bottom, 30px);
   right: calc(-1 * var(--mindmap-activity-width, 44px));
   z-index: 2000;

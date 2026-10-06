@@ -45,7 +45,7 @@ test('侧栏打开和关闭具备完整焦点生命周期，并同步全局激�
   ])
 
   assert.match(sidebar, /bus\.on\('focusActiveSidebar', focusWhenOpen\)/)
-  assert.match(sidebar, /closeButtonRef\.value\?\.focus\(\)/)
+  assert.match(sidebar, /closeButtonRef\.value\?\.focus\(\{ preventScroll: true \}\)/)
   assert.match(sidebar, /actions\.setActiveSidebar\(null\)/)
   assert.match(sidebar, /bus\.emit\('focusSidebarTrigger', sidebarName\)/)
   assert.match(sidebar, /focusReturnTarget = document\.activeElement/)

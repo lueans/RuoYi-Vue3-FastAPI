@@ -1,10 +1,11 @@
 <!-- A persistent, non-modal workspace column, like Open Design's chat pane.
      Hiding this shell never unmounts or stops the parent task. -->
 <template>
-  <Teleport to="body">
+  <Teleport to="body" :disabled="embedded">
     <Transition name="agent-panel" @after-leave="afterLeave">
-      <div v-if="rendered" v-show="modelValue" class="mindmapAiDrawerOverlay agentPanelLayer" :style="{ zIndex }">
+      <div v-if="rendered" v-show="modelValue" class="mindmapAiDrawerOverlay agentPanelLayer" :class="{ isEmbedded: embedded }" :style="{ zIndex }">
         <aside ref="panelRef" v-bind="$attrs" class="agentPanelShell" :style="{ width: `${width}px` }"
+          @dragenter.stop @dragleave.stop @dragover.stop @drop.stop
           :aria-label="label" tabindex="-1" @keydown.esc="$emit('escape', $event)">
           <div class="el-drawer__body"><slot /></div>
           <div class="el-drawer__footer"><slot name="footer" /></div>
@@ -16,7 +17,7 @@
 <script setup>
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 defineOptions({ inheritAttrs: false })
-const props = defineProps({ modelValue: Boolean, width: Number, label: { type: String, default: 'AI 脑图助手' }, zIndex: { type: Number, default: 2001 } })
+const props = defineProps({ modelValue: Boolean, width: Number, embedded: Boolean, label: { type: String, default: 'AI 脑图助手' }, zIndex: { type: Number, default: 2001 } })
 const emit = defineEmits(['closed', 'escape'])
 const panelRef = ref(null)
 const rendered = ref(false)
@@ -46,6 +47,7 @@ onBeforeUnmount(() => { focusGeneration++ })
 </script>
 <style scoped>
 .agentPanelLayer { position: fixed; pointer-events: none; }
+.agentPanelLayer.isEmbedded { position: absolute; }
 .agentPanelShell { position: absolute; inset: 0 auto 0 0; display: flex; flex-direction: column; box-sizing: border-box; max-width: 100%; height: 100%; overflow: hidden; pointer-events: auto; }
 .agentPanelShell:focus { outline: none; }
 .el-drawer__body { flex: 1; min-height: 0; }

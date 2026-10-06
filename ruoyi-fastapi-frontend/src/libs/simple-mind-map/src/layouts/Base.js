@@ -376,6 +376,9 @@ class Base {
       }
       this.setNodeCenter(tmpNode, [CENTER, CENTER])
       this.setNodeCenter(tmpNode2)
+      // 数值锚点固定在初始画布坐标；滚动条另行补偿视口尺寸差，不能重复扣除。
+      if (typeof initRootNodePosition[0] === 'number') tmpNode.left = this.mindMap.initWidth / 2
+      if (typeof initRootNodePosition[1] === 'number') tmpNode.top = this.mindMap.initHeight / 2
       this.rootNodeCenterOffset = {
         x: tmpNode2.left - tmpNode.left,
         y: tmpNode2.top - tmpNode.top

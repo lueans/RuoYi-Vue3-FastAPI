@@ -1483,8 +1483,8 @@ onBeforeUnmount(() => {
 
 <style lang="less" scoped>
 .searchContainer {
-  position: fixed;
-  top: var(--mindmap-shell-top, 52px);
+  position: absolute;
+  top: 0;
   bottom: var(--mindmap-workspace-bottom, 30px);
   left: var(--mindmap-activity-width, 44px);
   z-index: 2001;
@@ -1592,6 +1592,7 @@ onBeforeUnmount(() => {
   }
 
   &.filterDialog {
+    position: fixed;
     top: 88px;
     right: auto;
     bottom: auto;
@@ -2116,7 +2117,7 @@ onBeforeUnmount(() => {
   }
 
   .searchContainer:not(.filterDialog) {
-    top: var(--mindmap-shell-top, 60px);
+    top: 0;
     right: 0;
     bottom: 52px;
     left: 0;

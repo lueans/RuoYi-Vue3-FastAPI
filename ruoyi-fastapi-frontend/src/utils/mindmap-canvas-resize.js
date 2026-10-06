@@ -5,16 +5,21 @@ export function createMindmapCanvasResize({ getElement, getMindmap,
   cancelFrame = id => cancelAnimationFrame(id) }) {
   let frame = null
   let disposed = false
+  function flush() {
+    if (frame !== null) cancelFrame(frame)
+    frame = null
+    if (disposed) return
+    const element = getElement()
+    const mindmap = getMindmap()
+    if (!element?.isConnected || !mindmap || mindmap.el !== element) return
+    const { width, height } = element.getBoundingClientRect()
+    if (width > 0 && height > 0) mindmap.resize({ preserveLayout: true })
+  }
   function schedule() {
     if (disposed || frame !== null) return
     frame = requestFrame(() => {
       frame = null
-      if (disposed) return
-      const element = getElement()
-      const mindmap = getMindmap()
-      if (!element?.isConnected || !mindmap || mindmap.el !== element) return
-      const { width, height } = element.getBoundingClientRect()
-      if (width > 0 && height > 0) mindmap.resize()
+      flush()
     })
   }
   function dispose() {
@@ -22,5 +27,5 @@ export function createMindmapCanvasResize({ getElement, getMindmap,
     if (frame !== null) cancelFrame(frame)
     frame = null
   }
-  return { schedule, dispose }
+  return { schedule, flush, dispose }
 }
